@@ -1,0 +1,13 @@
+[package]
+name = "policy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+directories = { workspace = true }
+tracing = { workspace = true }

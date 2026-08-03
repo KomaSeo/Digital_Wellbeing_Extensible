@@ -1,0 +1,22 @@
+[package]
+name = "digital-wellbeing"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "digital-wellbeing"
+path = "src/main.rs"
+
+[dependencies]
+policy = { workspace = true }
+enforcer = { workspace = true }
+tool-api = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+eframe = { version = "0.31", default-features = true, features = ["default_fonts", "glow"] }
+egui = "0.31"
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-manifest = "1.4"

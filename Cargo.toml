@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/policy",
+    "crates/enforcer",
+    "crates/tool-api",
+    "apps/desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Digital Wellbeing"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+sysinfo = "0.33"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
+directories = "6"
+policy = { path = "crates/policy" }
+enforcer = { path = "crates/enforcer" }
+tool-api = { path = "crates/tool-api" }

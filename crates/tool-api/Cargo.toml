@@ -1,0 +1,12 @@
+[package]
+name = "tool-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+policy = { workspace = true }
+enforcer = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

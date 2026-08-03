@@ -1,0 +1,14 @@
+[package]
+name = "enforcer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+policy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+sysinfo = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
