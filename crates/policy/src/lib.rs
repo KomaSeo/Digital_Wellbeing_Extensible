@@ -319,71 +319,7 @@ impl PolicyStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_normalize_name() {
-        assert_eq!(Policy::normalize_name("folder/steam"), "steam.exe");
-        assert_eq!(Policy::normalize_name("Steam"), "steam.exe");
-        assert_eq!(Policy::normalize_name("steam.exe"), "steam.exe");
-    }
+mod policy_tests;
 
-    #[test]
-    fn blacklist_blocks_listed() {
-        let mut p = Policy::default();
-        p.blacklist.insert("steam.exe".into());
-        assert!(p.should_block("Steam.EXE"));
-        assert!(!p.should_block("notepad.exe"));
-        assert!(!p.should_block("explorer.exe"));
-    }
-
-    #[test]
-    fn whitelist_blocks_unknown() {
-        let mut p = Policy::default();
-        p.mode = EnforcementMode::Whitelist;
-        p.whitelist.insert("notepad.exe".into());
-        assert!(!p.should_block("notepad.exe"));
-        assert!(p.should_block("steam.exe"));
-        assert!(!p.should_block("csrss.exe"));
-    }
-    #[test]
-    fn test_always_protected() {
-        let list_of_protected = always_protected();
-        let policy = Policy::default();
-        for protected in list_of_protected {
-            assert!(!policy.should_block(protected));
-        }
-    }
-
-    #[test]
-    fn set_lists_replace_entirely() {
-        let dir = std::env::temp_dir().join(format!(
-            "dw-policy-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let store = PolicyStore::open(dir.join("policy.json")).unwrap();
-
-        store
-            .set_blacklist(&["Steam".into(), "discord.EXE".into(), "explorer.exe".into()])
-            .unwrap();
-        let p = store.get();
-        assert!(p.blacklist.contains("steam.exe"));
-        assert!(p.blacklist.contains("discord.exe"));
-        assert!(!p.blacklist.contains("explorer.exe"));
-
-        store
-            .set_whitelist(&["code.exe".into(), "notepad.exe".into()])
-            .unwrap();
-        let p = store.get();
-        assert!(p.whitelist.contains("code.exe"));
-        assert!(p.whitelist.contains("notepad.exe"));
-        assert!(p.whitelist.contains("csrss.exe"));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+#[cfg(test)]
+mod store_tests;
