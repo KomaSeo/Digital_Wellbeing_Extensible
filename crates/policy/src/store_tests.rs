@@ -1,16 +1,14 @@
 use super::*;
+use std::sync::Arc;
+
+fn memory_store() -> PolicyStore {
+    PolicyStore::with_persistence(Arc::new(MemoryPolicyPersistence::new()))
+        .expect("memory persistence load cannot fail")
+}
 
 #[test]
 fn set_lists_replace_entirely() {
-    let dir = std::env::temp_dir().join(format!(
-        "dw-policy-test-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let store = PolicyStore::open(dir.join("policy.json")).unwrap();
+    let store = memory_store();
 
     store
         .set_blacklist(&["Steam".into(), "discord.EXE".into(), "explorer.exe".into()])
@@ -27,6 +25,26 @@ fn set_lists_replace_entirely() {
     assert!(p.whitelist.contains("code.exe"));
     assert!(p.whitelist.contains("notepad.exe"));
     assert!(p.whitelist.contains("csrss.exe"));
+}
 
-    let _ = std::fs::remove_dir_all(&dir);
+#[test]
+fn mutations_roundtrip_through_memory_persistence() {
+    let persistence = Arc::new(MemoryPolicyPersistence::new());
+    let store = PolicyStore::with_persistence(Arc::clone(&persistence) as Arc<dyn PolicyPersistence>)
+        .unwrap();
+
+    store.add_blacklist("steam.exe").unwrap();
+    store.set_mode(EnforcementMode::Whitelist).unwrap();
+
+    let reloaded = PolicyStore::with_persistence(persistence).unwrap();
+    let p = reloaded.get();
+    assert!(p.blacklist.contains("steam.exe"));
+    assert_eq!(p.mode, EnforcementMode::Whitelist);
+}
+
+#[test]
+fn protected_names_rejected_on_add_blacklist() {
+    let store = memory_store();
+    let err = store.add_blacklist("explorer.exe").unwrap_err();
+    assert!(matches!(err, PolicyError::Protected(_)));
 }

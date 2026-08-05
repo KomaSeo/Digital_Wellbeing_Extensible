@@ -1,12 +1,14 @@
 use chrono::{DateTime, Utc};
-use directories::ProjectDirs;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
+
+mod persistence;
+
+pub use persistence::{FilePolicyPersistence, MemoryPolicyPersistence, PolicyPersistence};
 
 /// Processes that must never be terminated (OS stability + self-protection).
 pub fn always_protected() -> &'static [&'static str] {
@@ -94,7 +96,7 @@ impl Policy {
             format!("{file_name}.exe")
         }
     }
-    
+
     pub fn is_protected(name: &str) -> bool {
         let n = Self::normalize_name(name);
         always_protected().iter().any(|p| *p == n)
@@ -111,6 +113,7 @@ impl Policy {
         }
     }
 }
+
 #[derive(Debug, Error)]
 pub enum PolicyError {
     #[error("io error: {0}")]
@@ -128,55 +131,26 @@ pub enum PolicyError {
 #[derive(Clone)]
 pub struct PolicyStore {
     inner: Arc<RwLock<Policy>>,
-    path: PathBuf,
+    persistence: Arc<dyn PolicyPersistence>,
 }
 
 impl PolicyStore {
-    pub fn open_default() -> Result<Self, PolicyError> {
-        let dirs = ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
-            .ok_or(PolicyError::NoAppData)?;
-        let dir = dirs.config_dir();
-        fs::create_dir_all(dir)?;
-        let path = dir.join("policy.json");
-        Self::open(path)
+    /// Default store backed by [`FilePolicyPersistence::default`].
+    pub fn default() -> Result<Self, PolicyError> {
+        Self::with_persistence(Arc::new(FilePolicyPersistence::default()?))
     }
 
-    pub fn open(path: PathBuf) -> Result<Self, PolicyError> {
-        let policy = if path.exists() {
-            let raw = fs::read_to_string(&path)?;
-            serde_json::from_str(&raw)?
-        } else {
-            let policy = Policy::default();
-            let raw = serde_json::to_string_pretty(&policy)?;
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(&path, raw)?;
-            policy
-        };
+    /// Inject a custom [`PolicyPersistence`] (e.g. memory backend in tests).
+    pub fn with_persistence(persistence: Arc<dyn PolicyPersistence>) -> Result<Self, PolicyError> {
+        let policy = persistence.load()?;
         Ok(Self {
             inner: Arc::new(RwLock::new(policy)),
-            path,
+            persistence,
         })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     pub fn get(&self) -> Policy {
         self.inner.read().clone()
-    }
-
-    fn persist_locked(path: &Path, policy: &Policy) -> Result<(), PolicyError> {
-        let raw = serde_json::to_string_pretty(policy)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, &raw)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
     }
 
     fn mutate<F, T>(&self, f: F) -> Result<T, PolicyError>
@@ -186,7 +160,7 @@ impl PolicyStore {
         let mut guard = self.inner.write();
         let result = f(&mut guard)?;
         guard.updated_at = Utc::now();
-        Self::persist_locked(&self.path, &guard)?;
+        self.persistence.save(&guard)?;
         Ok(result)
     }
 
@@ -313,7 +287,7 @@ impl PolicyStore {
         policy.updated_at = Utc::now();
         let mut guard = self.inner.write();
         *guard = policy.clone();
-        Self::persist_locked(&self.path, &guard)?;
+        self.persistence.save(&guard)?;
         Ok(policy)
     }
 }

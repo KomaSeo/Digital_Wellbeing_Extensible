@@ -13,7 +13,7 @@ fn main() -> eframe::Result<()> {
         )
         .init();
 
-    let store = PolicyStore::open_default().expect("failed to open policy store");
+    let store = PolicyStore::default().expect("failed to open policy store");
     let enforcer = Arc::new(Enforcer::new(store));
     let _enforce_handle = enforcer.start_background(Duration::from_millis(800));
 

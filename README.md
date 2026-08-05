@@ -72,11 +72,15 @@ $json = '{"id":1,"method":"add_blacklist","params":{"name":"discord.exe"}}'
 
 ```
 apps/desktop     egui desktop shell + enforcer host
-crates/policy    blacklist/whitelist model + persistence
+crates/policy    blacklist/whitelist model + persistence trait
 crates/enforcer  process reconcile / terminate loop
 crates/tool-api  JSON-RPC function-call router
 scripts/call.ps1 convenience client
 ```
+
+`PolicyStore::default()` uses `FilePolicyPersistence::default()` (app config path).
+Callers may inject any `PolicyPersistence` via `with_persistence`
+(tests typically pass `MemoryPolicyPersistence`).
 
 Browser extension support is intentionally deferred; keep policy logic in `crates/policy` so a future browser host can reuse the same rules.
 
