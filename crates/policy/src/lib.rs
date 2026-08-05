@@ -94,7 +94,7 @@ impl Policy {
             format!("{file_name}.exe")
         }
     }
-
+    
     pub fn is_protected(name: &str) -> bool {
         let n = Self::normalize_name(name);
         always_protected().iter().any(|p| *p == n)
@@ -111,7 +111,6 @@ impl Policy {
         }
     }
 }
-
 #[derive(Debug, Error)]
 pub enum PolicyError {
     #[error("io error: {0}")]
@@ -288,6 +287,13 @@ impl PolicyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    
+    #[test]
+    fn test_normalize_name() {
+        assert_eq!(Policy::normalize_name("folder/steam"), "steam.exe");
+        assert_eq!(Policy::normalize_name("Steam"), "steam.exe");
+        assert_eq!(Policy::normalize_name("steam.exe"), "steam.exe");
+    }
 
     #[test]
     fn blacklist_blocks_listed() {
@@ -307,4 +313,13 @@ mod tests {
         assert!(p.should_block("steam.exe"));
         assert!(!p.should_block("csrss.exe"));
     }
+    #[test]
+    fn test_always_protected() {
+        let list_of_protected = always_protected();
+        let policy = Policy::default();
+        for protected in list_of_protected {
+            assert!(!policy.should_block(protected));
+        }
+    }
+
 }
