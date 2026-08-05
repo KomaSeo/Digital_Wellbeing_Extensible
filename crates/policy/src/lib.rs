@@ -235,6 +235,40 @@ impl PolicyStore {
         })
     }
 
+    /// Replace the entire blacklist in one shot. Protected system names are skipped.
+    pub fn set_blacklist(&self, names: &[String]) -> Result<Policy, PolicyError> {
+        let mut next = BTreeSet::new();
+        for raw in names {
+            let name = Policy::normalize_name(raw);
+            if name.is_empty() || Policy::is_protected(&name) {
+                continue;
+            }
+            next.insert(name);
+        }
+        self.mutate(|p| {
+            p.blacklist = next;
+            Ok(p.clone())
+        })
+    }
+
+    /// Replace the entire whitelist in one shot. Protected system names are always kept.
+    pub fn set_whitelist(&self, names: &[String]) -> Result<Policy, PolicyError> {
+        let mut next = BTreeSet::new();
+        for raw in names {
+            let name = Policy::normalize_name(raw);
+            if !name.is_empty() {
+                next.insert(name);
+            }
+        }
+        for protected in always_protected() {
+            next.insert((*protected).to_string());
+        }
+        self.mutate(|p| {
+            p.whitelist = next;
+            Ok(p.clone())
+        })
+    }
+
     pub fn save_strategy(&self, name: &str) -> Result<Policy, PolicyError> {
         let name = name.trim().to_string();
         self.mutate(|p| {
@@ -322,4 +356,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn set_lists_replace_entirely() {
+        let dir = std::env::temp_dir().join(format!(
+            "dw-policy-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = PolicyStore::open(dir.join("policy.json")).unwrap();
+
+        store
+            .set_blacklist(&["Steam".into(), "discord.EXE".into(), "explorer.exe".into()])
+            .unwrap();
+        let p = store.get();
+        assert!(p.blacklist.contains("steam.exe"));
+        assert!(p.blacklist.contains("discord.exe"));
+        assert!(!p.blacklist.contains("explorer.exe"));
+
+        store
+            .set_whitelist(&["code.exe".into(), "notepad.exe".into()])
+            .unwrap();
+        let p = store.get();
+        assert!(p.whitelist.contains("code.exe"));
+        assert!(p.whitelist.contains("notepad.exe"));
+        assert!(p.whitelist.contains("csrss.exe"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

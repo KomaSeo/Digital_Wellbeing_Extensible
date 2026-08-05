@@ -120,6 +120,16 @@ impl ToolRouter {
                 let policy = self.store().remove_whitelist(&name).map_err(to_tool)?;
                 Ok(serde_json::to_value(policy).map_err(to_tool)?)
             }
+            "set_blacklist" => {
+                let names = require_names(&params)?;
+                let policy = self.store().set_blacklist(&names).map_err(to_tool)?;
+                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+            }
+            "set_whitelist" => {
+                let names = require_names(&params)?;
+                let policy = self.store().set_whitelist(&names).map_err(to_tool)?;
+                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+            }
             "list_processes" => {
                 let list = self.enforcer.list_processes();
                 Ok(serde_json::to_value(list).map_err(to_tool)?)
@@ -163,6 +173,23 @@ fn require_name(params: &Value) -> Result<String, ToolError> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| ToolError::Message("params.name (string) required".into()))
+}
+
+fn require_names(params: &Value) -> Result<Vec<String>, ToolError> {
+    let arr = params
+        .get("names")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ToolError::Message("params.names (string array) required".into()))?;
+    let mut names = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(s) = item.as_str() else {
+            return Err(ToolError::Message(
+                "params.names must be an array of strings".into(),
+            ));
+        };
+        names.push(s.to_string());
+    }
+    Ok(names)
 }
 
 fn parse_mode(params: &Value) -> Result<EnforcementMode, ToolError> {

@@ -38,8 +38,10 @@ JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.
 | `set_mode` | `{ "mode": "blacklist" \| "whitelist" }` | Switch enforcement mode |
 | `add_blacklist` | `{ "name": "steam.exe" }` | Add to blacklist |
 | `remove_blacklist` | `{ "name": "steam.exe" }` | Remove from blacklist |
+| `set_blacklist` | `{ "names": ["steam.exe", "discord.exe"] }` | Replace entire blacklist |
 | `add_whitelist` | `{ "name": "code.exe" }` | Add to whitelist |
 | `remove_whitelist` | `{ "name": "code.exe" }` | Remove (protected names rejected) |
+| `set_whitelist` | `{ "names": ["code.exe", "notepad.exe"] }` | Replace entire whitelist (protected names kept) |
 | `list_processes` | `{}` | Running process snapshot |
 | `list_blocks` | `{ "limit": 50 }` | Recent terminations |
 | `save_strategy` | `{ "name": "focus" }` | Snapshot current lists as a named strategy |
@@ -52,6 +54,8 @@ JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.
 .\scripts\call.ps1 -Method ping
 .\scripts\call.ps1 -Method set_mode -Params @{ mode = "blacklist" }
 .\scripts\call.ps1 -Method add_blacklist -Params @{ name = "steam.exe" }
+.\scripts\call.ps1 -Method set_blacklist -Params @{ names = @("steam.exe", "discord.exe") }
+.\scripts\call.ps1 -Method set_whitelist -Params @{ names = @("code.exe", "notepad.exe") }
 .\scripts\call.ps1 -Method get_policy
 .\scripts\call.ps1 -Method save_strategy -Params @{ name = "evening" }
 .\scripts\call.ps1 -Method apply_strategy -Params @{ name = "evening" }
