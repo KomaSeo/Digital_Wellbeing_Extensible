@@ -1,3 +1,4 @@
 1. writing test case of Policy crate
 1-1. check policy persistent is working on system.
-2. understand tool-api structure
+2. understand tool-api structure\
+3. Execute program in background in small tray although program has been closed.
