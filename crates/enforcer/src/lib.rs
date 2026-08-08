@@ -15,7 +15,6 @@ const LOG_CAPACITY: usize = 200;
 pub struct BlockEvent {
     pub process_name: String,
     pub pid: u32,
-    pub reason: String,
     pub at: DateTime<Utc>,
 }
 
@@ -97,6 +96,7 @@ impl Enforcer {
         list
     }
 
+    /// Terminate every running process that the current policy does not allow.
     pub fn reconcile(&self, system: &mut System) -> anyhow::Result<usize> {
         system.refresh_processes(ProcessesToUpdate::All, true);
         let policy = self.store.get();
@@ -113,26 +113,16 @@ impl Enforcer {
                 continue;
             }
 
-            let reason = match policy.mode {
-                policy::EnforcementMode::Blacklist => "blacklist".to_string(),
-                policy::EnforcementMode::Whitelist => "not_in_whitelist".to_string(),
-            };
-
-            match proc.kill() {
-                true => {
-                    killed += 1;
-                    let event = BlockEvent {
-                        process_name: name.clone(),
-                        pid: pid_u32,
-                        reason: reason.clone(),
-                        at: Utc::now(),
-                    };
-                    self.push_log(event);
-                    info!("terminated {name} (pid={pid_u32}) reason={reason}");
-                }
-                false => {
-                    debug!("failed to terminate {name} (pid={pid_u32})");
-                }
+            if proc.kill() {
+                killed += 1;
+                self.push_log(BlockEvent {
+                    process_name: name.clone(),
+                    pid: pid_u32,
+                    at: Utc::now(),
+                });
+                info!("terminated {name} (pid={pid_u32})");
+            } else {
+                debug!("failed to terminate {name} (pid={pid_u32})");
             }
         }
         Ok(killed)

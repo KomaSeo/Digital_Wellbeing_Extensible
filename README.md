@@ -43,7 +43,7 @@ JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.
 | `remove_whitelist` | `{ "name": "code.exe" }` | Remove (protected names rejected) |
 | `set_whitelist` | `{ "names": ["code.exe", "notepad.exe"] }` | Replace entire whitelist (protected names kept) |
 | `list_processes` | `{}` | Running process snapshot |
-| `list_blocks` | `{ "limit": 50 }` | Recent terminations |
+| `list_blocks` | `{ "limit": 50 }` | Recent terminations (name, pid, time) |
 | `save_strategy` | `{ "name": "focus" }` | Snapshot current lists as a named strategy |
 | `apply_strategy` | `{ "name": "focus" }` | Load a saved strategy |
 

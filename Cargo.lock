@@ -1036,7 +1036,6 @@ dependencies = [
  "parking_lot",
  "policy",
  "serde",
- "serde_json",
  "sysinfo",
  "tracing",
 ]

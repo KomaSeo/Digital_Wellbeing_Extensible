@@ -251,13 +251,9 @@ impl eframe::App for App {
                                         .unwrap_or("?");
                                     let pid =
                                         item.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    let reason = item
-                                        .get("reason")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
                                     let at =
                                         item.get("at").and_then(|v| v.as_str()).unwrap_or("");
-                                    ui.label(format!("{at}  {name} ({pid}) — {reason}"));
+                                    ui.label(format!("{at}  {name} ({pid})"));
                                 }
                             }
                         }
