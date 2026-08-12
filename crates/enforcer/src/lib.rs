@@ -1,14 +1,12 @@
 mod rule;
 
-pub use rule::{
-    BlockDecision, BlockRule, ListPolicyHandle, ListPolicyRule, ProcessSnapshot, RuleInfo,
-};
+pub use rule::{BlockDecision, BlockRule, ProcessSnapshot, RuleInfo};
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
-use policy::Policy;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -16,6 +14,54 @@ use sysinfo::{ProcessesToUpdate, System};
 use tracing::{debug, info, warn};
 
 const LOG_CAPACITY: usize = 200;
+
+/// OS / self processes the enforcer will never terminate, regardless of rules.
+pub fn never_terminate() -> &'static [&'static str] {
+    &[
+        "csrss.exe",
+        "wininit.exe",
+        "winlogon.exe",
+        "services.exe",
+        "lsass.exe",
+        "smss.exe",
+        "svchost.exe",
+        "system",
+        "registry",
+        "explorer.exe",
+        "dwm.exe",
+        "fontdrvhost.exe",
+        "sihost.exe",
+        "taskhostw.exe",
+        "runtimebroker.exe",
+        "searchhost.exe",
+        "startmenuexperiencehost.exe",
+        "shellexperiencehost.exe",
+        "applicationframehost.exe",
+        "conhost.exe",
+        "digital-wellbeing.exe",
+        "digital_wellbeing.exe",
+    ]
+}
+
+fn normalize_process_name(name: &str) -> String {
+    let trimmed = name.trim().to_lowercase();
+    let file_name = Path::new(&trimmed)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&trimmed);
+    if file_name.ends_with(".exe") {
+        file_name.to_string()
+    } else if file_name.is_empty() {
+        trimmed
+    } else {
+        format!("{file_name}.exe")
+    }
+}
+
+fn is_never_terminate(name: &str) -> bool {
+    let n = normalize_process_name(name);
+    never_terminate().iter().any(|p| *p == n)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockEvent {
@@ -74,6 +120,8 @@ impl Enforcer {
             .iter()
             .map(|r| RuleInfo {
                 id: r.id().to_string(),
+                name: r.name().to_string(),
+                description: r.description().to_string(),
             })
             .collect()
     }
@@ -142,7 +190,7 @@ impl Enforcer {
                 continue;
             }
             let name = proc.name().to_string_lossy().to_string();
-            if Policy::is_protected(&name) {
+            if is_never_terminate(&name) {
                 continue;
             }
 
@@ -152,21 +200,22 @@ impl Enforcer {
                 exe: proc.exe().map(|p| p.to_string_lossy().to_string()),
             };
 
-            let Some(reason) = decide_block(&rules, &snapshot) else {
-                continue;
-            };
-
-            if proc.kill() {
-                killed += 1;
-                self.push_log(BlockEvent {
-                    process_name: name.clone(),
-                    pid: pid_u32,
-                    reason,
-                    at: Utc::now(),
-                });
-                info!("terminated {name} (pid={pid_u32})");
-            } else {
-                debug!("failed to terminate {name} (pid={pid_u32})");
+            match decide_block(&rules, &snapshot) {
+                BlockDecision::Allow => continue,
+                BlockDecision::Block { reason } => {
+                    if proc.kill() {
+                        killed += 1;
+                        self.push_log(BlockEvent {
+                            process_name: name.clone(),
+                            pid: pid_u32,
+                            reason,
+                            at: Utc::now(),
+                        });
+                        info!("terminated {name} (pid={pid_u32})");
+                    } else {
+                        debug!("failed to terminate {name} (pid={pid_u32})");
+                    }
+                }
             }
         }
         Ok(killed)
@@ -187,16 +236,16 @@ impl Default for Enforcer {
     }
 }
 
-fn decide_block(rules: &[Arc<dyn BlockRule>], snapshot: &ProcessSnapshot) -> Option<String> {
+fn decide_block(rules: &[Arc<dyn BlockRule>], snapshot: &ProcessSnapshot) -> BlockDecision {
     for rule in rules {
         match rule.evaluate(snapshot) {
             BlockDecision::Allow => {}
             BlockDecision::Block { reason } => {
-                return Some(format!("{}: {reason}", rule.id()));
+                return BlockDecision::block(format!("{}: {reason}", rule.id()));
             }
         }
     }
-    None
+    BlockDecision::Allow
 }
 
 #[cfg(test)]
@@ -214,6 +263,14 @@ mod tests {
             self.id
         }
 
+        fn name(&self) -> &str {
+            "Flag rule"
+        }
+
+        fn description(&self) -> &str {
+            "Test rule that blocks evil.exe when armed"
+        }
+
         fn evaluate(&self, process: &ProcessSnapshot) -> BlockDecision {
             if self.block.load(Ordering::SeqCst) && process.name.eq_ignore_ascii_case("evil.exe") {
                 BlockDecision::block("flagged")
@@ -221,6 +278,18 @@ mod tests {
                 BlockDecision::Allow
             }
         }
+    }
+
+    #[test]
+    fn works_with_zero_rules() {
+        let enforcer = Enforcer::new();
+        assert!(enforcer.list_rules().is_empty());
+        let snap = ProcessSnapshot {
+            pid: 1,
+            name: "evil.exe".into(),
+            exe: None,
+        };
+        assert_eq!(decide_block(&[], &snap), BlockDecision::Allow);
     }
 
     #[test]
@@ -238,11 +307,13 @@ mod tests {
             exe: None,
         };
         let rules = enforcer.rules.lock().clone();
-        assert!(decide_block(&rules, &snap).is_none());
+        assert_eq!(decide_block(&rules, &snap), BlockDecision::Allow);
 
         flag.store(true, Ordering::SeqCst);
-        let reason = decide_block(&rules, &snap).expect("should block");
-        assert!(reason.contains("flag"));
+        match decide_block(&rules, &snap) {
+            BlockDecision::Block { reason } => assert!(reason.contains("flag")),
+            BlockDecision::Allow => panic!("should block"),
+        }
     }
 
     #[test]

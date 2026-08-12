@@ -7,40 +7,20 @@ use std::sync::Arc;
 use thiserror::Error;
 
 mod persistence;
+mod rule;
 
-pub use persistence::{FilePolicyPersistence, MemoryPolicyPersistence, PolicyPersistence};
+pub use persistence::{FileListPersistence, ListPersistence, MemoryListPersistence};
+pub use rule::{ListBasedRule, ListBasedRuleHandle};
 
 /// Processes that must never be terminated (OS stability + self-protection).
+/// Delegates to [`enforcer::never_terminate`] so this rule and the enforcer stay aligned.
 pub fn always_protected() -> &'static [&'static str] {
-    &[
-        "csrss.exe",
-        "wininit.exe",
-        "winlogon.exe",
-        "services.exe",
-        "lsass.exe",
-        "smss.exe",
-        "svchost.exe",
-        "system",
-        "registry",
-        "explorer.exe",
-        "dwm.exe",
-        "fontdrvhost.exe",
-        "sihost.exe",
-        "taskhostw.exe",
-        "runtimebroker.exe",
-        "searchhost.exe",
-        "startmenuexperiencehost.exe",
-        "shellexperiencehost.exe",
-        "applicationframehost.exe",
-        "conhost.exe",
-        "digital-wellbeing.exe",
-        "digital_wellbeing.exe",
-    ]
+    enforcer::never_terminate()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum EnforcementMode {
+pub enum ListMode {
     #[default]
     Blacklist,
     Whitelist,
@@ -49,14 +29,15 @@ pub enum EnforcementMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Strategy {
     pub name: String,
-    pub mode: EnforcementMode,
+    pub mode: ListMode,
     pub blacklist: BTreeSet<String>,
     pub whitelist: BTreeSet<String>,
 }
 
+/// Persisted blacklist / whitelist configuration for [`ListBasedRule`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Policy {
-    pub mode: EnforcementMode,
+pub struct ListConfig {
+    pub mode: ListMode,
     pub blacklist: BTreeSet<String>,
     pub whitelist: BTreeSet<String>,
     #[serde(default)]
@@ -65,14 +46,14 @@ pub struct Policy {
     pub updated_at: DateTime<Utc>,
 }
 
-impl Default for Policy {
+impl Default for ListConfig {
     fn default() -> Self {
         let mut whitelist = BTreeSet::new();
         for name in always_protected() {
             whitelist.insert((*name).to_string());
         }
         Self {
-            mode: EnforcementMode::Blacklist,
+            mode: ListMode::Blacklist,
             blacklist: BTreeSet::new(),
             whitelist,
             strategies: Vec::new(),
@@ -81,7 +62,7 @@ impl Default for Policy {
     }
 }
 
-impl Policy {
+impl ListConfig {
     pub fn normalize_name(name: &str) -> String {
         let trimmed = name.trim().to_lowercase();
         let file_name = Path::new(&trimmed)
@@ -108,14 +89,14 @@ impl Policy {
             return false;
         }
         match self.mode {
-            EnforcementMode::Blacklist => self.blacklist.contains(&name),
-            EnforcementMode::Whitelist => !self.whitelist.contains(&name),
+            ListMode::Blacklist => self.blacklist.contains(&name),
+            ListMode::Whitelist => !self.whitelist.contains(&name),
         }
     }
 }
 
 #[derive(Debug, Error)]
-pub enum PolicyError {
+pub enum ListError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
@@ -129,33 +110,33 @@ pub enum PolicyError {
 }
 
 #[derive(Clone)]
-pub struct PolicyStore {
-    inner: Arc<RwLock<Policy>>,
-    persistence: Arc<dyn PolicyPersistence>,
+pub struct ListStore {
+    inner: Arc<RwLock<ListConfig>>,
+    persistence: Arc<dyn ListPersistence>,
 }
 
-impl PolicyStore {
-    /// Default store backed by [`FilePolicyPersistence::default`].
-    pub fn default() -> Result<Self, PolicyError> {
-        Self::with_persistence(Arc::new(FilePolicyPersistence::default()?))
+impl ListStore {
+    /// Default store backed by [`FileListPersistence::default`].
+    pub fn default() -> Result<Self, ListError> {
+        Self::with_persistence(Arc::new(FileListPersistence::default()?))
     }
 
-    /// Inject a custom [`PolicyPersistence`] (e.g. memory backend in tests).
-    pub fn with_persistence(persistence: Arc<dyn PolicyPersistence>) -> Result<Self, PolicyError> {
-        let policy = persistence.load()?;
+    /// Inject a custom [`ListPersistence`] (e.g. memory backend in tests).
+    pub fn with_persistence(persistence: Arc<dyn ListPersistence>) -> Result<Self, ListError> {
+        let config = persistence.load()?;
         Ok(Self {
-            inner: Arc::new(RwLock::new(policy)),
+            inner: Arc::new(RwLock::new(config)),
             persistence,
         })
     }
 
-    pub fn get(&self) -> Policy {
+    pub fn get(&self) -> ListConfig {
         self.inner.read().clone()
     }
 
-    fn mutate<F, T>(&self, f: F) -> Result<T, PolicyError>
+    fn mutate<F, T>(&self, f: F) -> Result<T, ListError>
     where
-        F: FnOnce(&mut Policy) -> Result<T, PolicyError>,
+        F: FnOnce(&mut ListConfig) -> Result<T, ListError>,
     {
         let mut guard = self.inner.write();
         let result = f(&mut guard)?;
@@ -164,17 +145,17 @@ impl PolicyStore {
         Ok(result)
     }
 
-    pub fn set_mode(&self, mode: EnforcementMode) -> Result<Policy, PolicyError> {
+    pub fn set_mode(&self, mode: ListMode) -> Result<ListConfig, ListError> {
         self.mutate(|p| {
             p.mode = mode;
             Ok(p.clone())
         })
     }
 
-    pub fn add_blacklist(&self, name: &str) -> Result<Policy, PolicyError> {
-        let name = Policy::normalize_name(name);
-        if Policy::is_protected(&name) {
-            return Err(PolicyError::Protected(name));
+    pub fn add_blacklist(&self, name: &str) -> Result<ListConfig, ListError> {
+        let name = ListConfig::normalize_name(name);
+        if ListConfig::is_protected(&name) {
+            return Err(ListError::Protected(name));
         }
         self.mutate(|p| {
             p.blacklist.insert(name);
@@ -182,26 +163,26 @@ impl PolicyStore {
         })
     }
 
-    pub fn remove_blacklist(&self, name: &str) -> Result<Policy, PolicyError> {
-        let name = Policy::normalize_name(name);
+    pub fn remove_blacklist(&self, name: &str) -> Result<ListConfig, ListError> {
+        let name = ListConfig::normalize_name(name);
         self.mutate(|p| {
             p.blacklist.remove(&name);
             Ok(p.clone())
         })
     }
 
-    pub fn add_whitelist(&self, name: &str) -> Result<Policy, PolicyError> {
-        let name = Policy::normalize_name(name);
+    pub fn add_whitelist(&self, name: &str) -> Result<ListConfig, ListError> {
+        let name = ListConfig::normalize_name(name);
         self.mutate(|p| {
             p.whitelist.insert(name);
             Ok(p.clone())
         })
     }
 
-    pub fn remove_whitelist(&self, name: &str) -> Result<Policy, PolicyError> {
-        let name = Policy::normalize_name(name);
-        if Policy::is_protected(&name) {
-            return Err(PolicyError::Protected(name));
+    pub fn remove_whitelist(&self, name: &str) -> Result<ListConfig, ListError> {
+        let name = ListConfig::normalize_name(name);
+        if ListConfig::is_protected(&name) {
+            return Err(ListError::Protected(name));
         }
         self.mutate(|p| {
             p.whitelist.remove(&name);
@@ -210,11 +191,11 @@ impl PolicyStore {
     }
 
     /// Replace the entire blacklist in one shot. Protected system names are skipped.
-    pub fn set_blacklist(&self, names: &[String]) -> Result<Policy, PolicyError> {
+    pub fn set_blacklist(&self, names: &[String]) -> Result<ListConfig, ListError> {
         let mut next = BTreeSet::new();
         for raw in names {
-            let name = Policy::normalize_name(raw);
-            if name.is_empty() || Policy::is_protected(&name) {
+            let name = ListConfig::normalize_name(raw);
+            if name.is_empty() || ListConfig::is_protected(&name) {
                 continue;
             }
             next.insert(name);
@@ -226,10 +207,10 @@ impl PolicyStore {
     }
 
     /// Replace the entire whitelist in one shot. Protected system names are always kept.
-    pub fn set_whitelist(&self, names: &[String]) -> Result<Policy, PolicyError> {
+    pub fn set_whitelist(&self, names: &[String]) -> Result<ListConfig, ListError> {
         let mut next = BTreeSet::new();
         for raw in names {
-            let name = Policy::normalize_name(raw);
+            let name = ListConfig::normalize_name(raw);
             if !name.is_empty() {
                 next.insert(name);
             }
@@ -243,7 +224,7 @@ impl PolicyStore {
         })
     }
 
-    pub fn save_strategy(&self, name: &str) -> Result<Policy, PolicyError> {
+    pub fn save_strategy(&self, name: &str) -> Result<ListConfig, ListError> {
         let name = name.trim().to_string();
         self.mutate(|p| {
             let strategy = Strategy {
@@ -261,7 +242,7 @@ impl PolicyStore {
         })
     }
 
-    pub fn apply_strategy(&self, name: &str) -> Result<Policy, PolicyError> {
+    pub fn apply_strategy(&self, name: &str) -> Result<ListConfig, ListError> {
         let name = name.trim().to_string();
         self.mutate(|p| {
             let strategy = p
@@ -269,7 +250,7 @@ impl PolicyStore {
                 .iter()
                 .find(|s| s.name == name)
                 .cloned()
-                .ok_or_else(|| PolicyError::StrategyNotFound(name.clone()))?;
+                .ok_or_else(|| ListError::StrategyNotFound(name.clone()))?;
             p.mode = strategy.mode;
             p.blacklist = strategy.blacklist;
             p.whitelist = strategy.whitelist;
@@ -280,20 +261,20 @@ impl PolicyStore {
         })
     }
 
-    pub fn replace_policy(&self, mut policy: Policy) -> Result<Policy, PolicyError> {
+    pub fn replace_config(&self, mut config: ListConfig) -> Result<ListConfig, ListError> {
         for protected in always_protected() {
-            policy.whitelist.insert((*protected).to_string());
+            config.whitelist.insert((*protected).to_string());
         }
-        policy.updated_at = Utc::now();
+        config.updated_at = Utc::now();
         let mut guard = self.inner.write();
-        *guard = policy.clone();
+        *guard = config.clone();
         self.persistence.save(&guard)?;
-        Ok(policy)
+        Ok(config)
     }
 }
 
 #[cfg(test)]
-mod policy_tests;
+mod config_tests;
 
 #[cfg(test)]
 mod store_tests;

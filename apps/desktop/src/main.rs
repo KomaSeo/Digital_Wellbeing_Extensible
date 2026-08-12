@@ -1,6 +1,6 @@
 use eframe::egui;
-use enforcer::{Enforcer, ListPolicyHandle};
-use policy::{EnforcementMode, PolicyStore};
+use enforcer::Enforcer;
+use list_based_rule::{ListBasedRuleHandle, ListMode, ListStore};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tool_api::{spawn_tcp, ToolRouter, DEFAULT_PORT};
@@ -13,10 +13,10 @@ fn main() -> eframe::Result<()> {
         )
         .init();
 
-    let store = PolicyStore::default().expect("failed to open policy store");
-    let list_policy = ListPolicyHandle::new(store.clone());
+    let store = ListStore::default().expect("failed to open list store");
+    let list_rule = ListBasedRuleHandle::new(store.clone());
     let enforcer = Arc::new(Enforcer::new());
-    enforcer.register_rule(list_policy.rule());
+    enforcer.register_rule(list_rule.rule());
     // Future: enforcer.register_rule(browser_guard.rule()); // e.g. 60s grace on extension loss
     let _enforce_handle = enforcer.start_background(Duration::from_millis(800));
 
@@ -89,13 +89,13 @@ impl eframe::App for App {
                 ui.label("Enforcement mode:");
                 let mut mode = policy.mode;
                 if ui
-                    .selectable_value(&mut mode, EnforcementMode::Blacklist, "Blacklist")
+                    .selectable_value(&mut mode, ListMode::Blacklist, "Blacklist")
                     .clicked()
                 {
                     self.call("set_mode", serde_json::json!({ "mode": "blacklist" }));
                 }
                 if ui
-                    .selectable_value(&mut mode, EnforcementMode::Whitelist, "Whitelist")
+                    .selectable_value(&mut mode, ListMode::Whitelist, "Whitelist")
                     .clicked()
                 {
                     self.call("set_mode", serde_json::json!({ "mode": "whitelist" }));

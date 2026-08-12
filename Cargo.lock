@@ -795,7 +795,7 @@ dependencies = [
  "egui",
  "embed-manifest",
  "enforcer",
- "policy",
+ "list_based_rule",
  "serde_json",
  "tool-api",
  "tracing",
@@ -1034,7 +1034,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "parking_lot",
- "policy",
  "serde",
  "sysinfo",
  "tracing",
@@ -1811,6 +1810,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "list_based_rule"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "directories",
+ "enforcer",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
 name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2474,19 +2487,6 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide",
-]
-
-[[package]]
-name = "policy"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "directories",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tracing",
 ]
 
 [[package]]
@@ -3263,7 +3263,7 @@ name = "tool-api"
 version = "0.1.0"
 dependencies = [
  "enforcer",
- "policy",
+ "list_based_rule",
  "serde",
  "serde_json",
  "thiserror 2.0.19",

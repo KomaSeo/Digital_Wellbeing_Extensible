@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/policy",
+    "crates/list_based_rule",
     "crates/enforcer",
     "crates/tool-api",
     "apps/desktop",
@@ -25,6 +25,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 directories = "6"
-policy = { path = "crates/policy" }
+list_based_rule = { path = "crates/list_based_rule" }
 enforcer = { path = "crates/enforcer" }
 tool-api = { path = "crates/tool-api" }

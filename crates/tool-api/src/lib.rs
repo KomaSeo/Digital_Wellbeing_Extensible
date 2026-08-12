@@ -1,5 +1,5 @@
 use enforcer::Enforcer;
-use policy::{EnforcementMode, Policy, PolicyStore};
+use list_based_rule::{ListConfig, ListMode, ListStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -45,15 +45,15 @@ pub enum ToolError {
 #[derive(Clone)]
 pub struct ToolRouter {
     enforcer: Arc<Enforcer>,
-    store: PolicyStore,
+    store: ListStore,
 }
 
 impl ToolRouter {
-    pub fn new(enforcer: Arc<Enforcer>, store: PolicyStore) -> Self {
+    pub fn new(enforcer: Arc<Enforcer>, store: ListStore) -> Self {
         Self { enforcer, store }
     }
 
-    pub fn store(&self) -> &PolicyStore {
+    pub fn store(&self) -> &ListStore {
         &self.store
     }
 
@@ -96,44 +96,44 @@ impl ToolRouter {
 
     pub fn dispatch(&self, method: &str, params: Value) -> Result<Value, ToolError> {
         match method {
-            "get_policy" => {
-                let policy = self.store().get();
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+            "get_policy" | "get_list_config" => {
+                let config = self.store().get();
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
             "set_mode" => {
                 let mode = parse_mode(&params)?;
-                let policy = self.store().set_mode(mode).map_err(to_tool)?;
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+                let config = self.store().set_mode(mode).map_err(to_tool)?;
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
             "add_blacklist" => {
                 let name = require_name(&params)?;
-                let policy = self.store().add_blacklist(&name).map_err(to_tool)?;
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+                let config = self.store().add_blacklist(&name).map_err(to_tool)?;
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
             "remove_blacklist" => {
                 let name = require_name(&params)?;
-                let policy = self.store().remove_blacklist(&name).map_err(to_tool)?;
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+                let config = self.store().remove_blacklist(&name).map_err(to_tool)?;
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
             "add_whitelist" => {
                 let name = require_name(&params)?;
-                let policy = self.store().add_whitelist(&name).map_err(to_tool)?;
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+                let config = self.store().add_whitelist(&name).map_err(to_tool)?;
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
             "remove_whitelist" => {
                 let name = require_name(&params)?;
-                let policy = self.store().remove_whitelist(&name).map_err(to_tool)?;
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+                let config = self.store().remove_whitelist(&name).map_err(to_tool)?;
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
             "set_blacklist" => {
                 let names = require_names(&params)?;
-                let policy = self.store().set_blacklist(&names).map_err(to_tool)?;
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+                let config = self.store().set_blacklist(&names).map_err(to_tool)?;
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
             "set_whitelist" => {
                 let names = require_names(&params)?;
-                let policy = self.store().set_whitelist(&names).map_err(to_tool)?;
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+                let config = self.store().set_whitelist(&names).map_err(to_tool)?;
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
             "list_processes" => {
                 let list = self.enforcer.list_processes();
@@ -153,18 +153,18 @@ impl ToolRouter {
             }
             "save_strategy" => {
                 let name = require_name(&params)?;
-                let policy = self.store().save_strategy(&name).map_err(to_tool)?;
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+                let config = self.store().save_strategy(&name).map_err(to_tool)?;
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
             "apply_strategy" => {
                 let name = require_name(&params)?;
-                let policy = self.store().apply_strategy(&name).map_err(to_tool)?;
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+                let config = self.store().apply_strategy(&name).map_err(to_tool)?;
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
-            "replace_policy" => {
-                let policy: Policy = serde_json::from_value(params).map_err(to_tool)?;
-                let policy = self.store().replace_policy(policy).map_err(to_tool)?;
-                Ok(serde_json::to_value(policy).map_err(to_tool)?)
+            "replace_policy" | "replace_list_config" => {
+                let config: ListConfig = serde_json::from_value(params).map_err(to_tool)?;
+                let config = self.store().replace_config(config).map_err(to_tool)?;
+                Ok(serde_json::to_value(config).map_err(to_tool)?)
             }
             "ping" => Ok(json!({ "ok": true })),
             other => Err(ToolError::Message(format!("unknown method: {other}"))),
@@ -201,14 +201,14 @@ fn require_names(params: &Value) -> Result<Vec<String>, ToolError> {
     Ok(names)
 }
 
-fn parse_mode(params: &Value) -> Result<EnforcementMode, ToolError> {
+fn parse_mode(params: &Value) -> Result<ListMode, ToolError> {
     let raw = params
         .get("mode")
         .and_then(|v| v.as_str())
         .ok_or_else(|| ToolError::Message("params.mode required".into()))?;
     match raw.to_lowercase().as_str() {
-        "blacklist" => Ok(EnforcementMode::Blacklist),
-        "whitelist" => Ok(EnforcementMode::Whitelist),
+        "blacklist" => Ok(ListMode::Blacklist),
+        "whitelist" => Ok(ListMode::Whitelist),
         other => Err(ToolError::Message(format!(
             "invalid mode '{other}', expected blacklist|whitelist"
         ))),

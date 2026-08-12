@@ -3,8 +3,8 @@
 use super::*;
 use std::sync::Arc;
 
-fn memory_store() -> PolicyStore {
-    PolicyStore::with_persistence(Arc::new(MemoryPolicyPersistence::new()))
+fn memory_store() -> ListStore {
+    ListStore::with_persistence(Arc::new(MemoryListPersistence::new()))
         .expect("memory persistence load cannot fail")
 }
 
@@ -31,22 +31,22 @@ fn set_lists_replace_entirely() {
 
 #[test]
 fn mutations_roundtrip_through_memory_persistence() {
-    let persistence = Arc::new(MemoryPolicyPersistence::new());
-    let store = PolicyStore::with_persistence(Arc::clone(&persistence) as Arc<dyn PolicyPersistence>)
+    let persistence = Arc::new(MemoryListPersistence::new());
+    let store = ListStore::with_persistence(Arc::clone(&persistence) as Arc<dyn ListPersistence>)
         .unwrap();
 
     store.add_blacklist("steam.exe").unwrap();
-    store.set_mode(EnforcementMode::Whitelist).unwrap();
+    store.set_mode(ListMode::Whitelist).unwrap();
 
-    let reloaded = PolicyStore::with_persistence(persistence).unwrap();
+    let reloaded = ListStore::with_persistence(persistence).unwrap();
     let p = reloaded.get();
     assert!(p.blacklist.contains("steam.exe"));
-    assert_eq!(p.mode, EnforcementMode::Whitelist);
+    assert_eq!(p.mode, ListMode::Whitelist);
 }
 
 #[test]
 fn protected_names_rejected_on_add_blacklist() {
     let store = memory_store();
     let err = store.add_blacklist("explorer.exe").unwrap_err();
-    assert!(matches!(err, PolicyError::Protected(_)));
+    assert!(matches!(err, ListError::Protected(_)));
 }

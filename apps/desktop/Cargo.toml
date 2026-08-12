@@ -8,7 +8,7 @@ name = "digital-wellbeing"
 path = "src/main.rs"
 
 [dependencies]
-policy = { workspace = true }
+list_based_rule = { workspace = true }
 enforcer = { workspace = true }
 tool-api = { workspace = true }
 anyhow = { workspace = true }
