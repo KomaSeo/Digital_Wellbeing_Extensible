@@ -71,26 +71,23 @@ $json = '{"id":1,"method":"add_blacklist","params":{"name":"discord.exe"}}'
 ## Project layout
 
 ```
-apps/desktop           egui desktop shell + rule registration host
-crates/list_based_rule blacklist/whitelist store + ListBasedRule (BlockRule)
-crates/enforcer        process loop + BlockRule registry (no list store)
+apps/desktop           egui shell: rule tabs + shared process/block views
+crates/list_based_rule blacklist/whitelist BlockRule + RuleUi settings
+crates/enforcer        process loop + BlockRule registry
+crates/rule_ui         RuleUi trait (per-rule settings panels)
 crates/tool-api        JSON-RPC function-call router
 scripts/call.ps1       convenience client
 ```
 
 `Enforcer` has **no** dependency on `ListStore`. Callers register one or more
-`BlockRule` implementations (`ListBasedRule` in `crates/list_based_rule` today;
-browser-extension grace rules later). A process is terminated when **any** rule
-returns `Block`. With zero rules registered, the enforcer terminates nothing
-(aside from never touching OS-critical / self processes).
+`BlockRule` implementations (`ListBasedRule` today; browser-extension grace
+rules later). A process is terminated when **any** rule returns `Block`.
+With zero rules registered, the enforcer terminates nothing (aside from never
+touching OS-critical / self processes).
 
-`ListStore::default()` uses `FileListPersistence::default()` (app config path;
-still `policy.json` for existing installs). Callers may inject any
-`ListPersistence` via `with_persistence` (tests typically pass
-`MemoryListPersistence`).
-
-Browser extension support is intentionally deferred; keep list logic in
-`crates/list_based_rule` and time-based / heartbeat logic in separate `BlockRule`s.
+The desktop shell lists each registered [`RuleUi`] tab and asks that rule to
+draw its own settings. New extensible rules should implement both `BlockRule`
+and `RuleUi`, then register `rule()` with the enforcer and `ui()` with the app.
 
 ## Safety notes
 

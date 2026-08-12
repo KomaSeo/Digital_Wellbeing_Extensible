@@ -1,11 +1,10 @@
 mod rule;
 
-pub use rule::{BlockDecision, BlockRule, ProcessSnapshot, RuleInfo};
+pub use rule::{BlockEvent, BlockRule, ProcessSnapshot, RuleInfo};
 
-use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -64,14 +63,6 @@ fn is_never_terminate(name: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockEvent {
-    pub process_name: String,
-    pub pid: u32,
-    pub reason: String,
-    pub at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
     pub pid: u32,
     pub name: String,
@@ -94,7 +85,7 @@ impl Enforcer {
         }
     }
 
-    /// Register a rule. Later rules are consulted after earlier ones; any [`BlockDecision::Block`] wins.
+    /// Register a rule. Later rules run after earlier ones; the first event for a pid wins.
     pub fn register_rule(&self, rule: Arc<dyn BlockRule>) {
         let id = rule.id().to_string();
         let mut rules = self.rules.lock();
@@ -181,41 +172,47 @@ impl Enforcer {
     pub fn reconcile(&self, system: &mut System) -> anyhow::Result<usize> {
         system.refresh_processes(ProcessesToUpdate::All, true);
         let rules = self.rules.lock().clone();
-        let mut killed = 0usize;
         let self_pid = std::process::id();
 
-        for (pid, proc) in system.processes() {
-            let pid_u32 = pid.as_u32();
-            if pid_u32 == self_pid {
-                continue;
-            }
-            let name = proc.name().to_string_lossy().to_string();
-            if is_never_terminate(&name) {
-                continue;
-            }
-
-            let snapshot = ProcessSnapshot {
-                pid: pid_u32,
-                name: name.clone(),
-                exe: proc.exe().map(|p| p.to_string_lossy().to_string()),
-            };
-
-            match decide_block(&rules, &snapshot) {
-                BlockDecision::Allow => continue,
-                BlockDecision::Block { reason } => {
-                    if proc.kill() {
-                        killed += 1;
-                        self.push_log(BlockEvent {
-                            process_name: name.clone(),
-                            pid: pid_u32,
-                            reason,
-                            at: Utc::now(),
-                        });
-                        info!("terminated {name} (pid={pid_u32})");
-                    } else {
-                        debug!("failed to terminate {name} (pid={pid_u32})");
-                    }
+        let snapshots: Vec<ProcessSnapshot> = system
+            .processes()
+            .iter()
+            .filter_map(|(pid, proc)| {
+                let pid_u32 = pid.as_u32();
+                if pid_u32 == self_pid {
+                    return None;
                 }
+                let name = proc.name().to_string_lossy().to_string();
+                if is_never_terminate(&name) {
+                    return None;
+                }
+                Some(ProcessSnapshot {
+                    pid: pid_u32,
+                    name,
+                    exe: proc.exe().map(|p| p.to_string_lossy().to_string()),
+                })
+            })
+            .collect();
+
+        let blocks = collect_blocks(&rules, &snapshots);
+        let mut killed = 0usize;
+
+        for event in blocks {
+            let Some(proc) = system.process(sysinfo::Pid::from_u32(event.pid)) else {
+                continue;
+            };
+            if proc.kill() {
+                killed += 1;
+                info!(
+                    "terminated {} (pid={}) [{}]",
+                    event.process_name, event.pid, event.reason
+                );
+                self.push_log(event);
+            } else {
+                debug!(
+                    "failed to terminate {} (pid={})",
+                    event.process_name, event.pid
+                );
             }
         }
         Ok(killed)
@@ -236,16 +233,20 @@ impl Default for Enforcer {
     }
 }
 
-fn decide_block(rules: &[Arc<dyn BlockRule>], snapshot: &ProcessSnapshot) -> BlockDecision {
+/// Merge rule outputs: first event for each pid wins; reasons are prefixed with rule id.
+fn collect_blocks(rules: &[Arc<dyn BlockRule>], processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
     for rule in rules {
-        match rule.evaluate(snapshot) {
-            BlockDecision::Allow => {}
-            BlockDecision::Block { reason } => {
-                return BlockDecision::block(format!("{}: {reason}", rule.id()));
+        for mut event in rule.evaluate(processes) {
+            if !seen.insert(event.pid) {
+                continue;
             }
+            event.reason = format!("{}: {}", rule.id(), event.reason);
+            out.push(event);
         }
     }
-    BlockDecision::Allow
+    out
 }
 
 #[cfg(test)]
@@ -271,12 +272,15 @@ mod tests {
             "Test rule that blocks evil.exe when armed"
         }
 
-        fn evaluate(&self, process: &ProcessSnapshot) -> BlockDecision {
-            if self.block.load(Ordering::SeqCst) && process.name.eq_ignore_ascii_case("evil.exe") {
-                BlockDecision::block("flagged")
-            } else {
-                BlockDecision::Allow
+        fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
+            if !self.block.load(Ordering::SeqCst) {
+                return Vec::new();
             }
+            processes
+                .iter()
+                .filter(|p| p.name.eq_ignore_ascii_case("evil.exe"))
+                .map(|p| BlockEvent::new(p, "flagged"))
+                .collect()
         }
     }
 
@@ -284,12 +288,12 @@ mod tests {
     fn works_with_zero_rules() {
         let enforcer = Enforcer::new();
         assert!(enforcer.list_rules().is_empty());
-        let snap = ProcessSnapshot {
+        let snaps = [ProcessSnapshot {
             pid: 1,
             name: "evil.exe".into(),
             exe: None,
-        };
-        assert_eq!(decide_block(&[], &snap), BlockDecision::Allow);
+        }];
+        assert!(collect_blocks(&[], &snaps).is_empty());
     }
 
     #[test]
@@ -301,19 +305,19 @@ mod tests {
             block: Arc::clone(&flag),
         }));
 
-        let snap = ProcessSnapshot {
+        let snaps = [ProcessSnapshot {
             pid: 1,
             name: "evil.exe".into(),
             exe: None,
-        };
+        }];
         let rules = enforcer.rules.lock().clone();
-        assert_eq!(decide_block(&rules, &snap), BlockDecision::Allow);
+        assert!(collect_blocks(&rules, &snaps).is_empty());
 
         flag.store(true, Ordering::SeqCst);
-        match decide_block(&rules, &snap) {
-            BlockDecision::Block { reason } => assert!(reason.contains("flag")),
-            BlockDecision::Allow => panic!("should block"),
-        }
+        let blocks = collect_blocks(&rules, &snaps);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].reason.contains("flag"));
+        assert_eq!(blocks[0].pid, 1);
     }
 
     #[test]

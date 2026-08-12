@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/list_based_rule",
     "crates/enforcer",
+    "crates/rule_ui",
     "crates/tool-api",
     "apps/desktop",
 ]
@@ -25,6 +26,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 directories = "6"
+egui = "0.31"
 list_based_rule = { path = "crates/list_based_rule" }
 enforcer = { path = "crates/enforcer" }
+rule_ui = { path = "crates/rule_ui" }
 tool-api = { path = "crates/tool-api" }

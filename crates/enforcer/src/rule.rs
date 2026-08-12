@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Snapshot of a running process passed to every [`BlockRule`].
@@ -8,17 +9,22 @@ pub struct ProcessSnapshot {
     pub exe: Option<String>,
 }
 
-/// Verdict from a single rule. Enforcer blocks if **any** registered rule returns [`Block`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BlockDecision {
-    Allow,
-    Block { reason: String },
+/// One process a rule wants terminated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlockEvent {
+    pub process_name: String,
+    pub pid: u32,
+    pub reason: String,
+    pub at: DateTime<Utc>,
 }
 
-impl BlockDecision {
-    pub fn block(reason: impl Into<String>) -> Self {
-        Self::Block {
+impl BlockEvent {
+    pub fn new(process: &ProcessSnapshot, reason: impl Into<String>) -> Self {
+        Self {
+            process_name: process.name.clone(),
+            pid: process.pid,
             reason: reason.into(),
+            at: Utc::now(),
         }
     }
 }
@@ -37,7 +43,9 @@ pub trait BlockRule: Send + Sync {
     /// Longer explanation of what this rule does.
     fn description(&self) -> &str;
 
-    fn evaluate(&self, process: &ProcessSnapshot) -> BlockDecision;
+    /// Inspect the full process snapshot list and return every process this rule
+    /// wants blocked. Batching lets rules amortize shared work (lookups, heartbeats, …).
+    fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

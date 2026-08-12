@@ -12,3 +12,5 @@ chrono = { workspace = true }
 directories = { workspace = true }
 tracing = { workspace = true }
 enforcer = { workspace = true }
+rule_ui = { workspace = true }
+egui = { workspace = true }

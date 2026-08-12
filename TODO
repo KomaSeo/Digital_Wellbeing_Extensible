@@ -1,4 +1,5 @@
-1. writing test case of Policy crate
-1-1. check policy persistent is working on system.
+1. 
 2. understand tool-api structure\
 3. Execute program in background in small tray although program has been closed.
+4. 관리자가 아닌 사용자가 관리자 권한을 external based rule에 따라 받을 수 있도록 프로그램을 제작하기. <-- 이게 ring 5가 될거다.
+5. background에서도 돌아갈 수 있도록 제작하기 - 관리자가 아닌 경우 프로그램을 종료할 수 없도록 만들기.

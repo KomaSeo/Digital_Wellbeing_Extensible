@@ -1,6 +1,7 @@
 use eframe::egui;
 use enforcer::Enforcer;
-use list_based_rule::{ListBasedRuleHandle, ListMode, ListStore};
+use list_based_rule::{ListBasedRuleHandle, ListStore};
+use rule_ui::RuleUi;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tool_api::{spawn_tcp, ToolRouter, DEFAULT_PORT};
@@ -17,7 +18,11 @@ fn main() -> eframe::Result<()> {
     let list_rule = ListBasedRuleHandle::new(store.clone());
     let enforcer = Arc::new(Enforcer::new());
     enforcer.register_rule(list_rule.rule());
-    // Future: enforcer.register_rule(browser_guard.rule()); // e.g. 60s grace on extension loss
+    // Future: enforcer.register_rule(browser_guard.rule());
+
+    let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui()];
+    // Future: rule_uis.push(browser_guard.ui());
+
     let _enforce_handle = enforcer.start_background(Duration::from_millis(800));
 
     let router = ToolRouter::new(Arc::clone(&enforcer), store);
@@ -33,35 +38,32 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Digital Wellbeing",
         options,
-        Box::new(move |_cc| Ok(Box::new(App::new(router)))),
+        Box::new(move |_cc| Ok(Box::new(App::new(router, rule_uis)))),
     )
 }
 
 struct App {
     router: ToolRouter,
-    name_input: String,
-    strategy_input: String,
+    rule_uis: Vec<Arc<dyn RuleUi>>,
+    selected_rule_id: String,
     status: String,
     last_refresh: Instant,
     process_filter: String,
 }
 
 impl App {
-    fn new(router: ToolRouter) -> Self {
+    fn new(router: ToolRouter, rule_uis: Vec<Arc<dyn RuleUi>>) -> Self {
+        let selected_rule_id = rule_uis
+            .first()
+            .map(|r| r.id().to_string())
+            .unwrap_or_default();
         Self {
             router,
-            name_input: String::new(),
-            strategy_input: String::new(),
+            rule_uis,
+            selected_rule_id,
             status: format!("Function call API: 127.0.0.1:{DEFAULT_PORT}"),
             last_refresh: Instant::now() - Duration::from_secs(10),
             process_filter: String::new(),
-        }
-    }
-
-    fn call(&mut self, method: &str, params: serde_json::Value) {
-        match self.router.dispatch(method, params) {
-            Ok(_) => self.status = format!("OK: {method}"),
-            Err(err) => self.status = format!("ERR: {err}"),
         }
     }
 }
@@ -73,7 +75,6 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(700));
         }
 
-        let policy = self.router.store().get();
         let blocks = self.router.dispatch("list_blocks", serde_json::json!({ "limit": 40 }));
         let processes = self
             .router
@@ -86,117 +87,33 @@ impl eframe::App for App {
                 ui.label(&self.status);
             });
             ui.horizontal(|ui| {
-                ui.label("Enforcement mode:");
-                let mut mode = policy.mode;
-                if ui
-                    .selectable_value(&mut mode, ListMode::Blacklist, "Blacklist")
-                    .clicked()
-                {
-                    self.call("set_mode", serde_json::json!({ "mode": "blacklist" }));
-                }
-                if ui
-                    .selectable_value(&mut mode, ListMode::Whitelist, "Whitelist")
-                    .clicked()
-                {
-                    self.call("set_mode", serde_json::json!({ "mode": "whitelist" }));
+                ui.label("Rules:");
+                for rule in &self.rule_uis {
+                    let selected = self.selected_rule_id == rule.id();
+                    if ui.selectable_label(selected, rule.name()).clicked() {
+                        self.selected_rule_id = rule.id().to_string();
+                    }
                 }
             });
         });
 
-        egui::SidePanel::left("lists")
-            .default_width(320.0)
+        egui::SidePanel::left("rule_settings")
+            .default_width(340.0)
             .show(ctx, |ui| {
-                ui.heading("Lists");
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.name_input);
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Add blacklist").clicked() && !self.name_input.trim().is_empty() {
-                        self.call(
-                            "add_blacklist",
-                            serde_json::json!({ "name": self.name_input.trim() }),
-                        );
-                        self.name_input.clear();
-                    }
-                    if ui.button("Add whitelist").clicked() && !self.name_input.trim().is_empty() {
-                        self.call(
-                            "add_whitelist",
-                            serde_json::json!({ "name": self.name_input.trim() }),
-                        );
-                        self.name_input.clear();
-                    }
-                });
-
-                ui.separator();
-                ui.label("Blacklist");
-                egui::ScrollArea::vertical()
-                    .id_salt("bl")
-                    .max_height(200.0)
-                    .show(ui, |ui| {
-                        for name in &policy.blacklist {
-                            ui.horizontal(|ui| {
-                                ui.label(name);
-                                if ui.small_button("✕").clicked() {
-                                    self.call(
-                                        "remove_blacklist",
-                                        serde_json::json!({ "name": name }),
-                                    );
-                                }
-                            });
-                        }
-                    });
-
-                ui.separator();
-                ui.label("Whitelist");
-                egui::ScrollArea::vertical()
-                    .id_salt("wl")
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        for name in &policy.whitelist {
-                            ui.horizontal(|ui| {
-                                ui.label(name);
-                                if ui.small_button("✕").clicked() {
-                                    self.call(
-                                        "remove_whitelist",
-                                        serde_json::json!({ "name": name }),
-                                    );
-                                }
-                            });
-                        }
-                    });
-
-                ui.separator();
-                ui.heading("Strategies");
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.strategy_input);
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Save current").clicked()
-                        && !self.strategy_input.trim().is_empty()
-                    {
-                        self.call(
-                            "save_strategy",
-                            serde_json::json!({ "name": self.strategy_input.trim() }),
-                        );
-                    }
-                    if ui.button("Apply").clicked() && !self.strategy_input.trim().is_empty() {
-                        self.call(
-                            "apply_strategy",
-                            serde_json::json!({ "name": self.strategy_input.trim() }),
-                        );
-                    }
-                });
-                for s in &policy.strategies {
-                    ui.horizontal(|ui| {
-                        ui.label(&s.name);
-                        if ui.small_button("load").clicked() {
-                            self.strategy_input = s.name.clone();
-                            self.call(
-                                "apply_strategy",
-                                serde_json::json!({ "name": s.name }),
-                            );
-                        }
-                    });
+                let selected = self
+                    .rule_uis
+                    .iter()
+                    .find(|r| r.id() == self.selected_rule_id);
+                if let Some(rule) = selected {
+                    ui.heading(rule.name());
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("rule_settings_scroll")
+                        .show(ui, |ui| {
+                            rule.settings_ui(ui);
+                        });
+                } else {
+                    ui.label("No rule selected.");
                 }
             });
 
@@ -223,17 +140,8 @@ impl eframe::App for App {
                                     let pid = item.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
                                     ui.horizontal(|ui| {
                                         ui.label(format!("{name} ({pid})"));
-                                        if ui.small_button("+BL").clicked() {
-                                            self.call(
-                                                "add_blacklist",
-                                                serde_json::json!({ "name": name }),
-                                            );
-                                        }
-                                        if ui.small_button("+WL").clicked() {
-                                            self.call(
-                                                "add_whitelist",
-                                                serde_json::json!({ "name": name }),
-                                            );
+                                        for rule in &self.rule_uis {
+                                            rule.process_row_ui(ui, name);
                                         }
                                     });
                                 }
