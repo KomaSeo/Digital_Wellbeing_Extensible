@@ -71,18 +71,23 @@ $json = '{"id":1,"method":"add_blacklist","params":{"name":"discord.exe"}}'
 ## Project layout
 
 ```
-apps/desktop     egui desktop shell + enforcer host
+apps/desktop     egui desktop shell + rule registration host
 crates/policy    blacklist/whitelist model + persistence trait
-crates/enforcer  process reconcile / terminate loop
+crates/enforcer  process loop + pluggable BlockRule registry
 crates/tool-api  JSON-RPC function-call router
 scripts/call.ps1 convenience client
 ```
+
+`Enforcer` does not own a single policy. Callers register one or more `BlockRule`
+implementations (`ListPolicyRule` today; browser-extension grace rules later).
+A process is terminated when **any** rule returns `Block`.
 
 `PolicyStore::default()` uses `FilePolicyPersistence::default()` (app config path).
 Callers may inject any `PolicyPersistence` via `with_persistence`
 (tests typically pass `MemoryPolicyPersistence`).
 
-Browser extension support is intentionally deferred; keep policy logic in `crates/policy` so a future browser host can reuse the same rules.
+Browser extension support is intentionally deferred; keep shared list logic in
+`crates/policy` and time-based / heartbeat logic in separate `BlockRule`s.
 
 ## Safety notes
 

@@ -45,15 +45,20 @@ pub enum ToolError {
 #[derive(Clone)]
 pub struct ToolRouter {
     enforcer: Arc<Enforcer>,
+    store: PolicyStore,
 }
 
 impl ToolRouter {
-    pub fn new(enforcer: Arc<Enforcer>) -> Self {
-        Self { enforcer }
+    pub fn new(enforcer: Arc<Enforcer>, store: PolicyStore) -> Self {
+        Self { enforcer, store }
     }
 
     pub fn store(&self) -> &PolicyStore {
-        self.enforcer.store()
+        &self.store
+    }
+
+    pub fn enforcer(&self) -> &Arc<Enforcer> {
+        &self.enforcer
     }
 
     pub fn handle_value(&self, request: Value) -> Value {
@@ -140,6 +145,10 @@ impl ToolRouter {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(50) as usize;
                 let list = self.enforcer.recent_blocks(limit);
+                Ok(serde_json::to_value(list).map_err(to_tool)?)
+            }
+            "list_rules" => {
+                let list = self.enforcer.list_rules();
                 Ok(serde_json::to_value(list).map_err(to_tool)?)
             }
             "save_strategy" => {

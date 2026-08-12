@@ -1,5 +1,5 @@
 use eframe::egui;
-use enforcer::Enforcer;
+use enforcer::{Enforcer, ListPolicyHandle};
 use policy::{EnforcementMode, PolicyStore};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,10 +14,13 @@ fn main() -> eframe::Result<()> {
         .init();
 
     let store = PolicyStore::default().expect("failed to open policy store");
-    let enforcer = Arc::new(Enforcer::new(store));
+    let list_policy = ListPolicyHandle::new(store.clone());
+    let enforcer = Arc::new(Enforcer::new());
+    enforcer.register_rule(list_policy.rule());
+    // Future: enforcer.register_rule(browser_guard.rule()); // e.g. 60s grace on extension loss
     let _enforce_handle = enforcer.start_background(Duration::from_millis(800));
 
-    let router = ToolRouter::new(Arc::clone(&enforcer));
+    let router = ToolRouter::new(Arc::clone(&enforcer), store);
     let _api_keep_alive = spawn_tcp(router.clone(), DEFAULT_PORT);
 
     let options = eframe::NativeOptions {
@@ -253,7 +256,11 @@ impl eframe::App for App {
                                         item.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
                                     let at =
                                         item.get("at").and_then(|v| v.as_str()).unwrap_or("");
-                                    ui.label(format!("{at}  {name} ({pid})"));
+                                    let reason = item
+                                        .get("reason")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    ui.label(format!("{at}  {name} ({pid})  [{reason}]"));
                                 }
                             }
                         }
