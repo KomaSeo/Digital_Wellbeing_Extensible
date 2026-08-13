@@ -8,6 +8,7 @@ use std::sync::Arc;
 struct ListUiState {
     name_input: String,
     strategy_input: String,
+    process_filter: String,
     status: String,
 }
 
@@ -65,7 +66,7 @@ impl BlockRule for ListBasedRule {
 }
 
 impl RuleUi for ListBasedRule {
-    fn settings_ui(&self, ui: &mut egui::Ui) {
+    fn settings_ui(&self, ui: &mut egui::Ui, processes: &[ProcessSnapshot]) {
         let config = self.store.get();
         let mut state = self.ui_state.lock();
 
@@ -120,7 +121,7 @@ impl RuleUi for ListBasedRule {
         ui.label("Blacklist");
         egui::ScrollArea::vertical()
             .id_salt("list_based_rule_bl")
-            .max_height(200.0)
+            .max_height(160.0)
             .show(ui, |ui| {
                 for name in &config.blacklist {
                     ui.horizontal(|ui| {
@@ -136,13 +137,37 @@ impl RuleUi for ListBasedRule {
         ui.label("Whitelist");
         egui::ScrollArea::vertical()
             .id_salt("list_based_rule_wl")
-            .max_height(220.0)
+            .max_height(160.0)
             .show(ui, |ui| {
                 for name in &config.whitelist {
                     ui.horizontal(|ui| {
                         ui.label(name);
                         if ui.small_button("✕").clicked() {
                             let _ = self.store.remove_whitelist(name);
+                        }
+                    });
+                }
+            });
+
+        ui.separator();
+        ui.heading("Running processes");
+        ui.text_edit_singleline(&mut state.process_filter);
+        let filter = state.process_filter.to_lowercase();
+        egui::ScrollArea::vertical()
+            .id_salt("list_based_rule_procs")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for process in processes {
+                    if !filter.is_empty() && !process.name.to_lowercase().contains(&filter) {
+                        continue;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} ({})", process.name, process.pid));
+                        if ui.small_button("+BL").clicked() {
+                            let _ = self.store.add_blacklist(&process.name);
+                        }
+                        if ui.small_button("+WL").clicked() {
+                            let _ = self.store.add_whitelist(&process.name);
                         }
                     });
                 }
@@ -191,15 +216,6 @@ impl RuleUi for ListBasedRule {
         if !state.status.is_empty() {
             ui.separator();
             ui.colored_label(egui::Color32::from_rgb(200, 80, 80), &state.status);
-        }
-    }
-
-    fn process_row_ui(&self, ui: &mut egui::Ui, process_name: &str) {
-        if ui.small_button("+BL").clicked() {
-            let _ = self.store.add_blacklist(process_name);
-        }
-        if ui.small_button("+WL").clicked() {
-            let _ = self.store.add_whitelist(process_name);
         }
     }
 }

@@ -1,5 +1,5 @@
 use eframe::egui;
-use enforcer::Enforcer;
+use enforcer::{Enforcer, ProcessSnapshot};
 use list_based_rule::{ListBasedRuleHandle, ListStore};
 use rule_ui::RuleUi;
 use std::sync::Arc;
@@ -42,10 +42,18 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MainTab {
+    /// Running processes + recent blocks overview.
+    Monitor,
+    /// A registered rule's settings panel.
+    Rule(String),
+}
+
 struct App {
     router: ToolRouter,
     rule_uis: Vec<Arc<dyn RuleUi>>,
-    selected_rule_id: String,
+    tab: MainTab,
     status: String,
     last_refresh: Instant,
     process_filter: String,
@@ -53,14 +61,10 @@ struct App {
 
 impl App {
     fn new(router: ToolRouter, rule_uis: Vec<Arc<dyn RuleUi>>) -> Self {
-        let selected_rule_id = rule_uis
-            .first()
-            .map(|r| r.id().to_string())
-            .unwrap_or_default();
         Self {
             router,
             rule_uis,
-            selected_rule_id,
+            tab: MainTab::Monitor,
             status: format!("Function call API: 127.0.0.1:{DEFAULT_PORT}"),
             last_refresh: Instant::now() - Duration::from_secs(10),
             process_filter: String::new(),
@@ -76,9 +80,15 @@ impl eframe::App for App {
         }
 
         let blocks = self.router.dispatch("list_blocks", serde_json::json!({ "limit": 40 }));
-        let processes = self
-            .router
-            .dispatch("list_processes", serde_json::json!({}));
+        let process_infos = self.router.enforcer().list_processes();
+        let snapshots: Vec<ProcessSnapshot> = process_infos
+            .iter()
+            .map(|p| ProcessSnapshot {
+                pid: p.pid,
+                name: p.name.clone(),
+                exe: p.exe.clone(),
+            })
+            .collect();
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -87,93 +97,89 @@ impl eframe::App for App {
                 ui.label(&self.status);
             });
             ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(self.tab == MainTab::Monitor, "Monitor")
+                    .clicked()
+                {
+                    self.tab = MainTab::Monitor;
+                }
+                ui.separator();
                 ui.label("Rules:");
                 for rule in &self.rule_uis {
-                    let selected = self.selected_rule_id == rule.id();
+                    let selected = matches!(&self.tab, MainTab::Rule(id) if id == rule.id());
                     if ui.selectable_label(selected, rule.name()).clicked() {
-                        self.selected_rule_id = rule.id().to_string();
+                        self.tab = MainTab::Rule(rule.id().to_string());
                     }
                 }
             });
         });
 
-        egui::SidePanel::left("rule_settings")
-            .default_width(340.0)
-            .show(ctx, |ui| {
-                let selected = self
-                    .rule_uis
-                    .iter()
-                    .find(|r| r.id() == self.selected_rule_id);
-                if let Some(rule) = selected {
-                    ui.heading(rule.name());
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .id_salt("rule_settings_scroll")
-                        .show(ui, |ui| {
-                            rule.settings_ui(ui);
-                        });
-                } else {
-                    ui.label("No rule selected.");
-                }
-            });
-
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.columns(2, |cols| {
-                cols[0].heading("Running processes");
-                cols[0].text_edit_singleline(&mut self.process_filter);
-                egui::ScrollArea::vertical()
-                    .id_salt("procs")
-                    .show(&mut cols[0], |ui| {
-                        if let Ok(value) = &processes {
-                            if let Some(arr) = value.as_array() {
+            let tab = self.tab.clone();
+            match tab {
+                MainTab::Monitor => {
+                    ui.columns(2, |cols| {
+                        cols[0].heading("Running processes");
+                        cols[0].text_edit_singleline(&mut self.process_filter);
+                        egui::ScrollArea::vertical()
+                            .id_salt("monitor_procs")
+                            .show(&mut cols[0], |ui| {
                                 let filter = self.process_filter.to_lowercase();
-                                for item in arr {
-                                    let name = item
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
+                                for process in &snapshots {
                                     if !filter.is_empty()
-                                        && !name.to_lowercase().contains(&filter)
+                                        && !process.name.to_lowercase().contains(&filter)
                                     {
                                         continue;
                                     }
-                                    let pid = item.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    ui.horizontal(|ui| {
-                                        ui.label(format!("{name} ({pid})"));
-                                        for rule in &self.rule_uis {
-                                            rule.process_row_ui(ui, name);
-                                        }
-                                    });
+                                    ui.label(format!("{} ({})", process.name, process.pid));
                                 }
-                            }
-                        }
-                    });
+                            });
 
-                cols[1].heading("Recent blocks");
-                egui::ScrollArea::vertical()
-                    .id_salt("blocks")
-                    .show(&mut cols[1], |ui| {
-                        if let Ok(value) = &blocks {
-                            if let Some(arr) = value.as_array() {
-                                for item in arr {
-                                    let name = item
-                                        .get("process_name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("?");
-                                    let pid =
-                                        item.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    let at =
-                                        item.get("at").and_then(|v| v.as_str()).unwrap_or("");
-                                    let reason = item
-                                        .get("reason")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    ui.label(format!("{at}  {name} ({pid})  [{reason}]"));
+                        cols[1].heading("Recent blocks");
+                        egui::ScrollArea::vertical()
+                            .id_salt("monitor_blocks")
+                            .show(&mut cols[1], |ui| {
+                                if let Ok(value) = &blocks {
+                                    if let Some(arr) = value.as_array() {
+                                        for item in arr {
+                                            let name = item
+                                                .get("process_name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("?");
+                                            let pid = item
+                                                .get("pid")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(0);
+                                            let at = item
+                                                .get("at")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let reason = item
+                                                .get("reason")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            ui.label(format!(
+                                                "{at}  {name} ({pid})  [{reason}]"
+                                            ));
+                                        }
+                                    }
                                 }
-                            }
-                        }
+                            });
                     });
-            });
+                }
+                MainTab::Rule(rule_id) => {
+                    let selected = self.rule_uis.iter().find(|r| r.id() == rule_id);
+                    if let Some(rule) = selected {
+                        egui::ScrollArea::vertical()
+                            .id_salt("rule_settings_scroll")
+                            .show(ui, |ui| {
+                                rule.settings_ui(ui, &snapshots);
+                            });
+                    } else {
+                        ui.label("Rule not found.");
+                    }
+                }
+            }
         });
     }
 }

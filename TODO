@@ -1,5 +1,8 @@
-1. 
-2. understand tool-api structure\
+1. 지금 tool-api는 list_based_rule만 지원하는데 - 이거 그냥 없애도 될 거 같은데. - 나중에 필요하면 더하자.
+2. chrome은 여기가 아닌 다른 곳에서 관리를 해야할 거 같은데. dll같은 걸 통해서 mod extension이 가능하도록 구현하자.
 3. Execute program in background in small tray although program has been closed.
 4. 관리자가 아닌 사용자가 관리자 권한을 external based rule에 따라 받을 수 있도록 프로그램을 제작하기. <-- 이게 ring 5가 될거다.
 5. background에서도 돌아갈 수 있도록 제작하기 - 관리자가 아닌 경우 프로그램을 종료할 수 없도록 만들기.
+
+
+backlog - 뭔가 privacy방지를 위해서 evaluate 대상의 filtering이 필요할 거 같긴 한데.
