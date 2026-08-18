@@ -10,3 +10,4 @@ chrono = { workspace = true }
 sysinfo = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+egui = { workspace = true }

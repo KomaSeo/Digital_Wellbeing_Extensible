@@ -11,6 +11,9 @@ mod heartbeat;
 mod http;
 mod rule;
 
+pub use content_filter::{
+    ContentFilter, EvaluateItem, EvaluateMedia, EvaluateRequest, EvaluateResult,
+};
 pub use heartbeat::{
     Heartbeat, HeartbeatMonitor, HeartbeatPayload, DEFAULT_GRACE, DEFAULT_HEARTBEAT_TTL,
 };

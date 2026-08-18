@@ -3,12 +3,20 @@ use crate::http::{handle_request, origin_allowed, try_parse, HttpRequest};
 use crate::rule::BrowserRule;
 use persistence::MemoryPersistence;
 use std::sync::Arc;
+use word_based_filter::{WordBasedConfig, WordBasedFilterHandle, WordBasedStore};
 
 fn memory_rule() -> BrowserRule {
     let store =
         BrowserStore::with_persistence(Arc::new(MemoryPersistence::<BrowserConfig>::new()))
             .unwrap();
-    BrowserRule::new(store)
+    let rule = BrowserRule::new(store);
+    let word_store = WordBasedStore::with_persistence(Arc::new(
+        MemoryPersistence::<WordBasedConfig>::new(),
+    ))
+    .unwrap();
+    let word = WordBasedFilterHandle::new(word_store);
+    rule.register_content_filter(word.filter());
+    rule
 }
 
 #[test]
@@ -87,4 +95,35 @@ fn unknown_path_is_404() {
     };
     let resp = handle_request(&rule, &req);
     assert_eq!(resp.status, 404);
+}
+
+#[test]
+fn evaluate_blocks_violent_item() {
+    let rule = memory_rule();
+    let body = serde_json::json!({
+        "items": [
+            { "id": "c1", "kind": "text", "text": "Nice flowers, thanks for sharing." },
+            { "id": "c2", "kind": "text", "text": "I hate this and hope you suffer violently tonight." },
+            {
+                "id": "c3",
+                "kind": "image",
+                "text": "",
+                "media": [{ "kind": "image", "alt": "nude still", "src": "https://cdn.example/a.jpg" }],
+                "image": "data:image/jpeg;base64,aaaa"
+            }
+        ]
+    });
+    let req = HttpRequest {
+        method: "POST".into(),
+        path: "/evaluate".into(),
+        origin: Some("chrome-extension://abc".into()),
+        body: serde_json::to_vec(&body).unwrap(),
+    };
+    let resp = handle_request(&rule, &req);
+    assert_eq!(resp.status, 200);
+    let parsed: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["results"][0]["action"], "allow");
+    assert_eq!(parsed["results"][1]["action"], "block");
+    assert_eq!(parsed["results"][2]["action"], "block");
 }

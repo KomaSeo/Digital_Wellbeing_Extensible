@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Digital Wellbeing",
   "version": "0.1.0",
-  "description": "Heartbeats the local Digital Wellbeing app, blocks blacklisted sites, and can extract content blocks for review.",
+  "description": "Heartbeats the local Digital Wellbeing app, blocks blacklisted sites, and hides filtered page content.",
   "incognito": "spanning",
   "permissions": [
     "offscreen",
@@ -14,11 +14,19 @@
     "<all_urls>",
     "http://127.0.0.1:8766/*"
   ],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "exclude_matches": ["http://127.0.0.1/*", "http://localhost/*"],
+      "js": ["content_extract.js", "content_watch.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Extract content blocks"
+    "default_title": "Content filter status"
   },
   "web_accessible_resources": [
     {

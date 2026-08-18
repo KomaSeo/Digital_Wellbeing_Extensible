@@ -1,4 +1,5 @@
 const HEARTBEAT_URL = "http://127.0.0.1:8766/heartbeat";
+const EVALUATE_URL = "http://127.0.0.1:8766/evaluate";
 const OFFSCREEN_URL = "offscreen.html";
 
 ensureOffscreen();
@@ -16,7 +17,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      files: ["content_extract.js", "content_extract_overlay.js"],
+      files: ["content_extract.js", "content_watch.js", "content_extract_overlay.js"],
     });
   } catch (err) {
     console.warn("content extract inject failed", err);
@@ -24,6 +25,12 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "evaluate-content") {
+    evaluateContent(Array.isArray(msg.items) ? msg.items : [])
+      .then((results) => sendResponse({ ok: true, results }))
+      .catch((err) => sendResponse({ ok: false, error: String(err), results: [] }));
+    return true;
+  }
   if (msg?.type !== "heartbeat-tick") {
     return;
   }
@@ -70,6 +77,19 @@ async function tick() {
   }
   const data = await res.json();
   await applyBlacklist(Array.isArray(data.blacklist) ? data.blacklist : []);
+}
+
+async function evaluateContent(items) {
+  const res = await fetch(EVALUATE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) {
+    throw new Error(`evaluate ${res.status}`);
+  }
+  const data = await res.json();
+  return Array.isArray(data.results) ? data.results : [];
 }
 
 async function collectHeartbeat() {

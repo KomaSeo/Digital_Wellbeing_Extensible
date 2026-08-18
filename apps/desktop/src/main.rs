@@ -1,11 +1,11 @@
 use browser_rule::{BrowserRuleHandle, BrowserStore};
 use eframe::egui;
-use enforcer::{Enforcer, ProcessSnapshot};
+use enforcer::{BlockRule, Enforcer, ProcessSnapshot};
 use list_based_rule::{ListBasedRuleHandle, ListStore};
-use rule_ui::RuleUi;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tool_api::{spawn_tcp, ToolRouter, DEFAULT_PORT};
+use word_based_filter::{WordBasedFilterHandle, WordBasedStore};
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
@@ -19,11 +19,14 @@ fn main() -> eframe::Result<()> {
     let list_rule = ListBasedRuleHandle::new(store.clone());
     let browser_store = BrowserStore::default().expect("failed to open browser store");
     let browser_guard = BrowserRuleHandle::new(browser_store);
+    let word_store = WordBasedStore::default().expect("failed to open word-based filter store");
+    let word_filter = WordBasedFilterHandle::new(word_store);
+    browser_guard.register_content_filter(word_filter.filter());
     let enforcer = Arc::new(Enforcer::new());
     enforcer.register_rule(list_rule.rule());
     enforcer.register_rule(browser_guard.rule());
 
-    let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui(), browser_guard.ui()];
+    let rules: Vec<Arc<dyn BlockRule>> = vec![list_rule.rule(), browser_guard.rule()];
 
     let _enforce_handle = enforcer.start_background(Duration::from_millis(800));
     let _heartbeat_keep_alive = browser_guard.spawn_http(browser_rule::DEFAULT_PORT);
@@ -41,7 +44,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Digital Wellbeing",
         options,
-        Box::new(move |_cc| Ok(Box::new(App::new(router, rule_uis)))),
+        Box::new(move |_cc| Ok(Box::new(App::new(router, rules)))),
     )
 }
 
@@ -55,7 +58,7 @@ enum MainTab {
 
 struct App {
     router: ToolRouter,
-    rule_uis: Vec<Arc<dyn RuleUi>>,
+    rules: Vec<Arc<dyn BlockRule>>,
     tab: MainTab,
     status: String,
     last_refresh: Instant,
@@ -63,10 +66,10 @@ struct App {
 }
 
 impl App {
-    fn new(router: ToolRouter, rule_uis: Vec<Arc<dyn RuleUi>>) -> Self {
+    fn new(router: ToolRouter, rules: Vec<Arc<dyn BlockRule>>) -> Self {
         Self {
             router,
-            rule_uis,
+            rules,
             tab: MainTab::Monitor,
             status: format!(
                 "Function call API: 127.0.0.1:{DEFAULT_PORT}  ·  Heartbeat: 127.0.0.1:{}",
@@ -111,7 +114,7 @@ impl eframe::App for App {
                 }
                 ui.separator();
                 ui.label("Rules:");
-                for rule in &self.rule_uis {
+                for rule in &self.rules {
                     let selected = matches!(&self.tab, MainTab::Rule(id) if id == rule.id());
                     if ui.selectable_label(selected, rule.name()).clicked() {
                         self.tab = MainTab::Rule(rule.id().to_string());
@@ -174,7 +177,7 @@ impl eframe::App for App {
                     });
                 }
                 MainTab::Rule(rule_id) => {
-                    let selected = self.rule_uis.iter().find(|r| r.id() == rule_id);
+                    let selected = self.rules.iter().find(|r| r.id() == rule_id);
                     if let Some(rule) = selected {
                         egui::ScrollArea::vertical()
                             .id_salt("rule_settings_scroll")

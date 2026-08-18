@@ -157,8 +157,8 @@
       <h1>컨텐츠 블록 추출 테스트</h1>
       <p>
         크롬(로고, 약관, 버튼)을 버리고 본문·댓글·미디어만 남기는 추출기입니다.
-        아래 픽스처에서 하이라이트를 확인하고, 블록을 숨겨 매핑이 맞는지 보면 됩니다.
-        실제 사이트는 확장 아이콘을 눌러 같은 추출기를 돌릴 수 있습니다.
+        스크롤로 댓글이 붙으면 이미 검사한 블록은 건너뛰고 새 블록만 이어서 봅니다.
+        실제 사이트는 확장 아이콘을 한 번 누르면 감시가 시작됩니다.
       </p>
       <div id="summary">테스트 실행 중…</div>
     </header>
@@ -172,11 +172,12 @@
         <div class="toolbar">
           <select id="fixture"></select>
           <button id="extract" class="primary" type="button">추출</button>
+          <button id="scroll-more" type="button">스크롤로 댓글 추가</button>
           <button id="hide-toxic" type="button">유해 블록 숨기기</button>
           <button id="reset" type="button">숨김 해제</button>
         </div>
         <iframe class="preview" id="preview" title="fixture preview"></iframe>
-        <p class="hint">보라색 테두리가 추출된 블록입니다. JSON은 element 없이 id만 남깁니다.</p>
+        <p class="hint">보라색 테두리가 추출된 블록입니다. 「스크롤로 댓글 추가」는 무한 스크롤처럼 노드를 붙입니다.</p>
         <pre id="json">[]</pre>
       </section>
       <section class="card" style="grid-column: 1 / -1">
@@ -188,7 +189,7 @@
     <script src="content_extract.js"></script>
     <script src="content_extract_test.js"></script>
     <script>
-      const { extractContent, serializeBlocks } = DwContentExtract;
+      const { observeContent, serializeBlocks } = DwContentExtract;
       const { FIXTURES, runTests } = DwContentExtractTest;
 
       const resultsEl = document.getElementById("results");
@@ -198,18 +199,22 @@
       const jsonEl = document.getElementById("json");
       const customEl = document.getElementById("custom");
 
-      const results = runTests(DwContentExtract);
-      const failed = results.filter((r) => !r.ok);
-      results.forEach((r) => {
-        const li = document.createElement("li");
-        li.className = r.ok ? "ok" : "fail";
-        li.textContent = (r.ok ? "통과 — " : "실패 — ") + r.name + (r.error ? "\n" + r.error : "");
-        resultsEl.appendChild(li);
+      let lastBlocks = [];
+      let watch = null;
+
+      runTests(DwContentExtract).then((results) => {
+        const failed = results.filter((r) => !r.ok);
+        results.forEach((r) => {
+          const li = document.createElement("li");
+          li.className = r.ok ? "ok" : "fail";
+          li.textContent = (r.ok ? "통과 — " : "실패 — ") + r.name + (r.error ? "\n" + r.error : "");
+          resultsEl.appendChild(li);
+        });
+        summaryEl.className = failed.length ? "fail" : "pass";
+        summaryEl.textContent = failed.length
+          ? failed.length + "개 실패 / " + results.length
+          : results.length + "개 전부 통과";
       });
-      summaryEl.className = failed.length ? "fail" : "pass";
-      summaryEl.textContent = failed.length
-        ? failed.length + "개 실패 / " + results.length
-        : results.length + "개 전부 통과";
 
       fixtureEl.innerHTML =
         Object.entries(FIXTURES)
@@ -230,24 +235,52 @@
           "</body></html>";
       }
 
-      let lastBlocks = [];
+      function stopWatch() {
+        if (watch) {
+          watch.disconnect();
+          watch = null;
+        }
+      }
 
       function runExtract() {
         const doc = preview.contentDocument;
         if (!doc || !doc.body) {
           return;
         }
+        stopWatch();
         doc.querySelectorAll("[data-dw-content-id]").forEach((el) => {
           el.removeAttribute("data-dw-content-id");
           el.style.removeProperty("display");
         });
-        const { blocks } = extractContent(doc, { stamp: true });
-        lastBlocks = blocks;
-        jsonEl.textContent = JSON.stringify(serializeBlocks(blocks), null, 2);
+        lastBlocks = [];
+        jsonEl.textContent = "[]";
+        watch = observeContent(doc, {
+          debounceMs: 50,
+          onBlocks(chunk) {
+            lastBlocks.push(...chunk);
+            jsonEl.textContent = JSON.stringify(serializeBlocks(lastBlocks), null, 2);
+          },
+        });
       }
 
       document.getElementById("extract").addEventListener("click", runExtract);
+      document.getElementById("scroll-more").addEventListener("click", () => {
+        const doc = preview.contentDocument;
+        const list = doc && doc.querySelector(".comments");
+        if (!list) {
+          return;
+        }
+        const n = list.children.length + 1;
+        const item = doc.createElement(list.tagName === "UL" ? "li" : "article");
+        item.className = "comment";
+        item.innerHTML =
+          "<p>Scrolled comment " +
+          n +
+          " about extra fertilizer appearing after the user kept reading.</p>";
+        list.appendChild(item);
+      });
       fixtureEl.addEventListener("change", () => {
+        stopWatch();
         loadPreview();
       });
       preview.addEventListener("load", runExtract);

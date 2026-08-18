@@ -90,13 +90,13 @@
     return texts(blocks).join("\n");
   }
 
-  function runTests(api) {
+  async function runTests(api) {
     const { extractContent, serializeBlocks } = api;
     const results = [];
 
-    function test(name, fn) {
+    async function test(name, fn) {
       try {
-        fn();
+        await fn();
         results.push({ name, ok: true });
       } catch (err) {
         results.push({ name, ok: false, error: String(err && err.message ? err.message : err) });
@@ -109,7 +109,7 @@
       }
     }
 
-    test("커뮤니티: 로고/약관/버튼은 빼고 본문·댓글만 남긴다", () => {
+    await test("커뮤니티: 로고/약관/버튼은 빼고 본문·댓글만 남긴다", () => {
       const { blocks } = extractContent(parseFixture(FIXTURES.community.html));
       const blob = joined(blocks).toLowerCase();
       assert(!blocks.some((b) => /\blogo\b/i.test(b.text)), "logo text leaked: " + joined(blocks));
@@ -125,7 +125,7 @@
       );
     });
 
-    test("커뮤니티: 유해 댓글이 별도 블록이고 element가 그 댓글 노드다", () => {
+    await test("커뮤니티: 유해 댓글이 별도 블록이고 element가 그 댓글 노드다", () => {
       const { blocks } = extractContent(parseFixture(FIXTURES.community.html));
       const hit = blocks.find((b) => /suffer violently/i.test(b.text));
       assert(hit, "toxic comment missing");
@@ -135,7 +135,7 @@
       assert(!/nice flowers/i.test(hit.text), "toxic block swallowed a neighbor comment");
     });
 
-    test("영상 페이지: video/iframe은 남기고 헤더·푸터는 뺀다", () => {
+    await test("영상 페이지: video/iframe은 남기고 헤더·푸터는 뺀다", () => {
       const { blocks } = extractContent(parseFixture(FIXTURES.video.html));
       const blob = joined(blocks).toLowerCase();
       assert(!blob.includes("terms"), "footer leaked");
@@ -157,7 +157,7 @@
       );
     });
 
-    test("뉴스: 본문 문단과 이미지는 남긴다", () => {
+    await test("뉴스: 본문 문단과 이미지는 남긴다", () => {
       const { blocks } = extractContent(parseFixture(FIXTURES.article.html));
       const blob = joined(blocks);
       assert(/riverside park/i.test(blob), "missing article text");
@@ -169,7 +169,7 @@
       assert(!/terms/i.test(blob), "footer leaked");
     });
 
-    test("숨긴 노드는 추출하지 않는다", () => {
+    await test("숨긴 노드는 추출하지 않는다", () => {
       const doc = parseFixture(`
         <p>Visible paragraph about a local bakery opening.</p>
         <p hidden>Secret hidden slur that should not be extracted.</p>
@@ -182,18 +182,56 @@
       assert(!/another hidden line/i.test(blob), "aria-hidden text leaked");
     });
 
-    test("serializeBlocks는 element를 떼고 id를 유지한다", () => {
+    await test("serializeBlocks는 element를 떼고 id를 유지한다", () => {
       const { blocks } = extractContent(parseFixture(FIXTURES.community.html));
       const json = serializeBlocks(blocks);
       assert(json.length === blocks.length, "length mismatch");
       assert(json.every((b) => b.id && b.kind && !("element" in b)), "element leaked into JSON");
     });
 
-    test("stamp 옵션이 원본 노드에 id를 찍는다", () => {
+    await test("이미 찍힌 블록은 건너뛰고 새로 붙은 댓글만 추출한다", () => {
       const doc = parseFixture(FIXTURES.community.html);
-      const { blocks } = extractContent(doc, { stamp: true });
-      const toxic = blocks.find((b) => /suffer violently/i.test(b.text));
-      assert(toxic && toxic.element.getAttribute("data-dw-content-id") === toxic.id, "stamp missing");
+      const first = extractContent(doc, { stamp: true });
+      doc.querySelector(".comments").insertAdjacentHTML(
+        "beforeend",
+        '<li class="comment"><p>A newly loaded comment about compost bins appearing after scroll.</p></li>'
+      );
+      const second = extractContent(doc, {
+        stamp: true,
+        skipStamped: true,
+        idStart: first.blocks.length + 1,
+      });
+      assert(second.blocks.length === 1, "expected 1 new block, got " + second.blocks.length + ": " + joined(second.blocks));
+      assert(/compost bins/i.test(second.blocks[0].text), "missing new comment");
+      assert(second.blocks[0].id === "c" + (first.blocks.length + 1), "id did not continue");
+      assert(
+        first.blocks.every((b) => b.element.getAttribute("data-dw-content-id")),
+        "old stamps were lost"
+      );
+    });
+
+    await test("MutationObserver가 추가된 댓글을 이어서 검사한다", async () => {
+      const { observeContent } = api;
+      assert(typeof observeContent === "function", "observeContent missing");
+      const doc = parseFixture(FIXTURES.community.html);
+      const seen = [];
+      const session = observeContent(doc, {
+        debounceMs: 0,
+        onBlocks: (chunk) => seen.push(...chunk),
+      });
+      assert(seen.length >= 5, "initial extract missing: " + joined(seen));
+      const before = seen.length;
+      doc.querySelector(".comments").insertAdjacentHTML(
+        "beforeend",
+        '<li class="comment"><p>Observer should catch this extra comment about mulch layers.</p></li>'
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      session.disconnect();
+      assert(
+        seen.length === before + 1,
+        "expected one more block, got " + (seen.length - before) + " extra: " + joined(seen.slice(before))
+      );
+      assert(/mulch layers/i.test(seen[seen.length - 1].text), "new text missing");
     });
 
     return results;

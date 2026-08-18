@@ -10,7 +10,7 @@ use std::time::Duration;
 
 pub const DEFAULT_PORT: u16 = 8766;
 
-const MAX_BODY: usize = 64_000;
+const MAX_BODY: usize = 512_000;
 
 #[derive(Debug)]
 pub(crate) struct HttpRequest {
@@ -114,6 +114,23 @@ pub(crate) fn handle_request(rule: &BrowserRule, req: &HttpRequest) -> HttpRespo
                 json!({ "ok": false, "error": err }),
             ),
         },
+        ("POST", "/evaluate") => match parse_evaluate(&req.body) {
+            Ok(body) => {
+                let results = rule.evaluate_content(&body.items);
+                json_response(
+                    200,
+                    "OK",
+                    req.origin.clone(),
+                    json!({ "ok": true, "results": results }),
+                )
+            }
+            Err(err) => json_response(
+                400,
+                "Bad Request",
+                req.origin.clone(),
+                json!({ "ok": false, "error": err }),
+            ),
+        },
         _ => json_response(
             404,
             "Not Found",
@@ -127,6 +144,10 @@ fn parse_payload(body: &[u8]) -> Result<HeartbeatPayload, String> {
     let value: Value =
         serde_json::from_slice(body).map_err(|e| format!("invalid json: {e}"))?;
     serde_json::from_value(value).map_err(|e| format!("invalid heartbeat: {e}"))
+}
+
+fn parse_evaluate(body: &[u8]) -> Result<content_filter::EvaluateRequest, String> {
+    serde_json::from_slice(body).map_err(|e| format!("invalid evaluate: {e}"))
 }
 
 pub(crate) fn origin_allowed(origin: Option<&str>) -> bool {

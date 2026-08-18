@@ -4,8 +4,9 @@ members = [
     "crates/persistence",
     "crates/list_based_rule",
     "crates/browser_rule",
+    "crates/content_filter",
+    "crates/word_based_filter",
     "crates/enforcer",
-    "crates/rule_ui",
     "crates/tool-api",
     "apps/desktop",
 ]
@@ -33,5 +34,6 @@ persistence = { path = "crates/persistence" }
 list_based_rule = { path = "crates/list_based_rule" }
 browser_rule = { path = "crates/browser_rule" }
 enforcer = { path = "crates/enforcer" }
-rule_ui = { path = "crates/rule_ui" }
+content_filter = { path = "crates/content_filter" }
+word_based_filter = { path = "crates/word_based_filter" }
 tool-api = { path = "crates/tool-api" }

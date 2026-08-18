@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 
 /// Seconds a guarded browser may run after first appearance before a healthy
 /// heartbeat is required. Avoids killing Chrome while the extension starts.
-pub const DEFAULT_GRACE: Duration = Duration::from_secs(8);
+pub const DEFAULT_GRACE: Duration = Duration::from_secs(30);
 
 /// A heartbeat older than this is treated as missing (fail-closed).
-pub const DEFAULT_HEARTBEAT_TTL: Duration = Duration::from_secs(10);
+pub const DEFAULT_HEARTBEAT_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HeartbeatPayload {

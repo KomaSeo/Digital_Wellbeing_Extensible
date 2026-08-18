@@ -1,7 +1,6 @@
 use crate::{ListMode, ListStore};
 use enforcer::{BlockEvent, BlockRule, ProcessSnapshot};
 use parking_lot::Mutex;
-use rule_ui::RuleUi;
 use std::sync::Arc;
 
 #[derive(Default)]
@@ -63,9 +62,7 @@ impl BlockRule for ListBasedRule {
             .map(|p| BlockEvent::new(p, reason))
             .collect()
     }
-}
 
-impl RuleUi for ListBasedRule {
     fn settings_ui(&self, ui: &mut egui::Ui, processes: &[ProcessSnapshot]) {
         let config = self.store.get();
         let mut state = self.ui_state.lock();
@@ -220,7 +217,7 @@ impl RuleUi for ListBasedRule {
     }
 }
 
-/// Shared handle so the app can register block + UI sides of the same rule.
+/// Shared handle so the app can register one object for enforcement and settings.
 #[derive(Clone)]
 pub struct ListBasedRuleHandle {
     inner: Arc<ListBasedRule>,
@@ -235,10 +232,6 @@ impl ListBasedRuleHandle {
 
     pub fn rule(&self) -> Arc<dyn BlockRule> {
         Arc::clone(&self.inner) as Arc<dyn BlockRule>
-    }
-
-    pub fn ui(&self) -> Arc<dyn RuleUi> {
-        Arc::clone(&self.inner) as Arc<dyn RuleUi>
     }
 
     pub fn store(&self) -> &ListStore {

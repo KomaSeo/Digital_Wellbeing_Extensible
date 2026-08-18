@@ -1,0 +1,13 @@
+[package]
+name = "word_based_filter"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+persistence = { workspace = true }
+content_filter = { workspace = true }
+egui = { workspace = true }

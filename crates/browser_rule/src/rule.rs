@@ -1,8 +1,8 @@
 use crate::heartbeat::HeartbeatMonitor;
 use crate::{BrowserStore, DEFAULT_GRACE, DEFAULT_HEARTBEAT_TTL};
+use content_filter::{merge_evaluate, ContentFilter, EvaluateItem, EvaluateResult};
 use enforcer::{BlockEvent, BlockRule, ProcessSnapshot};
 use parking_lot::Mutex;
-use rule_ui::RuleUi;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ pub struct BrowserRule {
     store: BrowserStore,
     heartbeat: HeartbeatMonitor,
     ui_state: Mutex<BrowserUiState>,
+    filters: Mutex<Vec<Arc<dyn ContentFilter>>>,
 }
 
 impl BrowserRule {
@@ -29,6 +30,7 @@ impl BrowserRule {
             store,
             heartbeat: HeartbeatMonitor::new(grace, heartbeat_ttl),
             ui_state: Mutex::new(BrowserUiState::default()),
+            filters: Mutex::new(Vec::new()),
         }
     }
 
@@ -42,6 +44,21 @@ impl BrowserRule {
 
     pub fn heartbeats_snapshot(&self) -> std::collections::HashMap<String, crate::Heartbeat> {
         self.heartbeat.snapshot()
+    }
+
+    pub fn register_content_filter(&self, filter: Arc<dyn ContentFilter>) {
+        let id = filter.id().to_string();
+        let mut filters = self.filters.lock();
+        if let Some(pos) = filters.iter().position(|f| f.id() == id) {
+            filters[pos] = filter;
+        } else {
+            filters.push(filter);
+        }
+    }
+
+    pub fn evaluate_content(&self, items: &[EvaluateItem]) -> Vec<EvaluateResult> {
+        let filters = self.filters.lock().clone();
+        merge_evaluate(&filters, items)
     }
 
     #[cfg(test)]
@@ -90,9 +107,7 @@ impl BlockRule for BrowserRule {
             })
             .collect()
     }
-}
 
-impl RuleUi for BrowserRule {
     fn settings_ui(&self, ui: &mut egui::Ui, _processes: &[ProcessSnapshot]) {
         let config = self.store.get();
         let mut state = self.ui_state.lock();
@@ -134,6 +149,17 @@ impl RuleUi for BrowserRule {
         }
 
         ui.separator();
+        let filters = self.filters.lock().clone();
+        if !filters.is_empty() {
+            ui.heading("Content filters");
+            ui.label("The extension sends extracted text and images to POST /evaluate. Any filter that returns block hides the element.");
+            for filter in filters.iter() {
+                ui.separator();
+                filter.settings_ui(ui);
+            }
+        }
+
+        ui.separator();
         ui.heading("Site blacklist");
         ui.label("The extension redirects these hosts to a block page.");
         ui.horizontal(|ui| {
@@ -171,7 +197,7 @@ impl RuleUi for BrowserRule {
     }
 }
 
-/// Shared handle so the app can register block + UI sides of the same rule.
+/// Shared handle so the app can register one object for enforcement and settings.
 #[derive(Clone)]
 pub struct BrowserRuleHandle {
     inner: Arc<BrowserRule>,
@@ -194,12 +220,12 @@ impl BrowserRuleHandle {
         Arc::clone(&self.inner) as Arc<dyn BlockRule>
     }
 
-    pub fn ui(&self) -> Arc<dyn RuleUi> {
-        Arc::clone(&self.inner) as Arc<dyn RuleUi>
-    }
-
     pub fn store(&self) -> &BrowserStore {
         self.inner.store()
+    }
+
+    pub fn register_content_filter(&self, filter: Arc<dyn ContentFilter>) {
+        self.inner.register_content_filter(filter);
     }
 
     pub fn spawn_http(&self, port: u16) -> std::sync::mpsc::Sender<()> {

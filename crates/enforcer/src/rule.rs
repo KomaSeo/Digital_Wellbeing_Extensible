@@ -46,6 +46,11 @@ pub trait BlockRule: Send + Sync {
     /// Inspect the full process snapshot list and return every process this rule
     /// wants blocked. Batching lets rules amortize shared work (lookups, heartbeats, …).
     fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent>;
+
+    /// Draw this rule's settings panel (shown when its tab is selected).
+    fn settings_ui(&self, ui: &mut egui::Ui, processes: &[ProcessSnapshot]) {
+        let _ = (ui, processes);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

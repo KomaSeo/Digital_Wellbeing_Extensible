@@ -1,8 +1,8 @@
 [package]
-name = "rule_ui"
+name = "content_filter"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+serde = { workspace = true }
 egui = { workspace = true }
-enforcer = { workspace = true }

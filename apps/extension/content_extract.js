@@ -158,6 +158,8 @@
     requireLayout: false,
     stamp: false,
     stampAttr: "data-dw-content-id",
+    skipStamped: false,
+    idStart: 1,
   };
 
   function extractContent(root, options) {
@@ -171,7 +173,7 @@
     walk(start, blocks, opts);
 
     const sliced = blocks.slice(0, opts.maxBlocks).map((block, i) => {
-      const id = "c" + (i + 1);
+      const id = "c" + (opts.idStart + i);
       if (opts.stamp && block.element && block.element.setAttribute) {
         block.element.setAttribute(opts.stampAttr, id);
       }
@@ -179,6 +181,91 @@
     });
 
     return { blocks: sliced };
+  }
+
+  /**
+   * Keep extracting as the page grows (infinite scroll, lazy comments).
+   * Already-stamped nodes are skipped so only new blocks are returned.
+   */
+  function observeContent(root, options) {
+    const opts = Object.assign({}, DEFAULTS, {
+      stamp: true,
+      skipStamped: true,
+      debounceMs: 200,
+      onBlocks: null,
+    }, options || {});
+
+    const target = root && root.body ? root.body : root;
+    let nextId = opts.idStart || 1;
+    let timer = null;
+    let stopped = false;
+    const pending = new Set();
+
+    function scan(scanRoot) {
+      if (stopped || !scanRoot) {
+        return [];
+      }
+      const { blocks } = extractContent(scanRoot, Object.assign({}, opts, {
+        skipStamped: true,
+        stamp: true,
+        idStart: nextId,
+        maxBlocks: Math.max(opts.maxBlocks, 200),
+      }));
+      if (blocks.length) {
+        nextId += blocks.length;
+        if (typeof opts.onBlocks === "function") {
+          opts.onBlocks(blocks);
+        }
+      }
+      return blocks;
+    }
+
+    const initial = scan(target);
+    const Observer = (target.ownerDocument || target).defaultView?.MutationObserver ||
+      (typeof MutationObserver !== "undefined" ? MutationObserver : null);
+
+    if (!Observer) {
+      return { initial, disconnect() {} };
+    }
+
+    const observer = new Observer((mutations) => {
+      if (stopped) {
+        return;
+      }
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType !== 1 || node.id === "dw-extract-host") {
+            continue;
+          }
+          pending.add(node.parentElement || node);
+        }
+      }
+      if (pending.size === 0) {
+        return;
+      }
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const batch = [...pending];
+        pending.clear();
+        for (const parent of batch) {
+          if (parent.isConnected) {
+            scan(parent);
+          }
+        }
+      }, opts.debounceMs);
+    });
+
+    observer.observe(target, { childList: true, subtree: true });
+
+    return {
+      initial,
+      disconnect() {
+        stopped = true;
+        clearTimeout(timer);
+        pending.clear();
+        observer.disconnect();
+      },
+    };
   }
 
   function serializeBlocks(blocks) {
@@ -195,6 +282,9 @@
 
   function walk(el, blocks, opts) {
     if (!el || el.nodeType !== 1) {
+      return;
+    }
+    if (isStamped(el, opts)) {
       return;
     }
     if (shouldSkipSubtree(el, opts)) {
@@ -252,8 +342,12 @@
     }
   }
 
+  function isStamped(el, opts) {
+    return Boolean(opts.skipStamped && el.getAttribute && el.getAttribute(opts.stampAttr));
+  }
+
   function pushBlock(el, blocks, opts) {
-    if (!el || blocks.some((b) => b.element === el)) {
+    if (!el || isStamped(el, opts) || blocks.some((b) => b.element === el)) {
       return;
     }
     if (blocks.some((b) => b.element && (b.element.contains(el) || el.contains(b.element)))) {
@@ -302,6 +396,9 @@
 
   function shouldSkipSubtree(el, opts) {
     if (el.nodeType !== 1) {
+      return true;
+    }
+    if (el.id === "dw-extract-host") {
       return true;
     }
     const tag = el.tagName;
@@ -578,6 +675,7 @@
 
   return {
     extractContent,
+    observeContent,
     serializeBlocks,
     DEFAULTS,
   };
