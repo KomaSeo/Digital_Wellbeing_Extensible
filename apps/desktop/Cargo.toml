@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 list_based_rule = { workspace = true }
+browser_rule = { workspace = true }
 enforcer = { workspace = true }
 rule_ui = { workspace = true }
 tool-api = { workspace = true }

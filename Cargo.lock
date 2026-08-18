@@ -498,6 +498,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser_rule"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "egui",
+ "enforcer",
+ "parking_lot",
+ "persistence",
+ "rule_ui",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -791,6 +807,7 @@ name = "digital-wellbeing"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "browser_rule",
  "eframe",
  "egui",
  "embed-manifest",
@@ -1815,15 +1832,13 @@ name = "list_based_rule"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "directories",
  "egui",
  "enforcer",
  "parking_lot",
+ "persistence",
  "rule_ui",
  "serde",
- "serde_json",
  "thiserror 2.0.19",
- "tracing",
 ]
 
 [[package]]
@@ -2429,6 +2444,17 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "persistence"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "pin-project"

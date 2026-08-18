@@ -1,10 +1,11 @@
 #![cfg(test)]
 
 use super::*;
+use persistence::{MemoryPersistence, Persistence};
 use std::sync::Arc;
 
 fn memory_store() -> ListStore {
-    ListStore::with_persistence(Arc::new(MemoryListPersistence::new()))
+    ListStore::with_persistence(Arc::new(MemoryPersistence::<ListConfig>::new()))
         .expect("memory persistence load cannot fail")
 }
 
@@ -31,9 +32,11 @@ fn set_lists_replace_entirely() {
 
 #[test]
 fn mutations_roundtrip_through_memory_persistence() {
-    let persistence = Arc::new(MemoryListPersistence::new());
-    let store = ListStore::with_persistence(Arc::clone(&persistence) as Arc<dyn ListPersistence>)
-        .unwrap();
+    let persistence = Arc::new(MemoryPersistence::<ListConfig>::new());
+    let store = ListStore::with_persistence(
+        Arc::clone(&persistence) as Arc<dyn Persistence<ListConfig>>,
+    )
+    .unwrap();
 
     store.add_blacklist("steam.exe").unwrap();
     store.set_mode(ListMode::Whitelist).unwrap();

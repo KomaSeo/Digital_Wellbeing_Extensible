@@ -1,3 +1,4 @@
+use browser_rule::{BrowserRuleHandle, BrowserStore};
 use eframe::egui;
 use enforcer::{Enforcer, ProcessSnapshot};
 use list_based_rule::{ListBasedRuleHandle, ListStore};
@@ -16,14 +17,16 @@ fn main() -> eframe::Result<()> {
 
     let store = ListStore::default().expect("failed to open list store");
     let list_rule = ListBasedRuleHandle::new(store.clone());
+    let browser_store = BrowserStore::default().expect("failed to open browser store");
+    let browser_guard = BrowserRuleHandle::new(browser_store);
     let enforcer = Arc::new(Enforcer::new());
     enforcer.register_rule(list_rule.rule());
-    // Future: enforcer.register_rule(browser_guard.rule());
+    enforcer.register_rule(browser_guard.rule());
 
-    let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui()];
-    // Future: rule_uis.push(browser_guard.ui());
+    let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui(), browser_guard.ui()];
 
     let _enforce_handle = enforcer.start_background(Duration::from_millis(800));
+    let _heartbeat_keep_alive = browser_guard.spawn_http(browser_rule::DEFAULT_PORT);
 
     let router = ToolRouter::new(Arc::clone(&enforcer), store);
     let _api_keep_alive = spawn_tcp(router.clone(), DEFAULT_PORT);
@@ -65,7 +68,10 @@ impl App {
             router,
             rule_uis,
             tab: MainTab::Monitor,
-            status: format!("Function call API: 127.0.0.1:{DEFAULT_PORT}"),
+            status: format!(
+                "Function call API: 127.0.0.1:{DEFAULT_PORT}  ·  Heartbeat: 127.0.0.1:{}",
+                browser_rule::DEFAULT_PORT
+            ),
             last_refresh: Instant::now() - Duration::from_secs(10),
             process_filter: String::new(),
         }

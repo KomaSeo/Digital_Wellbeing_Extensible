@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Content extract test</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f1ea;
+        --ink: #1c1917;
+        --muted: #57534e;
+        --card: #fffcf7;
+        --line: #e7e0d4;
+        --ok: #166534;
+        --ok-bg: #dcfce7;
+        --bad: #9f1239;
+        --bad-bg: #ffe4e6;
+        --accent: #6d28d9;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font: 15px/1.45 "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      header.top {
+        padding: 1.25rem 1.5rem 0.5rem;
+      }
+      header.top h1 {
+        margin: 0 0 0.35rem;
+        font-size: 1.25rem;
+      }
+      header.top p {
+        margin: 0;
+        color: var(--muted);
+        max-width: 46rem;
+      }
+      #summary {
+        display: inline-block;
+        margin-top: 0.85rem;
+        padding: 0.25rem 0.6rem;
+        border-radius: 999px;
+        font-weight: 600;
+        font-size: 0.85rem;
+      }
+      #summary.pass {
+        background: var(--ok-bg);
+        color: var(--ok);
+      }
+      #summary.fail {
+        background: var(--bad-bg);
+        color: var(--bad);
+      }
+      main.layout {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        padding: 1rem 1.5rem 2rem;
+      }
+      @media (max-width: 960px) {
+        main.layout {
+          grid-template-columns: 1fr;
+        }
+      }
+      section.card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1rem;
+        min-height: 12rem;
+      }
+      section.card h2 {
+        margin: 0 0 0.75rem;
+        font-size: 0.95rem;
+      }
+      #results {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      #results li {
+        padding: 0.45rem 0.5rem;
+        border-bottom: 1px solid var(--line);
+      }
+      #results li.ok {
+        color: var(--ok);
+      }
+      #results li.fail {
+        color: var(--bad);
+        white-space: pre-wrap;
+      }
+      .toolbar {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.75rem;
+      }
+      select,
+      button,
+      textarea {
+        font: inherit;
+      }
+      button,
+      select {
+        border: 1px solid var(--line);
+        background: #fff;
+        border-radius: 8px;
+        padding: 0.35rem 0.65rem;
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      iframe.preview {
+        width: 100%;
+        height: 280px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+      }
+      pre {
+        margin: 0.75rem 0 0;
+        max-height: 360px;
+        overflow: auto;
+        background: #1c1917;
+        color: #fefce8;
+        padding: 0.75rem;
+        border-radius: 8px;
+        font-size: 12px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 8rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.6rem;
+        resize: vertical;
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 0.85rem;
+        margin: 0.4rem 0 0;
+      }
+      [data-dw-content-id] {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <h1>컨텐츠 블록 추출 테스트</h1>
+      <p>
+        크롬(로고, 약관, 버튼)을 버리고 본문·댓글·미디어만 남기는 추출기입니다.
+        아래 픽스처에서 하이라이트를 확인하고, 블록을 숨겨 매핑이 맞는지 보면 됩니다.
+        실제 사이트는 확장 아이콘을 눌러 같은 추출기를 돌릴 수 있습니다.
+      </p>
+      <div id="summary">테스트 실행 중…</div>
+    </header>
+    <main class="layout">
+      <section class="card">
+        <h2>자동 테스트</h2>
+        <ol id="results"></ol>
+      </section>
+      <section class="card">
+        <h2>픽스처 미리보기</h2>
+        <div class="toolbar">
+          <select id="fixture"></select>
+          <button id="extract" class="primary" type="button">추출</button>
+          <button id="hide-toxic" type="button">유해 블록 숨기기</button>
+          <button id="reset" type="button">숨김 해제</button>
+        </div>
+        <iframe class="preview" id="preview" title="fixture preview"></iframe>
+        <p class="hint">보라색 테두리가 추출된 블록입니다. JSON은 element 없이 id만 남깁니다.</p>
+        <pre id="json">[]</pre>
+      </section>
+      <section class="card" style="grid-column: 1 / -1">
+        <h2>HTML 붙여넣기</h2>
+        <textarea id="custom" placeholder="여기에 HTML을 붙여넣고 추출을 누르세요."></textarea>
+        <p class="hint">셀렉트에서 픽스처를 고르면 이 칸은 무시됩니다. 직접 넣으려면 셀렉트를 “직접 입력”으로 바꾸세요.</p>
+      </section>
+    </main>
+    <script src="content_extract.js"></script>
+    <script src="content_extract_test.js"></script>
+    <script>
+      const { extractContent, serializeBlocks } = DwContentExtract;
+      const { FIXTURES, runTests } = DwContentExtractTest;
+
+      const resultsEl = document.getElementById("results");
+      const summaryEl = document.getElementById("summary");
+      const fixtureEl = document.getElementById("fixture");
+      const preview = document.getElementById("preview");
+      const jsonEl = document.getElementById("json");
+      const customEl = document.getElementById("custom");
+
+      const results = runTests(DwContentExtract);
+      const failed = results.filter((r) => !r.ok);
+      results.forEach((r) => {
+        const li = document.createElement("li");
+        li.className = r.ok ? "ok" : "fail";
+        li.textContent = (r.ok ? "통과 — " : "실패 — ") + r.name + (r.error ? "\n" + r.error : "");
+        resultsEl.appendChild(li);
+      });
+      summaryEl.className = failed.length ? "fail" : "pass";
+      summaryEl.textContent = failed.length
+        ? failed.length + "개 실패 / " + results.length
+        : results.length + "개 전부 통과";
+
+      fixtureEl.innerHTML =
+        Object.entries(FIXTURES)
+          .map(([id, f]) => '<option value="' + id + '">' + f.title + "</option>")
+          .join("") + '<option value="custom">직접 입력</option>';
+
+      function currentHtml() {
+        if (fixtureEl.value === "custom") {
+          return customEl.value || "<p>HTML을 붙여넣으세요.</p>";
+        }
+        return FIXTURES[fixtureEl.value].html;
+      }
+
+      function loadPreview() {
+        preview.srcdoc =
+          "<!DOCTYPE html><html><head><style>body{font:14px/1.4 sans-serif;margin:12px}nav,footer,header{opacity:.7}button{margin-right:4px}img,video,iframe{max-width:100%}</style></head><body>" +
+          currentHtml() +
+          "</body></html>";
+      }
+
+      let lastBlocks = [];
+
+      function runExtract() {
+        const doc = preview.contentDocument;
+        if (!doc || !doc.body) {
+          return;
+        }
+        doc.querySelectorAll("[data-dw-content-id]").forEach((el) => {
+          el.removeAttribute("data-dw-content-id");
+          el.style.removeProperty("display");
+        });
+        const { blocks } = extractContent(doc, { stamp: true });
+        lastBlocks = blocks;
+        jsonEl.textContent = JSON.stringify(serializeBlocks(blocks), null, 2);
+      }
+
+      document.getElementById("extract").addEventListener("click", runExtract);
+      fixtureEl.addEventListener("change", () => {
+        loadPreview();
+      });
+      preview.addEventListener("load", runExtract);
+      document.getElementById("hide-toxic").addEventListener("click", () => {
+        lastBlocks
+          .filter((b) => /violently|graphic violent/i.test(b.text))
+          .forEach((b) => {
+            b.element.style.setProperty("display", "none", "important");
+          });
+      });
+      document.getElementById("reset").addEventListener("click", () => {
+        lastBlocks.forEach((b) => b.element.style.removeProperty("display"));
+      });
+
+      loadPreview();
+    </script>
+  </body>
+</html>

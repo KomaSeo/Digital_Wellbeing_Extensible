@@ -1,15 +1,14 @@
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
+use persistence::{FilePersistence, PersistError, Persistence};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 
-mod persistence;
 mod rule;
 
-pub use persistence::{FileListPersistence, ListPersistence, MemoryListPersistence};
 pub use rule::{ListBasedRule, ListBasedRuleHandle};
 
 /// Processes that must never be terminated (OS stability + self-protection).
@@ -97,32 +96,30 @@ impl ListConfig {
 
 #[derive(Debug, Error)]
 pub enum ListError {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("json error: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Persist(#[from] PersistError),
     #[error("cannot modify protected process: {0}")]
     Protected(String),
     #[error("strategy not found: {0}")]
     StrategyNotFound(String),
-    #[error("app data directory unavailable")]
-    NoAppData,
 }
 
 #[derive(Clone)]
 pub struct ListStore {
     inner: Arc<RwLock<ListConfig>>,
-    persistence: Arc<dyn ListPersistence>,
+    persistence: Arc<dyn Persistence<ListConfig>>,
 }
 
 impl ListStore {
-    /// Default store backed by [`FileListPersistence::default`].
+    /// Default store backed by `policy.json` in the shared app config dir.
     pub fn default() -> Result<Self, ListError> {
-        Self::with_persistence(Arc::new(FileListPersistence::default()?))
+        Self::with_persistence(Arc::new(FilePersistence::<ListConfig>::app_file("policy.json")?))
     }
 
-    /// Inject a custom [`ListPersistence`] (e.g. memory backend in tests).
-    pub fn with_persistence(persistence: Arc<dyn ListPersistence>) -> Result<Self, ListError> {
+    /// Inject a custom [`Persistence`] (e.g. memory backend in tests).
+    pub fn with_persistence(
+        persistence: Arc<dyn Persistence<ListConfig>>,
+    ) -> Result<Self, ListError> {
         let config = persistence.load()?;
         Ok(Self {
             inner: Arc::new(RwLock::new(config)),
