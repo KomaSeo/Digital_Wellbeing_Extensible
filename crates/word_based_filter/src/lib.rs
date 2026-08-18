@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use persistence::{FilePersistence, PersistError, Persistence};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -9,17 +10,19 @@ mod filter;
 
 pub use filter::{WordBasedFilter, WordBasedFilterHandle};
 
-fn default_true() -> bool {
-    true
+fn default_blacklist() -> BTreeSet<String> {
+    [
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 /// Persisted properties for [`WordBasedFilter`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WordBasedConfig {
-    #[serde(default = "default_true")]
-    pub block_violence: bool,
-    #[serde(default = "default_true")]
-    pub block_sexual: bool,
+    #[serde(default = "default_blacklist")]
+    pub blacklist: BTreeSet<String>,
     #[serde(default = "Utc::now")]
     pub updated_at: DateTime<Utc>,
 }
@@ -27,10 +30,15 @@ pub struct WordBasedConfig {
 impl Default for WordBasedConfig {
     fn default() -> Self {
         Self {
-            block_violence: true,
-            block_sexual: true,
+            blacklist: default_blacklist(),
             updated_at: Utc::now(),
         }
+    }
+}
+
+impl WordBasedConfig {
+    pub fn normalize_word(raw: &str) -> String {
+        raw.trim().to_lowercase()
     }
 }
 
@@ -38,6 +46,8 @@ impl Default for WordBasedConfig {
 pub enum WordBasedError {
     #[error(transparent)]
     Persist(#[from] PersistError),
+    #[error("empty word")]
+    EmptyWord,
 }
 
 #[derive(Clone)]
@@ -78,16 +88,35 @@ impl WordBasedStore {
         Ok(result)
     }
 
-    pub fn set_block_violence(&self, enabled: bool) -> Result<WordBasedConfig, WordBasedError> {
+    pub fn add_word(&self, raw: &str) -> Result<WordBasedConfig, WordBasedError> {
+        let word = WordBasedConfig::normalize_word(raw);
+        if word.is_empty() {
+            return Err(WordBasedError::EmptyWord);
+        }
         self.mutate(|c| {
-            c.block_violence = enabled;
+            c.blacklist.insert(word);
             Ok(c.clone())
         })
     }
 
-    pub fn set_block_sexual(&self, enabled: bool) -> Result<WordBasedConfig, WordBasedError> {
+    pub fn remove_word(&self, raw: &str) -> Result<WordBasedConfig, WordBasedError> {
+        let word = WordBasedConfig::normalize_word(raw);
         self.mutate(|c| {
-            c.block_sexual = enabled;
+            c.blacklist.remove(&word);
+            Ok(c.clone())
+        })
+    }
+
+    pub fn set_blacklist(&self, words: &[String]) -> Result<WordBasedConfig, WordBasedError> {
+        let mut next = BTreeSet::new();
+        for raw in words {
+            let word = WordBasedConfig::normalize_word(raw);
+            if !word.is_empty() {
+                next.insert(word);
+            }
+        }
+        self.mutate(|c| {
+            c.blacklist = next;
             Ok(c.clone())
         })
     }

@@ -1,7 +1,10 @@
+mod fonts;
+
 use browser_rule::{BrowserRuleHandle, BrowserStore};
 use eframe::egui;
 use enforcer::{BlockRule, Enforcer, ProcessSnapshot};
 use list_based_rule::{ListBasedRuleHandle, ListStore};
+use llm_based_filter::{LlmBasedFilterHandle, LlmBasedStore, LlmCacheStore};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tool_api::{spawn_tcp, ToolRouter, DEFAULT_PORT};
@@ -21,7 +24,11 @@ fn main() -> eframe::Result<()> {
     let browser_guard = BrowserRuleHandle::new(browser_store);
     let word_store = WordBasedStore::default().expect("failed to open word-based filter store");
     let word_filter = WordBasedFilterHandle::new(word_store);
+    let llm_store = LlmBasedStore::default().expect("failed to open llm-based filter store");
+    let llm_cache = LlmCacheStore::default().expect("failed to open llm-based filter cache");
+    let llm_filter = LlmBasedFilterHandle::new(llm_store, llm_cache);
     browser_guard.register_content_filter(word_filter.filter());
+    browser_guard.register_content_filter(llm_filter.filter());
     let enforcer = Arc::new(Enforcer::new());
     enforcer.register_rule(list_rule.rule());
     enforcer.register_rule(browser_guard.rule());
@@ -44,7 +51,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Digital Wellbeing",
         options,
-        Box::new(move |_cc| Ok(Box::new(App::new(router, rules)))),
+        Box::new(move |cc| {
+            fonts::install_korean_fonts(&cc.egui_ctx);
+            Ok(Box::new(App::new(router, rules)))
+        }),
     )
 }
 
@@ -132,6 +142,7 @@ impl eframe::App for App {
                         cols[0].text_edit_singleline(&mut self.process_filter);
                         egui::ScrollArea::vertical()
                             .id_salt("monitor_procs")
+                            .max_width(f32::INFINITY)
                             .show(&mut cols[0], |ui| {
                                 let filter = self.process_filter.to_lowercase();
                                 for process in &snapshots {
@@ -147,6 +158,7 @@ impl eframe::App for App {
                         cols[1].heading("Recent blocks");
                         egui::ScrollArea::vertical()
                             .id_salt("monitor_blocks")
+                            .max_width(f32::INFINITY)
                             .show(&mut cols[1], |ui| {
                                 if let Ok(value) = &blocks {
                                     if let Some(arr) = value.as_array() {
@@ -181,6 +193,7 @@ impl eframe::App for App {
                     if let Some(rule) = selected {
                         egui::ScrollArea::vertical()
                             .id_salt("rule_settings_scroll")
+                            .max_width(f32::INFINITY)
                             .show(ui, |ui| {
                                 rule.settings_ui(ui, &snapshots);
                             });

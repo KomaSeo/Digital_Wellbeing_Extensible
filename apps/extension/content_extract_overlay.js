@@ -41,7 +41,48 @@
       }
       header { padding: 10px 12px 6px; font-weight: 650; }
       .meta { padding: 0 12px 8px; color: #57534e; font-size: 12px; }
-      .row { display: flex; gap: 6px; padding: 0 12px 10px; }
+      .row { display: flex; gap: 8px; align-items: center; padding: 0 12px 10px; }
+      .toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 1;
+        cursor: pointer;
+        user-select: none;
+      }
+      .toggle input {
+        position: absolute;
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .switch {
+        width: 36px;
+        height: 20px;
+        border-radius: 999px;
+        background: #d6d3d1;
+        position: relative;
+        flex: none;
+        transition: background 0.15s ease;
+      }
+      .switch::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 2px rgba(0,0,0,.25);
+        transition: transform 0.15s ease;
+      }
+      .toggle input:checked + .switch {
+        background: #7c3aed;
+      }
+      .toggle input:checked + .switch::after {
+        transform: translateX(16px);
+      }
       button {
         font: inherit;
         border: 1px solid #e7e0d4;
@@ -60,6 +101,11 @@
       <header id="title">컨텐츠 필터</header>
       <div class="meta">텍스트와 이미지를 로컬 앱에 보내 평가합니다. block이면 요소를 숨깁니다.</div>
       <div class="row">
+        <label class="toggle">
+          <span>범위 표시</span>
+          <input id="ranges" type="checkbox">
+          <span class="switch"></span>
+        </label>
         <button id="close" type="button">닫기</button>
       </div>
       <ol id="list"></ol>
@@ -71,6 +117,10 @@
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/"/g, "&quot;");
+  }
+
+  function syncRangeToggle() {
+    shadow.getElementById("ranges").checked = Boolean(session.showRanges);
   }
 
   function render() {
@@ -92,9 +142,15 @@
   }
 
   session.onVerdicts = () => render();
+  session.onRanges = () => syncRangeToggle();
   render();
+  syncRangeToggle();
+  shadow.getElementById("ranges").addEventListener("change", (event) => {
+    session.setShowRanges(event.target.checked);
+  });
   shadow.getElementById("close").addEventListener("click", () => {
     session.onVerdicts = null;
+    session.onRanges = null;
     host.remove();
   });
 })();

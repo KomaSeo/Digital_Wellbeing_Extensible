@@ -12,9 +12,13 @@
   }
 
   const { observeContent, serializeBlocks } = DwContentExtract;
+  const RANGE_STYLE_ID = "dw-range-style";
+  const RANGE_CLASS = "dw-show-content-ranges";
+  const RANGE_STORAGE_KEY = "dwShowContentRanges";
   const blocks = [];
   const byId = Object.create(null);
   const verdicts = Object.create(null);
+  let showRanges = false;
 
   function snapshotImage(block) {
     const node =
@@ -85,8 +89,11 @@
     }
     for (const result of results) {
       verdicts[result.id] = result;
+      const block = byId[result.id];
+      if (block?.element?.setAttribute) {
+        block.element.setAttribute("data-dw-verdict", result.action || "");
+      }
       if (result.action === "block") {
-        const block = byId[result.id];
         if (block) {
           hideBlock(block, result.reason);
         }
@@ -105,6 +112,52 @@
     evaluateAndApply(newBlocks);
   }
 
+  function ensureRangeStyle() {
+    if (document.getElementById(RANGE_STYLE_ID)) {
+      return;
+    }
+    const style = document.createElement("style");
+    style.id = RANGE_STYLE_ID;
+    style.textContent = `
+      html.${RANGE_CLASS} [data-dw-content-id] {
+        outline: 2px solid #7c3aed !important;
+        outline-offset: 2px !important;
+      }
+      html.${RANGE_CLASS} [data-dw-content-id][data-dw-verdict="allow"] {
+        outline-color: #16a34a !important;
+      }
+      html.${RANGE_CLASS} [data-dw-content-id][data-dw-verdict="block"] {
+        outline-color: #e11d48 !important;
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function setShowRanges(on) {
+    const next = Boolean(on);
+    showRanges = next;
+    if (window.__dwWatchSession) {
+      window.__dwWatchSession.showRanges = next;
+    }
+    if (next) {
+      ensureRangeStyle();
+      document.documentElement.classList.add(RANGE_CLASS);
+    } else {
+      document.documentElement.classList.remove(RANGE_CLASS);
+    }
+    if (typeof window.__dwWatchSession?.onRanges === "function") {
+      window.__dwWatchSession.onRanges(next);
+    }
+  }
+
+  function persistShowRanges(on) {
+    try {
+      chrome.storage?.local?.set({ [RANGE_STORAGE_KEY]: Boolean(on) });
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
   const watch = observeContent(document, {
     requireLayout: true,
     onBlocks(newBlocks) {
@@ -116,9 +169,30 @@
     blocks,
     byId,
     verdicts,
+    showRanges: false,
     onVerdicts: null,
+    onRanges: null,
+    setShowRanges(on) {
+      setShowRanges(on);
+      persistShowRanges(on);
+    },
     stop() {
       watch.disconnect();
     },
   };
+
+  try {
+    chrome.storage?.local?.get(RANGE_STORAGE_KEY, (data) => {
+      if (data && data[RANGE_STORAGE_KEY]) {
+        setShowRanges(true);
+      }
+    });
+    chrome.storage?.onChanged?.addListener((changes, area) => {
+      if (area === "local" && changes[RANGE_STORAGE_KEY]) {
+        setShowRanges(Boolean(changes[RANGE_STORAGE_KEY].newValue));
+      }
+    });
+  } catch (_) {
+    /* ignore */
+  }
 })();

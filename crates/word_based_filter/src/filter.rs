@@ -1,53 +1,25 @@
 use crate::{WordBasedConfig, WordBasedStore};
 use content_filter::{ContentFilter, EvaluateItem, EvaluateResult};
+use parking_lot::Mutex;
 use std::sync::Arc;
 
-const VIOLENCE_PHRASES: &[&str] = &[
-    "graphic violent",
-    "suffer violently",
-    "gore",
-    "beheading",
-    "decapitat",
-    "torture",
-    "murder",
-    "massacre",
-    "bloodshed",
-    "kill yourself",
-    "폭력",
-    "살해",
-    "고어",
-    "잔인",
-];
-
-const VIOLENCE_WORDS: &[&str] = &["violent", "violence", "gory"];
-
-const SEXUAL_PHRASES: &[&str] = &[
-    "pornography",
-    "onlyfans",
-    "hentai",
-    "nsfw",
-    "nude",
-    "naked",
-    "xxx",
-    "pornhub",
-    "xvideos",
-    "xhamster",
-    "explicit sexual",
-    "포르노",
-    "야동",
-    "선정",
-    "음란",
-];
-
-const SEXUAL_WORDS: &[&str] = &["porn", "nsfw", "xxx"];
+#[derive(Default)]
+struct WordUiState {
+    word_input: String,
+    status: String,
+}
 
 pub struct WordBasedFilter {
     store: WordBasedStore,
+    ui_state: Mutex<WordUiState>,
 }
 
 impl WordBasedFilter {
     pub fn new(store: WordBasedStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            ui_state: Mutex::new(WordUiState::default()),
+        }
     }
 
     pub fn store(&self) -> &WordBasedStore {
@@ -65,7 +37,7 @@ impl ContentFilter for WordBasedFilter {
     }
 
     fn description(&self) -> &str {
-        "Blocks extracted page blocks whose text or image labels match violence or sexual keywords."
+        "Blocks extracted page blocks whose text or image labels match words on your blacklist."
     }
 
     fn evaluate(&self, items: &[EvaluateItem]) -> Vec<EvaluateResult> {
@@ -80,18 +52,39 @@ impl ContentFilter for WordBasedFilter {
         ui.heading(self.name());
         ui.label(ContentFilter::description(self));
         let config = self.store.get();
+        let mut state = self.ui_state.lock();
 
-        let mut violence = config.block_violence;
-        if ui
-            .checkbox(&mut violence, "Block violent content")
-            .changed()
-        {
-            let _ = self.store.set_block_violence(violence);
-        }
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut state.word_input);
+            if ui.button("Add").clicked() && !state.word_input.trim().is_empty() {
+                match self.store.add_word(&state.word_input) {
+                    Ok(_) => {
+                        state.status.clear();
+                        state.word_input.clear();
+                    }
+                    Err(err) => state.status = err.to_string(),
+                }
+            }
+        });
 
-        let mut sexual = config.block_sexual;
-        if ui.checkbox(&mut sexual, "Block sexual content").changed() {
-            let _ = self.store.set_block_sexual(sexual);
+        ui.label("Blacklist");
+        egui::ScrollArea::vertical()
+            .id_salt("word_based_filter_bl")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for word in &config.blacklist {
+                    ui.horizontal(|ui| {
+                        ui.label(word);
+                        if ui.small_button("✕").clicked() {
+                            let _ = self.store.remove_word(word);
+                        }
+                    });
+                }
+            });
+
+        if !state.status.is_empty() {
+            ui.separator();
+            ui.colored_label(egui::Color32::from_rgb(200, 80, 80), &state.status);
         }
     }
 }
@@ -115,14 +108,9 @@ impl WordBasedFilterHandle {
 
 fn evaluate_one(config: &WordBasedConfig, item: &EvaluateItem) -> Option<EvaluateResult> {
     let blob = item_blob(item);
-    if config.block_violence {
-        if let Some(hit) = first_match(&blob, VIOLENCE_PHRASES, VIOLENCE_WORDS) {
-            return Some(EvaluateResult::block(&item.id, format!("violence:{hit}")));
-        }
-    }
-    if config.block_sexual {
-        if let Some(hit) = first_match(&blob, SEXUAL_PHRASES, SEXUAL_WORDS) {
-            return Some(EvaluateResult::block(&item.id, format!("sexual:{hit}")));
+    for word in &config.blacklist {
+        if matches_term(&blob, word) {
+            return Some(EvaluateResult::block(&item.id, format!("word:{word}")));
         }
     }
     None
@@ -138,18 +126,12 @@ fn item_blob(item: &EvaluateItem) -> String {
     parts.join(" ").to_lowercase()
 }
 
-fn first_match<'a>(blob: &str, phrases: &[&'a str], words: &[&'a str]) -> Option<&'a str> {
-    for phrase in phrases {
-        if blob.contains(phrase) {
-            return Some(phrase);
-        }
+fn matches_term(blob: &str, term: &str) -> bool {
+    if term.contains(char::is_whitespace) {
+        blob.contains(term)
+    } else {
+        contains_word(blob, term)
     }
-    for word in words {
-        if contains_word(blob, word) {
-            return Some(word);
-        }
-    }
-    None
 }
 
 fn contains_word(blob: &str, word: &str) -> bool {
@@ -181,11 +163,19 @@ mod tests {
     use crate::{WordBasedConfig, WordBasedStore};
     use content_filter::EvaluateMedia;
     use persistence::MemoryPersistence;
+    use std::collections::BTreeSet;
 
     fn filter_with(config: WordBasedConfig) -> WordBasedFilter {
         let persistence = Arc::new(MemoryPersistence::<WordBasedConfig>::with_value(config));
         let store = WordBasedStore::with_persistence(persistence).unwrap();
         WordBasedFilter::new(store)
+    }
+
+    fn config_with(words: &[&str]) -> WordBasedConfig {
+        WordBasedConfig {
+            blacklist: words.iter().map(|w| (*w).to_string()).collect(),
+            updated_at: chrono::Utc::now(),
+        }
     }
 
     fn item(id: &str, text: &str) -> EvaluateItem {
@@ -199,30 +189,31 @@ mod tests {
     }
 
     #[test]
-    fn blocks_violent_comment_and_allows_gardening() {
-        let filter = filter_with(WordBasedConfig::default());
+    fn custom_blacklist_blocks_matching_text() {
+        let filter = filter_with(config_with(&["suffer violently", "nude"]));
         let out = filter.evaluate(&[
             item("c1", "This is the original post about gardening in the backyard."),
             item("c2", "I hate this and hope you suffer violently tonight."),
         ]);
-        assert!(out.iter().all(|r| r.id != "c1" || !r.is_block()));
+        assert!(out.iter().all(|r| r.id != "c1"));
         let hit = out.iter().find(|r| r.id == "c2").unwrap();
         assert!(hit.is_block());
-        assert!(hit.reason.as_deref().unwrap().contains("violence"));
+        assert!(hit.reason.as_deref().unwrap().contains("suffer violently"));
     }
 
     #[test]
-    fn violence_pref_off_allows_violent_text() {
-        let mut config = WordBasedConfig::default();
-        config.block_violence = false;
-        let filter = filter_with(config);
+    fn empty_blacklist_allows_everything() {
+        let filter = filter_with(WordBasedConfig {
+            blacklist: BTreeSet::new(),
+            updated_at: chrono::Utc::now(),
+        });
         let out = filter.evaluate(&[item("c1", "graphic violent scenes")]);
-        assert!(out.is_empty() || out.iter().all(|r| !r.is_block()));
+        assert!(out.is_empty());
     }
 
     #[test]
-    fn blocks_sexual_image_alt() {
-        let filter = filter_with(WordBasedConfig::default());
+    fn blocks_image_alt_from_user_word() {
+        let filter = filter_with(config_with(&["nude"]));
         let out = filter.evaluate(&[EvaluateItem {
             id: "c9".into(),
             kind: "image".into(),
@@ -236,13 +227,12 @@ mod tests {
         }]);
         assert_eq!(out.len(), 1);
         assert!(out[0].is_block());
-        assert!(out[0].reason.as_deref().unwrap().contains("sexual"));
     }
 
     #[test]
-    fn non_violent_does_not_match() {
-        let filter = filter_with(WordBasedConfig::default());
+    fn hyphenated_non_match_stays_allowed() {
+        let filter = filter_with(config_with(&["violent"]));
         let out = filter.evaluate(&[item("c1", "a non-violent documentary about parks")]);
-        assert!(out.is_empty() || out.iter().all(|r| !r.is_block()));
+        assert!(out.is_empty());
     }
 }

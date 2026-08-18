@@ -179,6 +179,7 @@ impl BlockRule for BrowserRule {
         egui::ScrollArea::vertical()
             .id_salt("browser_rule_bl")
             .max_height(220.0)
+            .max_width(f32::INFINITY)
             .show(ui, |ui| {
                 for host in &config.blacklist {
                     ui.horizontal(|ui| {

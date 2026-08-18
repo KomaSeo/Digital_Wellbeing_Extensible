@@ -77,6 +77,8 @@ pub trait ContentFilter: Send + Sync {
 }
 
 /// First `block` from any filter wins. Unmentioned items stay `allow`.
+/// Later filters only see items that are still allowed, so an expensive
+/// LLM filter is not called for blocks a cheap keyword filter already caught.
 pub fn merge_evaluate(
     filters: &[Arc<dyn ContentFilter>],
     items: &[EvaluateItem],
@@ -84,7 +86,20 @@ pub fn merge_evaluate(
     let items: Vec<EvaluateItem> = items.iter().take(40).cloned().collect();
     let mut out: Vec<EvaluateResult> = items.iter().map(|i| EvaluateResult::allow(&i.id)).collect();
     for filter in filters {
-        for result in filter.evaluate(&items) {
+        let pending: Vec<EvaluateItem> = items
+            .iter()
+            .filter(|item| {
+                out.iter()
+                    .find(|r| r.id == item.id)
+                    .map(|r| !r.is_block())
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            break;
+        }
+        for result in filter.evaluate(&pending) {
             if !result.is_block() {
                 continue;
             }
@@ -146,5 +161,41 @@ mod tests {
         assert_eq!(out[0].action, "block");
         assert_eq!(out[1].action, "allow");
         assert_eq!(out[2].action, "block");
+    }
+
+    struct Recorder(std::sync::Mutex<Vec<String>>);
+
+    impl ContentFilter for Recorder {
+        fn id(&self) -> &str {
+            "recorder"
+        }
+        fn name(&self) -> &str {
+            "recorder"
+        }
+        fn description(&self) -> &str {
+            "recorder"
+        }
+        fn evaluate(&self, items: &[EvaluateItem]) -> Vec<EvaluateResult> {
+            self.0
+                .lock()
+                .unwrap()
+                .extend(items.iter().map(|i| i.id.clone()));
+            vec![]
+        }
+    }
+
+    #[test]
+    fn later_filters_skip_already_blocked_items() {
+        let recorder = Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+        let filters: Vec<Arc<dyn ContentFilter>> = vec![
+            Arc::new(BlockIfContains("aaa")),
+            Arc::clone(&recorder) as Arc<dyn ContentFilter>,
+        ];
+        let _ = merge_evaluate(
+            &filters,
+            &[item("c1", "hello aaa"), item("c2", "safe")],
+        );
+        let seen = recorder.0.lock().unwrap().clone();
+        assert_eq!(seen, vec!["c2".to_string()]);
     }
 }

@@ -119,6 +119,7 @@ impl BlockRule for ListBasedRule {
         egui::ScrollArea::vertical()
             .id_salt("list_based_rule_bl")
             .max_height(160.0)
+            .max_width(f32::INFINITY)
             .show(ui, |ui| {
                 for name in &config.blacklist {
                     ui.horizontal(|ui| {
@@ -135,6 +136,7 @@ impl BlockRule for ListBasedRule {
         egui::ScrollArea::vertical()
             .id_salt("list_based_rule_wl")
             .max_height(160.0)
+            .max_width(f32::INFINITY)
             .show(ui, |ui| {
                 for name in &config.whitelist {
                     ui.horizontal(|ui| {

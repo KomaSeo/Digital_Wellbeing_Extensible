@@ -11,6 +11,7 @@ path = "src/main.rs"
 list_based_rule = { workspace = true }
 browser_rule = { workspace = true }
 word_based_filter = { workspace = true }
+llm_based_filter = { workspace = true }
 enforcer = { workspace = true }
 tool-api = { workspace = true }
 anyhow = { workspace = true }

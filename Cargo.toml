@@ -6,6 +6,7 @@ members = [
     "crates/browser_rule",
     "crates/content_filter",
     "crates/word_based_filter",
+    "crates/llm_based_filter",
     "crates/enforcer",
     "crates/tool-api",
     "apps/desktop",
@@ -36,4 +37,5 @@ browser_rule = { path = "crates/browser_rule" }
 enforcer = { path = "crates/enforcer" }
 content_filter = { path = "crates/content_filter" }
 word_based_filter = { path = "crates/word_based_filter" }
+llm_based_filter = { path = "crates/llm_based_filter" }
 tool-api = { path = "crates/tool-api" }
