@@ -210,6 +210,23 @@
       );
     });
 
+    await test("범위 표시는 찍힌 extract 블록에 외곽선을 켠다", () => {
+      const { setShowRanges, isShowRanges } = api;
+      const doc = parseFixture(FIXTURES.community.html);
+      extractContent(doc, { stamp: true });
+      assert(setShowRanges(true, { document: doc }) === true, "setShowRanges did not return true");
+      assert(isShowRanges() === true, "isShowRanges false after enable");
+      assert(
+        doc.documentElement.getAttribute("data-dw-show-content-ranges") === "1",
+        "missing data-dw-show-content-ranges"
+      );
+      assert(doc.documentElement.classList.contains("dw-show-content-ranges"), "missing class");
+      assert(doc.getElementById("dw-range-style"), "missing outline stylesheet");
+      setShowRanges(false, { document: doc });
+      assert(isShowRanges() === false, "isShowRanges true after disable");
+      assert(!doc.documentElement.hasAttribute("data-dw-show-content-ranges"), "attr lingered");
+    });
+
     await test("MutationObserver가 추가된 댓글을 이어서 검사한다", async () => {
       const { observeContent } = api;
       assert(typeof observeContent === "function", "observeContent missing");

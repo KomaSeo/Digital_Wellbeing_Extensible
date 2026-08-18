@@ -53,8 +53,7 @@
       .toggle input {
         position: absolute;
         opacity: 0;
-        width: 0;
-        height: 0;
+        pointer-events: none;
       }
       .switch {
         width: 36px;
@@ -120,7 +119,21 @@
   }
 
   function syncRangeToggle() {
-    shadow.getElementById("ranges").checked = Boolean(session.showRanges);
+    const on = Boolean(
+      window.DwContentExtract?.isShowRanges?.() || session.showRanges
+    );
+    session.showRanges = on;
+    shadow.getElementById("ranges").checked = on;
+  }
+
+  function applyRanges(on) {
+    if (typeof session.setShowRanges === "function") {
+      session.setShowRanges(on);
+      return;
+    }
+    if (typeof window.DwContentExtract?.setShowRanges === "function") {
+      session.showRanges = window.DwContentExtract.setShowRanges(on);
+    }
   }
 
   function render() {
@@ -145,8 +158,10 @@
   session.onRanges = () => syncRangeToggle();
   render();
   syncRangeToggle();
-  shadow.getElementById("ranges").addEventListener("change", (event) => {
-    session.setShowRanges(event.target.checked);
+  shadow.querySelector(".toggle").addEventListener("click", (event) => {
+    event.preventDefault();
+    applyRanges(!session.showRanges);
+    syncRangeToggle();
   });
   shadow.getElementById("close").addEventListener("click", () => {
     session.onVerdicts = null;

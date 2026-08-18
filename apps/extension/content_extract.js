@@ -234,7 +234,7 @@
       }
       for (const mutation of mutations) {
         for (const node of mutation.addedNodes) {
-          if (node.nodeType !== 1 || node.id === "dw-extract-host") {
+          if (node.nodeType !== 1 || node.id === "dw-extract-host" || node.id === "dw-range-style") {
             continue;
           }
           pending.add(node.parentElement || node);
@@ -280,8 +280,108 @@
     }));
   }
 
+  const RANGE_STYLE_ID = "dw-range-style";
+  const RANGE_ATTR = "data-dw-show-content-ranges";
+  const RANGE_CLASS = "dw-show-content-ranges";
+  let rangeShown = false;
+  let rangeGuard = null;
+
+  function rangeCss(stampAttr) {
+    return `
+      html[${RANGE_ATTR}] [${stampAttr}] {
+        outline: 2px solid #7c3aed !important;
+        outline-offset: 2px !important;
+      }
+      html[${RANGE_ATTR}] [${stampAttr}][data-dw-verdict="allow"] {
+        outline-color: #16a34a !important;
+      }
+      html[${RANGE_ATTR}] [${stampAttr}][data-dw-verdict="block"] {
+        outline-color: #e11d48 !important;
+      }
+    `;
+  }
+
+  function ensureRangeStyle(doc, stampAttr) {
+    let style = doc.getElementById(RANGE_STYLE_ID);
+    if (!style) {
+      style = doc.createElement("style");
+      style.id = RANGE_STYLE_ID;
+      (doc.head || doc.documentElement).appendChild(style);
+    }
+    style.textContent = rangeCss(stampAttr);
+  }
+
+  function startRangeGuard(doc, stampAttr) {
+    if (rangeGuard) {
+      rangeGuard.disconnect();
+      rangeGuard = null;
+    }
+    const Observer = doc.defaultView?.MutationObserver ||
+      (typeof MutationObserver !== "undefined" ? MutationObserver : null);
+    if (!Observer) {
+      return;
+    }
+    rangeGuard = new Observer(() => {
+      if (!rangeShown) {
+        return;
+      }
+      if (!doc.documentElement.hasAttribute(RANGE_ATTR)) {
+        doc.documentElement.setAttribute(RANGE_ATTR, "1");
+      }
+      if (!doc.documentElement.classList.contains(RANGE_CLASS)) {
+        doc.documentElement.classList.add(RANGE_CLASS);
+      }
+      if (!doc.getElementById(RANGE_STYLE_ID)) {
+        ensureRangeStyle(doc, stampAttr);
+      }
+    });
+    rangeGuard.observe(doc.documentElement, {
+      attributes: true,
+      attributeFilter: [RANGE_ATTR, "class"],
+      childList: true,
+    });
+    if (doc.head) {
+      rangeGuard.observe(doc.head, { childList: true });
+    }
+  }
+
+  function stopRangeGuard() {
+    rangeGuard?.disconnect();
+    rangeGuard = null;
+  }
+
+  /**
+   * Draw outlines around stamped extract blocks. Independent of filtering.
+   */
+  function setShowRanges(on, options) {
+    const opts = options || {};
+    const doc = opts.document || (typeof document !== "undefined" ? document : null);
+    if (!doc || !doc.documentElement) {
+      return rangeShown;
+    }
+    const stampAttr = opts.stampAttr || DEFAULTS.stampAttr;
+    rangeShown = Boolean(on);
+    if (rangeShown) {
+      doc.documentElement.setAttribute(RANGE_ATTR, "1");
+      doc.documentElement.classList.add(RANGE_CLASS);
+      ensureRangeStyle(doc, stampAttr);
+      startRangeGuard(doc, stampAttr);
+    } else {
+      stopRangeGuard();
+      doc.documentElement.removeAttribute(RANGE_ATTR);
+      doc.documentElement.classList.remove(RANGE_CLASS);
+      doc.getElementById(RANGE_STYLE_ID)?.remove();
+    }
+    return rangeShown;
+  }
+
+  function isShowRanges() {
+    return rangeShown;
+  }
+
   function walk(el, blocks, opts) {
     if (!el || el.nodeType !== 1) {
+      // element가 존재하지않거나, 단순 노드인 경우 content가 없다고 판단함.
       return;
     }
     if (isStamped(el, opts)) {
@@ -677,6 +777,8 @@
     extractContent,
     observeContent,
     serializeBlocks,
+    setShowRanges,
+    isShowRanges,
     DEFAULTS,
   };
 });

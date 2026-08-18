@@ -3,22 +3,48 @@
  * Digital Wellbeing app, and hide anything that comes back as `block`.
  */
 (() => {
-  if (window.__dwWatchSession) {
-    return;
-  }
   if (typeof DwContentExtract === "undefined") {
     console.warn("DwContentExtract is not loaded");
     return;
   }
 
-  const { observeContent, serializeBlocks } = DwContentExtract;
-  const RANGE_STYLE_ID = "dw-range-style";
-  const RANGE_CLASS = "dw-show-content-ranges";
+  const { observeContent, serializeBlocks, setShowRanges } = DwContentExtract;
   const RANGE_STORAGE_KEY = "dwShowContentRanges";
+
+  function persistShowRanges(on) {
+    try {
+      chrome.storage?.local?.set({ [RANGE_STORAGE_KEY]: Boolean(on) });
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function applyShowRanges(on) {
+    const next = setShowRanges(on);
+    if (window.__dwWatchSession) {
+      window.__dwWatchSession.showRanges = next;
+    }
+    if (typeof window.__dwWatchSession?.onRanges === "function") {
+      window.__dwWatchSession.onRanges(next);
+    }
+    return next;
+  }
+
+  function bindRangeApi(session) {
+    session.setShowRanges = (on) => {
+      applyShowRanges(on);
+      persistShowRanges(on);
+    };
+    session.showRanges = Boolean(DwContentExtract.isShowRanges());
+  }
+
+  if (window.__dwWatchSession) {
+    bindRangeApi(window.__dwWatchSession);
+    return;
+  }
   const blocks = [];
   const byId = Object.create(null);
   const verdicts = Object.create(null);
-  let showRanges = false;
 
   function snapshotImage(block) {
     const node =
@@ -112,52 +138,6 @@
     evaluateAndApply(newBlocks);
   }
 
-  function ensureRangeStyle() {
-    if (document.getElementById(RANGE_STYLE_ID)) {
-      return;
-    }
-    const style = document.createElement("style");
-    style.id = RANGE_STYLE_ID;
-    style.textContent = `
-      html.${RANGE_CLASS} [data-dw-content-id] {
-        outline: 2px solid #7c3aed !important;
-        outline-offset: 2px !important;
-      }
-      html.${RANGE_CLASS} [data-dw-content-id][data-dw-verdict="allow"] {
-        outline-color: #16a34a !important;
-      }
-      html.${RANGE_CLASS} [data-dw-content-id][data-dw-verdict="block"] {
-        outline-color: #e11d48 !important;
-      }
-    `;
-    document.documentElement.appendChild(style);
-  }
-
-  function setShowRanges(on) {
-    const next = Boolean(on);
-    showRanges = next;
-    if (window.__dwWatchSession) {
-      window.__dwWatchSession.showRanges = next;
-    }
-    if (next) {
-      ensureRangeStyle();
-      document.documentElement.classList.add(RANGE_CLASS);
-    } else {
-      document.documentElement.classList.remove(RANGE_CLASS);
-    }
-    if (typeof window.__dwWatchSession?.onRanges === "function") {
-      window.__dwWatchSession.onRanges(next);
-    }
-  }
-
-  function persistShowRanges(on) {
-    try {
-      chrome.storage?.local?.set({ [RANGE_STORAGE_KEY]: Boolean(on) });
-    } catch (_) {
-      /* ignore */
-    }
-  }
-
   const watch = observeContent(document, {
     requireLayout: true,
     onBlocks(newBlocks) {
@@ -172,24 +152,21 @@
     showRanges: false,
     onVerdicts: null,
     onRanges: null,
-    setShowRanges(on) {
-      setShowRanges(on);
-      persistShowRanges(on);
-    },
     stop() {
       watch.disconnect();
     },
   };
+  bindRangeApi(window.__dwWatchSession);
 
   try {
     chrome.storage?.local?.get(RANGE_STORAGE_KEY, (data) => {
       if (data && data[RANGE_STORAGE_KEY]) {
-        setShowRanges(true);
+        applyShowRanges(true);
       }
     });
     chrome.storage?.onChanged?.addListener((changes, area) => {
       if (area === "local" && changes[RANGE_STORAGE_KEY]) {
-        setShowRanges(Boolean(changes[RANGE_STORAGE_KEY].newValue));
+        applyShowRanges(Boolean(changes[RANGE_STORAGE_KEY].newValue));
       }
     });
   } catch (_) {
