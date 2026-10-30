@@ -57,8 +57,14 @@ pub const BASE_PORT: u16 = 8770;
 /// Large enough for a whole settings file in `settings_put`.
 const MAX_REQUEST: usize = 512 * 1024;
 
+/// TCP port of the agent of `session` (on Linux the uid): `BASE_PORT + session % 1000`.
+/// `DW_PORT_BASE` moves the base (tests run several agents side by side).
 pub fn port_for_session(session: u32) -> u16 {
-    BASE_PORT.saturating_add(session.min(1000) as u16)
+    let base = std::env::var("DW_PORT_BASE")
+        .ok()
+        .and_then(|b| b.parse::<u16>().ok())
+        .unwrap_or(BASE_PORT);
+    base.saturating_add((session % 1000) as u16)
 }
 
 /// Responsibility: Describe one block for the Focus app.

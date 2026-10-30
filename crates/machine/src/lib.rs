@@ -29,12 +29,22 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// `%ProgramData%\DigitalWellbeing`.
+/// The shared data folder: `%ProgramData%\DigitalWellbeing` on Windows,
+/// `/var/lib/digital-wellbeing` elsewhere. `DW_DATA_DIR` overrides it (tests, and
+/// running the agent by hand on Linux); on Windows only an administrator can set the
+/// environment of the SYSTEM service, so a user cannot move it.
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("ProgramData")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
-    base.join("DigitalWellbeing")
+    if let Some(dir) = std::env::var_os("DW_DATA_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    if cfg!(windows) {
+        let base = std::env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        base.join("DigitalWellbeing")
+    } else {
+        PathBuf::from("/var/lib/digital-wellbeing")
+    }
 }
 
 pub fn policy_path() -> PathBuf {

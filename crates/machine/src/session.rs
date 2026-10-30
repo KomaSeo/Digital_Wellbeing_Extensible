@@ -1,9 +1,12 @@
-//! Responsibility: Find the Windows login session of the current process or of any pid, and
-//! the user logged on to a session.
+//! Responsibility: Find the login session of the current process or of any pid, and the user
+//! logged on to a session.
 //!
-//! Every logged-on user has their own session (desktop, windows, processes);
-//! services run in session 0. The agent runs inside one user's session and
-//! only enforces on processes of that session.
+//! Windows: every logged-on user has their own session (desktop, windows, processes);
+//! services run in session 0. The agent runs inside one user's session and only enforces
+//! on processes of that session.
+//!
+//! Linux and other Unix: the "session" is the user id that owns the process, so an agent
+//! started by (or for) a user enforces on that user's processes only.
 
 /// Session of the calling process.
 pub fn current_session_id() -> u32 {
@@ -19,8 +22,17 @@ pub fn process_session_id(pid: u32) -> Option<u32> {
     (unsafe { ProcessIdToSessionId(pid, &mut session) } != 0).then_some(session)
 }
 
-/// Non-Windows: everything is "session 0".
-#[cfg(not(windows))]
+/// Unix: the uid owning the process (`/proc/<pid>`), `None` if it is gone.
+#[cfg(target_os = "linux")]
+pub fn process_session_id(pid: u32) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(format!("/proc/{pid}"))
+        .ok()
+        .map(|m| m.uid())
+}
+
+/// Other systems: everything is "session 0".
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn process_session_id(_pid: u32) -> Option<u32> {
     Some(0)
 }

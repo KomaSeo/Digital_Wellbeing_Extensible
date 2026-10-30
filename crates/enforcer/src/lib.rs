@@ -64,6 +64,32 @@ pub fn never_terminate() -> &'static [&'static str] {
         "logonui.exe",
         "lockapp.exe",
         "userinit.exe",
+        // Linux: init, display server and desktop shell, session and sound daemons,
+        // remote login (`normalize_process_name` adds `.exe` to every name)
+        "init.exe",
+        "systemd.exe",
+        "systemd-logind.exe",
+        "dbus-daemon.exe",
+        "dbus-broker.exe",
+        "xorg.exe",
+        "xwayland.exe",
+        "xvfb.exe",
+        "gnome-shell.exe",
+        "gnome-session-binary.exe",
+        "kwin_x11.exe",
+        "kwin_wayland.exe",
+        "plasmashell.exe",
+        "xfwm4.exe",
+        "xfce4-session.exe",
+        "gdm.exe",
+        "gdm3.exe",
+        "sddm.exe",
+        "lightdm.exe",
+        "pipewire.exe",
+        "wireplumber.exe",
+        "pulseaudio.exe",
+        "sshd.exe",
+        "login.exe",
         // this app
         "digital-wellbeing.exe",
         "digital_wellbeing.exe",
@@ -196,13 +222,7 @@ impl Enforcer {
     }
 
     pub fn recent_blocks(&self, limit: usize) -> Vec<BlockEvent> {
-        self.logs
-            .lock()
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
+        self.logs.lock().iter().rev().take(limit).cloned().collect()
     }
 
     pub fn list_processes(&self) -> Vec<ProcessInfo> {
