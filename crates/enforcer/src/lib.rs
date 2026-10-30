@@ -42,7 +42,7 @@ pub fn never_terminate() -> &'static [&'static str] {
     ]
 }
 
-fn normalize_process_name(name: &str) -> String {
+pub fn normalize_process_name(name: &str) -> String {
     let trimmed = name.trim().to_lowercase();
     let file_name = Path::new(&trimmed)
         .file_name()
@@ -57,7 +57,7 @@ fn normalize_process_name(name: &str) -> String {
     }
 }
 
-fn is_never_terminate(name: &str) -> bool {
+pub fn is_never_terminate(name: &str) -> bool {
     let n = normalize_process_name(name);
     never_terminate().iter().any(|p| *p == n)
 }

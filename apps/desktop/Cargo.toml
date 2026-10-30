@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 list_based_rule = { workspace = true }
+ai_focus_rule = { workspace = true }
 enforcer = { workspace = true }
 rule_ui = { workspace = true }
 tool-api = { workspace = true }
@@ -19,5 +20,5 @@ eframe = { version = "0.31", default-features = true, features = ["default_fonts
 egui = { workspace = true }
 serde_json = { workspace = true }
 
-[target.'cfg(windows)'.build-dependencies]
+[build-dependencies]
 embed-manifest = "1.4"

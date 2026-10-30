@@ -1,3 +1,4 @@
+use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
 use eframe::egui;
 use enforcer::{Enforcer, ProcessSnapshot};
 use list_based_rule::{ListBasedRuleHandle, ListStore};
@@ -18,9 +19,14 @@ fn main() -> eframe::Result<()> {
     let list_rule = ListBasedRuleHandle::new(store.clone());
     let enforcer = Arc::new(Enforcer::new());
     enforcer.register_rule(list_rule.rule());
+
+    let ai_store = AiFocusStore::default().expect("failed to open AI focus settings");
+    let ai_rule = AiFocusRuleHandle::new(native_monitor(ai_store));
+    enforcer.register_rule(ai_rule.rule());
+    let _ai_monitor_handle = ai_rule.monitor().start_background();
     // Future: enforcer.register_rule(browser_guard.rule());
 
-    let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui()];
+    let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui(), ai_rule.ui()];
     // Future: rule_uis.push(browser_guard.ui());
 
     let _enforce_handle = enforcer.start_background(Duration::from_millis(800));

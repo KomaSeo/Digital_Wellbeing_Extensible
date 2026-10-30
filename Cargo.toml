@@ -5,6 +5,7 @@ members = [
     "crates/enforcer",
     "crates/rule_ui",
     "crates/tool-api",
+    "crates/ai_focus_rule",
     "apps/desktop",
 ]
 
@@ -31,3 +32,4 @@ list_based_rule = { path = "crates/list_based_rule" }
 enforcer = { path = "crates/enforcer" }
 rule_ui = { path = "crates/rule_ui" }
 tool-api = { path = "crates/tool-api" }
+ai_focus_rule = { path = "crates/ai_focus_rule" }

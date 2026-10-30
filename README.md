@@ -25,6 +25,35 @@ Policy file:
 | `blacklist` | Kill processes whose executable name is on the blacklist |
 | `whitelist` | Kill everything **not** on the whitelist (system-critical names are always protected) |
 
+## AI focus rule
+
+Tell the app what you are working on and press **Start session** in the *AI focus* tab.
+While the session runs:
+
+1. Every 5 s the foreground window (process + title) is recorded into an activity history.
+2. Every *check interval* (default 60 s) the task, that history and a downscaled
+   screenshot of the active monitor are sent to Claude, which answers
+   `on_task` / `off_task` / `unsure`.
+3. After *N* consecutive `off_task` verdicts (default 2) the app is blocked for
+   *block minutes* (default 30) — the enforcer kills it on sight. For browsers
+   (`chrome.exe`, `msedge.exe`, `whale.exe`, …) only the active tab is closed (Ctrl+W),
+   and a reopened tab with the same title is closed again.
+
+`unsure` never blocks. Changing the task or stopping the session clears all AI blocks.
+
+Settings (`%AppData%\DigitalWellbeing\DigitalWellbeing\config\ai_focus.json`):
+
+| Setting | Meaning |
+|---------|---------|
+| API key | `ANTHROPIC_API_KEY` env var, or saved in settings (plain text) |
+| Model | default `claude-opus-5-5`; any Claude model id works |
+| Always allow | never judged or blocked |
+| Private apps | judged from name + title only, never screenshotted (password managers by default) |
+| Send screenshot | turn off to send titles only |
+
+Each check is one Messages API call with one image (~1.2k input tokens at 1280 px wide),
+so the interval is the main cost knob.
+
 ## Function call API
 
 JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.
@@ -73,6 +102,7 @@ $json = '{"id":1,"method":"add_blacklist","params":{"name":"discord.exe"}}'
 ```
 apps/desktop           egui shell: rule tabs + shared process/block views
 crates/list_based_rule blacklist/whitelist BlockRule + RuleUi settings
+crates/ai_focus_rule   AI-judged focus BlockRule + RuleUi (activity sampler, Claude judge)
 crates/enforcer        process loop + BlockRule registry
 crates/rule_ui         RuleUi trait (per-rule settings panels)
 crates/tool-api        JSON-RPC function-call router
