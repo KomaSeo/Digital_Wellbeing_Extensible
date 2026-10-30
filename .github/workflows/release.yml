@@ -1,0 +1,68 @@
+# Responsibility: Build, test and package Digital Wellbeing on Windows; on a
+# `v*` tag, publish the setup program and a zip as a GitHub (pre-)release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build
+        run: cargo build --release --workspace --locked
+
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          $v = if ($ref.StartsWith("v")) { $ref.Substring(1) } else { "0.0.0-$($env:GITHUB_SHA.Substring(0,7))" }
+          "value=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Setup program (Inno Setup)
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          & $iscc installer\DigitalWellbeing.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.value }}"
+          $stage = "dist\DigitalWellbeing-$v"
+          New-Item -ItemType Directory -Force "$stage\docs" | Out-Null
+          Copy-Item target\release\digital-wellbeing-service.exe, target\release\digital-wellbeing-focus.exe, target\release\digital-wellbeing.exe, installer\install.cmd $stage
+          Copy-Item docs\*.md "$stage\docs"
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\DigitalWellbeing-$v-windows-x64.zip"
+          Remove-Item -Recurse $stage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-wellbeing-windows
+          path: dist/*
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          prerelease: true
+          body_path: installer/RELEASE_NOTES.md
+          files: dist/*

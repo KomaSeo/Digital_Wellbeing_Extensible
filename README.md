@@ -58,6 +58,10 @@ Code walkthrough (Korean): [`docs/ai_focus_rule.md`](docs/ai_focus_rule.md).
 
 ## Machine install (admin + standard work account)
 
+**Easiest:** download `DigitalWellbeing-Setup-<version>.exe` from the GitHub
+Releases page and run it; it asks for the work account and registers the
+service. (Releases are built by `.github/workflows/release.yml` on a `v*` tag.)
+
 Run the blocker as a Windows service so a standard account cannot stop it, and
 start it at boot:
 
