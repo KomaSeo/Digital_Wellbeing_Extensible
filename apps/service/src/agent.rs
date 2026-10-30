@@ -10,11 +10,14 @@
 //!
 //! It reads config from `%ProgramData%\DigitalWellbeing` and never writes it;
 //! the admin UI writes, the agent reloads within a few seconds. The files it
-//! writes are `planner_state.json` (task assignment, change requests) and
-//! `grants\<user>.json` (this user's access grants).
+//! writes are `planner_state.json` (task assignment, change requests),
+//! `grants\<user>.json` (this user's access grants) and `blocks\<user>.json`
+//! (blocks in force, so logging out and back in does not lift them).
 
 use ai_focus_rule::grants::GrantState;
-use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
+use ai_focus_rule::{
+    claude_judge_provider, platform, AiFocusRuleHandle, AiFocusStore, FocusMonitor, SavedBlocks,
+};
 use enforcer::Enforcer;
 use list_based_rule::{FileListPersistence, ListBasedRuleHandle, ListStore};
 use machine::session::{current_session_id, process_session_id};
@@ -27,6 +30,7 @@ use task_planner::{claude_advisor_provider, JsonStore, PlannerConfig, PlannerSta
 use tracing::{info, warn};
 
 const RELOAD_INTERVAL: Duration = Duration::from_secs(3);
+const AUTO_ASSIGN_INTERVAL: Duration = Duration::from_secs(60);
 
 pub fn run() -> anyhow::Result<()> {
     let session = current_session_id();
@@ -41,7 +45,16 @@ pub fn run() -> anyhow::Result<()> {
     let user =
         machine::session::session_user(session).unwrap_or_else(|| format!("session{session}"));
     let grants = JsonStore::<GrantState>::open(machine::grants_path_for(&user), true)?;
-    let monitor = native_monitor(ai_store.clone(), grants);
+    let blocks = JsonStore::<SavedBlocks>::open(machine::blocks_path_for(&user), true)?;
+    let monitor = Arc::new(
+        FocusMonitor::new(
+            ai_store.clone(),
+            platform::native(),
+            claude_judge_provider(),
+        )
+        .with_grants(grants)
+        .with_block_store(blocks),
+    );
     let ai_rule = AiFocusRuleHandle::new(Arc::clone(&monitor));
 
     let enforcer = Arc::new(Enforcer::new());
@@ -63,6 +76,10 @@ pub fn run() -> anyhow::Result<()> {
         claude_advisor_provider(),
     ));
 
+    let auto_planner = Arc::clone(&planner);
+    let auto_monitor = Arc::clone(&monitor);
+    thread::spawn(move || auto_assign_loop(auto_planner, auto_monitor));
+
     let api = Arc::new(AgentApi {
         monitor: Arc::clone(&monitor),
         planner: Some(planner),
@@ -77,6 +94,22 @@ pub fn run() -> anyhow::Result<()> {
 
     enforce.join().ok();
     Ok(())
+}
+
+/// While the planner is on, a focus session is not optional: if none is
+/// running (after logon, or when the user simply never asks for a task),
+/// start one with the assigned task. A recent assignment is resumed without
+/// an AI call; on failure (e.g. no network) try again later.
+fn auto_assign_loop(planner: Arc<TaskPlanner>, monitor: Arc<FocusMonitor>) {
+    loop {
+        if planner.is_active() && !monitor.store().get().session_active {
+            match planner.assign(chrono::Utc::now()) {
+                Ok(a) => info!("started focus session automatically: {}", a.task),
+                Err(err) => warn!("could not start the planned session: {err}"),
+            }
+        }
+        thread::sleep(AUTO_ASSIGN_INTERVAL);
+    }
 }
 
 /// Pick up edits the admin UI makes to the config files.

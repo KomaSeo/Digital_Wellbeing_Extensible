@@ -50,12 +50,22 @@ pub struct VerdictLogEntry {
 }
 
 /// Responsibility: Record why, and until when, something is blocked.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockedEntry {
     pub reason: String,
     pub until: Option<DateTime<Utc>>,
     /// Full window title when it was blocked (grants are matched against it).
+    #[serde(default)]
     pub title: String,
+}
+
+/// Responsibility: Hold the blocks in force, as saved to disk so that logging
+/// out and back in (which restarts the agent) does not lift them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedBlocks {
+    pub processes: HashMap<String, BlockedEntry>,
+    pub tabs: HashMap<String, BlockedEntry>,
 }
 
 /// Responsibility: Tell the caller what to do right after a judgement.
@@ -459,6 +469,8 @@ pub struct FocusMonitor {
     reviewer: ReviewerProvider,
     /// Held for a whole access request, so two clicks cannot race.
     access_busy: Mutex<()>,
+    /// Where blocks are saved (in memory unless [`Self::with_block_store`]).
+    blocks: JsonStore<SavedBlocks>,
     running: AtomicBool,
 }
 
@@ -473,7 +485,41 @@ impl FocusMonitor {
             grants: JsonStore::in_memory(GrantState::default()),
             reviewer: claude_reviewer_provider(),
             access_busy: Mutex::new(()),
+            blocks: JsonStore::in_memory(SavedBlocks::default()),
             running: AtomicBool::new(false),
+        }
+    }
+
+    /// Keep blocks in `store` and resume the ones saved there. Blocks meant to
+    /// last "until the session ends" are not resumed: that session is over.
+    pub fn with_block_store(mut self, store: JsonStore<SavedBlocks>) -> Self {
+        let mut saved = store.get();
+        saved.processes.retain(|_, b| b.until.is_some());
+        saved.tabs.retain(|_, b| b.until.is_some());
+        {
+            let state = self.state.get_mut();
+            state.blocked_processes = saved.processes;
+            state.blocked_tabs = saved.tabs;
+        }
+        self.blocks = store;
+        self
+    }
+
+    /// Save the blocks if they changed since the last save.
+    fn save_blocks(&self) {
+        let now = Utc::now();
+        let current = {
+            let mut state = self.state.lock();
+            state.active_process_blocks(now); // drops expired entries
+            SavedBlocks {
+                processes: state.blocked_processes.clone(),
+                tabs: state.blocked_tabs.clone(),
+            }
+        };
+        if current != self.blocks.get() {
+            if let Err(err) = self.blocks.update(|b| *b = current) {
+                warn!("could not save blocks: {err}");
+            }
         }
     }
 
@@ -506,7 +552,10 @@ impl FocusMonitor {
             info!("ai focus monitor started");
             while this.running.load(Ordering::SeqCst) {
                 // One bad sample must not end observation for the whole session.
-                let step = std::panic::AssertUnwindSafe(|| this.step(Utc::now()));
+                let step = std::panic::AssertUnwindSafe(|| {
+                    this.step(Utc::now());
+                    this.save_blocks();
+                });
                 if std::panic::catch_unwind(step).is_err() {
                     warn!("focus check panicked; continuing");
                 }
@@ -1515,5 +1564,28 @@ mod tests {
         h.monitor.step(Utc::now());
         assert_eq!(h.calls.load(Ordering::SeqCst), 1);
         assert!(!h.saw_screenshot.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn saved_blocks_are_resumed_after_a_restart() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        let saved = JsonStore::in_memory(SavedBlocks::default());
+        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config.clone());
+        let monitor = h.monitor.with_block_store(saved.clone());
+        monitor.step(Utc::now());
+        monitor.save_blocks();
+        assert_eq!(saved.get().processes.len(), 1);
+
+        // A new agent (e.g. after logging out and in) starts with the block.
+        let h2 = harness(
+            Verdict::OnTask,
+            fg("code.exe", "x"),
+            AiFocusConfig::default(),
+        );
+        let monitor2 = h2.monitor.with_block_store(saved);
+        let blocks = monitor2.state().active_process_blocks(Utc::now());
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, "steam.exe");
     }
 }

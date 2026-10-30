@@ -15,6 +15,7 @@
 //!     planner.json     to-do list for the task planner (admin)
 //!     planner_state.json  assignment + change-request log (written by agents)
 //!     grants\<user>.json  access grants + their log (written by that user's agent)
+//!     blocks\<user>.json  blocks in force (written by that user's agent)
 //!     logs\
 //! ```
 
@@ -70,6 +71,12 @@ pub fn grants_path_for(user: &str) -> PathBuf {
         })
         .collect();
     grants_dir().join(format!("{safe}.json"))
+}
+
+/// Blocks in force for `user` (resumed when the agent restarts).
+pub fn blocks_path_for(user: &str) -> PathBuf {
+    let file = grants_path_for(user);
+    data_dir().join("blocks").join(file.file_name().unwrap_or_default())
 }
 
 /// `PC\name` or `DOMAIN\name` -> `name` (sessions report bare names).

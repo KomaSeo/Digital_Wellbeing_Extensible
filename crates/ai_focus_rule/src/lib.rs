@@ -25,7 +25,7 @@ pub use config::{AiFocusConfig, AiFocusStore, ConfigError, DEFAULT_MODEL};
 pub use judge::{ClaudeJudge, Judge, JudgeError, JudgeRequest, Judgement, Verdict};
 pub use monitor::{
     claude_judge_provider, AccessError, ActivityEntry, BlockedEntry, FocusMonitor, JudgeProvider,
-    MonitorState, VerdictLogEntry,
+    MonitorState, SavedBlocks, VerdictLogEntry,
 };
 pub use rule::{AiFocusRule, AiFocusRuleHandle};
 
