@@ -56,6 +56,24 @@ so the interval is the main cost knob.
 
 Code walkthrough (Korean): [`docs/ai_focus_rule.md`](docs/ai_focus_rule.md).
 
+## Machine install (admin + standard work account)
+
+Run the blocker as a Windows service so a standard account cannot stop it, and
+start it at boot:
+
+```powershell
+cargo build --release
+# administrator terminal:
+.\target\release\digital-wellbeing-service.exe install --manage <work-account-user>
+```
+
+The service (LocalSystem) starts a SYSTEM agent inside each managed user's
+session; the agent enforces the rules and runs the AI check there. The user
+declares their task in **Digital Wellbeing Focus** (starts at logon); settings
+are edited with `digital-wellbeing.exe` (administrator) and stored in
+`%ProgramData%\DigitalWellbeing`, which standard users cannot read or write.
+Full guide (Korean): [`docs/multi_account.md`](docs/multi_account.md).
+
 ## Function call API
 
 JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.
@@ -105,6 +123,9 @@ $json = '{"id":1,"method":"add_blacklist","params":{"name":"discord.exe"}}'
 apps/desktop           egui shell: rule tabs + shared process/block views
 crates/list_based_rule blacklist/whitelist BlockRule + RuleUi settings
 crates/ai_focus_rule   AI-judged focus BlockRule + RuleUi (activity sampler, Claude judge)
+crates/machine         machine-install paths, managed users, session ids, agent<->Focus API
+apps/service           Windows service, per-session agent, installer
+apps/focus             Focus app for standard users (declare task, see verdicts)
 crates/enforcer        process loop + BlockRule registry
 crates/rule_ui         RuleUi trait (per-rule settings panels)
 crates/tool-api        JSON-RPC function-call router

@@ -134,6 +134,14 @@ impl ListStore {
         self.inner.read().clone()
     }
 
+    /// Re-read the persisted config, discarding the in-memory copy (no save).
+    /// Used when another process (the admin UI) edits the file.
+    pub fn reload(&self) -> Result<(), ListError> {
+        let config = self.persistence.load()?;
+        *self.inner.write() = config;
+        Ok(())
+    }
+
     fn mutate<F, T>(&self, f: F) -> Result<T, ListError>
     where
         F: FnOnce(&mut ListConfig) -> Result<T, ListError>,

@@ -464,6 +464,19 @@ let rule_uis = vec![list_rule.ui(), ai_rule.ui()];
 
 ---
 
+## 9.5 머신 설치(관리자 + 일반 계정)에서 달라지는 점
+
+자세한 내용은 [`multi_account.md`](multi_account.md)에 있습니다. 이 크레이트 쪽 변경만 요약하면:
+
+- **`AiFocusStore::open_read_only(path)`**: agent용입니다. 파일을 읽기만 하고 `update()`는 메모리에만 반영합니다.
+  `reload_keeping_session()`은 관리자가 고친 파일을 다시 읽되, 사용자가 정한 `session_active`와 `task`는 메모리 값을 유지합니다.
+  그래서 관리자가 간격을 바꿔도 사용자의 세션이 꺼지지 않고, 사용자의 할 일이 관리자 파일에 섞이지 않습니다.
+- **`AiFocusRuleHandle::settings_only(monitor)`**: 관리 UI용입니다. 세션, 차단 목록, 판정 기록 칸을 숨기고 설정만 보여 줍니다.
+  모니터는 시작하지 않습니다.
+- `VerdictLogEntry`가 `Deserialize`도 구현합니다. Focus 앱이 agent API로 받아서 보여 주기 위해서입니다.
+
+---
+
 ## 10. 확장 포인트 요약
 
 | 하고 싶은 것 | 손댈 곳 |

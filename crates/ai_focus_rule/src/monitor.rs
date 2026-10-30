@@ -4,7 +4,7 @@ use crate::platform::{Desktop, Foreground, Screenshot};
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use enforcer::{is_never_terminate, normalize_process_name};
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -28,7 +28,7 @@ pub struct ActivityEntry {
     pub last_seen: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerdictLogEntry {
     pub at: DateTime<Utc>,
     pub process_name: String,

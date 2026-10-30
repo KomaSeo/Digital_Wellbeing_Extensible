@@ -1,7 +1,7 @@
 use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
 use eframe::egui;
 use enforcer::{Enforcer, ProcessSnapshot};
-use list_based_rule::{ListBasedRuleHandle, ListStore};
+use list_based_rule::{FileListPersistence, ListBasedRuleHandle, ListStore};
 use rule_ui::RuleUi;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,6 +15,36 @@ fn main() -> eframe::Result<()> {
         )
         .init();
 
+    // A machine install (service + agents) exists: this window only edits the
+    // shared settings; the agents enforce them. `--standalone` forces the old
+    // single-account mode.
+    let machine_mode = !std::env::args().any(|a| a == "--standalone")
+        && machine::machine_config_path().exists();
+    let (router, rule_uis, status) = if machine_mode {
+        start_machine_admin()
+    } else {
+        start_standalone()
+    };
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([980.0, 680.0])
+            .with_title("Digital Wellbeing"),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Digital Wellbeing",
+        options,
+        Box::new(move |cc| {
+            rule_ui::install_system_fonts(&cc.egui_ctx);
+            Ok(Box::new(App::new(router, rule_uis, status)))
+        }),
+    )
+}
+
+/// Single account: enforce in this process and serve the function-call API.
+fn start_standalone() -> (ToolRouter, Vec<Arc<dyn RuleUi>>, String) {
     let store = ListStore::default().expect("failed to open list store");
     let list_rule = ListBasedRuleHandle::new(store.clone());
     let enforcer = Arc::new(Enforcer::new());
@@ -33,19 +63,31 @@ fn main() -> eframe::Result<()> {
 
     let router = ToolRouter::new(Arc::clone(&enforcer), store);
     let _api_keep_alive = spawn_tcp(router.clone(), DEFAULT_PORT);
+    let status = format!("Function call API: 127.0.0.1:{DEFAULT_PORT}");
+    (router, rule_uis, status)
+}
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([980.0, 680.0])
-            .with_title("Digital Wellbeing"),
-        ..Default::default()
-    };
+/// Machine install: edit `%ProgramData%\DigitalWellbeing\*.json` only. Nothing
+/// is enforced here and no API is opened (it has no authentication, and a
+/// standard user on the same PC could otherwise call it).
+fn start_machine_admin() -> (ToolRouter, Vec<Arc<dyn RuleUi>>, String) {
+    let store = ListStore::with_persistence(Arc::new(FileListPersistence::new(
+        machine::policy_path(),
+    )))
+    .expect("failed to open machine policy (run as administrator)");
+    let list_rule = ListBasedRuleHandle::new(store.clone());
 
-    eframe::run_native(
-        "Digital Wellbeing",
-        options,
-        Box::new(move |_cc| Ok(Box::new(App::new(router, rule_uis)))),
-    )
+    let ai_store = AiFocusStore::open(machine::ai_focus_path())
+        .expect("failed to open machine AI settings (run as administrator)");
+    let ai_rule = AiFocusRuleHandle::settings_only(native_monitor(ai_store));
+
+    let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui(), ai_rule.ui()];
+    let router = ToolRouter::new(Arc::new(Enforcer::new()), store);
+    let status = format!(
+        "Machine install: editing {} — enforced by the service in managed accounts",
+        machine::data_dir().display()
+    );
+    (router, rule_uis, status)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,12 +108,12 @@ struct App {
 }
 
 impl App {
-    fn new(router: ToolRouter, rule_uis: Vec<Arc<dyn RuleUi>>) -> Self {
+    fn new(router: ToolRouter, rule_uis: Vec<Arc<dyn RuleUi>>, status: String) -> Self {
         Self {
             router,
             rule_uis,
             tab: MainTab::Monitor,
-            status: format!("Function call API: 127.0.0.1:{DEFAULT_PORT}"),
+            status,
             last_refresh: Instant::now() - Duration::from_secs(10),
             process_filter: String::new(),
         }

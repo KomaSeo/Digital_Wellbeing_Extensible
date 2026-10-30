@@ -20,13 +20,17 @@ struct AiUiState {
 /// Blocks apps that an AI judge finds unrelated to the declared task.
 pub struct AiFocusRule {
     monitor: Arc<FocusMonitor>,
+    /// `false` in the admin UI of a machine install: the session runs in the
+    /// user's agent, so this panel only edits settings.
+    session_controls: bool,
     ui_state: Mutex<AiUiState>,
 }
 
 impl AiFocusRule {
-    pub fn new(monitor: Arc<FocusMonitor>) -> Self {
+    pub fn new(monitor: Arc<FocusMonitor>, session_controls: bool) -> Self {
         Self {
             monitor,
+            session_controls,
             ui_state: Mutex::new(AiUiState::default()),
         }
     }
@@ -41,48 +45,8 @@ impl AiFocusRule {
             Err(err) => state.status = err.to_string(),
         }
     }
-}
 
-impl BlockRule for AiFocusRule {
-    fn id(&self) -> &str {
-        "ai_focus_rule"
-    }
-
-    fn name(&self) -> &str {
-        "AI focus"
-    }
-
-    fn description(&self) -> &str {
-        "Periodically shows the AI your recent windows and a screenshot, and blocks \
-         apps or closes browser tabs it judges unrelated to your current task"
-    }
-
-    fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
-        let blocks = self.monitor.state().active_process_blocks(Utc::now());
-        if blocks.is_empty() {
-            return Vec::new();
-        }
-        processes
-            .iter()
-            .filter_map(|p| {
-                let name = normalize_process_name(&p.name);
-                blocks
-                    .iter()
-                    .find(|(blocked, _)| *blocked == name)
-                    .map(|(_, reason)| BlockEvent::new(p, format!("off-task: {reason}")))
-            })
-            .collect()
-    }
-}
-
-impl RuleUi for AiFocusRule {
-    fn settings_ui(&self, ui: &mut egui::Ui, processes: &[ProcessSnapshot]) {
-        let config = self.store().get();
-        let mut s = self.ui_state.lock();
-
-        ui.label(BlockRule::description(self));
-        ui.separator();
-
+    fn session_ui(&self, ui: &mut egui::Ui, config: &crate::AiFocusConfig, s: &mut AiUiState) {
         // --- Session -------------------------------------------------------
         ui.heading("Focus session");
         ui.label("What are you working on? (be specific — the AI judges against this)");
@@ -98,10 +62,10 @@ impl RuleUi for AiFocusRule {
                 ui.colored_label(egui::Color32::from_rgb(80, 170, 90), "● running");
                 if ui.button("Update task").clicked() {
                     let task = s.task_input.clone().unwrap_or_default();
-                    self.save(&mut s, |c| c.task = task);
+                    self.save(s, |c| c.task = task);
                 }
                 if ui.button("Stop session").clicked() {
-                    self.save(&mut s, |c| c.session_active = false);
+                    self.save(s, |c| c.session_active = false);
                 }
             } else {
                 ui.label("○ stopped");
@@ -110,7 +74,7 @@ impl RuleUi for AiFocusRule {
                     .add_enabled(!task.trim().is_empty(), egui::Button::new("Start session"))
                     .clicked()
                 {
-                    self.save(&mut s, |c| {
+                    self.save(s, |c| {
                         c.task = task;
                         c.session_active = true;
                     });
@@ -123,7 +87,13 @@ impl RuleUi for AiFocusRule {
             (
                 state.last_check,
                 state.last_error.clone(),
-                state.verdicts.iter().rev().take(30).cloned().collect::<Vec<_>>(),
+                state
+                    .verdicts
+                    .iter()
+                    .rev()
+                    .take(30)
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 state
                     .blocked_processes
                     .iter()
@@ -191,6 +161,57 @@ impl RuleUi for AiFocusRule {
                     });
                 }
             });
+    }
+}
+
+impl BlockRule for AiFocusRule {
+    fn id(&self) -> &str {
+        "ai_focus_rule"
+    }
+
+    fn name(&self) -> &str {
+        "AI focus"
+    }
+
+    fn description(&self) -> &str {
+        "Periodically shows the AI your recent windows and a screenshot, and blocks \
+         apps or closes browser tabs it judges unrelated to your current task"
+    }
+
+    fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
+        let blocks = self.monitor.state().active_process_blocks(Utc::now());
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+        processes
+            .iter()
+            .filter_map(|p| {
+                let name = normalize_process_name(&p.name);
+                blocks
+                    .iter()
+                    .find(|(blocked, _)| *blocked == name)
+                    .map(|(_, reason)| BlockEvent::new(p, format!("off-task: {reason}")))
+            })
+            .collect()
+    }
+}
+
+impl RuleUi for AiFocusRule {
+    fn settings_ui(&self, ui: &mut egui::Ui, processes: &[ProcessSnapshot]) {
+        let config = self.store().get();
+        let mut s = self.ui_state.lock();
+
+        ui.label(BlockRule::description(self));
+        ui.separator();
+
+        if self.session_controls {
+            self.session_ui(ui, &config, &mut s);
+        } else {
+            ui.label(
+                "Machine install: each user starts and stops their own focus session in the \
+                 Digital Wellbeing Focus app. Settings below apply to every managed account.",
+            );
+        }
 
         // --- Settings -----------------------------------------------------------
         ui.separator();
@@ -210,7 +231,10 @@ impl RuleUi for AiFocusRule {
 
                 ui.label("Off-task checks before block");
                 let mut strikes = config.strikes_to_block;
-                if ui.add(egui::DragValue::new(&mut strikes).range(1..=10)).changed() {
+                if ui
+                    .add(egui::DragValue::new(&mut strikes).range(1..=10))
+                    .changed()
+                {
                     self.save(&mut s, |c| c.strikes_to_block = strikes);
                 }
                 ui.end_row();
@@ -250,7 +274,9 @@ impl RuleUi for AiFocusRule {
                     if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.is_empty()) {
                         ui.label("using ANTHROPIC_API_KEY");
                     } else {
-                        let key = s.api_key_input.get_or_insert_with(|| config.api_key.clone());
+                        let key = s
+                            .api_key_input
+                            .get_or_insert_with(|| config.api_key.clone());
                         ui.add(egui::TextEdit::singleline(key).password(true));
                         if ui.button("Save").clicked() {
                             let key = s.api_key_input.clone().unwrap_or_default();
@@ -355,8 +381,18 @@ pub struct AiFocusRuleHandle {
 
 impl AiFocusRuleHandle {
     pub fn new(monitor: Arc<FocusMonitor>) -> Self {
+        Self::build(monitor, true)
+    }
+
+    /// Settings panel only, for editing a machine install's config from the admin UI.
+    /// The monitor is never started; its state stays empty.
+    pub fn settings_only(monitor: Arc<FocusMonitor>) -> Self {
+        Self::build(monitor, false)
+    }
+
+    fn build(monitor: Arc<FocusMonitor>, session_controls: bool) -> Self {
         Self {
-            inner: Arc::new(AiFocusRule::new(Arc::clone(&monitor))),
+            inner: Arc::new(AiFocusRule::new(Arc::clone(&monitor), session_controls)),
             monitor,
         }
     }

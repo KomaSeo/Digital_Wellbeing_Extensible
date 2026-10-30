@@ -99,6 +99,9 @@ impl AiFocusConfig {
 #[derive(Clone)]
 pub struct AiFocusStore {
     path: Option<PathBuf>,
+    /// `false` for the per-session agent: the file belongs to the admin UI, and
+    /// session/task changes from the user stay in memory only.
+    writable: bool,
     inner: Arc<RwLock<AiFocusConfig>>,
 }
 
@@ -118,16 +121,52 @@ impl AiFocusStore {
         };
         let store = Self {
             path: Some(path),
+            writable: true,
             inner: Arc::new(RwLock::new(config)),
         };
         store.save(&store.get())?;
         Ok(store)
     }
 
+    /// Reads `path` (defaults if missing) and never writes it.
+    pub fn open_read_only(path: PathBuf) -> Result<Self, ConfigError> {
+        let store = Self {
+            path: Some(path),
+            writable: false,
+            inner: Arc::new(RwLock::new(AiFocusConfig::default())),
+        };
+        store.reload_keeping_session()?;
+        Ok(store)
+    }
+
+    /// Re-read the file but keep the in-memory `session_active` / `task`, which
+    /// the user controls at runtime (see `open_read_only`).
+    pub fn reload_keeping_session(&self) -> Result<(), ConfigError> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let mut fresh: AiFocusConfig = if path.exists() {
+            serde_json::from_str(&fs::read_to_string(path)?)?
+        } else {
+            AiFocusConfig::default()
+        };
+        let mut config = self.inner.write();
+        fresh.session_active = config.session_active;
+        fresh.task = std::mem::take(&mut config.task);
+        *config = fresh;
+        Ok(())
+    }
+
+    /// Path of the backing file, if any.
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
+    }
+
     /// In-memory store for tests.
     pub fn in_memory(config: AiFocusConfig) -> Self {
         Self {
             path: None,
+            writable: true,
             inner: Arc::new(RwLock::new(config)),
         }
     }
@@ -148,7 +187,7 @@ impl AiFocusStore {
     }
 
     fn save(&self, config: &AiFocusConfig) -> Result<(), ConfigError> {
-        let Some(path) = &self.path else {
+        let Some(path) = self.path.as_ref().filter(|_| self.writable) else {
             return Ok(());
         };
         if let Some(parent) = path.parent() {
@@ -158,5 +197,39 @@ impl AiFocusStore {
         fs::write(&tmp, serde_json::to_string_pretty(config)?)?;
         fs::rename(&tmp, path)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_store_keeps_session_across_reload_and_never_writes() {
+        let dir = std::env::temp_dir().join(format!("dw_ai_cfg_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ai_focus.json");
+        let admin = AiFocusStore::open(path.clone()).unwrap();
+        admin.update(|c| c.check_interval_secs = 120).unwrap();
+
+        let agent = AiFocusStore::open_read_only(path.clone()).unwrap();
+        assert_eq!(agent.get().check_interval_secs, 120);
+        agent
+            .update(|c| {
+                c.session_active = true;
+                c.task = "thesis".into();
+            })
+            .unwrap();
+        let on_disk: AiFocusConfig =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(!on_disk.session_active);
+
+        admin.update(|c| c.check_interval_secs = 300).unwrap();
+        agent.reload_keeping_session().unwrap();
+        let c = agent.get();
+        assert_eq!(c.check_interval_secs, 300);
+        assert!(c.session_active);
+        assert_eq!(c.task, "thesis");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

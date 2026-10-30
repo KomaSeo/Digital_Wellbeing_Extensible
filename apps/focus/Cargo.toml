@@ -1,0 +1,17 @@
+[package]
+name = "digital-wellbeing-focus"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "digital-wellbeing-focus"
+path = "src/main.rs"
+
+[dependencies]
+machine = { workspace = true }
+rule_ui = { workspace = true }
+egui = { workspace = true }
+eframe = { version = "0.31", default-features = true, features = ["default_fonts", "glow"] }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }

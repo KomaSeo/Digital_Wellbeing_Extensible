@@ -39,9 +39,12 @@ pub fn never_terminate() -> &'static [&'static str] {
         "conhost.exe",
         "digital-wellbeing.exe",
         "digital_wellbeing.exe",
+        "digital-wellbeing-service.exe",
+        "digital-wellbeing-focus.exe",
     ]
 }
 
+/// Lower-case file name with `.exe` appended when missing (`C:\\X\\Steam` -> `steam.exe`).
 pub fn normalize_process_name(name: &str) -> String {
     let trimmed = name.trim().to_lowercase();
     let file_name = Path::new(&trimmed)
@@ -57,6 +60,7 @@ pub fn normalize_process_name(name: &str) -> String {
     }
 }
 
+/// True for processes in [`never_terminate`].
 pub fn is_never_terminate(name: &str) -> bool {
     let n = normalize_process_name(name);
     never_terminate().iter().any(|p| *p == n)
@@ -69,11 +73,15 @@ pub struct ProcessInfo {
     pub exe: Option<String>,
 }
 
+/// Decides which pids the enforcer may see and terminate (e.g. "only my session").
+pub type ProcessFilter = Arc<dyn Fn(u32) -> bool + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Enforcer {
     rules: Arc<Mutex<Vec<Arc<dyn BlockRule>>>>,
     logs: Arc<Mutex<VecDeque<BlockEvent>>>,
     running: Arc<Mutex<bool>>,
+    filter: Arc<Mutex<Option<ProcessFilter>>>,
 }
 
 impl Enforcer {
@@ -82,7 +90,18 @@ impl Enforcer {
             rules: Arc::new(Mutex::new(Vec::new())),
             logs: Arc::new(Mutex::new(VecDeque::with_capacity(LOG_CAPACITY))),
             running: Arc::new(Mutex::new(false)),
+            filter: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Restrict enforcement (and [`Self::list_processes`]) to pids the filter accepts.
+    /// Without a filter every process on the machine is in scope.
+    pub fn set_process_filter(&self, filter: ProcessFilter) {
+        *self.filter.lock() = Some(filter);
+    }
+
+    fn in_scope(&self, pid: u32) -> bool {
+        self.filter.lock().as_ref().is_none_or(|f| f(pid))
     }
 
     /// Register a rule. Later rules run after earlier ones; the first event for a pid wins.
@@ -153,6 +172,7 @@ impl Enforcer {
         let mut list: Vec<ProcessInfo> = system
             .processes()
             .iter()
+            .filter(|(pid, _)| self.in_scope(pid.as_u32()))
             .map(|(pid, proc)| ProcessInfo {
                 pid: pid.as_u32(),
                 name: proc.name().to_string_lossy().to_string(),
@@ -179,7 +199,7 @@ impl Enforcer {
             .iter()
             .filter_map(|(pid, proc)| {
                 let pid_u32 = pid.as_u32();
-                if pid_u32 == self_pid {
+                if pid_u32 == self_pid || !self.in_scope(pid_u32) {
                     return None;
                 }
                 let name = proc.name().to_string_lossy().to_string();

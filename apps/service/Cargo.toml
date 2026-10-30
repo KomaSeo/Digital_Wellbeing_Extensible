@@ -1,0 +1,26 @@
+[package]
+name = "digital-wellbeing-service"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "digital-wellbeing-service"
+path = "src/main.rs"
+
+[dependencies]
+enforcer = { workspace = true }
+list_based_rule = { workspace = true }
+ai_focus_rule = { workspace = true }
+machine = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }
