@@ -1,4 +1,5 @@
 use crate::config::AiFocusStore;
+use crate::grants::GrantEvent;
 use crate::judge::Verdict;
 use crate::monitor::FocusMonitor;
 use chrono::{Local, Utc};
@@ -15,6 +16,8 @@ struct AiUiState {
     allow_input: String,
     private_input: String,
     status: String,
+    /// When the admin view last re-read `grants.json`.
+    grants_read: Option<std::time::Instant>,
 }
 
 /// Blocks apps that an AI judge finds unrelated to the declared task.
@@ -44,6 +47,79 @@ impl AiFocusRule {
             Ok(_) => state.status.clear(),
             Err(err) => state.status = err.to_string(),
         }
+    }
+
+    /// Access grants in force and their history; the admin can revoke.
+    fn grants_ui(&self, ui: &mut egui::Ui, config: &crate::AiFocusConfig, s: &mut AiUiState) {
+        // The admin view reads the agents' file; refresh it now and then. (With
+        // session controls this process owns the store, so it is always current.)
+        if !self.session_controls
+            && s.grants_read
+                .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
+        {
+            let _ = self.monitor.grants().reload();
+            s.grants_read = Some(std::time::Instant::now());
+        }
+        let grants = self.monitor.grants().get();
+        let now = Utc::now();
+
+        ui.separator();
+        ui.heading("Access grants");
+        ui.label(
+            "Apps and sites the AI let the user use for a stated purpose. They stay observed: \
+             off-purpose use revokes the grant and blocks again.",
+        );
+        let active: Vec<_> = grants
+            .grants
+            .iter()
+            .filter(|g| g.is_active(now, config))
+            .collect();
+        if active.is_empty() {
+            ui.label("None.");
+        }
+        for g in active {
+            ui.horizontal_wrapped(|ui| {
+                let until = g
+                    .until
+                    .map(|u| {
+                        u.with_timezone(&Local)
+                            .format("until %m-%d %H:%M")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "permanent".into());
+                ui.label(format!("{} ({until}) — {}", g.target.label(), g.purpose));
+                if ui.small_button("revoke").clicked() {
+                    let id = g.id.clone();
+                    // Through the config file, so this UI never writes grants.json.
+                    self.save(s, |c| {
+                        c.revoked_grants.insert(id);
+                    });
+                }
+            });
+        }
+        ui.collapsing("History", |ui| {
+            for e in grants.log.iter().rev() {
+                let what = match &e.event {
+                    GrantEvent::Requested {
+                        approved: true,
+                        granted_minutes: Some(m),
+                        ..
+                    } => format!("granted {m} min"),
+                    GrantEvent::Requested { approved: true, .. } => "granted permanently".into(),
+                    GrantEvent::Requested { .. } => "refused".into(),
+                    GrantEvent::RevokedForMisuse => "revoked (misuse)".into(),
+                    GrantEvent::RevokedByAdmin => "revoked by admin".into(),
+                };
+                ui.label(format!(
+                    "{}  {}  {} — \"{}\" {}",
+                    e.at.with_timezone(&Local).format("%m-%d %H:%M"),
+                    e.target.label(),
+                    what,
+                    e.purpose,
+                    e.message
+                ));
+            }
+        });
     }
 
     fn session_ui(&self, ui: &mut egui::Ui, config: &crate::AiFocusConfig, s: &mut AiUiState) {
@@ -269,6 +345,23 @@ impl RuleUi for AiFocusRule {
                 });
                 ui.end_row();
 
+                ui.label("Users may ask for permanent access");
+                let mut permanent = config.allow_permanent_grants;
+                if ui.checkbox(&mut permanent, "").changed() {
+                    self.save(&mut s, |c| c.allow_permanent_grants = permanent);
+                }
+                ui.end_row();
+
+                ui.label("Longest timed access (minutes)");
+                let mut max = config.max_grant_minutes;
+                if ui
+                    .add(egui::DragValue::new(&mut max).range(5..=600))
+                    .changed()
+                {
+                    self.save(&mut s, |c| c.max_grant_minutes = max);
+                }
+                ui.end_row();
+
                 ui.label("API key");
                 ui.horizontal(|ui| {
                     if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.is_empty()) {
@@ -287,6 +380,8 @@ impl RuleUi for AiFocusRule {
                 ui.end_row();
             });
         ui.small("A saved key is stored in plain text in ai_focus.json; prefer the ANTHROPIC_API_KEY environment variable.");
+
+        self.grants_ui(ui, &config, &mut s);
 
         // --- Lists ------------------------------------------------------------------
         ui.separator();
