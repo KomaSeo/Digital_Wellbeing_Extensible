@@ -45,8 +45,11 @@ pub struct Strategy {
 /// Persisted blacklist / whitelist configuration for [`ListBasedRule`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListConfig {
+    #[serde(default)]
     pub mode: ListMode,
+    #[serde(default)]
     pub blacklist: BTreeSet<String>,
+    #[serde(default)]
     pub whitelist: BTreeSet<String>,
     #[serde(default)]
     pub strategies: Vec<Strategy>,
@@ -86,6 +89,33 @@ impl ListConfig {
         }
     }
 
+    /// Bring config from any source (file, API, strategy) into the form the
+    /// rule relies on: normalized names, no empty names, protected names never
+    /// blacklisted and always whitelisted, no unnamed strategies.
+    pub fn sanitize(&mut self) {
+        fn clean(set: &mut BTreeSet<String>) {
+            *set = set
+                .iter()
+                .map(|n| ListConfig::normalize_name(n))
+                .filter(|n| !n.is_empty())
+                .collect();
+        }
+        fn fix_lists(blacklist: &mut BTreeSet<String>, whitelist: &mut BTreeSet<String>) {
+            clean(blacklist);
+            clean(whitelist);
+            blacklist.retain(|n| !ListConfig::is_protected(n));
+            for protected in always_protected() {
+                whitelist.insert((*protected).to_string());
+            }
+        }
+        fix_lists(&mut self.blacklist, &mut self.whitelist);
+        self.strategies.retain(|s| !s.name.trim().is_empty());
+        for strategy in &mut self.strategies {
+            strategy.name = strategy.name.trim().to_string();
+            fix_lists(&mut strategy.blacklist, &mut strategy.whitelist);
+        }
+    }
+
     pub fn is_protected(name: &str) -> bool {
         let n = Self::normalize_name(name);
         always_protected().iter().any(|p| *p == n)
@@ -114,6 +144,8 @@ pub enum ListError {
     Protected(String),
     #[error("strategy not found: {0}")]
     StrategyNotFound(String),
+    #[error("strategy name is empty")]
+    EmptyStrategyName,
     #[error("app data directory unavailable")]
     NoAppData,
 }
@@ -133,7 +165,8 @@ impl ListStore {
 
     /// Inject a custom [`ListPersistence`] (e.g. memory backend in tests).
     pub fn with_persistence(persistence: Arc<dyn ListPersistence>) -> Result<Self, ListError> {
-        let config = persistence.load()?;
+        let mut config = persistence.load()?;
+        config.sanitize();
         Ok(Self {
             inner: Arc::new(RwLock::new(config)),
             persistence,
@@ -147,7 +180,8 @@ impl ListStore {
     /// Re-read the persisted config, discarding the in-memory copy (no save).
     /// Used when another process (the admin UI) edits the file.
     pub fn reload(&self) -> Result<(), ListError> {
-        let config = self.persistence.load()?;
+        let mut config = self.persistence.load()?;
+        config.sanitize();
         *self.inner.write() = config;
         Ok(())
     }
@@ -156,10 +190,14 @@ impl ListStore {
     where
         F: FnOnce(&mut ListConfig) -> Result<T, ListError>,
     {
+        // Change a copy and save it first: if saving fails, memory keeps
+        // matching the file (and what the agent enforces).
         let mut guard = self.inner.write();
-        let result = f(&mut guard)?;
-        guard.updated_at = Utc::now();
-        self.persistence.save(&guard)?;
+        let mut next = guard.clone();
+        let result = f(&mut next)?;
+        next.updated_at = Utc::now();
+        self.persistence.save(&next)?;
+        *guard = next;
         Ok(result)
     }
 
@@ -244,6 +282,9 @@ impl ListStore {
 
     pub fn save_strategy(&self, name: &str) -> Result<ListConfig, ListError> {
         let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(ListError::EmptyStrategyName);
+        }
         self.mutate(|p| {
             let strategy = Strategy {
                 name: name.clone(),
@@ -280,14 +321,11 @@ impl ListStore {
     }
 
     pub fn replace_config(&self, mut config: ListConfig) -> Result<ListConfig, ListError> {
-        for protected in always_protected() {
-            config.whitelist.insert((*protected).to_string());
-        }
-        config.updated_at = Utc::now();
-        let mut guard = self.inner.write();
-        *guard = config.clone();
-        self.persistence.save(&guard)?;
-        Ok(config)
+        config.sanitize();
+        self.mutate(|p| {
+            *p = config;
+            Ok(p.clone())
+        })
     }
 }
 
