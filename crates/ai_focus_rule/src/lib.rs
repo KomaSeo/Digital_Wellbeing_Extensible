@@ -8,6 +8,7 @@
 //!
 //! Walkthrough of every module (Korean): `docs/ai_focus_rule.md`.
 
+pub mod access_review;
 pub mod claude;
 mod config;
 pub mod grants;
