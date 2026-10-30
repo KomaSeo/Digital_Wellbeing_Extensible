@@ -372,6 +372,7 @@ impl FocusMonitor {
             process_name: &fg.process_name,
             title: &fg.title,
             screenshot: screenshot.as_deref(),
+            grant_purpose: None,
         })
     }
 }
