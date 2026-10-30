@@ -26,10 +26,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Caches are scoped to a ref: a tag run can never read another tag's
+      # cache, so only branch runs (RELEASE_VERSION releases) save one, and
+      # the next branch run starts with compiled dependencies.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+          save-if: ${{ github.ref_type == 'branch' }}
 
+      # Tests in the release profile: the build below then reuses everything
+      # already compiled instead of compiling the workspace a second time.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --release
 
       - name: Build
         run: cargo build --release --workspace --locked
