@@ -222,9 +222,14 @@ impl TaskPlanner {
                     };
                     self.state.update(|s| s.done.push(record))?;
                 }
-                // Next one, or stop when the list is empty.
+                // Next one, or stop when the list is empty. If picking fails
+                // (AI or network error), do not stay on the finished to-do:
+                // end the session so "Get my task" can be used again.
                 if self.is_active() {
-                    self.pick_and_apply(now)?;
+                    if let Err(err) = self.pick_and_apply(now) {
+                        tracing::warn!("could not pick the next to-do: {err}");
+                        self.end(now)?;
+                    }
                 } else {
                     self.end(now)?;
                 }

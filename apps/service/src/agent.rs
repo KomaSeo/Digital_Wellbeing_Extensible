@@ -92,25 +92,35 @@ fn reload_loop(
     loop {
         thread::sleep(RELOAD_INTERVAL);
         let now = (modified(&policy), modified(&ai), modified(&plan));
+        // A change counts as seen only once its reload worked; a file that was
+        // locked or half-written (e.g. saved in place by an editor) is retried.
         if now.0 != seen.0 {
             match list_store.reload() {
-                Ok(()) => info!("reloaded {}", policy.display()),
-                Err(err) => warn!("reload {}: {err}", policy.display()),
+                Ok(()) => {
+                    info!("reloaded {}", policy.display());
+                    seen.0 = now.0;
+                }
+                Err(err) => warn!("reload {}: {err}; retrying", policy.display()),
             }
         }
         if now.1 != seen.1 {
             match ai_store.reload_keeping_session() {
-                Ok(()) => info!("reloaded {}", ai.display()),
-                Err(err) => warn!("reload {}: {err}", ai.display()),
+                Ok(()) => {
+                    info!("reloaded {}", ai.display());
+                    seen.1 = now.1;
+                }
+                Err(err) => warn!("reload {}: {err}; retrying", ai.display()),
             }
         }
         if now.2 != seen.2 {
             match planner_config.reload() {
-                Ok(()) => info!("reloaded {}", plan.display()),
-                Err(err) => warn!("reload {}: {err}", plan.display()),
+                Ok(()) => {
+                    info!("reloaded {}", plan.display());
+                    seen.2 = now.2;
+                }
+                Err(err) => warn!("reload {}: {err}; retrying", plan.display()),
             }
         }
-        seen = now;
     }
 }
 

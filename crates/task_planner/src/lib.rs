@@ -21,12 +21,12 @@ pub use advisor::{
     claude_advisor_provider, Advisor, AdvisorProvider, ClaudeAdvisor, Pick, PickRequest, Review,
     ReviewRequest,
 };
+pub use ai_focus_rule::store::JsonStore;
 pub use model::{
     Assignment, AssignmentSource, ChangeKind, ChangeRecord, DoneRecord, PlannerConfig,
     PlannerState, PlannerStatus, TodoItem,
 };
 pub use planner::{PlannerError, TaskPlanner};
-pub use ai_focus_rule::store::JsonStore;
 
 #[cfg(test)]
 mod tests;

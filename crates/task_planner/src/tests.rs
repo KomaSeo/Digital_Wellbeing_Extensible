@@ -231,3 +231,19 @@ fn change_kind_json_shape() {
     let done: ChangeKind = serde_json::from_value(serde_json::json!({ "kind": "done" })).unwrap();
     assert_eq!(done, ChangeKind::Done);
 }
+
+#[test]
+fn approved_done_with_a_failing_pick_ends_the_session() {
+    let h = harness(true, &["a", "b"]);
+    h.planner.assign(Utc::now()).unwrap();
+    h.advisor.bogus_pick.store(true, Ordering::SeqCst);
+    let record = h
+        .planner
+        .request_change(Utc::now(), ChangeKind::Done, "3장 초안 제출함")
+        .unwrap();
+    assert!(record.approved);
+    assert!(h.planner.status().assignment.is_none());
+    assert!(!h.focus.store().get().session_active);
+    // "a" is done; "b" is still open, so the planner stays active.
+    assert!(h.planner.is_active());
+}

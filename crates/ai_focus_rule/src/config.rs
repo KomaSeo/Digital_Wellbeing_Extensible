@@ -156,7 +156,11 @@ impl AiFocusStore {
             writable: false,
             inner: Arc::new(RwLock::new(AiFocusConfig::default())),
         };
-        store.reload_keeping_session()?;
+        // A damaged file must not stop the agent: run on defaults (which
+        // block nothing extra) and pick up the file once it is readable again.
+        if let Err(err) = store.reload_keeping_session() {
+            tracing::warn!("cannot read AI focus settings ({err}); using defaults for now");
+        }
         Ok(store)
     }
 

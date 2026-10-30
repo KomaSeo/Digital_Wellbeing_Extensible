@@ -239,8 +239,9 @@ pub fn call(session: u32, method: &str, params: Value) -> Result<Status, String>
             "agent not running for this session (is the service installed?)".to_string()
         })?;
     stream
-        // assign / request_change wait for the AI.
-        .set_read_timeout(Some(Duration::from_secs(120)))
+        // assign / request_change wait for the AI; an approved "done" makes two
+        // calls of up to 90 s each, so allow more than that.
+        .set_read_timeout(Some(Duration::from_secs(300)))
         .map_err(|e| e.to_string())?;
     let request = json!({ "method": method, "params": params });
     stream
