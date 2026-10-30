@@ -109,6 +109,12 @@ to-dos join the list only if the agent's AI approves them against the admin's
 life rules (Task planner tab); the task-picking prompt is fixed in the code.
 Setup (Korean): [`docs/claude_desktop.md`](docs/claude_desktop.md).
 
+**AI usage**: every Claude call's token counts are recorded per day and purpose
+with an estimated cost (price table in `crates/ai_focus_rule/src/usage.rs`); the
+AI focus tab shows today and this month, and an optional daily budget pauses
+focus checks (not planner or access requests) once it is spent. The API has no
+way to read the remaining credit; the Claude Console shows it.
+
 ## Function call API
 
 JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.

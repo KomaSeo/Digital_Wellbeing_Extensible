@@ -98,6 +98,8 @@ pub struct SettingsSnapshot {
     pub planner_state: Value,
     pub grants: BTreeMap<String, Value>,
     pub blocks: BTreeMap<String, Value>,
+    /// Every user's token usage file (see `ai_focus_rule::usage`).
+    pub usage: BTreeMap<String, Value>,
 }
 
 /// Read everything the admin panels need from `dir`; refused while locked.
@@ -112,6 +114,7 @@ pub fn snapshot(dir: &Path, now: DateTime<Utc>) -> Result<SettingsSnapshot, Stri
         planner_state: read_json(&dir.join("planner_state.json")),
         grants: read_folder(&dir.join("grants")),
         blocks: read_folder(&dir.join("blocks")),
+        usage: read_folder(&dir.join("usage")),
     })
 }
 

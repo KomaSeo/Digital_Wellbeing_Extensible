@@ -71,9 +71,11 @@ impl ClaudeClient {
         body
     }
 
-    /// Send and deserialize the structured reply into `T`.
+    /// Send and deserialize the structured reply into `T`. The reply's token usage is
+    /// recorded under `purpose` ("focus check", "planner pick", ...; see `usage.rs`).
     pub fn structured<T: DeserializeOwned>(
         &self,
+        purpose: &str,
         system: &str,
         content: Vec<Value>,
         schema: Value,
@@ -98,6 +100,8 @@ impl ClaudeClient {
             }
             Err(err) => return Err(JudgeError::Transport(err.to_string())),
         };
+        // Before parsing: a refused or cut-off reply is billed too.
+        crate::usage::record(purpose, &self.model, &response);
         parse_structured(&response)
     }
 }

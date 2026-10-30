@@ -59,6 +59,10 @@ pub struct AiFocusConfig {
     pub allow_permanent_grants: bool,
     /// Upper limit for temporary access, in minutes.
     pub max_grant_minutes: u32,
+    /// Estimated US dollars per day after which focus checks stop until the next day
+    /// (`0` = no limit). Planner and access-request calls are still allowed: refusing
+    /// them could leave the user stuck on a task. See `usage.rs`.
+    pub daily_budget_usd: f64,
     /// Grant ids the admin revoked. Kept here (an admin-owned file) so the
     /// admin UI never writes the agent's `grants.json`; the monitor drops these.
     pub revoked_grants: BTreeSet<String>,
@@ -92,6 +96,7 @@ impl Default for AiFocusConfig {
             ]),
             allow_permanent_grants: true,
             max_grant_minutes: 120,
+            daily_budget_usd: 0.0,
             revoked_grants: BTreeSet::new(),
             unblocked: BTreeSet::new(),
         }
@@ -193,6 +198,11 @@ impl AiFocusStore {
     /// `grants.json` next to the settings file (standalone install).
     pub fn grants_path(&self) -> Option<PathBuf> {
         self.path.as_ref().map(|p| p.with_file_name("grants.json"))
+    }
+
+    /// Standalone mode: `usage.json` next to the settings (token usage, see `usage.rs`).
+    pub fn usage_path(&self) -> Option<PathBuf> {
+        self.path.as_ref().map(|p| p.with_file_name("usage.json"))
     }
 
     /// Path of the backing file, if any.

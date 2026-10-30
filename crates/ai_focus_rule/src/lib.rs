@@ -20,6 +20,7 @@ mod monitor;
 pub mod platform;
 mod rule;
 pub mod store;
+pub mod usage;
 mod youtube;
 
 pub use config::{AiFocusConfig, AiFocusStore, ConfigError, DEFAULT_MODEL};
@@ -34,11 +35,19 @@ use grants::GrantState;
 use std::sync::Arc;
 use store::JsonStore;
 
-/// Monitor wired to the native desktop and the Claude judge.
 /// Monitor wired to the native desktop and the Claude judge and reviewer,
-/// keeping access grants in `grants`.
-pub fn native_monitor(store: AiFocusStore, grants: JsonStore<GrantState>) -> Arc<FocusMonitor> {
-    Arc::new(
-        FocusMonitor::new(store, platform::native(), claude_judge_provider()).with_grants(grants),
-    )
+/// keeping access grants in `grants`. With `usage`, the recorder is also
+/// installed for every Claude call of this process (see `usage.rs`).
+pub fn native_monitor(
+    store: AiFocusStore,
+    grants: JsonStore<GrantState>,
+    usage: Option<Arc<usage::UsageRecorder>>,
+) -> Arc<FocusMonitor> {
+    let mut monitor =
+        FocusMonitor::new(store, platform::native(), claude_judge_provider()).with_grants(grants);
+    if let Some(usage) = usage {
+        usage::install(Arc::clone(&usage));
+        monitor = monitor.with_usage(usage);
+    }
+    Arc::new(monitor)
 }

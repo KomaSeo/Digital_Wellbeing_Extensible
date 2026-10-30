@@ -16,6 +16,7 @@
 //!     planner_state.json  assignment + change-request log (written by agents)
 //!     grants\<user>.json  access grants + their log (written by that user's agent)
 //!     blocks\<user>.json  blocks in force (written by that user's agent)
+//!     usage\<user>.json   Claude token usage and estimated cost (that user's agent)
 //!     settings_lock.json  until when standard users may not edit settings (see `settings`)
 //!     logs\
 //! ```
@@ -78,6 +79,17 @@ pub fn grants_path_for(user: &str) -> PathBuf {
 /// One blocks file per user (`blocks\<user>.json`), written by that user's agent.
 pub fn blocks_dir() -> PathBuf {
     data_dir().join("blocks")
+}
+
+/// One token-usage file per user (`usage\<user>.json`), written by that user's agent.
+pub fn usage_dir() -> PathBuf {
+    data_dir().join("usage")
+}
+
+/// Token usage of `user`'s Claude calls (see `ai_focus_rule::usage`).
+pub fn usage_path_for(user: &str) -> PathBuf {
+    let file = grants_path_for(user);
+    usage_dir().join(file.file_name().unwrap_or_default())
 }
 
 /// Blocks in force for `user` (resumed when the agent restarts).

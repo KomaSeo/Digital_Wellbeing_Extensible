@@ -97,6 +97,12 @@ pub struct Status {
     /// Admin settings are locked for standard users until then; `None` = unlocked.
     #[serde(default)]
     pub settings_locked_until: Option<DateTime<Utc>>,
+    /// Estimated cost of today's Claude calls on this PC, and the admin's daily
+    /// budget for focus checks (`0` = none).
+    #[serde(default)]
+    pub ai_cost_today_usd: Option<f64>,
+    #[serde(default)]
+    pub daily_budget_usd: f64,
 }
 
 /// Responsibility: Hold what the agent exposes (focus monitor, optional planner) and tell
@@ -146,6 +152,8 @@ fn status(api: &AgentApi) -> Status {
         last_proposal: None,
         settings_locked_until: crate::settings::read_lock(&crate::settings::lock_path())
             .locked_until(Utc::now()),
+        ai_cost_today_usd: monitor.usage().map(|u| u.today_cost()),
+        daily_budget_usd: config.daily_budget_usd,
     }
 }
 

@@ -15,6 +15,7 @@
 //! (blocks in force, so logging out and back in does not lift them).
 
 use ai_focus_rule::grants::GrantState;
+use ai_focus_rule::usage::UsageRecorder;
 use ai_focus_rule::{
     claude_judge_provider, platform, AiFocusRuleHandle, AiFocusStore, FocusMonitor, SavedBlocks,
 };
@@ -46,6 +47,13 @@ pub fn run() -> anyhow::Result<()> {
         machine::session::session_user(session).unwrap_or_else(|| format!("session{session}"));
     let grants = JsonStore::<GrantState>::open(machine::grants_path_for(&user), true)?;
     let blocks = JsonStore::<SavedBlocks>::open(machine::blocks_path_for(&user), true)?;
+    // Every Claude call of this agent (focus checks, planner, access reviews) is counted;
+    // the daily budget adds up every user's file.
+    let usage = Arc::new(UsageRecorder::new(
+        JsonStore::open(machine::usage_path_for(&user), true)?,
+        Some(machine::usage_dir()),
+    ));
+    ai_focus_rule::usage::install(Arc::clone(&usage));
     let monitor = Arc::new(
         FocusMonitor::new(
             ai_store.clone(),
@@ -53,7 +61,8 @@ pub fn run() -> anyhow::Result<()> {
             claude_judge_provider(),
         )
         .with_grants(grants)
-        .with_block_store(blocks),
+        .with_block_store(blocks)
+        .with_usage(Arc::clone(&usage)),
     );
     let ai_rule = AiFocusRuleHandle::new(Arc::clone(&monitor));
 

@@ -211,9 +211,13 @@ impl SettingsTab {
         )))
         .map_err(|e| e.to_string())?;
         let ai_store = AiFocusStore::open(dir.join("ai_focus.json")).map_err(|e| e.to_string())?;
-        let monitor = native_monitor(ai_store, JsonStore::in_memory(GrantState::default()));
-        let ai_rule =
-            AiFocusRuleHandle::settings_only(monitor, dir.join("grants"), dir.join("blocks"));
+        let monitor = native_monitor(ai_store, JsonStore::in_memory(GrantState::default()), None);
+        let ai_rule = AiFocusRuleHandle::settings_only(
+            monitor,
+            dir.join("grants"),
+            dir.join("blocks"),
+            dir.join("usage"),
+        );
         let planner = PlannerAdminUi::new(
             JsonStore::<PlannerConfig>::open(dir.join("planner.json"), true)
                 .map_err(|e| e.to_string())?,
@@ -287,7 +291,11 @@ fn write_read_only(dir: &Path, snapshot: &SettingsSnapshot) -> Result<(), String
             &json(&snapshot.planner_state)?,
         )?;
     }
-    for (folder, files) in [("grants", &snapshot.grants), ("blocks", &snapshot.blocks)] {
+    for (folder, files) in [
+        ("grants", &snapshot.grants),
+        ("blocks", &snapshot.blocks),
+        ("usage", &snapshot.usage),
+    ] {
         let folder = dir.join(folder);
         let _ = fs::remove_dir_all(&folder);
         fs::create_dir_all(&folder).map_err(|e| e.to_string())?;

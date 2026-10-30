@@ -83,6 +83,10 @@ pub enum JudgeError {
     Truncated,
     #[error("unexpected response: {0}")]
     BadResponse(String),
+    #[error(
+        "today's AI budget is spent (${spent:.2} of ${limit:.2}); focus checks resume tomorrow"
+    )]
+    BudgetReached { spent: f64, limit: f64 },
 }
 
 /// Responsibility: Judge one window against the task (Claude in production, fakes in tests).
@@ -118,6 +122,7 @@ impl Judge for ClaudeJudge {
         // Effort `low`: a single classification needs little reasoning, and
         // this runs every check interval.
         self.client.structured(
+            "focus check",
             SYSTEM_PROMPT,
             Self::content(request),
             verdict_schema(),

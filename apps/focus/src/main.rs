@@ -629,6 +629,16 @@ impl eframe::App for FocusApp {
                 if let Some(err) = &status.last_error {
                     ui.colored_label(RED, format!("AI check failed: {err}"));
                 }
+                if let Some(cost) = status.ai_cost_today_usd {
+                    ui.small(if status.daily_budget_usd > 0.0 {
+                        format!(
+                            "AI cost today (estimate): ${cost:.2} of ${:.2}",
+                            status.daily_budget_usd
+                        )
+                    } else {
+                        format!("AI cost today (estimate): ${cost:.2}")
+                    });
+                }
 
                 ui.separator();
                 ui.heading("Blocked now");

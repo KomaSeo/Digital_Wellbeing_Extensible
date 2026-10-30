@@ -74,7 +74,10 @@ fn start_standalone() -> Started {
     let grants_path = ai_store.grants_path().expect("settings have a file");
     let grants =
         JsonStore::<GrantState>::open(grants_path, true).expect("failed to open grants.json");
-    let ai_rule = AiFocusRuleHandle::new(native_monitor(ai_store, grants));
+    let usage_path = ai_store.usage_path().expect("settings have a file");
+    let usage = JsonStore::open(usage_path, true).expect("failed to open usage.json");
+    let usage = Arc::new(ai_focus_rule::usage::UsageRecorder::new(usage, None));
+    let ai_rule = AiFocusRuleHandle::new(native_monitor(ai_store, grants, Some(usage)));
     enforcer.register_rule(ai_rule.rule());
     // Future: enforcer.register_rule(browser_guard.rule());
 
@@ -122,9 +125,13 @@ fn start_machine_admin() -> Started {
         .expect("failed to open machine AI settings (run as administrator)");
     // The admin view reads every user's grants and blocks files; it revokes
     // and unblocks through the config.
-    let monitor = native_monitor(ai_store, JsonStore::in_memory(GrantState::default()));
-    let ai_rule =
-        AiFocusRuleHandle::settings_only(monitor, machine::grants_dir(), machine::blocks_dir());
+    let monitor = native_monitor(ai_store, JsonStore::in_memory(GrantState::default()), None);
+    let ai_rule = AiFocusRuleHandle::settings_only(
+        monitor,
+        machine::grants_dir(),
+        machine::blocks_dir(),
+        machine::usage_dir(),
+    );
 
     let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui(), ai_rule.ui()];
 

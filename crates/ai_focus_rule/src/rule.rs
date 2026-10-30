@@ -5,6 +5,7 @@ use crate::config::AiFocusStore;
 use crate::grants::{GrantEvent, GrantState};
 use crate::judge::Verdict;
 use crate::monitor::{FocusMonitor, SavedBlocks};
+use crate::usage::{Totals, UsageLog};
 use chrono::{Local, Utc};
 use enforcer::{normalize_process_name, BlockEvent, BlockRule, ProcessSnapshot};
 use parking_lot::Mutex;
@@ -29,6 +30,10 @@ struct AiUiState {
     blocks_read: Option<std::time::Instant>,
     /// Admin view: (user, blocks) read from every file in the blocks folder.
     admin_blocks: Vec<(String, SavedBlocks)>,
+    /// When the admin view last re-read the usage files.
+    usage_read: Option<std::time::Instant>,
+    /// Admin view: (user, token usage) read from every file in the usage folder.
+    admin_usage: Vec<(String, UsageLog)>,
     show_key: bool,
     /// Result of the last "Check key", written by a background thread.
     key_check: Arc<Mutex<Option<String>>>,
@@ -48,6 +53,8 @@ pub struct AiFocusRule {
     admin_grants_dir: Option<PathBuf>,
     /// Admin view of a machine install: folder with one blocks file per user.
     admin_blocks_dir: Option<PathBuf>,
+    /// Admin view of a machine install: folder with one token-usage file per user.
+    admin_usage_dir: Option<PathBuf>,
     ui_state: Mutex<AiUiState>,
 }
 
@@ -56,6 +63,7 @@ impl AiFocusRule {
         Self {
             admin_grants_dir: None,
             admin_blocks_dir: None,
+            admin_usage_dir: None,
             monitor,
             session_controls,
             ui_state: Mutex::new(AiUiState::default()),
@@ -238,6 +246,98 @@ impl AiFocusRule {
                 }
             });
         }
+    }
+
+    /// Token usage and estimated cost of the Claude calls (today, this month, by purpose and
+    /// user), and the daily budget for focus checks. See `usage.rs`.
+    fn usage_ui(&self, ui: &mut egui::Ui, config: &crate::AiFocusConfig, s: &mut AiUiState) {
+        let sources: Vec<(String, UsageLog)> = match &self.admin_usage_dir {
+            Some(dir) => {
+                if s.usage_read
+                    .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
+                {
+                    s.admin_usage = read_user_files(dir).0;
+                    s.usage_read = Some(std::time::Instant::now());
+                }
+                s.admin_usage.clone()
+            }
+            None => self
+                .monitor
+                .usage()
+                .map(|u| vec![(String::new(), u.log())])
+                .unwrap_or_default(),
+        };
+        let today_date = Local::now().date_naive();
+        let mut today = Totals::default();
+        let mut month = Totals::default();
+        let mut by_purpose: std::collections::BTreeMap<String, Totals> = Default::default();
+        for (_, log) in &sources {
+            let day = log.day(today_date);
+            today.merge(&day.total);
+            month.merge(&log.month(today_date));
+            for (purpose, totals) in day.by_purpose {
+                by_purpose.entry(purpose).or_default().merge(&totals);
+            }
+        }
+
+        ui.separator();
+        ui.heading("AI usage");
+        egui::Grid::new("ai_usage").num_columns(5).show(ui, |ui| {
+            ui.label("");
+            ui.label("calls");
+            ui.label("input tokens");
+            ui.label("output tokens");
+            ui.label("estimated cost");
+            ui.end_row();
+            let row = |ui: &mut egui::Ui, name: &str, t: &Totals| {
+                ui.label(name);
+                ui.label(t.calls.to_string());
+                ui.label((t.input_tokens + t.cache_read_tokens + t.cache_write_tokens).to_string());
+                ui.label(t.output_tokens.to_string());
+                ui.label(format!("${:.3}", t.cost_usd));
+                ui.end_row();
+            };
+            row(ui, "Today", &today);
+            row(ui, "This month", &month);
+            for (purpose, totals) in &by_purpose {
+                row(ui, &format!("  today: {purpose}"), totals);
+            }
+        });
+        if sources.len() > 1 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Today by user:");
+                for (user, log) in &sources {
+                    ui.label(format!("{user} ${:.3}", log.day(today_date).total.cost_usd));
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label("Daily budget for focus checks (USD, 0 = none)");
+            let mut budget = config.daily_budget_usd;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut budget)
+                        .range(0.0..=1000.0)
+                        .speed(0.05)
+                        .fixed_decimals(2),
+                )
+                .changed()
+            {
+                self.save(s, |c| c.daily_budget_usd = budget);
+            }
+        });
+        if config.daily_budget_usd > 0.0 && today.cost_usd >= config.daily_budget_usd {
+            ui.colored_label(
+                egui::Color32::from_rgb(200, 80, 80),
+                "Today's budget is spent: focus checks are paused until tomorrow. Blocks stay; \
+                 planner and access requests still work.",
+            );
+        }
+        ui.small(
+            "Estimated from the token counts the API returns and the price table in usage.rs. \
+             The Claude Console shows the real bill and the remaining credit; the API offers \
+             no way to read the credit.",
+        );
     }
 
     /// Access grants in force and their history; the admin can revoke.
@@ -573,6 +673,7 @@ impl RuleUi for AiFocusRule {
 
         self.admin_blocks_ui(ui, &config, &mut s);
         self.grants_ui(ui, &config, &mut s);
+        self.usage_ui(ui, &config, &mut s);
 
         // --- Lists ------------------------------------------------------------------
         ui.separator();
@@ -703,16 +804,18 @@ impl AiFocusRuleHandle {
     }
 
     /// Settings panel only, for editing a machine install's config from the admin UI.
-    /// The monitor is never started; grants and blocks are read from every file in
-    /// `grants_dir` and `blocks_dir`.
+    /// The monitor is never started; grants, blocks and token usage are read from every
+    /// file in `grants_dir`, `blocks_dir` and `usage_dir`.
     pub fn settings_only(
         monitor: Arc<FocusMonitor>,
         grants_dir: PathBuf,
         blocks_dir: PathBuf,
+        usage_dir: PathBuf,
     ) -> Self {
         let mut rule = AiFocusRule::new(Arc::clone(&monitor), false);
         rule.admin_grants_dir = Some(grants_dir);
         rule.admin_blocks_dir = Some(blocks_dir);
+        rule.admin_usage_dir = Some(usage_dir);
         Self {
             inner: Arc::new(rule),
             monitor,
@@ -765,7 +868,7 @@ mod tests {
         render(AiFocusRuleHandle::new(Arc::clone(&monitor)).ui().as_ref());
         let dir = std::env::temp_dir().join("dw_no_grants_dir");
         render(
-            AiFocusRuleHandle::settings_only(monitor, dir.clone(), dir)
+            AiFocusRuleHandle::settings_only(monitor, dir.clone(), dir.clone(), dir)
                 .ui()
                 .as_ref(),
         );

@@ -9,6 +9,7 @@ use crate::grants::{Grant, GrantDuration, GrantEvent, GrantLogEntry, GrantState,
 use crate::judge::{ClaudeJudge, Judge, JudgeError, JudgeRequest, Judgement, Verdict};
 use crate::platform::{Desktop, Foreground, Screenshot};
 use crate::store::JsonStore;
+use crate::usage::UsageRecorder;
 use crate::youtube;
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use enforcer::{is_never_terminate, normalize_process_name};
@@ -600,6 +601,9 @@ pub struct FocusMonitor {
     access_busy: Mutex<()>,
     /// Where blocks are saved (in memory unless [`Self::with_block_store`]).
     blocks: JsonStore<SavedBlocks>,
+    /// Token usage of this process's Claude calls (see `usage.rs`); with a daily
+    /// budget, focus checks stop once it is spent.
+    usage: Option<Arc<UsageRecorder>>,
     running: AtomicBool,
 }
 
@@ -615,6 +619,7 @@ impl FocusMonitor {
             reviewer: claude_reviewer_provider(),
             access_busy: Mutex::new(()),
             blocks: JsonStore::in_memory(SavedBlocks::default()),
+            usage: None,
             running: AtomicBool::new(false),
         }
     }
@@ -663,6 +668,17 @@ impl FocusMonitor {
     pub fn with_grants(mut self, grants: JsonStore<GrantState>) -> Self {
         self.grants = grants;
         self
+    }
+
+    /// Count token usage in `usage` and honour the daily budget. The same recorder
+    /// is usually also `usage::install`ed, so that every Claude call reaches it.
+    pub fn with_usage(mut self, usage: Arc<UsageRecorder>) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
+    pub fn usage(&self) -> Option<&Arc<UsageRecorder>> {
+        self.usage.as_ref()
     }
 
     pub fn with_reviewer(mut self, reviewer: ReviewerProvider) -> Self {
@@ -953,6 +969,9 @@ impl FocusMonitor {
         fg: &Foreground,
         grant: Option<&Grant>,
     ) -> Result<Judgement, JudgeError> {
+        if let Some((spent, limit)) = self.usage.as_ref().and_then(|u| u.over_budget(config)) {
+            return Err(JudgeError::BudgetReached { spent, limit });
+        }
         let judge = (self.judge)(config)?;
         let private_on_screen = config.is_private(&fg.process_name)
             || (!config.private_apps.is_empty()
@@ -1795,6 +1814,33 @@ mod tests {
         h.monitor.step(Utc::now());
         assert_eq!(h.calls.load(Ordering::SeqCst), 1);
         assert!(!h.saw_screenshot.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn focus_checks_stop_when_the_daily_budget_is_spent() {
+        use crate::usage::{TokenUsage, UsageLog, UsageRecorder};
+        let mut config = session("thesis");
+        config.daily_budget_usd = 1.0;
+        let usage = Arc::new(UsageRecorder::new(
+            JsonStore::in_memory(UsageLog::default()),
+            None,
+        ));
+        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
+        let monitor = h.monitor.with_usage(Arc::clone(&usage));
+        // $4 of input on Opus 5.5: over the $1 budget.
+        let spent = TokenUsage {
+            input: 1_000_000,
+            ..Default::default()
+        };
+        usage.record("focus check", "claude-opus-5-5", &spent);
+        monitor.step(Utc::now());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0, "the judge is not asked");
+        assert!(monitor.state().process_blocks().is_empty());
+        assert!(monitor
+            .state()
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("budget")));
     }
 
     #[test]

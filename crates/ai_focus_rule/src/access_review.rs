@@ -82,6 +82,7 @@ impl AccessReviewer for ClaudeAccessReviewer {
     fn review(&self, r: &AccessRequest) -> Result<AccessDecision, JudgeError> {
         // `medium`: rare call that weighs a purpose against a task.
         self.client.structured(
+            "access review",
             ACCESS_PROMPT,
             vec![text_block(request_text(r))],
             decision_schema(),

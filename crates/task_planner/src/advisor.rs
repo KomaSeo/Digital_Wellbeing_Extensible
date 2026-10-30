@@ -176,6 +176,7 @@ impl Advisor for ClaudeAdvisor {
         // `medium`: rare call, and weighing deadlines against priorities
         // benefits from some reasoning.
         self.client.structured(
+            "planner pick",
             PICK_PROMPT,
             vec![text_block(pick_text(r))],
             pick_schema(),
@@ -185,6 +186,7 @@ impl Advisor for ClaudeAdvisor {
 
     fn review(&self, r: &ReviewRequest) -> Result<Review, JudgeError> {
         self.client.structured(
+            "planner review",
             REVIEW_PROMPT,
             vec![text_block(review_text(r))],
             review_schema(),
@@ -194,6 +196,7 @@ impl Advisor for ClaudeAdvisor {
 
     fn review_proposal(&self, r: &ProposalRequest) -> Result<Review, JudgeError> {
         self.client.structured(
+            "proposal review",
             PROPOSAL_PROMPT,
             vec![text_block(proposal_text(r))],
             review_schema(),

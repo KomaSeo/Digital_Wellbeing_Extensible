@@ -101,7 +101,7 @@ UAC 창에 관리자 비밀번호를 넣으면 됩니다.
 ### 2.2 설치 후 파일 위치
 
 ```
-C:\Program Files\DigitalWellbeing\     실행 파일 3개가 있습니다. 일반 사용자는 이 파일을 읽고 실행할 수만 있습니다.
+C:\Program Files\DigitalWellbeing\     실행 파일 4개가 있습니다. 일반 사용자는 이 파일을 읽고 실행할 수만 있습니다.
 C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 수 있습니다.
     policy.json          블랙리스트/화이트리스트 규칙
     ai_focus.json        AI 집중 설정 (API 키 포함)
@@ -111,6 +111,8 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
     grants\<사용자>.json  앱·사이트 접근 허용과 그 기록. 그 사용자의 agent가 씁니다. (접근 요청, docs/access_grants.md)
     blocks\<사용자>.json  지금 걸려 있는 차단. 그 사용자의 agent가 씁니다. 로그아웃했다가 다시 로그인해도 차단이 이어집니다.
                          차단은 시간이 지나도 풀리지 않습니다. 관리자는 관리 UI의 AI focus 탭(Blocked now)에서 차단을 풀 수 있습니다.
+    usage\<사용자>.json   그 사용자의 Claude 호출 토큰 수와 예상 비용(날짜·용도별). 그 사용자의 agent가 씁니다. (docs/ai_focus_rule.md 5.10절)
+    settings_lock.json   작업 계정에서 설정을 고치지 못하게 잠근 기한. (6.4절)
     logs\service.log, logs\agent-session<번호>.log   실행 기록
 ```
 
