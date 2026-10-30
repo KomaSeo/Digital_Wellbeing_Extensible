@@ -137,6 +137,15 @@ AI focus tab shows today and this month, and an optional daily budget pauses
 focus checks (not planner or access requests) once it is spent. The API has no
 way to read the remaining credit; the Claude Console shows it.
 
+**Linux and tests**: everything but the Windows service, installer and tray runs
+on Linux too; the focus monitor uses X11 there (`platform/x11.rs`; Wayland is not
+supported) and the agent runs as `digital-wellbeing-service agent`.
+`xvfb-run -a cargo test --workspace` includes an X11 test and an end-to-end test
+that runs the real agent against real windows and a local stand-in for the Claude
+API. CI (`.github/workflows/ci.yml`) runs that on Linux and, on Windows, the tests
+plus a real install, upgrade (checking the data-folder ACLs) and uninstall.
+Guide (Korean): [`docs/linux_and_tests.md`](docs/linux_and_tests.md).
+
 ## Function call API
 
 JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.

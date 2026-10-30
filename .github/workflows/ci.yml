@@ -1,0 +1,103 @@
+# Responsibility: Check every push on real machines: the whole test suite on Linux under a
+# virtual X server (including the end-to-end agent test), and on Windows the test suite plus
+# a real install, upgrade and uninstall of the service.
+#
+# The Windows job is the only place where the installer's Win32 work (service registration,
+# data-folder ACLs, copying the executables) runs before a user installs it.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-ci
+      # Xvfb for the X11 and end-to-end tests; the rest builds the egui apps.
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxkbcommon-dev libwayland-dev libgl1-mesa-dev libxcb1-dev
+      - name: Test (with a virtual X server)
+        run: xvfb-run -a cargo test --workspace --locked
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Same cache as the release workflow: both build the release profile.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+      - name: Test
+        run: cargo test --workspace --locked --release
+      - name: Build
+        run: cargo build --release --workspace --locked
+
+      - name: Install, upgrade and uninstall the service
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "target\release\digital-wellbeing-service.exe"
+          $data = "C:\ProgramData\DigitalWellbeing"
+
+          Write-Host "== install"
+          & $exe install --manage-all
+          if ($LASTEXITCODE -ne 0) { throw "install failed ($LASTEXITCODE)" }
+          $svc = Get-Service DigitalWellbeing
+          if ($svc.Status -ne "Running") { throw "service is $($svc.Status) after install" }
+          if ($svc.StartType -ne "Automatic") { throw "service start type is $($svc.StartType)" }
+          foreach ($f in "digital-wellbeing-service.exe", "digital-wellbeing-focus.exe", "digital-wellbeing-mcp.exe") {
+            if (-not (Test-Path "C:\Program Files\DigitalWellbeing\$f")) { throw "$f was not installed" }
+          }
+
+          Write-Host "== upgrade over files an older version left behind"
+          Set-Content "$data\planner.json" '{"enabled":false}'
+          Set-Content "$data\logs\old.log" 'from an older version'
+          & $exe install --manage-all
+          if ($LASTEXITCODE -ne 0) { throw "upgrade install failed ($LASTEXITCODE)" }
+          Start-Sleep -Seconds 3
+
+          Write-Host "== every file inside the data folder: SYSTEM and Administrators, readable"
+          foreach ($f in Get-ChildItem $data -Recurse -File) {
+            $acl = (Get-Acl $f.FullName).AccessToString
+            if ($acl -notmatch "SYSTEM" -or $acl -notmatch "Administrators") {
+              throw "bad ACL on $($f.FullName): '$acl'"
+            }
+            Get-Content $f.FullName -TotalCount 1 | Out-Null
+          }
+          $folder = (Get-Acl $data).AccessToString
+          Write-Host $folder
+          if ($folder -match "Users|Everyone|Authenticated") { throw "standard users can reach $data" }
+
+          Write-Host "== service log after the upgrade"
+          Get-Content "$data\logs\service.log" -Tail 20
+          if (-not (Select-String -Path "$data\logs\service.log" -Pattern "service running" -Quiet)) {
+            throw "the service did not log that it runs"
+          }
+          # Hosted runners may have no logged-on user; report what the supervisor did.
+          if (Select-String -Path "$data\logs\service.log" -Pattern "started agent" -Quiet) {
+            Get-ChildItem "$data\logs\agent-session*.log" | ForEach-Object { "== $($_.Name)"; Get-Content $_.FullName -Tail 15 }
+          } else {
+            Write-Host "no user session on this runner: agent start-up in a session is not covered here"
+          }
+
+          Write-Host "== uninstall"
+          & $exe uninstall
+          if ($LASTEXITCODE -ne 0) { throw "uninstall failed ($LASTEXITCODE)" }
+          Start-Sleep -Seconds 2
+          $left = Get-Service DigitalWellbeing -ErrorAction SilentlyContinue
+          if ($left -and $left.Status -eq "Running") { throw "the service still runs after uninstall" }
