@@ -9,6 +9,7 @@ use crate::grants::{Grant, GrantDuration, GrantEvent, GrantLogEntry, GrantState,
 use crate::judge::{ClaudeJudge, Judge, JudgeError, JudgeRequest, Judgement, Verdict};
 use crate::platform::{Desktop, Foreground, Screenshot};
 use crate::store::JsonStore;
+use crate::youtube;
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use enforcer::{is_never_terminate, normalize_process_name};
 use parking_lot::Mutex;
@@ -26,6 +27,8 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const HISTORY_CAPACITY: usize = 30;
 const VERDICT_LOG_CAPACITY: usize = 100;
 const MAX_TITLE_CHARS: usize = 120;
+/// Most YouTube pages whose channel is remembered (see `MonitorState::channels`).
+const CHANNEL_CACHE_CAPACITY: usize = 500;
 const SCREENSHOT_MAX_WIDTH: u32 = 1280;
 
 /// Responsibility: Record one stretch of time a window stayed in front.
@@ -77,6 +80,19 @@ pub enum Action {
     CloseTab,
 }
 
+/// Responsibility: Count off-task verdicts in a row for one strike key, and remember what
+/// they were about, so that reaching the limit blocks each of those things.
+///
+/// For most windows every verdict in a run is about the same thing. On YouTube the strike key
+/// is the site but blocks are per channel: someone who hops to another channel after each
+/// strike would otherwise never be blocked, so the run collects every channel it saw.
+#[derive(Debug, Default)]
+struct StrikeRun {
+    count: u32,
+    /// (block key, window title, reason), one per distinct block key.
+    targets: Vec<(String, String, String)>,
+}
+
 /// Responsibility: Hold the session's runtime state (history, strikes, blocks, verdicts) and
 /// apply the rules to it, without any I/O.
 #[derive(Debug, Default)]
@@ -84,11 +100,16 @@ pub struct MonitorState {
     pub task: String,
     pub history: VecDeque<ActivityEntry>,
     pub verdicts: VecDeque<VerdictLogEntry>,
-    strikes: HashMap<String, u32>,
+    strikes: HashMap<String, StrikeRun>,
     /// Normalized process name -> block.
     pub blocked_processes: HashMap<String, BlockedEntry>,
-    /// Browser "process|site" -> block (see [`tab_key`]).
+    /// Browser "process|site" -> block (see [`tab_key`]); on YouTube
+    /// "process|youtube channel: …" or "process|youtube page: …" (see `youtube.rs`).
     pub blocked_tabs: HashMap<String, BlockedEntry>,
+    /// YouTube page name -> channel, as the judge read it from a screenshot.
+    /// The title names only the video, so this is how a video of a blocked
+    /// channel is recognized on the next sample without asking the judge again.
+    channels: HashMap<String, String>,
     pub last_check: Option<DateTime<Utc>>,
     /// When the next scheduled check is due (randomized; see [`Self::mark_checked`]).
     next_check: Option<DateTime<Utc>>,
@@ -116,6 +137,7 @@ impl MonitorState {
             task: task.to_string(),
             history: std::mem::take(&mut self.history),
             verdicts: std::mem::take(&mut self.verdicts),
+            channels: std::mem::take(&mut self.channels),
             blocked_processes: keep(&mut self.blocked_processes),
             blocked_tabs: keep(&mut self.blocked_tabs),
             ..Default::default()
@@ -216,9 +238,44 @@ impl MonitorState {
         x
     }
 
-    pub fn tab_blocked(&self, now: DateTime<Utc>, fg: &Foreground) -> bool {
+    /// What a block of this window would be keyed by, and so what "the same
+    /// window" means for early checks: the process for an app, the site for a
+    /// browser tab, and on YouTube the channel (or, unknown, the page).
+    pub fn target_key(&self, config: &AiFocusConfig, fg: &Foreground) -> String {
+        if !config.is_browser(&fg.process_name) {
+            return normalize_process_name(&fg.process_name);
+        }
+        if !youtube::is_youtube(&fg.title) {
+            return tab_key(fg);
+        }
+        match self.channels.get(&youtube::page_name(&fg.title)) {
+            Some(channel) => youtube::channel_key(&fg.process_name, channel),
+            None => youtube::page_key(&fg.process_name, &fg.title),
+        }
+    }
+
+    /// Remember which channel a YouTube page belongs to.
+    fn learn_channel(&mut self, fg: &Foreground, channel: &str) {
+        if !youtube::is_youtube(&fg.title) {
+            return;
+        }
+        let Some(channel) = youtube::normalize_channel(channel) else {
+            return;
+        };
+        if self.channels.len() >= CHANNEL_CACHE_CAPACITY {
+            self.channels.clear();
+        }
+        self.channels.insert(youtube::page_name(&fg.title), channel);
+    }
+
+    /// Is this browser tab blocked right now?
+    pub fn tab_blocked(&self, now: DateTime<Utc>, config: &AiFocusConfig, fg: &Foreground) -> bool {
+        self.key_blocked(now, &self.target_key(config, fg))
+    }
+
+    fn key_blocked(&self, now: DateTime<Utc>, key: &str) -> bool {
         self.blocked_tabs
-            .get(&tab_key(fg))
+            .get(key)
             .is_some_and(|b| b.until.is_none_or(|u| now < u))
     }
 
@@ -243,53 +300,84 @@ impl MonitorState {
         grant: Option<&Grant>,
     ) -> Action {
         let is_browser = config.is_browser(&fg.process_name);
-        let block_key = if is_browser {
-            tab_key(fg)
-        } else {
-            normalize_process_name(&fg.process_name)
-        };
-        // Strikes on a granted app/site count per grant, so switching videos
-        // (= tab titles) on a granted site does not reset them.
+        if is_browser {
+            self.learn_channel(fg, &judgement.channel);
+        }
+        let target = self.target_key(config, fg);
+        // Strikes count per site (or app), not per block target: counting per
+        // tab title let a user dodge blocks by moving to the next video, and
+        // per channel by moving to the next channel. Strikes on a granted
+        // app/site count per grant, for the same reason.
         let key = match grant {
             Some(g) => format!("grant:{}", g.id),
-            None => block_key.clone(),
+            None if is_browser => tab_key(fg),
+            None => target.clone(),
         };
 
         let mut action = Action::None;
         let mut action_label = String::new();
-        match judgement.verdict {
-            Verdict::OnTask => {
-                self.strikes.remove(&key);
-            }
-            Verdict::Unsure => {}
-            Verdict::OffTask => {
-                let needed = config.strikes_to_block.max(1);
-                let strikes = self.strikes.entry(key.clone()).or_insert(0);
-                *strikes += 1;
-                if *strikes >= needed {
+        if grant.is_none() && is_browser && self.key_blocked(now, &target) {
+            // Only now known to be a blocked channel (its first screenshot).
+            action = Action::CloseTab;
+            action_label = "tab closed (already blocked)".into();
+        } else {
+            match judgement.verdict {
+                Verdict::OnTask => {
                     self.strikes.remove(&key);
-                    let until = (config.block_minutes > 0).then(|| {
-                        now + ChronoDuration::minutes(clamp_block_minutes(config.block_minutes))
-                    });
-                    let entry = BlockedEntry {
-                        reason: judgement.reason.clone(),
-                        until,
-                        title: fg.title.clone(),
-                    };
-                    if is_browser {
-                        self.blocked_tabs.insert(block_key, entry);
-                        action = Action::CloseTab;
-                        action_label = "tab closed".into();
+                }
+                Verdict::Unsure => {}
+                Verdict::OffTask => {
+                    let needed = config.strikes_to_block.max(1);
+                    let run = self.strikes.entry(key.clone()).or_default();
+                    run.count += 1;
+                    if !run.targets.iter().any(|(k, _, _)| *k == target) {
+                        run.targets.push((
+                            target.clone(),
+                            fg.title.clone(),
+                            judgement.reason.clone(),
+                        ));
+                    }
+                    if run.count >= needed {
+                        let run = self.strikes.remove(&key).unwrap_or_default();
+                        let until = (config.block_minutes > 0).then(|| {
+                            now + ChronoDuration::minutes(clamp_block_minutes(config.block_minutes))
+                        });
+                        if is_browser {
+                            let blocked = run.targets.len();
+                            for (block_key, title, reason) in run.targets {
+                                self.blocked_tabs.insert(
+                                    block_key,
+                                    BlockedEntry {
+                                        reason,
+                                        until,
+                                        title,
+                                    },
+                                );
+                            }
+                            action = Action::CloseTab;
+                            action_label = if blocked > 1 {
+                                format!("tab closed, {blocked} blocked")
+                            } else {
+                                "tab closed".into()
+                            };
+                        } else {
+                            self.blocked_processes.insert(
+                                target.clone(),
+                                BlockedEntry {
+                                    reason: judgement.reason.clone(),
+                                    until,
+                                    title: fg.title.clone(),
+                                },
+                            );
+                            action = Action::BlockProcess(target);
+                            action_label = "blocked".into();
+                        }
+                        if grant.is_some() {
+                            action_label = format!("access revoked, {action_label}");
+                        }
                     } else {
-                        self.blocked_processes.insert(block_key.clone(), entry);
-                        action = Action::BlockProcess(block_key);
-                        action_label = "blocked".into();
+                        action_label = format!("strike {}/{needed}", run.count);
                     }
-                    if grant.is_some() {
-                        action_label = format!("access revoked, {action_label}");
-                    }
-                } else {
-                    action_label = format!("strike {strikes}/{needed}");
                 }
             }
         }
@@ -339,6 +427,19 @@ pub fn tab_key(fg: &Foreground) -> String {
 /// `(3) Funny cats - YouTube - Google Chrome` -> `youtube`. Without a
 /// separator the whole title is used.
 pub fn site_of(title: &str) -> String {
+    let t = strip_browser_noise(title);
+    let site = [" - ", " | ", " — ", " · "]
+        .iter()
+        .filter_map(|sep| t.rfind(sep).map(|i| &t[i + sep.len()..]))
+        .min_by_key(|s| s.len())
+        .unwrap_or(t);
+    truncate(site.trim(), 60).to_lowercase()
+}
+
+/// A browser title without the browser's name, Edge's "and 3 more pages" and
+/// unread counters such as "(3) ", which change constantly:
+/// `(3) Funny cats - YouTube - Google Chrome` -> `Funny cats - YouTube`.
+pub fn strip_browser_noise(title: &str) -> &str {
     const BROWSER_SUFFIXES: &[&str] = &[
         " - Google Chrome",
         " - Microsoft\u{200b} Edge",
@@ -360,7 +461,6 @@ pub fn site_of(title: &str) -> String {
     if let Some(i) = t.rfind(" and ").filter(|_| t.ends_with(" more pages")) {
         t = &t[..i];
     }
-    // Unread counters such as "(3) " change constantly.
     if let Some(rest) = t.strip_prefix('(') {
         if let Some((count, after)) = rest.split_once(") ") {
             if count.chars().all(|c| c.is_ascii_digit() || c == '+') {
@@ -368,22 +468,7 @@ pub fn site_of(title: &str) -> String {
             }
         }
     }
-    let site = [" - ", " | ", " — ", " · "]
-        .iter()
-        .filter_map(|sep| t.rfind(sep).map(|i| &t[i + sep.len()..]))
-        .min_by_key(|s| s.len())
-        .unwrap_or(t);
-    truncate(site.trim(), 60).to_lowercase()
-}
-
-/// What "the same window" means for checks and strikes: the site for a
-/// browser, the program otherwise.
-fn window_key(config: &AiFocusConfig, fg: &Foreground) -> String {
-    if config.is_browser(&fg.process_name) {
-        tab_key(fg)
-    } else {
-        normalize_process_name(&fg.process_name)
-    }
+    t.trim()
 }
 
 /// How long a newly focused window must stay in front before an early check.
@@ -607,7 +692,7 @@ impl FocusMonitor {
             if !exempt
                 && grant.is_none()
                 && config.is_browser(&fg.process_name)
-                && state.tab_blocked(now, &fg)
+                && state.tab_blocked(now, &config, &fg)
             {
                 drop(state);
                 if self.close_tab_if_unchanged(&fg) {
@@ -620,7 +705,7 @@ impl FocusMonitor {
                 && state.check_due(
                     now,
                     config.check_interval_secs,
-                    &window_key(&config, &fg),
+                    &state.target_key(&config, &fg),
                     since,
                 )
         };
@@ -628,9 +713,11 @@ impl FocusMonitor {
             return;
         }
 
-        self.state
-            .lock()
-            .mark_checked(now, config.check_interval_secs, &window_key(&config, &fg));
+        {
+            let mut state = self.state.lock();
+            let key = state.target_key(&config, &fg);
+            state.mark_checked(now, config.check_interval_secs, &key);
+        }
         let result = self.run_judge(&config, &fg, grant.as_ref());
         // The judge call can take a while; if access to this window was granted
         // (or revoked) meanwhile, the verdict was made under the old terms.
@@ -830,6 +917,7 @@ impl FocusMonitor {
             history: &history,
             process_name: &fg.process_name,
             title: &fg.title,
+            youtube: config.is_browser(&fg.process_name) && youtube::is_youtube(&fg.title),
             screenshot: screenshot.as_deref(),
             grant_purpose: grant.map(|g| g.purpose.as_str()),
         })
@@ -894,6 +982,8 @@ mod tests {
 
     struct FixedJudge {
         verdict: Arc<Mutex<Verdict>>,
+        /// Channel the judge "reads" from the screenshot.
+        channel: Arc<Mutex<String>>,
         /// Runs once inside the next judge call (simulates something happening meanwhile).
         during_call: Hook,
         saw_grant: Arc<Mutex<Option<String>>>,
@@ -919,6 +1009,7 @@ mod tests {
             Ok(Judgement {
                 verdict: *self.verdict.lock(),
                 reason: "test".into(),
+                channel: self.channel.lock().clone(),
             })
         }
     }
@@ -931,6 +1022,7 @@ mod tests {
         saw_screenshot: Arc<AtomicBool>,
         switch_to: Arc<Mutex<Option<Foreground>>>,
         verdict: Arc<Mutex<Verdict>>,
+        channel: Arc<Mutex<String>>,
         saw_grant: Arc<Mutex<Option<String>>>,
         current: Arc<Mutex<Option<Foreground>>>,
         during_call: Hook,
@@ -953,12 +1045,14 @@ mod tests {
         let current = Arc::new(Mutex::new(Some(current)));
         let switch_to = Arc::new(Mutex::new(None));
         let verdict = Arc::new(Mutex::new(verdict));
+        let channel = Arc::new(Mutex::new(String::new()));
         let saw_grant = Arc::new(Mutex::new(None));
         let during_call: Hook = Arc::new(Mutex::new(None));
         let visible = Arc::new(Mutex::new(Vec::new()));
         let judge: Arc<dyn Judge> = Arc::new(FixedJudge {
             during_call: Arc::clone(&during_call),
             verdict: Arc::clone(&verdict),
+            channel: Arc::clone(&channel),
             saw_grant: Arc::clone(&saw_grant),
             fg: Arc::clone(&current),
             switch_to: Arc::clone(&switch_to),
@@ -981,6 +1075,7 @@ mod tests {
             saw_screenshot,
             switch_to,
             verdict,
+            channel,
             saw_grant,
             current,
             during_call,
@@ -1183,6 +1278,7 @@ mod tests {
             saw_screenshot,
             switch_to,
             verdict,
+            channel,
             saw_grant,
             current,
             during_call,
@@ -1197,6 +1293,7 @@ mod tests {
                 saw_screenshot,
                 switch_to,
                 verdict,
+                channel,
                 saw_grant,
                 current,
                 during_call,
@@ -1407,21 +1504,87 @@ mod tests {
     }
 
     #[test]
-    fn switching_videos_does_not_reset_strikes() {
+    fn switching_channels_does_not_reset_strikes() {
         let h = harness(
             Verdict::OffTask,
             fg("chrome.exe", "Video 1 - YouTube"),
             session("thesis"),
         );
+        *h.channel.lock() = "Cat TV".into();
         let t0 = Utc::now();
         h.monitor.step(t0);
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 0);
         *h.current.lock() = Some(fg("chrome.exe", "(1) Video 2 - YouTube"));
+        *h.channel.lock() = "Game World".into();
         h.monitor.step(t0 + ChronoDuration::seconds(61));
+        // Second strike on YouTube: both channels it saw are blocked.
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
-        // Any other YouTube tab is closed straight away now.
-        *h.current.lock() = Some(fg("chrome.exe", "Video 3 - YouTube"));
+        let blocked: Vec<String> = h.monitor.state().blocked_tabs.keys().cloned().collect();
+        assert_eq!(blocked.len(), 2, "{blocked:?}");
+        assert!(blocked.contains(&"chrome.exe|youtube channel: cat tv".to_string()));
+        // Video 1 again: its channel is known, so it is closed without a check.
+        *h.current.lock() = Some(fg("chrome.exe", "Video 1 - YouTube"));
         h.monitor.step(t0 + ChronoDuration::seconds(66));
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn youtube_blocks_one_channel_not_the_whole_site() {
+        let mut config = session("learn Rust");
+        config.strikes_to_block = 1;
+        let h = harness(
+            Verdict::OffTask,
+            fg("chrome.exe", "Funny cats - YouTube"),
+            config,
+        );
+        *h.channel.lock() = "Cat TV".into();
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+
+        // Another channel stays open: checked (early, after the dwell), on task.
+        *h.verdict.lock() = Verdict::OnTask;
+        *h.channel.lock() = "Rust Lang".into();
+        *h.current.lock() = Some(fg("chrome.exe", "Async in depth - YouTube"));
+        h.monitor.step(t0 + ChronoDuration::seconds(20));
+        h.monitor.step(t0 + ChronoDuration::seconds(30));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+
+        // A new video of the blocked channel: unknown until judged, then closed
+        // even though this verdict alone would have let it stay.
+        *h.channel.lock() = "cat  tv".into();
+        *h.current.lock() = Some(fg("chrome.exe", "More cats - YouTube"));
+        h.monitor.step(t0 + ChronoDuration::seconds(40));
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+        h.monitor.step(t0 + ChronoDuration::seconds(50));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            h.monitor.state().verdicts.back().unwrap().action,
+            "tab closed (already blocked)"
+        );
+    }
+
+    #[test]
+    fn youtube_pages_without_a_channel_are_blocked_alone() {
+        let mut config = session("learn Rust");
+        config.strikes_to_block = 1;
+        let h = harness(
+            Verdict::OffTask,
+            fg("chrome.exe", "YouTube - Google Chrome"),
+            config,
+        );
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+        let keys: Vec<String> = h.monitor.state().blocked_tabs.keys().cloned().collect();
+        assert_eq!(keys, ["chrome.exe|youtube page: youtube"]);
+        // A video is not covered by the home page's block.
+        *h.current.lock() = Some(fg("chrome.exe", "Async in depth - YouTube"));
+        h.monitor.step(t0 + ChronoDuration::seconds(5));
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
     }
 
     #[test]

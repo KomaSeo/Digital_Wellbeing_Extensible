@@ -46,6 +46,11 @@ pub enum Verdict {
 pub struct Judgement {
     pub verdict: Verdict,
     pub reason: String,
+    /// YouTube only: the channel whose video or page is in front, as shown on
+    /// screen; empty elsewhere or when unreadable. Blocks on YouTube are per
+    /// channel (see `youtube.rs`).
+    #[serde(default)]
+    pub channel: String,
 }
 
 /// Responsibility: Carry everything the judge sees for one check.
@@ -55,6 +60,8 @@ pub struct JudgeRequest<'a> {
     pub history: &'a str,
     pub process_name: &'a str,
     pub title: &'a str,
+    /// The window is a YouTube tab: ask for the channel too.
+    pub youtube: bool,
     /// JPEG bytes.
     pub screenshot: Option<&'a [u8]>,
     /// Purpose of an access grant covering this window, if any.
@@ -127,9 +134,13 @@ fn verdict_schema() -> Value {
             "reason": {
                 "type": "string",
                 "description": "One short sentence the user will see, in the language of the task description."
+            },
+            "channel": {
+                "type": "string",
+                "description": "YouTube only: the name of the channel whose video or page is in front, exactly as shown on screen. Empty for other windows, for pages without a single channel, or when it cannot be read."
             }
         },
-        "required": ["verdict", "reason"],
+        "required": ["verdict", "reason", "channel"],
         "additionalProperties": false
     })
 }
@@ -138,7 +149,7 @@ fn user_text(request: &JudgeRequest) -> String {
     format!(
         "Declared task:\n{task}\n\n\
          Recent foreground activity (oldest first):\n{history}\n\n\
-         In front right now: {process} — \"{title}\"\n{grant}{shot}",
+         In front right now: {process} — \"{title}\"\n{grant}{youtube}{shot}",
         task = request.task.trim(),
         history = if request.history.is_empty() {
             "(none yet)"
@@ -153,6 +164,16 @@ fn user_text(request: &JudgeRequest) -> String {
                 purpose.trim()
             ),
             None => String::new(),
+        },
+        youtube = if request.youtube {
+            "This is YouTube. Blocks on YouTube apply to one channel, not the \
+             whole site, so judge the channel's video or page in front, and \
+             put that channel's name in `channel` exactly as the screen shows \
+             it (under the video, or in the channel page's header). Leave \
+             `channel` empty on pages without a single channel (home, search \
+             results, subscriptions) or when you cannot read it.\n"
+        } else {
+            ""
         },
         shot = if request.screenshot.is_some() {
             "The attached screenshot shows that screen."
@@ -198,6 +219,7 @@ mod tests {
             history: "",
             process_name: "chrome.exe",
             title: "YouTube",
+            youtube: true,
             screenshot: Some(&[1, 2, 3]),
             grant_purpose: None,
         };
@@ -218,6 +240,18 @@ mod tests {
             "low",
         );
         assert!(body.get("fallbacks").is_none());
+        assert!(user_text(&req).contains("This is YouTube"));
+        assert_eq!(
+            body["output_config"]["format"]["schema"]["required"][2],
+            "channel"
+        );
+    }
+
+    #[test]
+    fn a_judgement_without_channel_still_parses() {
+        let j: Judgement =
+            serde_json::from_str(r#"{"verdict":"on_task","reason":"docs"}"#).unwrap();
+        assert!(j.channel.is_empty());
     }
 
     #[test]
@@ -227,6 +261,7 @@ mod tests {
             history: "",
             process_name: "chrome.exe",
             title: "Rust 강의 - YouTube",
+            youtube: false,
             screenshot: None,
             grant_purpose: Some("Rust 비동기 강의 시청"),
         };

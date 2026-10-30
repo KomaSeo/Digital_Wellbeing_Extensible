@@ -171,18 +171,25 @@ impl FocusApp {
         });
     }
 
-    /// Fill the access form from a block-list key: `steam.exe`, or
-    /// `chrome.exe|Funny cats - YouTube` (site name = text after the last " - ").
+    /// Fill the access form from a block-list key: `steam.exe`, `chrome.exe|naver`,
+    /// an older `chrome.exe|Funny cats - YouTube` (site name = text after the last
+    /// " - "), or a YouTube channel/page key `chrome.exe|youtube channel: cat tv`.
+    /// Tab titles never name the channel, so a YouTube block is asked for as
+    /// "youtube"; the purpose the user gives then limits what the grant covers.
     fn prefill_access(&mut self, key: &str) {
         match key.split_once('|') {
             Some((_, title)) => {
                 self.access.site = true;
-                self.access.target = title
-                    .rsplit(" - ")
-                    .next()
-                    .unwrap_or(title)
-                    .trim()
-                    .to_string();
+                // Page names may contain " - " themselves, so look for the
+                // YouTube marker before splitting off the site.
+                let site = match title
+                    .split_once(" channel: ")
+                    .or(title.split_once(" page: "))
+                {
+                    Some((site, _)) => site,
+                    None => title.rsplit(" - ").next().unwrap_or(title),
+                };
+                self.access.target = site.trim().to_string();
             }
             None => {
                 self.access.site = false;
