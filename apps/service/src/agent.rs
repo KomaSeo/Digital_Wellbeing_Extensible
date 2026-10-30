@@ -11,7 +11,7 @@
 //! It reads config from `%ProgramData%\DigitalWellbeing` and never writes it;
 //! the admin UI writes, the agent reloads within a few seconds. The files it
 //! writes are `planner_state.json` (task assignment, change requests) and
-//! `grants.json` (access grants).
+//! `grants\<user>.json` (this user's access grants).
 
 use ai_focus_rule::grants::GrantState;
 use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
@@ -38,7 +38,9 @@ pub fn run() -> anyhow::Result<()> {
     let list_rule = ListBasedRuleHandle::new(list_store.clone());
 
     let ai_store = AiFocusStore::open_read_only(machine::ai_focus_path())?;
-    let grants = JsonStore::<GrantState>::open(machine::grants_path(), true)?;
+    let user =
+        machine::session::session_user(session).unwrap_or_else(|| format!("session{session}"));
+    let grants = JsonStore::<GrantState>::open(machine::grants_path_for(&user), true)?;
     let monitor = native_monitor(ai_store.clone(), grants);
     let ai_rule = AiFocusRuleHandle::new(Arc::clone(&monitor));
 

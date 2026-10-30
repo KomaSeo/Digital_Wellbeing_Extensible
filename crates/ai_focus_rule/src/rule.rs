@@ -2,13 +2,14 @@
 //! settings tab (RuleUi).
 
 use crate::config::AiFocusStore;
-use crate::grants::GrantEvent;
+use crate::grants::{GrantEvent, GrantState};
 use crate::judge::Verdict;
 use crate::monitor::FocusMonitor;
 use chrono::{Local, Utc};
 use enforcer::{normalize_process_name, BlockEvent, BlockRule, ProcessSnapshot};
 use parking_lot::Mutex;
 use rule_ui::RuleUi;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Responsibility: Keep the AI focus tab's edit buffers and status message between frames.
@@ -20,8 +21,10 @@ struct AiUiState {
     allow_input: String,
     private_input: String,
     status: String,
-    /// When the admin view last re-read `grants.json`.
+    /// When the admin view last re-read the grants files.
     grants_read: Option<std::time::Instant>,
+    /// Admin view: (user, grants) read from every file in the grants folder.
+    admin_grants: Vec<(String, GrantState)>,
 }
 
 /// Responsibility: Report the monitor's blocked processes to the enforcer, and draw the tab:
@@ -33,12 +36,15 @@ pub struct AiFocusRule {
     /// `false` in the admin UI of a machine install: the session runs in the
     /// user's agent, so this panel only edits settings.
     session_controls: bool,
+    /// Admin view of a machine install: folder with one grants file per user.
+    admin_grants_dir: Option<PathBuf>,
     ui_state: Mutex<AiUiState>,
 }
 
 impl AiFocusRule {
     pub fn new(monitor: Arc<FocusMonitor>, session_controls: bool) -> Self {
         Self {
+            admin_grants_dir: None,
             monitor,
             session_controls,
             ui_state: Mutex::new(AiUiState::default()),
@@ -58,16 +64,20 @@ impl AiFocusRule {
 
     /// Access grants in force and their history; the admin can revoke.
     fn grants_ui(&self, ui: &mut egui::Ui, config: &crate::AiFocusConfig, s: &mut AiUiState) {
-        // The admin view reads the agents' file; refresh it now and then. (With
-        // session controls this process owns the store, so it is always current.)
-        if !self.session_controls
-            && s.grants_read
-                .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
-        {
-            let _ = self.monitor.grants().reload();
-            s.grants_read = Some(std::time::Instant::now());
-        }
-        let grants = self.monitor.grants().get();
+        // The admin view reads the agents' files; refresh them now and then.
+        // (With session controls this process owns the store: always current.)
+        let sources: Vec<(String, GrantState)> = match &self.admin_grants_dir {
+            Some(dir) => {
+                if s.grants_read
+                    .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
+                {
+                    s.admin_grants = read_grant_files(dir);
+                    s.grants_read = Some(std::time::Instant::now());
+                }
+                s.admin_grants.clone()
+            }
+            None => vec![(String::new(), self.monitor.grants().get())],
+        };
         let now = Utc::now();
 
         ui.separator();
@@ -76,16 +86,19 @@ impl AiFocusRule {
             "Apps and sites the AI let the user use for a stated purpose. They stay observed: \
              off-purpose use revokes the grant and blocks again.",
         );
-        let active: Vec<_> = grants
-            .grants
+        let active: Vec<_> = sources
             .iter()
-            .filter(|g| g.is_active(now, config))
+            .flat_map(|(user, state)| state.grants.iter().map(move |g| (user, g)))
+            .filter(|(_, g)| g.is_active(now, config))
             .collect();
         if active.is_empty() {
             ui.label("None.");
         }
-        for g in active {
+        for (user, g) in active {
             ui.horizontal_wrapped(|ui| {
+                if !user.is_empty() {
+                    ui.strong(user.as_str());
+                }
                 let until = g
                     .until
                     .map(|u| {
@@ -97,7 +110,7 @@ impl AiFocusRule {
                 ui.label(format!("{} ({until}) — {}", g.target.label(), g.purpose));
                 if ui.small_button("revoke").clicked() {
                     let id = g.id.clone();
-                    // Through the config file, so this UI never writes grants.json.
+                    // Through the config file, so this UI never writes a grants file.
                     self.save(s, |c| {
                         c.revoked_grants.insert(id);
                     });
@@ -105,7 +118,12 @@ impl AiFocusRule {
             });
         }
         ui.collapsing("History", |ui| {
-            for e in grants.log.iter().rev() {
+            let mut log: Vec<_> = sources
+                .iter()
+                .flat_map(|(user, state)| state.log.iter().map(move |e| (user, e)))
+                .collect();
+            log.sort_by(|a, b| b.1.at.cmp(&a.1.at));
+            for (user, e) in log {
                 let what = match &e.event {
                     GrantEvent::Requested {
                         approved: true,
@@ -118,8 +136,13 @@ impl AiFocusRule {
                     GrantEvent::RevokedByAdmin => "revoked by admin".into(),
                 };
                 ui.label(format!(
-                    "{}  {}  {} — \"{}\" {}",
+                    "{}  {}{}  {} — \"{}\" {}",
                     e.at.with_timezone(&Local).format("%m-%d %H:%M"),
+                    if user.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{user}: ")
+                    },
                     e.target.label(),
                     what,
                     e.purpose,
@@ -474,6 +497,25 @@ fn name_list(
     });
 }
 
+/// Every `<user>.json` in `dir` as (user, grants); unreadable files are skipped.
+fn read_grant_files(dir: &std::path::Path) -> Vec<(String, GrantState)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, GrantState)> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| {
+            let user = p.file_stem()?.to_string_lossy().to_string();
+            let state = serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
+            Some((user, state))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// Responsibility: Hand out the same AiFocusRule as a block rule and as a settings tab, plus
 /// its monitor.
 ///
@@ -490,9 +532,14 @@ impl AiFocusRuleHandle {
     }
 
     /// Settings panel only, for editing a machine install's config from the admin UI.
-    /// The monitor is never started; its state stays empty.
-    pub fn settings_only(monitor: Arc<FocusMonitor>) -> Self {
-        Self::build(monitor, false)
+    /// The monitor is never started; grants are read from every file in `grants_dir`.
+    pub fn settings_only(monitor: Arc<FocusMonitor>, grants_dir: PathBuf) -> Self {
+        let mut rule = AiFocusRule::new(Arc::clone(&monitor), false);
+        rule.admin_grants_dir = Some(grants_dir);
+        Self {
+            inner: Arc::new(rule),
+            monitor,
+        }
     }
 
     fn build(monitor: Arc<FocusMonitor>, session_controls: bool) -> Self {

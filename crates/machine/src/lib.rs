@@ -14,7 +14,7 @@
 //!     machine.json     which Windows accounts are managed
 //!     planner.json     to-do list for the task planner (admin)
 //!     planner_state.json  assignment + change-request log (written by agents)
-//!     grants.json      access grants + their log (written by agents)
+//!     grants\<user>.json  access grants + their log (written by that user's agent)
 //!     logs\
 //! ```
 
@@ -50,9 +50,31 @@ pub fn planner_state_path() -> PathBuf {
     data_dir().join("planner_state.json")
 }
 
-/// Access grants and their log; written by agents.
-pub fn grants_path() -> PathBuf {
-    data_dir().join("grants.json")
+/// One grants file per user (`grants\<user>.json`), written by that user's agent.
+pub fn grants_dir() -> PathBuf {
+    data_dir().join("grants")
+}
+
+/// Grants file of `user`. Grants belong to a person, not to one logon, and
+/// agents of different users must not overwrite each other's file.
+pub fn grants_path_for(user: &str) -> PathBuf {
+    let safe: String = bare_user(user)
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || "-_.".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    grants_dir().join(format!("{safe}.json"))
+}
+
+/// `PC\name` or `DOMAIN\name` -> `name` (sessions report bare names).
+pub fn bare_user(user: &str) -> &str {
+    user.rsplit('\\').next().unwrap_or(user).trim()
 }
 
 pub fn machine_config_path() -> PathBuf {
@@ -96,7 +118,7 @@ impl MachineConfig {
             || self
                 .managed_users
                 .iter()
-                .any(|u| u.eq_ignore_ascii_case(user))
+                .any(|u| bare_user(u).eq_ignore_ascii_case(bare_user(user)))
     }
 }
 
@@ -113,5 +135,14 @@ mod tests {
         };
         assert!(c.manages("work"));
         assert!(!c.manages("Admin"));
+        // `--manage PC\Work` must still match the bare name the session reports.
+        let c = MachineConfig {
+            managed_users: vec!["DESKTOP-1\\Work".into()],
+        };
+        assert!(c.manages("work"));
+        assert!(
+            grants_path_for("PC\\Work").ends_with("grants/work.json")
+                || grants_path_for("PC\\Work").ends_with("grants\\work.json")
+        );
     }
 }

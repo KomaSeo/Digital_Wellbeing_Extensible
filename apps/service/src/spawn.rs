@@ -12,8 +12,8 @@ use windows_sys::Win32::Security::{
     TOKEN_ALL_ACCESS,
 };
 use windows_sys::Win32::System::RemoteDesktop::{
-    WTSActive, WTSDisconnected, WTSEnumerateSessionsW, WTSFreeMemory, WTSQuerySessionInformationW,
-    WTSUserName, WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW,
+    WTSActive, WTSDisconnected, WTSEnumerateSessionsW, WTSFreeMemory, WTS_CURRENT_SERVER_HANDLE,
+    WTS_SESSION_INFOW,
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, TerminateProcess,
@@ -43,7 +43,7 @@ pub fn user_sessions() -> Vec<UserSession> {
             if info.SessionId == 0 || (info.State != WTSActive && info.State != WTSDisconnected) {
                 continue;
             }
-            if let Some(user) = session_user(info.SessionId) {
+            if let Some(user) = machine::session::session_user(info.SessionId) {
                 out.push(UserSession {
                     id: info.SessionId,
                     user,
@@ -53,28 +53,6 @@ pub fn user_sessions() -> Vec<UserSession> {
         WTSFreeMemory(list as *mut c_void);
     }
     out
-}
-
-fn session_user(session: u32) -> Option<String> {
-    let mut buf: *mut u16 = null_mut();
-    let mut bytes = 0u32;
-    // SAFETY: WTS allocates a NUL-terminated UTF-16 string; freed below.
-    unsafe {
-        if WTSQuerySessionInformationW(
-            WTS_CURRENT_SERVER_HANDLE,
-            session,
-            WTSUserName,
-            &mut buf,
-            &mut bytes,
-        ) == 0
-        {
-            return None;
-        }
-        let len = (0..).take_while(|&i| *buf.add(i) != 0).count();
-        let user = String::from_utf16_lossy(std::slice::from_raw_parts(buf, len));
-        WTSFreeMemory(buf as *mut c_void);
-        Some(user).filter(|u| !u.is_empty())
-    }
 }
 
 /// Responsibility: Own the handle of a process the service started: report whether it runs,
