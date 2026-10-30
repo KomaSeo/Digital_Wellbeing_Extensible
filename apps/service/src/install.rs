@@ -8,12 +8,17 @@
 //! 2. copy the three executables to `%ProgramFiles%\DigitalWellbeing`
 //!    (standard users cannot modify files there — otherwise they could swap
 //!    in their own program and have the service run it as SYSTEM);
-//! 3. create `%ProgramData%\DigitalWellbeing` and restrict it to SYSTEM and
-//!    Administrators (users can neither read the API key nor edit policy);
+//! 3. create `%ProgramData%\DigitalWellbeing` (on a first install a folder
+//!    already there is moved aside: any user may have created it; junctions
+//!    are refused), make Administrators the owner and restrict it to SYSTEM
+//!    and Administrators (users can neither read the API key nor edit policy);
 //! 4. write `machine.json` when `--manage` is given;
 //! 5. register the service: automatic start, LocalSystem, restart on failure;
 //! 6. register the Focus app to start at every user's logon (HKLM Run key);
 //! 7. start the service.
+//!
+//! If a later step fails during an upgrade, the previous service is started
+//! again. Running executables are renamed to `*.old` before the new copy.
 
 use crate::service::SERVICE_NAME;
 use crate::{ADMIN_EXE, FOCUS_EXE, SERVICE_EXE};
@@ -61,11 +66,30 @@ pub fn install(args: &[String]) -> anyhow::Result<()> {
     .context("cannot open the service manager — run this from an administrator terminal")?;
 
     // 1. stop old service
-    if let Ok(existing) = manager.open_service(SERVICE_NAME, service_access()) {
+    let existing = manager.open_service(SERVICE_NAME, service_access()).ok();
+    if let Some(existing) = &existing {
         println!("stopping the running service…");
-        stop_and_wait(&existing)?;
+        stop_and_wait(existing)?;
     }
+    let upgrade = existing.is_some();
 
+    let result = install_steps(&manager, managed, upgrade);
+    if result.is_err() {
+        // Never leave the PC unprotected because an upgrade failed half-way.
+        if let Some(old) = &existing {
+            if old.start::<&str>(&[]).is_ok() {
+                println!("install failed; the previous service was started again");
+            }
+        }
+    }
+    result
+}
+
+fn install_steps(
+    manager: &ServiceManager,
+    managed: Vec<String>,
+    upgrade: bool,
+) -> anyhow::Result<()> {
     // 2. binaries
     let dir = install_dir();
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -86,14 +110,24 @@ pub fn install(args: &[String]) -> anyhow::Result<()> {
         if same_file(&from, &to) {
             continue;
         }
-        fs::copy(&from, &to)
-            .with_context(|| format!("copy {} (close the app if it is running)", to.display()))?;
+        replace_file(&from, &to).with_context(|| format!("copy {}", to.display()))?;
         println!("copied {}", to.display());
     }
 
     // 3. data dir, locked down
     let data = machine::data_dir();
-    fs::create_dir_all(machine::log_dir())?;
+    prepare_data_dir(&data, upgrade)?;
+    // Owner first: an owner can always rewrite the ACL, so a folder owned by
+    // someone else would not stay locked.
+    run(Command::new("icacls").arg(&data).args([
+        "/setowner",
+        SID_ADMINISTRATORS,
+        "/T",
+        "/C",
+        "/L",
+        "/Q",
+    ]))
+    .context("set data dir owner")?;
     run(Command::new("icacls").arg(&data).args([
         "/inheritance:r",
         "/grant:r",
@@ -101,6 +135,7 @@ pub fn install(args: &[String]) -> anyhow::Result<()> {
         "/grant:r",
         &format!("{SID_ADMINISTRATORS}:(OI)(CI)F"),
         "/T",
+        "/L",
         "/Q",
     ]))
     .context("restrict data dir")?;
@@ -189,6 +224,65 @@ pub fn uninstall() -> anyhow::Result<()> {
         install_dir().display(),
         machine::data_dir().display()
     );
+    Ok(())
+}
+
+/// Make `data` a fresh, trusted folder. On a first install anything already
+/// there was created by someone else (any user may create folders under
+/// ProgramData) and may hide links or files meant to be overwritten, so it is
+/// moved aside. Junctions are refused: the service would write through them.
+fn prepare_data_dir(data: &Path, upgrade: bool) -> anyhow::Result<()> {
+    for path in [data.to_path_buf(), machine::log_dir()] {
+        if is_reparse_point(&path) {
+            bail!(
+                "{} is a link/junction; remove it and run install again",
+                path.display()
+            );
+        }
+    }
+    if data.exists() && !upgrade {
+        let aside = data.with_file_name(format!(
+            "DigitalWellbeing.untrusted-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ));
+        fs::rename(data, &aside)
+            .with_context(|| format!("move pre-existing {} aside", data.display()))?;
+        println!("moved a pre-existing data folder to {}", aside.display());
+    }
+    fs::create_dir_all(machine::log_dir())?;
+    Ok(())
+}
+
+fn is_reparse_point(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    fs::symlink_metadata(path)
+        .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
+/// Copy `from` over `to` even while `to` is running: a running exe cannot be
+/// overwritten but can be renamed, so the old file is moved to `*.old` first.
+fn replace_file(from: &Path, to: &Path) -> anyhow::Result<()> {
+    if to.exists() {
+        let old = to.with_extension("exe.old");
+        // A previous .old may itself still be running; fall back to a unique name.
+        let old = if fs::remove_file(&old).is_ok() || !old.exists() {
+            old
+        } else {
+            to.with_extension(format!("exe.old.{}", std::process::id()))
+        };
+        fs::rename(to, &old)?;
+        if let Err(err) = fs::copy(from, to) {
+            let _ = fs::rename(&old, to);
+            return Err(err.into());
+        }
+        let _ = fs::remove_file(&old); // fails while still running; removed next time
+    } else {
+        fs::copy(from, to)?;
+    }
     Ok(())
 }
 

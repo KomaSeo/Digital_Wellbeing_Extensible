@@ -105,12 +105,17 @@ impl MachineConfig {
             .unwrap_or_default()
     }
 
+    /// Atomic (temp file + rename): a half-written file would read as
+    /// "manage everyone" for a moment.
     pub fn save(&self) -> std::io::Result<()> {
         fs::create_dir_all(data_dir())?;
+        let path = machine_config_path();
+        let tmp = path.with_extension("json.tmp");
         fs::write(
-            machine_config_path(),
+            &tmp,
             serde_json::to_string_pretty(self).map_err(std::io::Error::other)?,
-        )
+        )?;
+        fs::rename(&tmp, &path)
     }
 
     pub fn manages(&self, user: &str) -> bool {
