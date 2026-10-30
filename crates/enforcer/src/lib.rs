@@ -7,28 +7,43 @@ pub use rule::{BlockEvent, BlockRule, ProcessSnapshot, RuleInfo};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sysinfo::{ProcessesToUpdate, System};
 use tracing::{debug, info, warn};
 
 const LOG_CAPACITY: usize = 200;
+/// How long to leave a process alone after it refused to die.
+const KILL_RETRY: Duration = Duration::from_secs(30);
 
 /// OS / self processes the enforcer will never terminate, regardless of rules.
 pub fn never_terminate() -> &'static [&'static str] {
+    // Every entry is already in `normalize_process_name` form (lower case,
+    // `.exe`), or it would never match; a test checks this.
     &[
+        // kernel and pseudo processes
+        "system.exe",
+        "system idle process.exe",
+        "idle.exe",
+        "registry.exe",
+        "memory compression.exe",
+        "secure system.exe",
+        // core OS
         "csrss.exe",
         "wininit.exe",
         "winlogon.exe",
         "services.exe",
         "lsass.exe",
+        "lsaiso.exe",
         "smss.exe",
         "svchost.exe",
-        "system",
-        "registry",
+        "spoolsv.exe",
+        "msmpeng.exe",
+        // a usable desktop: shell, typing/IME, sound, drivers, UAC, lock screen
         "explorer.exe",
         "dwm.exe",
         "fontdrvhost.exe",
@@ -40,6 +55,16 @@ pub fn never_terminate() -> &'static [&'static str] {
         "shellexperiencehost.exe",
         "applicationframehost.exe",
         "conhost.exe",
+        "ctfmon.exe",
+        "textinputhost.exe",
+        "audiodg.exe",
+        "wudfhost.exe",
+        "dllhost.exe",
+        "consent.exe",
+        "logonui.exe",
+        "lockapp.exe",
+        "userinit.exe",
+        // this app
         "digital-wellbeing.exe",
         "digital_wellbeing.exe",
         "digital-wellbeing-service.exe",
@@ -86,8 +111,13 @@ pub type ProcessFilter = Arc<dyn Fn(u32) -> bool + Send + Sync>;
 pub struct Enforcer {
     rules: Arc<Mutex<Vec<Arc<dyn BlockRule>>>>,
     logs: Arc<Mutex<VecDeque<BlockEvent>>>,
-    running: Arc<Mutex<bool>>,
+    /// Bumped by every start and stop; a loop runs only while it holds the
+    /// current value, so a second start never leaves two loops running.
+    generation: Arc<AtomicU64>,
     filter: Arc<Mutex<Option<ProcessFilter>>>,
+    /// Processes that would not die (pid, start time) -> when to try again.
+    /// Without this, protected processes would be retried every tick forever.
+    failed_kills: Arc<Mutex<HashMap<(u32, u64), Instant>>>,
 }
 
 impl Enforcer {
@@ -95,8 +125,9 @@ impl Enforcer {
         Self {
             rules: Arc::new(Mutex::new(Vec::new())),
             logs: Arc::new(Mutex::new(VecDeque::with_capacity(LOG_CAPACITY))),
-            running: Arc::new(Mutex::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
             filter: Arc::new(Mutex::new(None)),
+            failed_kills: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -142,13 +173,14 @@ impl Enforcer {
             .collect()
     }
 
+    /// Start the loop. Starting again replaces the previous loop.
     pub fn start_background(self: &Arc<Self>, interval: Duration) -> JoinHandle<()> {
         let this = Arc::clone(self);
-        *this.running.lock() = true;
+        let generation = this.generation.fetch_add(1, Ordering::SeqCst) + 1;
         thread::spawn(move || {
             info!("enforcer loop started");
             let mut system = System::new();
-            while *this.running.lock() {
+            while this.generation.load(Ordering::SeqCst) == generation {
                 if let Err(err) = this.reconcile(&mut system) {
                     warn!("reconcile error: {err:#}");
                 }
@@ -159,7 +191,7 @@ impl Enforcer {
     }
 
     pub fn stop(&self) {
-        *self.running.lock() = false;
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn recent_blocks(&self, limit: usize) -> Vec<BlockEvent> {
@@ -222,12 +254,24 @@ impl Enforcer {
 
         let blocks = collect_blocks(&rules, &snapshots);
         let mut killed = 0usize;
+        let now = Instant::now();
+        let mut failed = self.failed_kills.lock();
+        failed.retain(|(pid, start), _| {
+            system
+                .process(sysinfo::Pid::from_u32(*pid))
+                .is_some_and(|p| p.start_time() == *start)
+        });
 
         for event in blocks {
             let Some(proc) = system.process(sysinfo::Pid::from_u32(event.pid)) else {
                 continue;
             };
-            if proc.kill() {
+            let key = (event.pid, proc.start_time());
+            if failed.get(&key).is_some_and(|retry| now < *retry) {
+                continue;
+            }
+            if terminate(proc) {
+                failed.remove(&key);
                 killed += 1;
                 info!(
                     "terminated {} (pid={}) [{}]",
@@ -236,9 +280,12 @@ impl Enforcer {
                 self.push_log(event);
             } else {
                 debug!(
-                    "failed to terminate {} (pid={})",
-                    event.process_name, event.pid
+                    "failed to terminate {} (pid={}); retrying in {}s",
+                    event.process_name,
+                    event.pid,
+                    KILL_RETRY.as_secs()
                 );
+                failed.insert(key, now + KILL_RETRY);
             }
         }
         Ok(killed)
@@ -257,6 +304,29 @@ impl Default for Enforcer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Terminate directly. (sysinfo's `kill()` starts `taskkill.exe` on Windows: one
+/// child process per kill, found via the exe's own folder before System32.)
+#[cfg(windows)]
+fn terminate(proc: &sysinfo::Process) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    // SAFETY: the handle is checked for null and closed before returning.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, proc.pid().as_u32());
+        if handle.is_null() {
+            return false;
+        }
+        let ok = TerminateProcess(handle, 1) != 0;
+        CloseHandle(handle);
+        ok
+    }
+}
+
+#[cfg(not(windows))]
+fn terminate(proc: &sysinfo::Process) -> bool {
+    proc.kill()
 }
 
 /// Merge rule outputs: first event for each pid wins; reasons are prefixed with rule id.
@@ -309,6 +379,25 @@ mod tests {
                 .map(|p| BlockEvent::new(p, "flagged"))
                 .collect()
         }
+    }
+
+    #[test]
+    fn protected_names_are_in_normalized_form() {
+        for name in never_terminate() {
+            assert_eq!(normalize_process_name(name), *name);
+        }
+        assert!(is_never_terminate("System"));
+        assert!(is_never_terminate("Registry"));
+        assert!(is_never_terminate("CTFMON.EXE"));
+    }
+
+    #[test]
+    fn restarting_the_loop_retires_the_old_one() {
+        let enforcer = Arc::new(Enforcer::new());
+        let first = enforcer.start_background(Duration::from_millis(5));
+        let _second = enforcer.start_background(Duration::from_millis(5));
+        first.join().unwrap(); // returns only because the first loop stopped
+        enforcer.stop();
     }
 
     #[test]
