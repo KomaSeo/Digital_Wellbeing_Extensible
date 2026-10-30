@@ -81,6 +81,14 @@ AI focus task; finishing, switching or ending needs a reason the AI approves.
 Every request is logged for the admin. Guide (Korean):
 [`docs/task_planner.md`](docs/task_planner.md).
 
+**Access requests**: from the Focus app the user can ask for an app or site
+the AI check blocks, for some minutes or permanently, stating the purpose.
+If the AI approves, the block is lifted, but the app stays observed and is
+judged against that purpose; repeated off-purpose use revokes the grant and
+blocks again. The admin sets limits and can revoke grants; the admin's
+blacklist is never lifted this way. Guide (Korean):
+[`docs/access_grants.md`](docs/access_grants.md).
+
 ## Function call API
 
 JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.

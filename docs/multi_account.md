@@ -107,6 +107,7 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
     machine.json         관리 대상 계정 목록
     planner.json         할 일 목록. 관리자가 고칩니다. (할 일 플래너)
     planner_state.json   현재 할당과 변경 요청 기록. agent가 씁니다. (할 일 플래너)
+    grants.json          앱·사이트 접근 허용과 그 기록. agent가 씁니다. (접근 요청, docs/access_grants.md)
     logs\service.log, logs\agent-session<번호>.log   실행 기록
 ```
 
@@ -138,9 +139,10 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
 | agent가 어떤 이유로든 꺼진다 | 서비스가 2초 안에 agent를 다시 띄웁니다. | `Supervisor`가 agent를 감시합니다. |
 | 서비스가 오류로 꺼진다 | Windows가 5초 뒤에 서비스를 다시 시작합니다(최대 3번). | 설치기가 서비스 복구 설정을 넣었습니다. |
 | 8765 포트의 로컬 API로 규칙을 바꾼다 | ❌ 그 API가 열려 있지 않습니다. | 머신 설치에서는 관리 UI가 8765 API를 열지 않습니다. |
-| agent의 API(877x 포트)로 규칙을 바꾼다 | ❌ agent가 그런 요청을 받지 않습니다. | agent의 API에는 집중 세션과 할 일 플래너에 관한 요청(`status`, `start_session`, `stop_session`, `assign`, `request_change`)만 있습니다. 규칙을 바꾸는 요청은 없습니다. |
+| agent의 API(877x 포트)로 규칙을 바꾼다 | ❌ agent가 그런 요청을 받지 않습니다. | agent의 API에는 집중 세션, 할 일 플래너, 접근 요청에 관한 요청(`status`, `start_session`, `stop_session`, `assign`, `request_change`, `request_access`)만 있습니다. 규칙을 바꾸는 요청은 없습니다. |
 | Focus 앱을 끈다 | ✅ 끌 수 있습니다. 하지만 차단에는 영향이 없습니다. | 차단은 Focus 앱이 아니라 agent가 합니다. |
 | 할 일을 "유튜브 보기"라고 적는다 | 할 일 플래너가 꺼져 있으면 ✅ 적을 수 있습니다. 켜져 있으면 ❌ 적을 수 없습니다. | 할 일 플래너가 켜져 있으면 AI가 목록에서 할 일을 고릅니다. 사용자가 할 일을 바꾸려면 이유를 적고 AI의 승인을 받아야 합니다([`task_planner.md`](task_planner.md)). |
+| 차단된 앱이나 사이트를 쓰게 해 달라고 한다 | 목적을 적어 요청하면, AI가 승인할 때만 차단이 풀립니다. | 허용된 동안에도 AI가 목적대로 쓰는지 계속 확인하고, 다르게 쓰면 다시 차단합니다. 관리자 블랙리스트는 풀리지 않습니다([`access_grants.md`](access_grants.md)). |
 | 집중 세션을 끝낸다 | 할 일 플래너가 꺼져 있으면 ✅ 끝낼 수 있습니다. 켜져 있으면 이유를 적고 AI의 승인을 받아야 합니다. | 집중 세션이 꺼져 있어도, 블랙리스트 규칙은 항상 적용됩니다. |
 
 **전제 조건: 작업 계정이 "표준 사용자"여야 합니다.** 작업 계정이 관리자 계정이면, 사용자가 위의 장치를 모두 풀 수 있습니다.
@@ -228,7 +230,8 @@ agent가 뜨지 않으면, 관리자는 관리자 계정에서 `C:\ProgramData\D
 3. 하는 일이 바뀌면, 사용자는 내용을 고치고 **Change task**를 누릅니다. 그러면 agent는 이전 AI 차단 기록을 지우고, 새 할 일로 곧바로 다시 검사합니다.
 4. 일이 끝나면, 사용자는 **End session**을 누릅니다. 사용자가 로그아웃하거나 컴퓨터를 다시 켜도 집중 세션은 끝납니다.
    agent는 할 일을 저장하지 않으므로, 사용자는 다음에 할 일을 다시 적어야 합니다.
-5. 사용자는 Focus 창을 닫아도 됩니다. 그래도 agent는 계속 차단하고, 사용자가 Focus 창을 다시 열면 상태가 그대로 보입니다.
+5. 일에 필요한 앱이나 사이트가 차단되면, 사용자는 Focus 창에서 "Ask for access"를 누르고 목적을 적어 요청합니다. 자세한 방법은 [`access_grants.md`](access_grants.md) 10장에 있습니다.
+6. 사용자는 Focus 창을 닫아도 됩니다. 그래도 agent는 계속 차단하고, 사용자가 Focus 창을 다시 열면 상태가 그대로 보입니다.
 
 ### 6.2 관리자가 설정을 바꿀 때
 
