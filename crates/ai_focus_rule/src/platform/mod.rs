@@ -14,6 +14,30 @@ pub struct Foreground {
     pub title: String,
 }
 
+/// Responsibility: Describe one open top-level window (in front or not): handle, process,
+/// title, and whether it is minimized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenWindow {
+    pub window: isize,
+    pub pid: u32,
+    pub process_name: String,
+    /// For a browser window: the title of the tab it shows.
+    pub title: String,
+    pub minimized: bool,
+}
+
+impl OpenWindow {
+    /// The same window as a [`Foreground`], so the monitor's key functions apply.
+    pub fn as_foreground(&self) -> Foreground {
+        Foreground {
+            window: self.window,
+            pid: self.pid,
+            process_name: self.process_name.clone(),
+            title: self.title.clone(),
+        }
+    }
+}
+
 /// Responsibility: Hold the raw RGBA pixels of one captured monitor.
 pub struct Screenshot {
     pub width: u32,
@@ -36,6 +60,19 @@ pub trait Desktop: Send + Sync {
 
     /// Close the active tab of a browser window, if it is still in front.
     fn close_active_tab(&self, fg: &Foreground) -> bool;
+
+    /// Every open top-level window a user would call "a program" or "a browser window":
+    /// visible (minimized included), titled, not a tool window, dialog or hidden Store app.
+    /// A browser window reports only the tab it shows; its other tabs are not visible here.
+    fn open_windows(&self) -> Vec<OpenWindow> {
+        Vec::new()
+    }
+
+    /// Minimize `window` without taking the focus (used for a blocked tab shown in a
+    /// background window, e.g. a video on a second monitor).
+    fn minimize(&self, _window: isize) -> bool {
+        false
+    }
 }
 
 /// Desktop access for the current OS. On non-Windows builds this reports no

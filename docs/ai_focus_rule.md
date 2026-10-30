@@ -415,6 +415,40 @@ Claude API는 응답마다 그 호출에 쓴 토큰 수(`usage`)를 돌려줍니
 **남은 크레딧(잔액):** Claude API에는 남은 크레딧을 읽는 기능이 없습니다. 그래서 이 프로그램은 잔액을 보여 줄 수 없습니다. 잔액과 실제 청구액은 Claude Console에서 확인합니다.
 이 프로그램의 비용은 단가표로 계산한 **예상치**입니다. 단가가 바뀌면 `prices()`를 고쳐야 합니다.
 
+### 5.11 다른 열린 창도 함께 판정하기 (`open_windows`, `others`)
+
+모니터는 검사할 때마다 맨 앞 창(화면 캡처 포함)과 함께 **다른 열린 창의 목록**도 AI에게 보냅니다. 이 목록에는 이미지가 없고 제목만 있습니다.
+- 브라우저 창은 그 창이 지금 보여 주는 탭의 제목을 보냅니다.
+- 다른 프로그램은 프로그램 이름과 창 제목을 보냅니다.
+
+**목록을 만드는 방법** (`Desktop::open_windows()`, Windows 구현은 `platform/windows.rs`의 `collect_open`):
+1. Windows의 최상위 창을 모두 훑습니다. 보이는 창(최소화된 창 포함)이면서 제목이 있는 창만 남깁니다.
+   도구 창(`WS_EX_TOOLWINDOW`), 다른 창에 딸린 대화 상자, 숨겨진 Store 앱 창(cloaked)은 뺍니다.
+2. Store 앱 창은 맨 앞 창과 같은 방법으로, 틀(ApplicationFrameHost) 안의 실제 앱 이름을 씁니다.
+3. 모니터(`others_to_judge`)는 이 목록에서 다음 창을 뺍니다. 맨 앞 창, 검사 제외 대상(이 프로그램, Windows 핵심 프로그램, `always_allow`), 허용(grant)을 받은 창, 이미 차단된 탭이나 앱,
+   `recheck_minutes` 안에 `on_task`를 받은 창입니다. 같은 앱의 창이 여러 개이거나 같은 페이지가 두 창에 열려 있으면 하나만 남깁니다. 한 번에 최대 30개까지 보냅니다.
+
+**AI에게 보내는 글:** 질문 끝에 다음과 같은 목록이 붙습니다. 지시문은 AI에게 "각 창을 같은 기준으로 판정해서 `others`에 id별로 하나씩 답하라"고 시킵니다.
+또 "일을 방해하지 않는 프로그램(음악 재생기, 동기화 도구, 일에 필요한 메신저)은 `on_task`, 제목만으로 무엇인지 알 수 없으면 `unsure`"라고 시킵니다.
+```
+Other open windows (title only; judge each in `others`):
+[0] browser tab chrome.exe — "웃긴 고양이 - YouTube - Google Chrome"
+[1] program steam.exe — "Steam"
+```
+
+**판정 결과의 처리** (`MonitorState::apply_background()`):
+- **브라우저 창:** `off_task`이면 그 사이트(YouTube는 페이지)를 바로 차단 목록에 넣습니다. 그 창이 최소화되어 있지 않으면, 모니터는 포커스를 빼앗지 않고 창을 최소화합니다(`SW_SHOWMINNOACTIVE`).
+  두 번째 모니터에 띄워 둔 영상 같은 것을 가리려는 것입니다. 탭은 사용자가 그 창을 앞으로 가져올 때 닫힙니다(Ctrl+W는 맨 앞 탭에만 보낼 수 있기 때문입니다).
+- **프로그램:** 앞에 있는 앱과 같이 경고를 셉니다. 경고가 `strikes_to_block`에 이르면 그 프로그램을 차단 목록에 넣고, Enforcer가 그 프로그램을 끕니다.
+- `on_task`를 받은 창은 `recheck_minutes` 동안 다시 판정하지 않습니다.
+- 판정 기록에는 제목 앞에 `(background)`가 붙습니다.
+- 차단된 탭을 보여 주는 뒤쪽 창은 5초마다 확인해서, 보이면 다시 최소화합니다.
+
+**검사 시각:** 맨 앞 창이 검사 제외 대상이거나 `on_task`로 믿는 중이어도, 판정할 뒤쪽 창이 있으면 정기 검사 시각에 검사합니다. 이때는 뒤쪽 창의 판정만 반영하고, 맨 앞 창의 판정은 버립니다.
+판정할 뒤쪽 창이 없고 맨 앞 창도 믿는 중이면, 모니터는 Claude를 부르지 않습니다.
+
+**비용:** 창 하나마다 입력 토큰 수십 개와 출력 토큰 수십 개가 더 듭니다. `on_task`를 받은 창은 한동안 목록에서 빠지므로, 같은 창 때문에 비용이 계속 늘지는 않습니다.
+
 ---
 
 ## 6. Claude 호출 (`judge.rs`, `claude.rs`)
@@ -448,7 +482,7 @@ body:
   "system": "<SYSTEM_PROMPT>",
   "output_config": {
     "effort": "low",
-    "format": { "type": "json_schema", "schema": { verdict, reason, channel } }
+    "format": { "type": "json_schema", "schema": { verdict, reason, channel, others } }
   },
   "fallbacks": "default",                           // 이 기능을 지원하는 모델일 때만 붙인다
   "messages": [{
@@ -593,6 +627,9 @@ let rule_uis = vec![list_rule.ui(), ai_rule.ui()];
 | `scheduled_checks_fall_between_60_and_100_percent_of_the_interval` | 다음 정기 검사 시각이 항상 검사 간격의 60~100% 사이다. |
 | `no_screenshot_while_a_private_app_is_visible_behind` | 비공개 앱이 뒤에 보이기만 해도 화면 캡처를 보내지 않는다. |
 | `saved_blocks_are_resumed_after_a_restart` | 저장된 차단을 새 agent가 이어서 적용한다. |
+| `other_open_windows_are_listed_by_title_only` | 맨 앞 창, Windows 핵심 프로그램, 같은 앱의 두 번째 창은 목록에서 빠지고, 나머지가 제목만으로 전달된다. |
+| `an_off_task_background_tab_is_blocked_hidden_and_closed_in_front` | 뒤쪽 창의 딴짓 탭은 바로 차단되고 창이 최소화된다. 그 창을 앞으로 가져오면 Claude를 다시 부르지 않고 탭이 닫힌다. |
+| `background_apps_collect_strikes_even_while_the_front_is_trusted` | 맨 앞 창을 믿는 중이어도 정기 검사 시각에 뒤쪽 앱을 판정하고, 경고가 쌓이면 차단한다. 판정할 것이 없으면 Claude를 부르지 않는다. |
 | `focus_checks_stop_when_the_daily_budget_is_spent` | 오늘 쓴 비용이 하루 예산을 넘으면, 모니터가 판정기를 부르지 않고 차단도 하지 않으며 `last_error`에 예산 오류를 적는다. |
 | `absurd_check_interval_does_not_panic` | 터무니없이 큰 검사 간격이 들어와도 모니터가 멈추지 않는다. |
 | `site_of_strips_browser_noise` | 탭 제목에서 브라우저 이름과 알림 숫자를 떼고 사이트를 뽑는다. |
@@ -616,7 +653,8 @@ YouTube 탭의 질문에 채널 안내가 들어가고 응답 형식에 `channel
    - 제목에 사이트 이름이 없는 페이지는 제목 전체가 키가 됩니다. 이런 페이지가 차단되어도, 같은 사이트의 다른 페이지는 막히지 않습니다.
    - 반대로 서로 다른 사이트가 끝에 같은 이름을 쓰면, 모니터는 두 사이트를 같은 것으로 봅니다.
    - TODO 2번(Chrome 확장 프로그램)을 만들면, 키를 도메인으로 바꾸는 것이 자연스럽습니다. 개발자는 `tab_key()` 함수 한 곳만 고치면 됩니다.
-2. **모니터는 맨 앞 창만 판정합니다.** 새 창은 10초 넘게 앞에 있으면 판정받지만, 그보다 짧게 잠깐 본 창은 활동 기록에만 남습니다. 두 번째 모니터에 띄워 둔 영상처럼 앞에 오지 않는 창도 판정 대상이 아닙니다.
+2. **브라우저 창의 뒤쪽 탭은 판정하지 않습니다.** 모니터는 맨 앞 창과 함께 다른 열린 창도 제목으로 판정합니다(5.11절). 하지만 Windows는 브라우저 창마다 지금 선택된 탭의 제목만 알려 줍니다. 같은 창의 뒤쪽 탭은 앞으로 나와야 판정받습니다. 뒤쪽 탭까지 보려면 브라우저 확장 프로그램이나 UI Automation이 필요합니다.
+   창이 없는 프로그램(트레이에만 있는 프로그램, 백그라운드 프로그램)도 목록에 들어가지 않습니다.
 3. **단독 실행 모드에서는 차단 상태가 메모리에만 있습니다.** 사용자가 프로그램을 다시 시작하면 차단이 풀립니다.
    머신 설치에서는 agent가 차단 목록을 사용자별 파일(`blocks\<사용자>.json`)에 저장하고, 다시 시작할 때 이어서 적용합니다. 그래서 로그아웃했다가 다시 로그인해도 차단이 풀리지 않습니다.
 4. **모니터는 같은 이름의 프로그램을 모두 끕니다.** 예를 들어 `code.exe`가 `off_task`를 받으면, VS Code 창이 모두 닫힙니다. 중요한 앱은 `always_allow`에 넣어 두세요.

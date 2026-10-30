@@ -1,17 +1,19 @@
 //! Responsibility: Implement Desktop on Windows with Win32 calls and xcap.
 
-use super::{Desktop, Foreground, Screenshot};
+use super::{Desktop, Foreground, OpenWindow, Screenshot};
 use parking_lot::Mutex;
 use std::mem::size_of;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
     VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    EnumChildWindows, EnumWindows, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, ShowWindow,
+    GWL_EXSTYLE, GW_OWNER, SW_SHOWMINNOACTIVE, WS_EX_TOOLWINDOW,
 };
 
 const VK_W: VIRTUAL_KEY = 0x57;
@@ -115,6 +117,41 @@ impl Desktop for WindowsDesktop {
             .collect()
     }
 
+    fn open_windows(&self) -> Vec<OpenWindow> {
+        let mut handles: Vec<HWND> = Vec::new();
+        // SAFETY: the callback only pushes into `handles`, which outlives the call.
+        unsafe {
+            EnumWindows(Some(collect_open), &mut handles as *mut Vec<HWND> as LPARAM);
+        }
+        handles
+            .into_iter()
+            .filter_map(|hwnd| {
+                let mut pid = window_pid(hwnd);
+                let mut process_name = self.process_name(pid)?;
+                // Store apps: name the app inside the frame, as `foreground` does.
+                if process_name.eq_ignore_ascii_case("ApplicationFrameHost.exe") {
+                    let app_pid = hosted_app_pid(hwnd, pid)?;
+                    process_name = self.process_name(app_pid)?;
+                    pid = app_pid;
+                }
+                Some(OpenWindow {
+                    window: hwnd as isize,
+                    pid,
+                    process_name,
+                    title: window_title(hwnd),
+                    // SAFETY: a plain query on a handle just enumerated.
+                    minimized: unsafe { IsIconic(hwnd) } != 0,
+                })
+            })
+            .collect()
+    }
+
+    fn minimize(&self, window: isize) -> bool {
+        // SAFETY: a stale handle just makes the call fail. SW_SHOWMINNOACTIVE keeps the
+        // focus where it is.
+        unsafe { ShowWindow(window as HWND, SW_SHOWMINNOACTIVE) != 0 }
+    }
+
     fn close_active_tab(&self, fg: &Foreground) -> bool {
         // SAFETY: SendInput reads `inputs` for the given count only.
         unsafe {
@@ -204,6 +241,33 @@ fn hosted_app_pid(frame: HWND, frame_pid: u32) -> Option<u32> {
         EnumChildWindows(frame, Some(visit), &mut search as *mut Search as LPARAM);
     }
     (search.found != 0).then_some(search.found)
+}
+
+/// EnumWindows callback: collect the windows `open_windows` reports.
+unsafe extern "system" fn collect_open(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: lparam is the &mut Vec<HWND> passed by open_windows; the rest are plain
+    // queries on the enumerated handle.
+    unsafe {
+        let mut cloaked = 0u32;
+        let is_cloaked = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            &mut cloaked as *mut u32 as *mut _,
+            size_of::<u32>() as u32,
+        ) == 0
+            && cloaked != 0;
+        let tool = (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW) != 0;
+        let owned = !GetWindow(hwnd, GW_OWNER).is_null();
+        if IsWindowVisible(hwnd) != 0
+            && !is_cloaked
+            && !tool
+            && !owned
+            && !window_title(hwnd).trim().is_empty()
+        {
+            (*(lparam as *mut Vec<HWND>)).push(hwnd);
+        }
+    }
+    1
 }
 
 /// EnumWindows callback: collect pids of visible, non-minimized windows.

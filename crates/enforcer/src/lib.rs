@@ -69,6 +69,7 @@ pub fn never_terminate() -> &'static [&'static str] {
         "digital_wellbeing.exe",
         "digital-wellbeing-service.exe",
         "digital-wellbeing-focus.exe",
+        "digital-wellbeing-mcp.exe",
     ]
 }
 

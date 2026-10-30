@@ -6,8 +6,10 @@ use crate::access_review::{
 };
 use crate::config::{AiFocusConfig, AiFocusStore};
 use crate::grants::{Grant, GrantDuration, GrantEvent, GrantLogEntry, GrantState, GrantTarget};
-use crate::judge::{ClaudeJudge, Judge, JudgeError, JudgeRequest, Judgement, Verdict};
-use crate::platform::{Desktop, Foreground, Screenshot};
+use crate::judge::{
+    ClaudeJudge, Judge, JudgeError, JudgeRequest, Judgement, OtherVerdict, OtherWindow, Verdict,
+};
+use crate::platform::{Desktop, Foreground, OpenWindow, Screenshot};
 use crate::store::JsonStore;
 use crate::usage::UsageRecorder;
 use crate::youtube;
@@ -31,6 +33,8 @@ const MAX_TITLE_CHARS: usize = 120;
 /// Most YouTube pages whose channel is remembered (see `MonitorState::channels`).
 const CHANNEL_CACHE_CAPACITY: usize = 500;
 const SCREENSHOT_MAX_WIDTH: u32 = 1280;
+/// Most other open windows listed in one check (each costs a few tokens).
+const MAX_OTHER_WINDOWS: usize = 30;
 
 /// Responsibility: Record one stretch of time a window stayed in front.
 #[derive(Debug, Clone, Serialize)]
@@ -211,6 +215,72 @@ impl MonitorState {
             Some(now + ChronoDuration::milliseconds(interval * (600 + jitter) / 1000));
         let horizon = ChronoDuration::milliseconds(interval);
         self.judged.retain(|_, at| now - *at < horizon);
+    }
+
+    /// Has the randomized schedule come round (or was nothing checked yet)?
+    pub fn scheduled_due(&self, now: DateTime<Utc>) -> bool {
+        self.last_check.is_none() || self.next_check.is_none_or(|next| now >= next)
+    }
+
+    /// Apply the judgement of a window that is open but not in front. Tabs are blocked at
+    /// the first off_task (the tab is closed when it comes to the front); apps collect
+    /// strikes like a front app. Returns true when the window should be minimized (a
+    /// blocked tab still shown in a visible background window).
+    pub fn apply_background(
+        &mut self,
+        now: DateTime<Utc>,
+        config: &AiFocusConfig,
+        window: &OpenWindow,
+        verdict: &OtherVerdict,
+    ) -> bool {
+        let fg = window.as_foreground();
+        let is_browser = config.is_browser(&fg.process_name);
+        let target = self.target_key(config, &fg);
+        self.remember_verdict(now, config, &fg, verdict.verdict);
+        let mut minimize = false;
+        let mut action = String::new();
+        if verdict.verdict == Verdict::OffTask {
+            let id = self.new_block_id(now);
+            let entry = BlockedEntry {
+                id,
+                reason: verdict.reason.clone(),
+                title: fg.title.clone(),
+            };
+            if is_browser {
+                self.blocked_tabs.insert(target, entry);
+                minimize = !window.minimized;
+                action = if minimize {
+                    "blocked, window minimized".into()
+                } else {
+                    "blocked".into()
+                };
+            } else {
+                let needed = config.strikes_to_block.max(1);
+                let strikes = self.strikes.entry(target.clone()).or_insert(0);
+                *strikes += 1;
+                if *strikes >= needed {
+                    self.strikes.remove(&target);
+                    self.blocked_processes.insert(target, entry);
+                    action = "blocked".into();
+                } else {
+                    action = format!("strike {strikes}/{needed}");
+                }
+            }
+        } else if verdict.verdict == Verdict::OnTask && !is_browser {
+            self.strikes.remove(&target);
+        }
+        if self.verdicts.len() >= VERDICT_LOG_CAPACITY {
+            self.verdicts.pop_front();
+        }
+        self.verdicts.push_back(VerdictLogEntry {
+            at: now,
+            process_name: fg.process_name.clone(),
+            title: truncate(&format!("(background) {}", fg.title), MAX_TITLE_CHARS),
+            verdict: verdict.verdict,
+            reason: verdict.reason.clone(),
+            action,
+        });
+        minimize
     }
 
     /// When the current foreground window came to the front (last history entry).
@@ -752,11 +822,10 @@ impl FocusMonitor {
             .get()
             .covering(now, &config, &fg.process_name, &fg.title)
             .cloned();
-        let exempt = fg.pid == std::process::id()
-            || is_never_terminate(&fg.process_name)
-            || config.is_always_allowed(&fg.process_name);
+        let exempt = self.exempt(&config, &fg);
+        let open = self.desktop.open_windows();
 
-        let due = {
+        let (due, judge_front, others) = {
             let mut state = self.state.lock();
             state.record(now, &fg);
             if !exempt
@@ -770,15 +839,32 @@ impl FocusMonitor {
                 }
                 return;
             }
+            let hide: Vec<isize> = open
+                .iter()
+                .filter(|w| w.window != fg.window && !w.minimized)
+                .filter(|w| config.is_browser(&w.process_name))
+                .filter(|w| state.tab_blocked(&config, &w.as_foreground()))
+                .filter(|w| self.covering_grant(now, &config, w).is_none())
+                .map(|w| w.window)
+                .collect();
+            let others = self.others_to_judge(now, &config, &state, &fg, &open);
             let since = state.front_since().unwrap_or(now);
-            !exempt
-                && !state.recently_on_task(now, &config, &fg)
+            let judge_front = !exempt && !state.recently_on_task(now, &config, &fg);
+            let front_due = judge_front
                 && state.check_due(
                     now,
                     config.check_interval_secs,
                     &state.target_key(&config, &fg),
                     since,
-                )
+                );
+            let others_due = !others.is_empty() && state.scheduled_due(now);
+            drop(state);
+            // A blocked tab shown in a background window (say, a video on a second
+            // monitor) is hidden; it is closed once it comes to the front.
+            for window in hide {
+                self.desktop.minimize(window);
+            }
+            (front_due || others_due, judge_front, others)
         };
         if !due {
             return;
@@ -789,7 +875,17 @@ impl FocusMonitor {
             let key = state.target_key(&config, &fg);
             state.mark_checked(now, config.check_interval_secs, &key);
         }
-        let result = self.run_judge(&config, &fg, grant.as_ref());
+        let listed: Vec<OtherWindow> = others
+            .iter()
+            .enumerate()
+            .map(|(id, w)| OtherWindow {
+                id,
+                is_browser: config.is_browser(&w.process_name),
+                process_name: w.process_name.clone(),
+                title: truncate(&w.title, MAX_TITLE_CHARS),
+            })
+            .collect();
+        let result = self.run_judge(&config, &fg, grant.as_ref(), &listed);
         // The judge call can take a while; if access to this window was granted
         // (or revoked) meanwhile, the verdict was made under the old terms.
         let grant_now = self
@@ -806,8 +902,23 @@ impl FocusMonitor {
         }
         let mut state = self.state.lock();
         match result {
-            Ok(judgement) => {
+            Ok(mut judgement) => {
                 state.last_error = None;
+                let mut minimize = Vec::new();
+                for verdict in std::mem::take(&mut judgement.others) {
+                    if let Some(window) = others.get(verdict.id) {
+                        if state.apply_background(now, &config, window, &verdict) {
+                            minimize.push(window.window);
+                        }
+                    }
+                }
+                if !judge_front {
+                    drop(state);
+                    for window in minimize {
+                        self.desktop.minimize(window);
+                    }
+                    return;
+                }
                 info!(
                     "{} \"{}\": {:?} ({})",
                     fg.process_name, fg.title, judgement.verdict, judgement.reason
@@ -815,6 +926,9 @@ impl FocusMonitor {
                 let reason = judgement.reason.clone();
                 let action = state.apply_judgement(now, &config, &fg, judgement, grant.as_ref());
                 drop(state);
+                for window in minimize {
+                    self.desktop.minimize(window);
+                }
                 if action != Action::None {
                     if let Some(grant) = &grant {
                         self.revoke_for_misuse(now, grant, &reason);
@@ -832,6 +946,61 @@ impl FocusMonitor {
                 state.last_error = Some(err.to_string());
             }
         }
+    }
+
+    /// Never judged: this program, Windows essentials, the admin's always-allow list.
+    fn exempt(&self, config: &AiFocusConfig, window: &Foreground) -> bool {
+        window.pid == std::process::id()
+            || is_never_terminate(&window.process_name)
+            || config.is_always_allowed(&window.process_name)
+    }
+
+    fn covering_grant(
+        &self,
+        now: DateTime<Utc>,
+        config: &AiFocusConfig,
+        window: &OpenWindow,
+    ) -> Option<Grant> {
+        self.grants
+            .get()
+            .covering(now, config, &window.process_name, &window.title)
+            .cloned()
+    }
+
+    /// Open windows other than `fg` that need a verdict: not exempt, not granted, not
+    /// already blocked, not judged on_task within `recheck_minutes`; one per verdict key
+    /// (the same app's other windows, the same page in two windows), at most
+    /// [`MAX_OTHER_WINDOWS`].
+    fn others_to_judge(
+        &self,
+        now: DateTime<Utc>,
+        config: &AiFocusConfig,
+        state: &MonitorState,
+        fg: &Foreground,
+        open: &[OpenWindow],
+    ) -> Vec<OpenWindow> {
+        let front_key = state.verdict_key(config, fg);
+        let mut seen = std::collections::HashSet::from([front_key]);
+        open.iter()
+            .filter(|w| w.window != fg.window)
+            .filter(|w| {
+                let as_fg = w.as_foreground();
+                let blocked = if config.is_browser(&w.process_name) {
+                    state.tab_blocked(config, &as_fg)
+                } else {
+                    state
+                        .blocked_processes
+                        .contains_key(&normalize_process_name(&w.process_name))
+                };
+                !self.exempt(config, &as_fg)
+                    && !blocked
+                    && !state.recently_on_task(now, config, &as_fg)
+                    && self.covering_grant(now, config, w).is_none()
+                    && seen.insert(state.verdict_key(config, &as_fg))
+            })
+            .take(MAX_OTHER_WINDOWS)
+            .cloned()
+            .collect()
     }
 
     /// Ctrl+W hits whatever tab is active *now*. The judge call can take seconds,
@@ -968,6 +1137,7 @@ impl FocusMonitor {
         config: &AiFocusConfig,
         fg: &Foreground,
         grant: Option<&Grant>,
+        others: &[OtherWindow],
     ) -> Result<Judgement, JudgeError> {
         if let Some((spent, limit)) = self.usage.as_ref().and_then(|u| u.over_budget(config)) {
             return Err(JudgeError::BudgetReached { spent, limit });
@@ -994,6 +1164,7 @@ impl FocusMonitor {
             youtube: config.is_browser(&fg.process_name) && youtube::is_youtube(&fg.title),
             screenshot: screenshot.as_deref(),
             grant_purpose: grant.map(|g| g.purpose.as_str()),
+            others,
         })
     }
 }
@@ -1028,6 +1199,8 @@ mod tests {
         fg: Arc<Mutex<Option<Foreground>>>,
         tabs_closed: Arc<AtomicUsize>,
         visible: Arc<Mutex<Vec<String>>>,
+        open: Arc<Mutex<Vec<OpenWindow>>>,
+        minimized: Arc<Mutex<Vec<isize>>>,
     }
 
     impl Desktop for FakeDesktop {
@@ -1048,6 +1221,13 @@ mod tests {
             self.tabs_closed.fetch_add(1, Ordering::SeqCst);
             true
         }
+        fn open_windows(&self) -> Vec<OpenWindow> {
+            self.open.lock().clone()
+        }
+        fn minimize(&self, window: isize) -> bool {
+            self.minimized.lock().push(window);
+            true
+        }
     }
 
     /// Responsibility: Test double for Judge: return a settable verdict and record what it was
@@ -1058,6 +1238,9 @@ mod tests {
         verdict: Arc<Mutex<Verdict>>,
         /// Channel the judge "reads" from the screenshot.
         channel: Arc<Mutex<String>>,
+        /// Verdict for every listed other window, and the last list it saw.
+        others_verdict: Arc<Mutex<Verdict>>,
+        saw_others: Arc<Mutex<Vec<OtherWindow>>>,
         /// Runs once inside the next judge call (simulates something happening meanwhile).
         during_call: Hook,
         saw_grant: Arc<Mutex<Option<String>>>,
@@ -1080,10 +1263,21 @@ mod tests {
             self.saw_screenshot
                 .store(request.screenshot.is_some(), Ordering::SeqCst);
             *self.saw_grant.lock() = request.grant_purpose.map(str::to_string);
+            *self.saw_others.lock() = request.others.to_vec();
+            let other = *self.others_verdict.lock();
             Ok(Judgement {
                 verdict: *self.verdict.lock(),
                 reason: "test".into(),
                 channel: self.channel.lock().clone(),
+                others: request
+                    .others
+                    .iter()
+                    .map(|w| OtherVerdict {
+                        id: w.id,
+                        verdict: other,
+                        reason: "bg".into(),
+                    })
+                    .collect(),
             })
         }
     }
@@ -1097,6 +1291,10 @@ mod tests {
         switch_to: Arc<Mutex<Option<Foreground>>>,
         verdict: Arc<Mutex<Verdict>>,
         channel: Arc<Mutex<String>>,
+        others_verdict: Arc<Mutex<Verdict>>,
+        saw_others: Arc<Mutex<Vec<OtherWindow>>>,
+        open: Arc<Mutex<Vec<OpenWindow>>>,
+        minimized: Arc<Mutex<Vec<isize>>>,
         saw_grant: Arc<Mutex<Option<String>>>,
         current: Arc<Mutex<Option<Foreground>>>,
         during_call: Hook,
@@ -1120,6 +1318,10 @@ mod tests {
         let switch_to = Arc::new(Mutex::new(None));
         let verdict = Arc::new(Mutex::new(verdict));
         let channel = Arc::new(Mutex::new(String::new()));
+        let others_verdict = Arc::new(Mutex::new(Verdict::OnTask));
+        let saw_others = Arc::new(Mutex::new(Vec::new()));
+        let open = Arc::new(Mutex::new(Vec::new()));
+        let minimized = Arc::new(Mutex::new(Vec::new()));
         let saw_grant = Arc::new(Mutex::new(None));
         let during_call: Hook = Arc::new(Mutex::new(None));
         let visible = Arc::new(Mutex::new(Vec::new()));
@@ -1127,6 +1329,8 @@ mod tests {
             during_call: Arc::clone(&during_call),
             verdict: Arc::clone(&verdict),
             channel: Arc::clone(&channel),
+            others_verdict: Arc::clone(&others_verdict),
+            saw_others: Arc::clone(&saw_others),
             saw_grant: Arc::clone(&saw_grant),
             fg: Arc::clone(&current),
             switch_to: Arc::clone(&switch_to),
@@ -1139,6 +1343,8 @@ mod tests {
                 fg: Arc::clone(&current),
                 tabs_closed: Arc::clone(&tabs_closed),
                 visible: Arc::clone(&visible),
+                open: Arc::clone(&open),
+                minimized: Arc::clone(&minimized),
             }),
             Arc::new(move |_| Ok(Arc::clone(&judge))),
         );
@@ -1150,6 +1356,10 @@ mod tests {
             switch_to,
             verdict,
             channel,
+            others_verdict,
+            saw_others,
+            open,
+            minimized,
             saw_grant,
             current,
             during_call,
@@ -1398,6 +1608,10 @@ mod tests {
             switch_to,
             verdict,
             channel,
+            others_verdict,
+            saw_others,
+            open,
+            minimized,
             saw_grant,
             current,
             during_call,
@@ -1413,6 +1627,10 @@ mod tests {
                 switch_to,
                 verdict,
                 channel,
+                others_verdict,
+                saw_others,
+                open,
+                minimized,
                 saw_grant,
                 current,
                 during_call,
@@ -1841,6 +2059,93 @@ mod tests {
             .last_error
             .as_deref()
             .is_some_and(|e| e.contains("budget")));
+    }
+
+    fn win(window: isize, process: &str, title: &str, minimized: bool) -> OpenWindow {
+        OpenWindow {
+            window,
+            pid: 5000 + window as u32,
+            process_name: process.into(),
+            title: title.into(),
+            minimized,
+        }
+    }
+
+    #[test]
+    fn other_open_windows_are_listed_by_title_only() {
+        let h = harness(
+            Verdict::OnTask,
+            fg("code.exe", "main.rs"),
+            session("coding"),
+        );
+        *h.open.lock() = vec![
+            win(1, "code.exe", "main.rs", false), // the front window itself
+            win(2, "chrome.exe", "Rust docs - Google Chrome", true),
+            win(3, "explorer.exe", "Downloads", false), // Windows essential
+            win(4, "spotify.exe", "Spotify", false),
+            win(5, "spotify.exe", "Spotify mini player", false), // same app again
+        ];
+        h.monitor.step(Utc::now());
+        let listed = h.saw_others.lock().clone();
+        let titles: Vec<&str> = listed.iter().map(|w| w.title.as_str()).collect();
+        assert_eq!(titles, ["Rust docs - Google Chrome", "Spotify"]);
+        assert!(listed[0].is_browser && !listed[1].is_browser);
+    }
+
+    #[test]
+    fn an_off_task_background_tab_is_blocked_hidden_and_closed_in_front() {
+        let h = harness(
+            Verdict::OnTask,
+            fg("code.exe", "main.rs"),
+            session("coding"),
+        );
+        *h.others_verdict.lock() = Verdict::OffTask;
+        *h.open.lock() = vec![win(2, "chrome.exe", "Funny cats - YouTube", false)];
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        assert_eq!(
+            *h.minimized.lock(),
+            [2],
+            "shown on a second monitor: hidden"
+        );
+        assert_eq!(h.monitor.state().blocked_tabs.len(), 1);
+        assert!(h
+            .monitor
+            .state()
+            .verdicts
+            .iter()
+            .any(|v| v.title == "(background) Funny cats - YouTube"
+                && v.action.contains("minimized")));
+        // Brought to the front: closed without asking the judge again.
+        *h.current.lock() = Some(Foreground {
+            window: 2,
+            ..fg("chrome.exe", "Funny cats - YouTube")
+        });
+        h.monitor.step(t0 + ChronoDuration::seconds(5));
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn background_apps_collect_strikes_even_while_the_front_is_trusted() {
+        let h = harness(
+            Verdict::OnTask,
+            fg("code.exe", "main.rs"),
+            session("coding"),
+        );
+        *h.others_verdict.lock() = Verdict::OffTask;
+        *h.open.lock() = vec![win(2, "steam.exe", "Steam", false)];
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        assert!(h.monitor.state().process_blocks().is_empty(), "strike 1/2");
+        // code.exe is trusted for 15 minutes, but the schedule still runs a check
+        // for the background window.
+        h.monitor.step(t0 + ChronoDuration::seconds(61));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(h.monitor.state().process_blocks()[0].0, "steam.exe");
+        // Nothing left to judge and the front is trusted: no more calls.
+        h.monitor.step(t0 + ChronoDuration::seconds(122));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
