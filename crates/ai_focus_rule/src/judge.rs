@@ -72,6 +72,8 @@ pub enum JudgeError {
     Transport(String),
     #[error("model declined to judge this screen")]
     Refused,
+    #[error("the answer was cut off (max_tokens); try a lower effort or a larger limit")]
+    Truncated,
     #[error("unexpected response: {0}")]
     BadResponse(String),
 }

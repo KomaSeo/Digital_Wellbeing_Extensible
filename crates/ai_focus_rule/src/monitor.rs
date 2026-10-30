@@ -424,11 +424,23 @@ pub enum AccessError {
 pub type JudgeProvider =
     Arc<dyn Fn(&AiFocusConfig) -> Result<Arc<dyn Judge>, JudgeError> + Send + Sync>;
 
-/// Claude judge built from the current config (key and model may change at runtime).
+/// Claude judge for the current config. The judge (and its HTTP connection)
+/// is reused until the key or the model changes.
 pub fn claude_judge_provider() -> JudgeProvider {
-    Arc::new(|config: &AiFocusConfig| {
+    type Cached = Option<((String, String), Arc<dyn Judge>)>;
+    let cache: Mutex<Cached> = Mutex::new(None);
+    Arc::new(move |config: &AiFocusConfig| {
         let key = config.resolve_api_key().ok_or(JudgeError::NoApiKey)?;
-        Ok(Arc::new(ClaudeJudge::new(key, config.model.clone())) as Arc<dyn Judge>)
+        let id = (key, config.model.clone());
+        let mut cache = cache.lock();
+        if let Some((cached_id, judge)) = cache.as_ref() {
+            if *cached_id == id {
+                return Ok(Arc::clone(judge));
+            }
+        }
+        let judge: Arc<dyn Judge> = Arc::new(ClaudeJudge::new(id.0.clone(), id.1.clone()));
+        *cache = Some((id, Arc::clone(&judge)));
+        Ok(judge)
     })
 }
 
@@ -752,7 +764,7 @@ impl FocusMonitor {
     ) -> Result<Judgement, JudgeError> {
         let judge = (self.judge)(config)?;
         let screenshot = if config.send_screenshot && !config.is_private(&fg.process_name) {
-            self.desktop.screenshot(fg).and_then(|s| encode_jpeg(&s))
+            self.desktop.screenshot(fg).and_then(encode_jpeg)
         } else {
             None
         };
@@ -769,11 +781,12 @@ impl FocusMonitor {
 }
 
 /// Downscale to at most [`SCREENSHOT_MAX_WIDTH`] wide and encode as JPEG.
-fn encode_jpeg(shot: &Screenshot) -> Option<Vec<u8>> {
+fn encode_jpeg(shot: Screenshot) -> Option<Vec<u8>> {
     use image::codecs::jpeg::JpegEncoder;
     use image::{imageops::FilterType, DynamicImage, RgbaImage};
 
-    let rgba = RgbaImage::from_raw(shot.width, shot.height, shot.rgba.clone())?;
+    // Takes the pixels by value: a 4K capture is ~33 MB, not worth copying.
+    let rgba = RgbaImage::from_raw(shot.width, shot.height, shot.rgba)?;
     let mut img = DynamicImage::ImageRgba8(rgba);
     if img.width() > SCREENSHOT_MAX_WIDTH {
         let height = img.height() * SCREENSHOT_MAX_WIDTH / img.width();
@@ -1062,7 +1075,7 @@ mod tests {
             height: 1440,
             rgba: vec![200; 2560 * 1440 * 4],
         };
-        let jpeg = encode_jpeg(&shot).unwrap();
+        let jpeg = encode_jpeg(shot).unwrap();
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
         let decoded = image::load_from_memory(&jpeg).unwrap();
         assert_eq!(decoded.width(), 1280);

@@ -107,20 +107,68 @@ fn supports_server_fallback(model: &str) -> bool {
     .contains(&model)
 }
 
-/// Check for a refusal, then parse the first text block (the first block is
-/// usually an empty `thinking` block) as `T`.
+/// Check the stop reason, then parse the answer as `T`.
+///
+/// The answer is the last `text` block after the last `fallback` block: with
+/// server-side fallbacks, a declined first attempt can leave partial text
+/// before the fallback model's answer. (The first block is usually an empty
+/// `thinking` block, so `content[0]` is never the answer.)
 pub fn parse_structured<T: DeserializeOwned>(response: &Value) -> Result<T, JudgeError> {
-    if response["stop_reason"] == "refusal" {
-        return Err(JudgeError::Refused);
+    match response["stop_reason"].as_str() {
+        Some("refusal") => return Err(JudgeError::Refused),
+        Some("max_tokens") => return Err(JudgeError::Truncated),
+        _ => {}
     }
-    let text = response["content"]
+    let blocks = response["content"]
         .as_array()
-        .and_then(|blocks| {
-            blocks
-                .iter()
-                .find(|b| b["type"] == "text")
-                .and_then(|b| b["text"].as_str())
-        })
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let after_fallback = blocks
+        .iter()
+        .rposition(|b| b["type"] == "fallback")
+        .map_or(0, |i| i + 1);
+    let text = blocks[after_fallback..]
+        .iter()
+        .rev()
+        .find(|b| b["type"] == "text")
+        .and_then(|b| b["text"].as_str())
         .ok_or_else(|| JudgeError::BadResponse(format!("no text block: {response}")))?;
     serde_json::from_str(text).map_err(|e| JudgeError::BadResponse(format!("{e}: {text}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct Answer {
+        ok: bool,
+    }
+
+    #[test]
+    fn answer_after_a_fallback_wins() {
+        let response = json!({
+            "stop_reason": "end_turn",
+            "content": [
+                { "type": "text", "text": "{\"ok\": fa" },
+                { "type": "fallback", "from": {}, "to": {} },
+                { "type": "thinking", "thinking": "" },
+                { "type": "text", "text": "{\"ok\": true}" }
+            ]
+        });
+        assert_eq!(
+            parse_structured::<Answer>(&response).unwrap(),
+            Answer { ok: true }
+        );
+    }
+
+    #[test]
+    fn truncated_answer_is_its_own_error() {
+        let response = json!({ "stop_reason": "max_tokens", "content": [] });
+        assert!(matches!(
+            parse_structured::<Answer>(&response),
+            Err(JudgeError::Truncated)
+        ));
+    }
 }
