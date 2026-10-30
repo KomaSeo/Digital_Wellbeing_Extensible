@@ -178,7 +178,7 @@ impl ListStore {
     }
 
     /// Re-read the persisted config, discarding the in-memory copy (no save).
-    /// Used when another process (the admin UI) edits the file.
+    /// Used when another process (an agent saving the Settings tab's edits) changes the file.
     pub fn reload(&self) -> Result<(), ListError> {
         let mut config = self.persistence.load()?;
         config.sanitize();

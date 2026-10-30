@@ -5,7 +5,8 @@
 //!
 //! What `install` does, in order:
 //! 1. stop an already-installed service (so its binaries can be replaced);
-//! 2. copy the four executables to `%ProgramFiles%\DigitalWellbeing`
+//! 2. copy the three executables to `%ProgramFiles%\DigitalWellbeing` (and delete the old
+//!    admin settings window an older version installed)
 //!    (standard users cannot modify files there — otherwise they could swap
 //!    in their own program and have the service run it as SYSTEM);
 //! 3. create `%ProgramData%\DigitalWellbeing` (on a first install a folder
@@ -21,7 +22,7 @@
 //! again. Running executables are renamed to `*.old` before the new copy.
 
 use crate::service::SERVICE_NAME;
-use crate::{ADMIN_EXE, FOCUS_EXE, MCP_EXE, SERVICE_EXE};
+use crate::{FOCUS_EXE, LEGACY_ADMIN_EXE, MCP_EXE, SERVICE_EXE};
 use anyhow::{bail, Context};
 use machine::MachineConfig;
 use std::ffi::OsString;
@@ -97,7 +98,7 @@ fn install_steps(
         .parent()
         .map(Path::to_path_buf)
         .context("no exe dir")?;
-    for exe in [SERVICE_EXE, FOCUS_EXE, ADMIN_EXE, MCP_EXE] {
+    for exe in [SERVICE_EXE, FOCUS_EXE, MCP_EXE] {
         let from = source_dir.join(exe);
         let to = dir.join(exe);
         if !from.exists() {
@@ -112,6 +113,16 @@ fn install_steps(
         }
         replace_file(&from, &to).with_context(|| format!("copy {}", to.display()))?;
         println!("copied {}", to.display());
+    }
+
+    // Settings are edited in the Focus app now; a leftover admin window would
+    // only confuse. If it is running, it goes on the next install.
+    let legacy = dir.join(LEGACY_ADMIN_EXE);
+    if legacy.exists() {
+        match fs::remove_file(&legacy) {
+            Ok(()) => println!("removed {}", legacy.display()),
+            Err(err) => println!("warning: could not remove {}: {err}", legacy.display()),
+        }
     }
 
     // 3. data dir, locked down
@@ -141,8 +152,7 @@ fn install_steps(
     .context("restrict data dir")?;
     println!("locked {} to SYSTEM + Administrators", data.display());
 
-    // 4. managed users. Always written: its presence also tells the admin UI
-    //    (digital-wellbeing.exe) to edit these shared files instead of enforcing.
+    // 4. managed users.
     let mut config = MachineConfig::load();
     if !managed.is_empty() {
         config.managed_users = managed;

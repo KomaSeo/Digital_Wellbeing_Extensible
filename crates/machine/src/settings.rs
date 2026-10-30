@@ -1,16 +1,17 @@
-//! Responsibility: Let standard users edit the admin settings through their agent while the
-//! settings are unlocked, and let anyone lock them for a while.
+//! Responsibility: Let users edit the settings through their agent while the settings are
+//! unlocked, and let anyone lock them for a while.
 //!
-//! The admin settings (`policy.json`, `ai_focus.json`, `planner.json`) sit in the data folder,
-//! which only SYSTEM and Administrators can write. The owner of the PC is also its admin but
-//! keeps the admin password hidden from themselves, so:
+//! The settings (`policy.json`, `ai_focus.json`, `planner.json`) sit in the data folder, which
+//! only SYSTEM and Administrators can write; the user works in a standard account. The program
+//! does not tell accounts apart: what decides is the lock alone.
 //!
 //! - **unlocked** (no lock, or the lock has run out): the agent (SYSTEM) reads and writes these
 //!   files for any local user who asks ([`snapshot`], [`put`]); the Focus app's Settings tab
-//!   uses this to show the same panels as the admin UI;
+//!   is built on this;
 //! - **locked** ([`SettingsLock`], `settings_lock.json`): the agent refuses. Anyone may lock or
-//!   extend a lock ([`extend_lock`]); nobody can shorten one from a standard account. Only the
-//!   admin account (which writes the folder directly) can lift it early.
+//!   extend a lock ([`extend_lock`]); nothing in the program shortens one. (Windows cannot stop
+//!   an administrator account from deleting the file or the service; the user does not work
+//!   in one.)
 //!
 //! Standard users cannot change the system clock, so the lock cannot be outwaited by setting
 //! the clock forward.

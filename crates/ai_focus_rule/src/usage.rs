@@ -7,7 +7,7 @@
 //! below (US dollars per million tokens); the bill in the Claude Console is the real figure.
 //! The API has no endpoint for the remaining credit balance, so the app cannot show it.
 //!
-//! Machine install: each user's agent writes `usage\<user>.json`; the admin UI reads them all.
+//! Machine install: each user's agent writes `usage\<user>.json`; the Settings tab reads them all.
 //! Standalone: `usage.json` next to `ai_focus.json`.
 
 use crate::config::AiFocusConfig;

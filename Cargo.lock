@@ -908,7 +908,6 @@ version = "0.1.0"
 dependencies = [
  "ai_focus_rule",
  "anyhow",
- "chrono",
  "eframe",
  "egui",
  "embed-manifest",

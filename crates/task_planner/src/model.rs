@@ -47,7 +47,8 @@ impl TodoItem {
 
 /// Responsibility: Hold the admin's planner settings and to-do list (planner.json).
 ///
-/// Admin settings (`planner.json`). Standard users cannot edit this file.
+/// Part of the settings (`planner.json`): edited in the Focus app's Settings tab while the
+/// settings are not locked, never by a planner request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlannerConfig {
@@ -57,8 +58,8 @@ pub struct PlannerConfig {
     pub todos: Vec<TodoItem>,
     /// The owner's standing rules for how time is spent ("no leisure before
     /// 18:00 on weekdays", "a 30-minute break after two hours of work"). Every
-    /// AI decision of the planner follows them. Only the admin can edit them,
-    /// so a request made in a weak moment cannot change them.
+    /// AI decision of the planner follows them. They change only in the settings
+    /// (lockable), so a request made in a weak moment cannot change them.
     pub life_rules: String,
     /// Ids of proposed to-dos the admin removed. Proposals live in the
     /// agent's `planner_state.json`; the admin removes one by naming it here,

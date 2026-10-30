@@ -2,7 +2,7 @@
 //! managed-users setting.
 //!
 //! Pieces shared by a machine-wide install (service + per-session agent +
-//! Focus app + admin UI).
+//! Focus app, whose Settings tab edits the settings through the agent).
 //!
 //! Layout of a machine install:
 //!

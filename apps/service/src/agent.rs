@@ -8,8 +8,9 @@
 //! - it can terminate any process, so the enforcer is restricted to processes
 //!   of its own session.
 //!
-//! It reads config from `%ProgramData%\DigitalWellbeing` and never writes it;
-//! the admin UI writes, the agent reloads within a few seconds. The files it
+//! It reads config from `%ProgramData%\DigitalWellbeing` and writes it only
+//! for the Focus app's Settings tab (`settings_put`, while unlocked); every
+//! agent reloads changed files within a few seconds. The files it
 //! writes are `planner_state.json` (task assignment, change requests),
 //! `grants\<user>.json` (this user's access grants) and `blocks\<user>.json`
 //! (blocks in force, so logging out and back in does not lift them).
@@ -121,7 +122,7 @@ fn auto_assign_loop(planner: Arc<TaskPlanner>, monitor: Arc<FocusMonitor>) {
     }
 }
 
-/// Pick up edits the admin UI makes to the config files.
+/// Pick up edits to the config files (made through any agent's `settings_put`).
 fn reload_loop(
     list_store: ListStore,
     ai_store: AiFocusStore,

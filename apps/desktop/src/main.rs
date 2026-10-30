@@ -1,16 +1,17 @@
 //! Responsibility: Start the desktop window. Standalone: enforce the rules in this process and
-//! serve the local API. Machine install: only edit the shared settings files.
+//! serve the local API. On a PC with the machine install it only points to the Focus app,
+//! whose Settings tab edits the shared settings (while they are not locked).
 
 use ai_focus_rule::grants::GrantState;
 use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
 use eframe::egui;
 use enforcer::{Enforcer, ProcessSnapshot};
-use list_based_rule::{FileListPersistence, ListBasedRuleHandle, ListStore};
+use list_based_rule::{ListBasedRuleHandle, ListStore};
 use machine::session::{current_session_id, process_session_id};
 use rule_ui::{Panel, RuleUi};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use task_planner::{JsonStore, PlannerAdminUi};
+use task_planner::JsonStore;
 use tool_api::{spawn_tcp, ToolRouter, DEFAULT_PORT};
 
 fn main() -> eframe::Result<()> {
@@ -20,16 +21,27 @@ fn main() -> eframe::Result<()> {
         )
         .init();
 
-    // A machine install (service + agents) exists: this window only edits the
-    // shared settings; the agents enforce them. `--standalone` forces the old
-    // single-account mode. Decided by the registered service, not by a file
-    // (a file is left behind by uninstall, and anyone may create one).
-    let machine_mode = !std::env::args().any(|a| a == "--standalone") && service_installed();
-    let (router, rule_uis, panels, status) = if machine_mode {
-        start_machine_admin()
-    } else {
-        start_standalone()
-    };
+    // A machine install (service + agents) exists: the agents enforce, and the
+    // Focus app's Settings tab edits the settings while they are unlocked. This
+    // window then only says so. `--standalone` forces single-account mode.
+    // Decided by the registered service, not by a file (a file is left behind
+    // by uninstall, and anyone may create one).
+    if !std::env::args().any(|a| a == "--standalone") && service_installed() {
+        return eframe::run_native(
+            "Digital Wellbeing",
+            eframe::NativeOptions {
+                viewport: egui::ViewportBuilder::default()
+                    .with_inner_size([520.0, 200.0])
+                    .with_title("Digital Wellbeing"),
+                ..Default::default()
+            },
+            Box::new(|cc| {
+                rule_ui::install_system_fonts(&cc.egui_ctx);
+                Ok(Box::new(InstalledNotice))
+            }),
+        );
+    }
+    let (router, rule_uis, panels, status) = start_standalone();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -43,13 +55,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             rule_ui::install_system_fonts(&cc.egui_ctx);
-            Ok(Box::new(App::new(
-                router,
-                rule_uis,
-                panels,
-                status,
-                machine_mode,
-            )))
+            Ok(Box::new(App::new(router, rule_uis, panels, status)))
         }),
     )
 }
@@ -112,42 +118,21 @@ fn start_standalone() -> Started {
     (router, rule_uis, Vec::new(), status)
 }
 
-/// Machine install: edit `%ProgramData%\DigitalWellbeing\*.json` only. Nothing
-/// is enforced here and no API is opened (it has no authentication, and a
-/// standard user on the same PC could otherwise call it).
-fn start_machine_admin() -> Started {
-    let store =
-        ListStore::with_persistence(Arc::new(FileListPersistence::new(machine::policy_path())))
-            .expect("failed to open machine policy (run as administrator)");
-    let list_rule = ListBasedRuleHandle::new(store.clone());
+/// Responsibility: Tell the user where the settings are on a PC with the machine install.
+struct InstalledNotice;
 
-    let ai_store = AiFocusStore::open(machine::ai_focus_path())
-        .expect("failed to open machine AI settings (run as administrator)");
-    // The admin view reads every user's grants and blocks files; it revokes
-    // and unblocks through the config.
-    let monitor = native_monitor(ai_store, JsonStore::in_memory(GrantState::default()), None);
-    let ai_rule = AiFocusRuleHandle::settings_only(
-        monitor,
-        machine::grants_dir(),
-        machine::blocks_dir(),
-        machine::usage_dir(),
-    );
-
-    let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui(), ai_rule.ui()];
-
-    let planner = PlannerAdminUi::new(
-        JsonStore::open(machine::planner_path(), true).expect("failed to open planner.json"),
-        JsonStore::open(machine::planner_state_path(), false)
-            .expect("failed to open planner_state.json"),
-    );
-    let panels: Vec<Arc<dyn Panel>> = vec![Arc::new(planner)];
-
-    let router = ToolRouter::new(Arc::new(Enforcer::new()), store);
-    let status = format!(
-        "Machine install: editing {} — enforced by the service in managed accounts",
-        machine::data_dir().display()
-    );
-    (router, rule_uis, panels, status)
+impl eframe::App for InstalledNotice {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Digital Wellbeing is installed for this PC");
+            ui.label(
+                "The service enforces the rules in the managed accounts. Open the Digital \
+                 Wellbeing Focus app in a managed account (Start menu or the tray icon); its \
+                 Settings tab edits the settings while they are not locked.",
+            );
+            ui.label("This window does nothing else; close it.");
+        });
+    }
 }
 
 /// Is the machine-wide service registered?
@@ -187,16 +172,12 @@ struct App {
     panels: Vec<Arc<dyn Panel>>,
     tab: MainTab,
     status: String,
-    machine_mode: bool,
     last_refresh: Instant,
     /// Cached between refreshes: listing processes on every repaint (every
     /// mouse move or key press) made the window slow.
     snapshots: Vec<ProcessSnapshot>,
     blocks: serde_json::Value,
     process_filter: String,
-    /// Machine install: until when standard users may not edit the settings
-    /// (`machine::settings`); re-read with the other cached values.
-    settings_locked_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl App {
@@ -205,7 +186,6 @@ impl App {
         rule_uis: Vec<Arc<dyn RuleUi>>,
         panels: Vec<Arc<dyn Panel>>,
         status: String,
-        machine_mode: bool,
     ) -> Self {
         Self {
             router,
@@ -213,12 +193,10 @@ impl App {
             panels,
             tab: MainTab::Monitor,
             status,
-            machine_mode,
             last_refresh: Instant::now() - Duration::from_secs(10),
             snapshots: Vec::new(),
             blocks: serde_json::Value::Null,
             process_filter: String::new(),
-            settings_locked_until: None,
         }
     }
 }
@@ -227,11 +205,6 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.last_refresh.elapsed() >= REFRESH {
             self.last_refresh = Instant::now();
-            if self.machine_mode {
-                self.settings_locked_until =
-                    machine::settings::read_lock(&machine::settings::lock_path())
-                        .locked_until(chrono::Utc::now());
-            }
             self.blocks = self
                 .router
                 .dispatch("list_blocks", serde_json::json!({ "limit": 40 }))
@@ -251,7 +224,6 @@ impl eframe::App for App {
         ctx.request_repaint_after(REFRESH);
         let snapshots = &self.snapshots;
         let blocks = &self.blocks;
-        let machine_mode = self.machine_mode;
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -259,30 +231,6 @@ impl eframe::App for App {
                 ui.separator();
                 ui.label(&self.status);
             });
-            if machine_mode {
-                // Standard users edit these settings from the Focus app while
-                // unlocked; only this (admin) window can lift a lock early.
-                ui.horizontal(|ui| match self.settings_locked_until {
-                    Some(until) => {
-                        ui.label(format!(
-                            "Locked for standard users until {}.",
-                            until.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
-                        ));
-                        if ui.small_button("Unlock now").clicked() {
-                            if let Err(err) = std::fs::remove_file(machine::settings::lock_path()) {
-                                self.status = format!("could not unlock: {err}");
-                            }
-                            self.settings_locked_until = None;
-                        }
-                    }
-                    None => {
-                        ui.label(
-                            "Unlocked: standard users can also edit these settings from the \
-                             Focus app (Settings tab) until someone locks them.",
-                        );
-                    }
-                });
-            }
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(self.tab == MainTab::Monitor, "Monitor")
@@ -336,33 +284,21 @@ impl eframe::App for App {
                         egui::ScrollArea::vertical().id_salt("monitor_blocks").show(
                             &mut cols[1],
                             |ui| {
-                                if machine_mode {
-                                    ui.label(
-                                        "The service enforces and logs blocks in each managed \
-                                         account (see logs in the data folder).",
-                                    );
-                                }
-                                {
-                                    if let Some(arr) = blocks.as_array() {
-                                        for item in arr {
-                                            let name = item
-                                                .get("process_name")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("?");
-                                            let pid = item
-                                                .get("pid")
-                                                .and_then(|v| v.as_u64())
-                                                .unwrap_or(0);
-                                            let at = item
-                                                .get("at")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            let reason = item
-                                                .get("reason")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            ui.label(format!("{at}  {name} ({pid})  [{reason}]"));
-                                        }
+                                if let Some(arr) = blocks.as_array() {
+                                    for item in arr {
+                                        let name = item
+                                            .get("process_name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("?");
+                                        let pid =
+                                            item.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
+                                        let at =
+                                            item.get("at").and_then(|v| v.as_str()).unwrap_or("");
+                                        let reason = item
+                                            .get("reason")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        ui.label(format!("{at}  {name} ({pid})  [{reason}]"));
                                     }
                                 }
                             },

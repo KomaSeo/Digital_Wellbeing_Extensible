@@ -1,8 +1,8 @@
 //! Responsibility: Show the admin settings in the Focus app while they are unlocked, send the
 //! user's edits to the agent, and let the user lock the settings for a while.
 //!
-//! The admin UI (`digital-wellbeing.exe`) needs the admin password. While the settings are
-//! unlocked, this tab shows the same panels to a standard user: it asks the agent for the
+//! This tab is where the settings of a machine install are edited, from any managed
+//! (standard) account, as long as they are not locked. It asks the agent for the
 //! settings (`settings_get`), writes them into a private copy ("mirror") under
 //! `%LOCALAPPDATA%`, and opens the usual stores and panels on that copy. A background thread
 //! sends every file the panels save back to the agent (`settings_put`), which writes the real
@@ -92,10 +92,7 @@ impl SettingsTab {
                         until.with_timezone(&Local).format("%Y-%m-%d %H:%M")
                     ),
                 );
-                ui.label(
-                    "Nobody can change them from a standard account until then. You can only \
-                     lock them for longer.",
-                );
+                ui.label("Nobody can change them until then. You can only lock them for longer.");
             }
             None => {
                 ui.colored_label(
@@ -169,7 +166,7 @@ impl SettingsTab {
         let hours = self.lock_days * 24 + self.lock_hours;
         ui.checkbox(
             &mut self.confirm,
-            "I understand that I cannot unlock early from this account.",
+            "I understand that nobody can unlock them early.",
         );
         if ui
             .add_enabled(hours > 0 && self.confirm, egui::Button::new("Lock"))

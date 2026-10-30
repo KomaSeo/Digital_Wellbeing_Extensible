@@ -1,5 +1,5 @@
 ; Responsibility: Build DigitalWellbeing-Setup-<version>.exe (Inno Setup 6): copy
-; the four executables to Program Files, ask which Windows account to manage,
+; the three executables to Program Files, ask which Windows account to manage,
 ; and run `digital-wellbeing-service.exe install`; uninstall runs `uninstall`.
 ;
 ; Built by .github/workflows/release.yml:  ISCC.exe installer\DigitalWellbeing.iss
@@ -26,7 +26,7 @@ OutputBaseFilename=DigitalWellbeing-Setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\digital-wellbeing.exe
+UninstallDisplayIcon={app}\digital-wellbeing-focus.exe
 ; Close running Focus apps of logged-on users so their exe can be replaced.
 CloseApplications=force
 RestartApplications=no
@@ -34,12 +34,10 @@ RestartApplications=no
 [Files]
 Source: "..\target\release\digital-wellbeing-service.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\digital-wellbeing-focus.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\digital-wellbeing.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\digital-wellbeing-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\docs\*.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Digital Wellbeing\Digital Wellbeing settings (admin)"; Filename: "{app}\digital-wellbeing.exe"
 Name: "{autoprograms}\Digital Wellbeing\Digital Wellbeing Focus"; Filename: "{app}\digital-wellbeing-focus.exe"
 Name: "{autoprograms}\Digital Wellbeing\Guide (Korean)"; Filename: "{app}\docs\multi_account.md"
 

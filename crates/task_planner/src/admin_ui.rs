@@ -112,7 +112,7 @@ impl Panel for PlannerAdminUi {
         ui.heading("Life rules");
         ui.label(
             "Standing rules the AI follows when it picks a task, reviews a change and \
-             reviews a to-do the user proposes. Only this admin view can change them.",
+             reviews a to-do the user proposes. They can be changed only here, while the settings are not locked.",
         );
         draft.dirty |= ui
             .add(
