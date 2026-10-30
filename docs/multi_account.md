@@ -205,6 +205,24 @@ cd <저장소 폴더>\target\release
 3. 관리자는 필요하면 **List-based rule** 탭에서 항상 막을 프로그램(게임 등)을 블랙리스트에 넣습니다.
 4. 관리자는 창을 닫습니다. agent는 바뀐 설정을 3초 안에 읽습니다. 관리자가 관리 UI를 계속 켜 둘 필요는 없습니다.
 
+### 4.4 코드를 고치며 내 PC에서 빠르게 시험하기
+
+GitHub의 릴리스를 거치면 한 번에 몇 분이 걸립니다. 코드를 고쳐 가며 시험할 때는 내 PC에서 직접 빌드하고 설치하는 편이 훨씬 빠릅니다.
+첫 빌드는 몇 분 걸리지만, 그 뒤로는 바뀐 부분만 다시 컴파일하므로 수십 초면 됩니다.
+
+준비(한 번만): 개발자는 https://rustup.rs 에서 Rust를 설치하고(기본 MSVC 선택), Visual Studio Build Tools의 "C++를 사용한 데스크톱 개발"을 설치합니다.
+
+| 하고 싶은 것 | 명령 (저장소 폴더에서) |
+|---|---|
+| 자동 테스트만 돌리기 | `cargo test --workspace` |
+| 서비스 없이 내 계정에서 전체 기능 써 보기 | `cargo run -p digital-wellbeing --release -- --standalone` (관리자 PowerShell) |
+| 서비스까지 실제로 설치해 시험하기 | `.\scripts\dev-install.ps1 -Manage <작업 계정>` (관리자 PowerShell, 처음 한 번) |
+| 고친 코드로 다시 설치하기 | `.\scripts\dev-install.ps1` |
+| 다시 설치하고 agent 로그를 실시간으로 보기 | `.\scripts\dev-install.ps1 -Tail` |
+
+`dev-install.ps1`은 릴리스 빌드를 한 뒤 `install` 명령을 실행하고, 서비스 상태와 최근 로그를 보여 줍니다. 설치기는 실행 중인 서비스를 멈추고 파일을 바꾼 뒤 다시 시작하므로, 개발자는 이 스크립트를 몇 번이고 다시 실행해도 됩니다.
+PowerShell이 스크립트 실행을 막으면, 개발자는 한 번만 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`를 실행합니다.
+
 ---
 
 ## 5. 설치 확인 점검 목록 (처음 한 번)

@@ -80,6 +80,11 @@ are edited with `digital-wellbeing.exe` (administrator) and stored in
 `%ProgramData%\DigitalWellbeing`, which standard users cannot read or write.
 Full guide (Korean): [`docs/multi_account.md`](docs/multi_account.md).
 
+Testing changes on your own PC (much faster than a release): from an
+administrator PowerShell, `.\scripts\dev-install.ps1 -Manage <work-account>`
+builds and (re)installs; run it again after each change, add `-Tail` to follow
+the agent log.
+
 **Task planner** (machine install): the admin keeps a to-do list (deadline,
 priority, notes) in the *Task planner* tab. When it is on, the AI picks the
 user's task from the list ("Get my task" in the Focus app) and that becomes the
