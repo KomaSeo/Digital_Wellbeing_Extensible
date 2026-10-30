@@ -409,6 +409,9 @@ Anthropic은 공식 Rust SDK를 제공하지 않으므로, 코드는 REST API를
 2. **Blocked now**: 지금 차단된 앱과 탭, 남은 시간, `unblock` 버튼. 사용자가 `unblock`을 누르면 `MonitorState::unblock`이 그 차단을 지웁니다. 그 앱의 경고 횟수는 차단될 때 이미 0이 되었습니다.
 3. **Recent AI checks**: 최근 30개의 판정. 화면은 판정을 색으로 구분하고(초록은 on_task, 빨강은 off_task, 회색은 unsure), 이유와 결과를 보여 줍니다.
 4. **Settings**: 검사 간격, 경고 횟수, 차단 시간, 화면 캡처 여부, 모델, API 키.
+   API 키 칸(`api_key_ui`)은 환경 변수가 있어도 항상 보입니다. 머신 설치의 agent는 SYSTEM으로 돌아서 이 창을 띄운 계정의 환경 변수를 볼 수 없기 때문입니다.
+   칸은 저장된 키의 마지막 4글자만 보여 주고, Save, Clear, Check key 버튼을 둡니다. Check key는 백그라운드 스레드에서 `ClaudeClient::check()`를 부릅니다.
+   이 함수는 Models API(`GET /v1/models/<모델>`)로 키와 모델 이름을 확인하므로 토큰 비용이 들지 않습니다.
 5. **Always allow / Private apps 목록**: 사용자는 앱 이름을 직접 입력하거나, "running…" 목록에서 실행 중인 프로그램을 골라 추가합니다.
 
 egui와 관련된 세부 사항:

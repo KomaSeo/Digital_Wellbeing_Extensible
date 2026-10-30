@@ -64,7 +64,7 @@ pub struct JudgeRequest<'a> {
 /// Responsibility: Report why a Claude call failed (shared by every Claude-backed module).
 #[derive(Debug, Error)]
 pub enum JudgeError {
-    #[error("no API key: set ANTHROPIC_API_KEY or enter one in settings")]
+    #[error("no API key: an administrator saves one in Digital Wellbeing settings, AI focus tab")]
     NoApiKey,
     #[error("API error {status}: {body}")]
     Api { status: u16, body: String },

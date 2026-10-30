@@ -25,6 +25,10 @@ struct AiUiState {
     grants_read: Option<std::time::Instant>,
     /// Admin view: (user, grants) read from every file in the grants folder.
     admin_grants: Vec<(String, GrantState)>,
+    show_key: bool,
+    /// Result of the last "Check key", written by a background thread.
+    key_check: Arc<Mutex<Option<String>>>,
+    key_checking: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Responsibility: Report the monitor's blocked processes to the enforcer, and draw the tab:
@@ -60,6 +64,105 @@ impl AiFocusRule {
             Ok(_) => state.status.clear(),
             Err(err) => state.status = err.to_string(),
         }
+    }
+
+    /// Enter, check and clear the Anthropic API key. Always shown: on a machine
+    /// install the agents run as SYSTEM and cannot see the environment
+    /// variables of the account this window runs in, so the key must be saved.
+    fn api_key_ui(&self, ui: &mut egui::Ui, config: &crate::AiFocusConfig, s: &mut AiUiState) {
+        let saved = config.api_key.trim();
+        if saved.is_empty() {
+            ui.colored_label(egui::Color32::from_rgb(200, 80, 80), "No key saved.");
+        } else {
+            let tail: String = saved
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            ui.label(format!("A key is saved (…{tail})."));
+        }
+        let env_key = std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.trim().is_empty());
+        if env_key && self.session_controls {
+            ui.small(
+                "ANTHROPIC_API_KEY is set for this account; it is used instead of the saved key.",
+            );
+        }
+        ui.horizontal(|ui| {
+            let key = s.api_key_input.get_or_insert_with(String::new);
+            ui.add(
+                egui::TextEdit::singleline(key)
+                    .password(!s.show_key)
+                    .hint_text("sk-ant-…")
+                    .desired_width(260.0),
+            );
+            ui.checkbox(&mut s.show_key, "show");
+        });
+        ui.horizontal(|ui| {
+            let typed = s.api_key_input.clone().unwrap_or_default();
+            if ui
+                .add_enabled(!typed.trim().is_empty(), egui::Button::new("Save"))
+                .clicked()
+            {
+                self.save(s, |c| c.api_key = typed.trim().to_string());
+                s.api_key_input = Some(String::new());
+                *s.key_check.lock() = None;
+            }
+            if ui
+                .add_enabled(!saved.is_empty(), egui::Button::new("Clear"))
+                .clicked()
+            {
+                self.save(s, |c| c.api_key.clear());
+                *s.key_check.lock() = None;
+            }
+            let checking = s.key_checking.load(std::sync::atomic::Ordering::SeqCst);
+            // Check the typed key if there is one, otherwise the saved one.
+            let to_check = if typed.trim().is_empty() {
+                saved.to_string()
+            } else {
+                typed.trim().to_string()
+            };
+            if ui
+                .add_enabled(
+                    !checking && !to_check.is_empty(),
+                    egui::Button::new("Check key"),
+                )
+                .clicked()
+            {
+                let (result, busy, ctx) = (
+                    Arc::clone(&s.key_check),
+                    Arc::clone(&s.key_checking),
+                    ui.ctx().clone(),
+                );
+                let model = config.model.clone();
+                busy.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let message =
+                        match crate::claude::ClaudeClient::new(to_check, model.clone()).check() {
+                            Ok(()) => format!("✔ The key works and model {model} is available."),
+                            Err(crate::JudgeError::Api { status: 401, .. }) => {
+                                "✖ The key was rejected (401).".into()
+                            }
+                            Err(crate::JudgeError::Api { status: 404, .. }) => {
+                                format!("✖ The key works, but model {model} was not found (404).")
+                            }
+                            Err(err) => format!("✖ {err}"),
+                        };
+                    *result.lock() = Some(message);
+                    busy.store(false, std::sync::atomic::Ordering::SeqCst);
+                    ctx.request_repaint();
+                });
+            }
+            if checking {
+                ui.spinner();
+            }
+        });
+        if let Some(message) = s.key_check.lock().as_ref() {
+            ui.label(message.as_str());
+        }
+        ui.small("The key is saved without encryption in ai_focus.json. On a machine install only administrators can open that folder.");
     }
 
     /// Access grants in force and their history; the admin can revoke.
@@ -393,23 +496,9 @@ impl RuleUi for AiFocusRule {
                 ui.end_row();
 
                 ui.label("API key");
-                ui.horizontal(|ui| {
-                    if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.is_empty()) {
-                        ui.label("using ANTHROPIC_API_KEY");
-                    } else {
-                        let key = s
-                            .api_key_input
-                            .get_or_insert_with(|| config.api_key.clone());
-                        ui.add(egui::TextEdit::singleline(key).password(true));
-                        if ui.button("Save").clicked() {
-                            let key = s.api_key_input.clone().unwrap_or_default();
-                            self.save(&mut s, |c| c.api_key = key.trim().to_string());
-                        }
-                    }
-                });
+                ui.vertical(|ui| self.api_key_ui(ui, &config, &mut s));
                 ui.end_row();
             });
-        ui.small("A saved key is stored in plain text in ai_focus.json; prefer the ANTHROPIC_API_KEY environment variable.");
 
         self.grants_ui(ui, &config, &mut s);
 
@@ -559,5 +648,34 @@ impl AiFocusRuleHandle {
 
     pub fn monitor(&self) -> &Arc<FocusMonitor> {
         &self.monitor
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{platform, AiFocusConfig, AiFocusStore, JudgeError};
+
+    fn render(rule: &dyn RuleUi) {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| rule.settings_ui(ui, &[]));
+        });
+    }
+
+    #[test]
+    fn settings_tab_renders_in_both_modes() {
+        let config = AiFocusConfig {
+            api_key: "sk-ant-test-abcd".into(),
+            ..Default::default()
+        };
+        let monitor = Arc::new(FocusMonitor::new(
+            AiFocusStore::in_memory(config),
+            platform::native(),
+            Arc::new(|_: &AiFocusConfig| Err(JudgeError::NoApiKey)),
+        ));
+        render(AiFocusRuleHandle::new(Arc::clone(&monitor)).ui().as_ref());
+        let dir = std::env::temp_dir().join("dw_no_grants_dir");
+        render(AiFocusRuleHandle::settings_only(monitor, dir).ui().as_ref());
     }
 }

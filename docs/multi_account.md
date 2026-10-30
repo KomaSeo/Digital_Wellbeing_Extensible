@@ -195,11 +195,13 @@ cd <저장소 폴더>\target\release
 
 1. 관리자는 `C:\Program Files\DigitalWellbeing\digital-wellbeing.exe`를 실행하고, UAC 창에 관리자 비밀번호를 넣습니다.
    창 위쪽에 `Machine install: editing C:\ProgramData\DigitalWellbeing …`가 보이면, 관리 UI가 머신 설치용 모드로 열린 것입니다.
-2. 관리자는 **AI focus** 탭의 **API key** 칸에 Anthropic API 키를 넣고 Save를 누릅니다.
-   - agent는 SYSTEM 권한으로 돌기 때문에, **사용자 계정에 설정된 `ANTHROPIC_API_KEY` 환경 변수를 읽지 못합니다.** 그래서 관리자는 이 칸에 키를 저장해야 합니다.
-     프로그램은 키를 암호화하지 않고 파일에 저장합니다. 하지만 그 폴더는 관리자만 열 수 있으므로, 사용자는 작업 계정에서 키를 읽을 수 없습니다.
-   - 화면에 "using ANTHROPIC_API_KEY"가 보일 수도 있습니다. 이 문구는 관리 UI를 실행한 관리자 프로그램에 환경 변수가 있다는 뜻입니다.
-     agent와는 관계가 없으므로, 관리자는 그래도 키를 저장해 두어야 합니다.
+2. 관리자는 **AI focus** 탭의 **API key** 칸에 Anthropic API 키를 붙여 넣고 **Save**를 누릅니다.
+   - 저장하면 칸 위에 "A key is saved (…abcd)."처럼 저장된 키의 마지막 4글자가 보입니다.
+   - 관리자는 **Check key**를 눌러 키가 맞는지 확인할 수 있습니다. 이 버튼은 Anthropic의 모델 목록을 조회하므로 비용이 들지 않습니다.
+     "✔ The key works…"가 나오면 키가 맞습니다. "rejected (401)"이 나오면 키가 틀렸고, "not found (404)"가 나오면 설정의 모델 이름이 틀렸습니다.
+   - agent는 SYSTEM 권한으로 돌기 때문에, **관리자나 사용자 계정에 설정된 `ANTHROPIC_API_KEY` 환경 변수를 읽지 못합니다.** 그래서 관리자는 환경 변수가 있더라도 이 칸에 키를 저장해야 합니다.
+   - 프로그램은 키를 암호화하지 않고 파일에 저장합니다. 하지만 그 폴더는 관리자만 열 수 있으므로, 사용자는 작업 계정에서 키를 읽을 수 없습니다.
+   - 키를 지우려면 **Clear**를 누릅니다. 입력한 키를 눈으로 확인하려면 **show**를 체크합니다.
 3. 관리자는 필요하면 **List-based rule** 탭에서 항상 막을 프로그램(게임 등)을 블랙리스트에 넣습니다.
 4. 관리자는 창을 닫습니다. agent는 바뀐 설정을 3초 안에 읽습니다. 관리자가 관리 UI를 계속 켜 둘 필요는 없습니다.
 

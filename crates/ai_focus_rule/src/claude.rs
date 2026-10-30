@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
+const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const API_VERSION: &str = "2026-10-21";
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 
@@ -28,6 +29,26 @@ impl ClaudeClient {
             agent,
             api_key,
             model,
+        }
+    }
+
+    /// Check the key and the model name without spending tokens: look the
+    /// model up in the Models API (401 = bad key, 404 = unknown model).
+    pub fn check(&self) -> Result<(), JudgeError> {
+        let url = format!("{MODELS_URL}/{}", self.model);
+        match self
+            .agent
+            .get(&url)
+            .set("x-api-key", &self.api_key)
+            .set("anthropic-version", API_VERSION)
+            .call()
+        {
+            Ok(_) => Ok(()),
+            Err(ureq::Error::Status(status, resp)) => Err(JudgeError::Api {
+                status,
+                body: resp.into_string().unwrap_or_default(),
+            }),
+            Err(err) => Err(JudgeError::Transport(err.to_string())),
         }
     }
 
@@ -170,5 +191,20 @@ mod tests {
             parse_structured::<Answer>(&response),
             Err(JudgeError::Truncated)
         ));
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+
+    /// Needs network access: `cargo test -p ai_focus_rule -- --ignored`.
+    #[test]
+    #[ignore]
+    fn a_bogus_key_is_rejected_by_the_api() {
+        let err = ClaudeClient::new("sk-ant-bogus".into(), "claude-opus-5-5".into())
+            .check()
+            .unwrap_err();
+        assert!(matches!(err, JudgeError::Api { status: 401, .. }), "{err}");
     }
 }
