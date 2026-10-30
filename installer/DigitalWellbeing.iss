@@ -79,8 +79,11 @@ begin
   if CurStep <> ssPostInstall then
     exit;
   Params := 'install';
+  { Empty means every account, also on an upgrade (plain "install" would keep the old list). }
   if Trim(UserPage.Values[0]) <> '' then
-    Params := Params + ' --manage "' + Trim(UserPage.Values[0]) + '"';
+    Params := Params + ' --manage "' + Trim(UserPage.Values[0]) + '"'
+  else
+    Params := Params + ' --manage-all';
   WizardForm.StatusLabel.Caption := 'Registering the Digital Wellbeing service...';
   if not Exec(ExpandConstant('{app}\digital-wellbeing-service.exe'), Params, ExpandConstant('{app}'),
       SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then

@@ -5,6 +5,7 @@ after the first build only changed crates are recompiled).
 
 Usage, from an administrator PowerShell in the repository folder:
   .\scripts\dev-install.ps1 -Manage work   # first time: name the work account
+  .\scripts\dev-install.ps1 -ManageAll     # or manage every account, administrators too
   .\scripts\dev-install.ps1                # later: keeps the managed accounts
   .\scripts\dev-install.ps1 -Tail          # then follow the newest agent log
 
@@ -12,6 +13,7 @@ If scripts are blocked, run once: Set-ExecutionPolicy -Scope CurrentUser RemoteS
 #>
 param(
     [string]$Manage,
+    [switch]$ManageAll,
     [switch]$Tail
 )
 
@@ -32,6 +34,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "== install ==" -ForegroundColor Cyan
 $installArgs = @("install")
 if ($Manage) { $installArgs += @("--manage", $Manage) }
+if ($ManageAll) { $installArgs += "--manage-all" }
 & "$repo\target\release\digital-wellbeing-service.exe" @installArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

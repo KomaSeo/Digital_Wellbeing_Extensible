@@ -12,7 +12,7 @@ echo.
 set "DW_USER="
 set /p DW_USER=Work account user name (empty = manage every account): 
 if "%DW_USER%"=="" (
-    digital-wellbeing-service.exe install
+    digital-wellbeing-service.exe install --manage-all
 ) else (
     digital-wellbeing-service.exe install --manage "%DW_USER%"
 )

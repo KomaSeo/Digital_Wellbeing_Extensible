@@ -47,7 +47,7 @@ fn main() -> anyhow::Result<()> {
         _ => {
             eprintln!(
                 "usage (from an administrator terminal):\n  \
-                 digital-wellbeing-service install [--manage <windows user>]...\n  \
+                 digital-wellbeing-service install [--manage <windows user>]... | [--manage-all]\n  \
                  digital-wellbeing-service uninstall"
             );
             Ok(())

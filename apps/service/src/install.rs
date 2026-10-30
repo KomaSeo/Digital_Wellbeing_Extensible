@@ -88,7 +88,7 @@ pub fn install(args: &[String]) -> anyhow::Result<()> {
 
 fn install_steps(
     manager: &ServiceManager,
-    managed: Vec<String>,
+    managed: Option<Vec<String>>,
     upgrade: bool,
 ) -> anyhow::Result<()> {
     // 2. binaries
@@ -154,12 +154,12 @@ fn install_steps(
 
     // 4. managed users.
     let mut config = MachineConfig::load();
-    if !managed.is_empty() {
+    if let Some(managed) = managed {
         config.managed_users = managed;
     }
     config.save()?;
     if config.managed_users.is_empty() {
-        println!("managed accounts: ALL (use --manage <user> to limit to your work account)");
+        println!("managed accounts: ALL, administrators included (--manage <user> limits them)");
     } else {
         println!("managed accounts: {}", config.managed_users.join(", "));
     }
@@ -311,16 +311,25 @@ fn stop_and_wait(service: &Service) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_manage(args: &[String]) -> anyhow::Result<Vec<String>> {
+/// Which accounts to manage: `--manage <user>` (repeatable) names them, `--manage-all`
+/// manages every account (administrators too), neither keeps what `machine.json` says.
+fn parse_manage(args: &[String]) -> anyhow::Result<Option<Vec<String>>> {
     let mut users = Vec::new();
+    let mut all = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--manage" => users.push(it.next().context("--manage needs a user name")?.clone()),
+            "--manage-all" => all = true,
             other => bail!("unknown option '{other}'"),
         }
     }
-    Ok(users)
+    match (all, users.is_empty()) {
+        (true, false) => bail!("use either --manage <user> or --manage-all, not both"),
+        (true, true) => Ok(Some(Vec::new())),
+        (false, false) => Ok(Some(users)),
+        (false, true) => Ok(None),
+    }
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -336,4 +345,28 @@ fn run(cmd: &mut Command) -> anyhow::Result<()> {
         bail!("{cmd:?} failed ({status})");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_manage;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn manage_options() {
+        assert_eq!(parse_manage(&args(&[])).unwrap(), None);
+        assert_eq!(
+            parse_manage(&args(&["--manage-all"])).unwrap(),
+            Some(vec![])
+        );
+        assert_eq!(
+            parse_manage(&args(&["--manage", "work", "--manage", "admin"])).unwrap(),
+            Some(args(&["work", "admin"]))
+        );
+        assert!(parse_manage(&args(&["--manage", "work", "--manage-all"])).is_err());
+        assert!(parse_manage(&args(&["--manage"])).is_err());
+    }
 }
