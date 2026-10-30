@@ -30,16 +30,18 @@ Policy file:
 Tell the app what you are working on and press **Start session** in the *AI focus* tab.
 While the session runs:
 
-1. Every 5 s the foreground window (process + title) is recorded into an activity history.
-2. Every *check interval* (default 60 s) the task, that history and a downscaled
-   screenshot of the active monitor are sent to Claude, which answers
-   `on_task` / `off_task` / `unsure`.
-3. After *N* consecutive `off_task` verdicts (default 2) the app is blocked for
-   *block minutes* (default 30) — the enforcer kills it on sight. For browsers
-   (`chrome.exe`, `msedge.exe`, `whale.exe`, …) only the active tab is closed (Ctrl+W),
-   and a reopened tab with the same title is closed again.
+1. Every 3 s the open windows are sampled; the foreground one goes into an activity history.
+2. Any app or page without a verdict for the current task is judged at once: the task,
+   that history, a downscaled screenshot of the foreground monitor and the titles of the
+   other open windows go to Claude, which answers `on_task` / `off_task` / `unsure` for
+   each. A verdict comes due again after *recheck minutes* (on_task, default 15) or the
+   *check interval* (unsure, or an app still collecting strikes; default 60 s).
+3. A browser tab judged `off_task` is closed (Ctrl+W) and its site blocked at once
+   (YouTube: the channel). An app needs *N* consecutive `off_task` verdicts (default 2);
+   then the enforcer kills it on sight.
 
-`unsure` never blocks. Changing the task or stopping the session clears all AI blocks.
+`unsure` never blocks. Blocks do not expire and survive task changes; an approved
+access request (or `unblock`) lifts them.
 
 Settings (`%AppData%\DigitalWellbeing\DigitalWellbeing\config\ai_focus.json`):
 
