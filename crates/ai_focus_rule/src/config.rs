@@ -45,6 +45,13 @@ pub struct AiFocusConfig {
     pub private_apps: BTreeSet<String>,
     /// Off-task tabs are closed (Ctrl+W) instead of killing the whole browser.
     pub browsers: BTreeSet<String>,
+    /// Users may ask for access that lasts until revoked (not only for minutes).
+    pub allow_permanent_grants: bool,
+    /// Upper limit for temporary access, in minutes.
+    pub max_grant_minutes: u32,
+    /// Grant ids the admin revoked. Kept here (an admin-owned file) so the
+    /// admin UI never writes the agent's `grants.json`; the monitor drops these.
+    pub revoked_grants: BTreeSet<String>,
 }
 
 impl Default for AiFocusConfig {
@@ -69,6 +76,9 @@ impl Default for AiFocusConfig {
                 "brave.exe",
                 "opera.exe",
             ]),
+            allow_permanent_grants: true,
+            max_grant_minutes: 120,
+            revoked_grants: BTreeSet::new(),
         }
     }
 }

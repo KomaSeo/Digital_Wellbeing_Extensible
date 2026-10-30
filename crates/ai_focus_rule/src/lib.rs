@@ -14,6 +14,7 @@ mod judge;
 mod monitor;
 pub mod platform;
 mod rule;
+pub mod store;
 
 pub use config::{AiFocusConfig, AiFocusStore, ConfigError, DEFAULT_MODEL};
 pub use judge::{ClaudeJudge, Judge, JudgeError, JudgeRequest, Judgement, Verdict};

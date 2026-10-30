@@ -8,7 +8,7 @@ use crate::model::{
     Assignment, AssignmentSource, ChangeKind, ChangeRecord, DoneRecord, PlannerConfig,
     PlannerState, PlannerStatus, TodoItem,
 };
-use crate::store::JsonStore;
+use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
 use chrono::{DateTime, Duration, Local, Utc};
 use parking_lot::Mutex;

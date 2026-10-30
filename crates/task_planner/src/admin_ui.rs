@@ -1,7 +1,7 @@
 //! Admin tab: edit the to-do list, see what the agent assigned and decided.
 
 use crate::model::{ChangeKind, PlannerConfig, PlannerState, TodoItem};
-use crate::store::JsonStore;
+use ai_focus_rule::store::JsonStore;
 use chrono::{Local, NaiveDate};
 use parking_lot::Mutex;
 use rule_ui::Panel;

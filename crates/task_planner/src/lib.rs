@@ -13,7 +13,6 @@ mod admin_ui;
 mod advisor;
 mod model;
 mod planner;
-mod store;
 
 pub use admin_ui::PlannerAdminUi;
 pub use advisor::{
@@ -25,7 +24,7 @@ pub use model::{
     PlannerState, PlannerStatus, TodoItem,
 };
 pub use planner::{PlannerError, TaskPlanner};
-pub use store::JsonStore;
+pub use ai_focus_rule::store::JsonStore;
 
 #[cfg(test)]
 mod tests;
