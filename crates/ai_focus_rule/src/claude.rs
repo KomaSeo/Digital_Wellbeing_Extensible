@@ -7,8 +7,19 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
-const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
+const API_BASE: &str = "https://api.anthropic.com";
+
+/// `https://api.anthropic.com`, or `DW_CLAUDE_API_URL` (the end-to-end test points it at a
+/// local fake). On Windows the agent's environment is the SYSTEM service's, which only an
+/// administrator can set.
+fn api_base() -> String {
+    std::env::var("DW_CLAUDE_API_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| API_BASE.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
 const API_VERSION: &str = "2026-10-21";
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 
@@ -21,9 +32,14 @@ pub struct ClaudeClient {
 
 impl ClaudeClient {
     pub fn new(api_key: String, model: String) -> Self {
+        // A proxy from the environment is used, except for a local stand-in API.
+        let base = api_base();
+        let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
+            .iter()
+            .any(|prefix| base.starts_with(prefix));
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(90))
-            .try_proxy_from_env(true)
+            .try_proxy_from_env(!local)
             .build();
         Self {
             agent,
@@ -35,7 +51,7 @@ impl ClaudeClient {
     /// Check the key and the model name without spending tokens: look the
     /// model up in the Models API (401 = bad key, 404 = unknown model).
     pub fn check(&self) -> Result<(), JudgeError> {
-        let url = format!("{MODELS_URL}/{}", self.model);
+        let url = format!("{}/v1/models/{}", api_base(), self.model);
         match self
             .agent
             .get(&url)
@@ -83,7 +99,7 @@ impl ClaudeClient {
     ) -> Result<T, JudgeError> {
         let mut call = self
             .agent
-            .post(API_URL)
+            .post(&format!("{}/v1/messages", api_base()))
             .set("x-api-key", &self.api_key)
             .set("anthropic-version", API_VERSION)
             .set("content-type", "application/json");

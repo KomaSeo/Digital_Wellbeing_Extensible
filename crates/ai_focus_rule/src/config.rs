@@ -95,6 +95,13 @@ impl Default for AiFocusConfig {
                 "whale.exe",
                 "brave.exe",
                 "opera.exe",
+                // Linux process names (normalized like every name here)
+                "chromium.exe",
+                "chromium-browser.exe",
+                "firefox-bin.exe",
+                "firefox-esr.exe",
+                "microsoft-edge.exe",
+                "vivaldi-bin.exe",
             ]),
             allow_permanent_grants: true,
             max_grant_minutes: 120,
@@ -107,18 +114,15 @@ impl Default for AiFocusConfig {
 
 impl AiFocusConfig {
     pub fn is_always_allowed(&self, process_name: &str) -> bool {
-        self.always_allow
-            .contains(&normalize_process_name(process_name))
+        listed(&self.always_allow, process_name)
     }
 
     pub fn is_private(&self, process_name: &str) -> bool {
-        self.private_apps
-            .contains(&normalize_process_name(process_name))
+        listed(&self.private_apps, process_name)
     }
 
     pub fn is_browser(&self, process_name: &str) -> bool {
-        self.browsers
-            .contains(&normalize_process_name(process_name))
+        listed(&self.browsers, process_name)
     }
 
     /// API key from the environment, falling back to the saved one.
@@ -250,9 +254,31 @@ impl AiFocusStore {
     }
 }
 
+/// Is `process_name` in `list`? Both sides are compared in `normalize_process_name` form, so a
+/// hand-edited file with "Chrome" or "firefox" still matches.
+fn listed(list: &BTreeSet<String>, process_name: &str) -> bool {
+    let name = normalize_process_name(process_name);
+    list.contains(&name)
+        || list
+            .iter()
+            .any(|entry| normalize_process_name(entry) == name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_match_names_in_any_spelling() {
+        let mut config = AiFocusConfig::default();
+        assert!(
+            config.is_browser("chromium"),
+            "Linux browsers are in the defaults"
+        );
+        config.browsers.insert("MyBrowser".into()); // hand-edited, not normalized
+        assert!(config.is_browser("mybrowser"));
+        assert!(!config.is_browser("code"));
+    }
 
     #[test]
     fn read_only_store_keeps_session_across_reload_and_never_writes() {

@@ -962,11 +962,13 @@ dependencies = [
  "enforcer",
  "list_based_rule",
  "machine",
+ "serde_json",
  "task_planner",
  "tracing",
  "tracing-subscriber",
  "windows-service",
  "windows-sys 0.59.0",
+ "x11rb",
 ]
 
 [[package]]

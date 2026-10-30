@@ -151,8 +151,7 @@ impl Conn {
         let name = class
             .value
             .split(|b| *b == 0)
-            .filter(|part| !part.is_empty())
-            .next_back()
+            .rfind(|part| !part.is_empty())
             .map(|c| String::from_utf8_lossy(c).into_owned())
             .unwrap_or_default();
         Ok((pid, name))
