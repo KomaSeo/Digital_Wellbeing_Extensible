@@ -139,17 +139,30 @@ fn install_steps(
         "/Q",
     ]))
     .context("set data dir owner")?;
+    // The folder alone gets the explicit, inheritable ACL. (Applying this with
+    // /T also hit every existing file: the (OI)(CI) grant does not apply to a
+    // file, so files kept no ACE at all and even SYSTEM could not open them.)
     run(Command::new("icacls").arg(&data).args([
         "/inheritance:r",
         "/grant:r",
         &format!("{SID_SYSTEM}:(OI)(CI)F"),
         "/grant:r",
         &format!("{SID_ADMINISTRATORS}:(OI)(CI)F"),
-        "/T",
         "/L",
         "/Q",
     ]))
     .context("restrict data dir")?;
+    // Everything inside inherits that ACL; this also repairs files an earlier
+    // version left without any ACE.
+    if let Err(err) = run(Command::new("icacls")
+        .arg(data.join("*"))
+        .args(["/reset", "/T", "/C", "/L", "/Q"]))
+    {
+        println!(
+            "warning: could not reset the ACLs inside {}: {err:#}",
+            data.display()
+        );
+    }
     println!("locked {} to SYSTEM + Administrators", data.display());
 
     // 4. managed users.
