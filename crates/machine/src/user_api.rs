@@ -29,9 +29,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 use task_planner::{ChangeKind, ChangeRecord, PlannerStatus, TaskPlanner};
 
 /// Re-exported so clients need not depend on the rule crates.
@@ -198,35 +200,100 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
 /// Serve forever on the port of `session` (blocking; run in a thread).
 pub fn serve(api: Arc<AgentApi>, session: u32) -> std::io::Result<()> {
     let port = port_for_session(session);
-    let listener = TcpListener::bind(("127.0.0.1", port))?;
+    // The port may still be held by an agent that is shutting down: retry.
+    let listener = loop {
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => break listener,
+            Err(err) => {
+                tracing::warn!("user api cannot bind 127.0.0.1:{port} ({err}); retrying");
+                thread::sleep(Duration::from_secs(5));
+            }
+        }
+    };
     tracing::info!("user api listening on 127.0.0.1:{port}");
+    let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        let api = Arc::clone(&api);
-        thread::spawn(move || {
+        let Ok(mut stream) = stream else { continue };
+        if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            active.fetch_sub(1, Ordering::SeqCst);
+            let _ = stream.set_write_timeout(Some(REQUEST_DEADLINE));
+            let _ = reply(&mut stream, &json!({ "error": "agent busy" }));
+            continue;
+        }
+        let (api, active_conn) = (Arc::clone(&api), Arc::clone(&active));
+        let spawned = thread::Builder::new().spawn(move || {
             if let Err(err) = handle(&api, stream) {
                 tracing::debug!("user api client error: {err}");
             }
+            active_conn.fetch_sub(1, Ordering::SeqCst);
         });
+        if spawned.is_err() {
+            active.fetch_sub(1, Ordering::SeqCst);
+        }
     }
     Ok(())
 }
 
+/// Most simultaneous clients; the API runs in a SYSTEM process any local
+/// user can connect to, so it must not be possible to exhaust it.
+const MAX_CONNECTIONS: usize = 16;
+/// The whole request line must arrive within this time.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+
 fn handle(api: &AgentApi, mut stream: TcpStream) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let mut line = String::new();
-    BufReader::new((&stream).take(MAX_REQUEST as u64)).read_line(&mut line)?;
-    let response = match serde_json::from_str::<Value>(&line) {
-        Ok(req) => {
-            let method = req["method"].as_str().unwrap_or_default();
-            match dispatch(api, method, &req["params"]) {
-                Ok(result) => json!({ "result": result }),
-                Err(message) => json!({ "error": message }),
+    // Answers may wait for the AI, so the write timeout is generous.
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    let response = match read_line(&mut stream) {
+        Ok(line) => match serde_json::from_str::<Value>(&line) {
+            Ok(req) => {
+                let method = req["method"].as_str().unwrap_or_default();
+                match dispatch(api, method, &req["params"]) {
+                    Ok(result) => json!({ "result": result }),
+                    Err(message) => json!({ "error": message }),
+                }
             }
-        }
-        Err(err) => json!({ "error": format!("parse error: {err}") }),
+            Err(err) => json!({ "error": format!("parse error: {err}") }),
+        },
+        Err(err) => json!({ "error": err }),
     };
-    stream.write_all(serde_json::to_string(&response)?.as_bytes())?;
+    reply(&mut stream, &response)
+}
+
+/// One request line, within [`REQUEST_DEADLINE`] overall and
+/// [`MAX_REQUEST`] bytes (a per-read timeout alone lets a slow client keep
+/// the connection for minutes).
+fn read_line(stream: &mut TcpStream) -> Result<String, String> {
+    let deadline = Instant::now() + REQUEST_DEADLINE;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err("request timed out".into());
+        }
+        stream
+            .set_read_timeout(Some(left))
+            .map_err(|e| e.to_string())?;
+        let n = stream
+            .read(&mut chunk)
+            .map_err(|_| "request timed out".to_string())?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.contains(&b'\n') {
+            break;
+        }
+        if buf.len() > MAX_REQUEST {
+            return Err("request too large".into());
+        }
+    }
+    let end = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
+    String::from_utf8(buf[..end].to_vec()).map_err(|_| "request is not UTF-8".into())
+}
+
+fn reply(stream: &mut TcpStream, value: &Value) -> std::io::Result<()> {
+    stream.write_all(serde_json::to_string(value)?.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()
 }
@@ -301,6 +368,29 @@ mod tests {
         assert!(err.contains("focus session"));
         let s = call(session, "status", json!({})).unwrap();
         assert!(s.grants.is_empty());
+    }
+
+    #[test]
+    fn a_client_that_never_finishes_its_request_is_cut_off() {
+        let monitor = Arc::new(FocusMonitor::new(
+            AiFocusStore::in_memory(AiFocusConfig::default()),
+            platform::native(),
+            Arc::new(|_: &AiFocusConfig| Err(JudgeError::NoApiKey)),
+        ));
+        let api = Arc::new(AgentApi {
+            monitor,
+            planner: None,
+        });
+        let session = 901;
+        thread::spawn(move || serve(api, session));
+        thread::sleep(Duration::from_millis(200));
+        let mut s = TcpStream::connect(("127.0.0.1", port_for_session(session))).unwrap();
+        s.write_all(b"{\"method\":").unwrap(); // and then nothing
+        let started = Instant::now();
+        let mut line = String::new();
+        BufReader::new(s).read_line(&mut line).unwrap();
+        assert!(line.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(8));
     }
 
     #[test]
