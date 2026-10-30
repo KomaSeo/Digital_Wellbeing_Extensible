@@ -122,7 +122,7 @@ impl AiFocusRule {
                 .iter()
                 .flat_map(|(user, state)| state.log.iter().map(move |e| (user, e)))
                 .collect();
-            log.sort_by(|a, b| b.1.at.cmp(&a.1.at));
+            log.sort_by_key(|(_, e)| std::cmp::Reverse(e.at));
             for (user, e) in log {
                 let what = match &e.event {
                     GrantEvent::Requested {

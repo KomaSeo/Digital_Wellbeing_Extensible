@@ -54,6 +54,8 @@ pub struct VerdictLogEntry {
 pub struct BlockedEntry {
     pub reason: String,
     pub until: Option<DateTime<Utc>>,
+    /// Full window title when it was blocked (grants are matched against it).
+    pub title: String,
 }
 
 /// Responsibility: Tell the caller what to do right after a judgement.
@@ -75,19 +77,32 @@ pub struct MonitorState {
     strikes: HashMap<String, u32>,
     /// Normalized process name -> block.
     pub blocked_processes: HashMap<String, BlockedEntry>,
-    /// Browser "process|title" -> block.
+    /// Browser "process|site" -> block (see [`tab_key`]).
     pub blocked_tabs: HashMap<String, BlockedEntry>,
     pub last_check: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
 }
 
 impl MonitorState {
-    /// Start over for a new task (or a stopped session).
+    /// Start over for a new task (or a stopped session). Strikes start from
+    /// zero, but blocks keep running until they expire: otherwise re-entering
+    /// the task (or stopping and starting) would lift every block at once.
+    /// Blocks meant to last "until the session ends" end when the session does.
     pub fn reset(&mut self, task: &str) {
+        let session_ended = task.is_empty();
+        let keep = |blocks: &mut HashMap<String, BlockedEntry>| {
+            let mut kept = std::mem::take(blocks);
+            if session_ended {
+                kept.retain(|_, b| b.until.is_some());
+            }
+            kept
+        };
         *self = Self {
             task: task.to_string(),
             history: std::mem::take(&mut self.history),
             verdicts: std::mem::take(&mut self.verdicts),
+            blocked_processes: keep(&mut self.blocked_processes),
+            blocked_tabs: keep(&mut self.blocked_tabs),
             ..Default::default()
         };
     }
@@ -132,7 +147,7 @@ impl MonitorState {
     pub fn check_due(&self, now: DateTime<Utc>, interval_secs: u64) -> bool {
         match self.last_check {
             None => true,
-            Some(at) => now - at >= ChronoDuration::seconds(interval_secs as i64),
+            Some(at) => now - at >= ChronoDuration::seconds(clamp_interval(interval_secs)),
         }
     }
 
@@ -188,11 +203,13 @@ impl MonitorState {
                 *strikes += 1;
                 if *strikes >= needed {
                     self.strikes.remove(&key);
-                    let until = (config.block_minutes > 0)
-                        .then(|| now + ChronoDuration::minutes(config.block_minutes as i64));
+                    let until = (config.block_minutes > 0).then(|| {
+                        now + ChronoDuration::minutes(clamp_block_minutes(config.block_minutes))
+                    });
                     let entry = BlockedEntry {
                         reason: judgement.reason.clone(),
                         until,
+                        title: fg.title.clone(),
                     };
                     if is_browser {
                         self.blocked_tabs.insert(block_key, entry);
@@ -233,20 +250,75 @@ impl MonitorState {
 
     /// Lift every block and strike a new grant covers.
     pub fn unblock_matching(&mut self, target: &GrantTarget) {
-        self.blocked_processes
-            .retain(|key, _| !target.matches_block_key(key));
-        self.blocked_tabs
-            .retain(|key, _| !target.matches_block_key(key));
+        let covered = |key: &str, entry: &BlockedEntry| {
+            target.matches_block_key(key) || target.matches_block_key(&format!("x|{}", entry.title))
+        };
+        self.blocked_processes.retain(|key, b| !covered(key, b));
+        self.blocked_tabs.retain(|key, b| !covered(key, b));
         self.strikes.retain(|key, _| !target.matches_block_key(key));
     }
 }
 
+/// Strike and block key of a browser window: `process|site`. Counting per
+/// exact title let a user dodge blocks by moving to the next video or post
+/// (every title starts a fresh count); counting per site does not.
 pub fn tab_key(fg: &Foreground) -> String {
     format!(
         "{}|{}",
         normalize_process_name(&fg.process_name),
-        truncate(&fg.title, MAX_TITLE_CHARS)
+        site_of(&fg.title)
     )
+}
+
+/// Best guess at the site from a browser window title, lower case:
+/// `(3) Funny cats - YouTube - Google Chrome` -> `youtube`. Without a
+/// separator the whole title is used.
+pub fn site_of(title: &str) -> String {
+    const BROWSER_SUFFIXES: &[&str] = &[
+        " - Google Chrome",
+        " - Microsoft\u{200b} Edge",
+        " - Microsoft Edge",
+        " — Mozilla Firefox",
+        " - Mozilla Firefox",
+        " - Whale",
+        " - Brave",
+        " - Opera",
+    ];
+    let mut t = title.trim();
+    for suffix in BROWSER_SUFFIXES {
+        if let Some(rest) = t.strip_suffix(suffix) {
+            t = rest;
+            break;
+        }
+    }
+    // Edge: "Title and 3 more pages"
+    if let Some(i) = t.rfind(" and ").filter(|_| t.ends_with(" more pages")) {
+        t = &t[..i];
+    }
+    // Unread counters such as "(3) " change constantly.
+    if let Some(rest) = t.strip_prefix('(') {
+        if let Some((count, after)) = rest.split_once(") ") {
+            if count.chars().all(|c| c.is_ascii_digit() || c == '+') {
+                t = after;
+            }
+        }
+    }
+    let site = [" - ", " | ", " — ", " · "]
+        .iter()
+        .filter_map(|sep| t.rfind(sep).map(|i| &t[i + sep.len()..]))
+        .min_by_key(|s| s.len())
+        .unwrap_or(t);
+    truncate(site.trim(), 60).to_lowercase()
+}
+
+/// Admin-entered values are used in date arithmetic; keep them sane so an
+/// absurd number cannot overflow (and panic) the monitor thread.
+fn clamp_block_minutes(minutes: u64) -> i64 {
+    minutes.min(7 * 24 * 60) as i64
+}
+
+fn clamp_interval(secs: u64) -> i64 {
+    secs.clamp(10, 24 * 3600) as i64
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -351,7 +423,11 @@ impl FocusMonitor {
         thread::spawn(move || {
             info!("ai focus monitor started");
             while this.running.load(Ordering::SeqCst) {
-                this.step(Utc::now());
+                // One bad sample must not end observation for the whole session.
+                let step = std::panic::AssertUnwindSafe(|| this.step(Utc::now()));
+                if std::panic::catch_unwind(step).is_err() {
+                    warn!("focus check panicked; continuing");
+                }
                 thread::sleep(SAMPLE_INTERVAL);
             }
             info!("ai focus monitor stopped");
@@ -397,7 +473,11 @@ impl FocusMonitor {
         let due = {
             let mut state = self.state.lock();
             state.record(now, &fg);
-            if !exempt && config.is_browser(&fg.process_name) && state.tab_blocked(now, &fg) {
+            if !exempt
+                && grant.is_none()
+                && config.is_browser(&fg.process_name)
+                && state.tab_blocked(now, &fg)
+            {
                 drop(state);
                 if self.close_tab_if_unchanged(&fg) {
                     info!("closed blocked tab \"{}\"", fg.title);
@@ -412,6 +492,20 @@ impl FocusMonitor {
 
         self.state.lock().last_check = Some(now);
         let result = self.run_judge(&config, &fg, grant.as_ref());
+        // The judge call can take a while; if access to this window was granted
+        // (or revoked) meanwhile, the verdict was made under the old terms.
+        let grant_now = self
+            .grants
+            .get()
+            .covering(now, &self.store.get(), &fg.process_name, &fg.title)
+            .map(|g| g.id.clone());
+        if result.is_ok() && grant_now != grant.as_ref().map(|g| g.id.clone()) {
+            info!(
+                "discarding verdict for {}: access changed during the check",
+                fg.process_name
+            );
+            return;
+        }
         let mut state = self.state.lock();
         match result {
             Ok(judgement) => {
@@ -644,8 +738,12 @@ mod tests {
 
     /// Responsibility: Test double for Judge: return a settable verdict and record what it was
     /// asked.
+    type Hook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
     struct FixedJudge {
         verdict: Arc<Mutex<Verdict>>,
+        /// Runs once inside the next judge call (simulates something happening meanwhile).
+        during_call: Hook,
         saw_grant: Arc<Mutex<Option<String>>>,
         /// Foreground of the fake desktop, and what to switch it to mid-call.
         fg: Arc<Mutex<Option<Foreground>>>,
@@ -657,6 +755,9 @@ mod tests {
     impl Judge for FixedJudge {
         fn judge(&self, request: &JudgeRequest) -> Result<Judgement, JudgeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(hook) = self.during_call.lock().take() {
+                hook();
+            }
             if let Some(next) = self.switch_to.lock().take() {
                 *self.fg.lock() = Some(next);
             }
@@ -680,6 +781,7 @@ mod tests {
         verdict: Arc<Mutex<Verdict>>,
         saw_grant: Arc<Mutex<Option<String>>>,
         current: Arc<Mutex<Option<Foreground>>>,
+        during_call: Hook,
     }
 
     fn fg(process: &str, title: &str) -> Foreground {
@@ -699,7 +801,9 @@ mod tests {
         let switch_to = Arc::new(Mutex::new(None));
         let verdict = Arc::new(Mutex::new(verdict));
         let saw_grant = Arc::new(Mutex::new(None));
+        let during_call: Hook = Arc::new(Mutex::new(None));
         let judge: Arc<dyn Judge> = Arc::new(FixedJudge {
+            during_call: Arc::clone(&during_call),
             verdict: Arc::clone(&verdict),
             saw_grant: Arc::clone(&saw_grant),
             fg: Arc::clone(&current),
@@ -724,6 +828,7 @@ mod tests {
             verdict,
             saw_grant,
             current,
+            during_call,
         }
     }
 
@@ -924,6 +1029,7 @@ mod tests {
             verdict,
             saw_grant,
             current,
+            during_call,
         } = h;
         let monitor = monitor.with_reviewer(Arc::new(move |_| Ok(Arc::clone(&reviewer))));
         (
@@ -936,6 +1042,7 @@ mod tests {
                 verdict,
                 saw_grant,
                 current,
+                during_call,
             },
             calls,
         )
@@ -1123,5 +1230,135 @@ mod tests {
         );
         assert!(matches!(r, Err(AccessError::PermanentNotAllowed)));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    // --- review fixes ----------------------------------------------------------
+
+    #[test]
+    fn site_of_strips_browser_noise() {
+        assert_eq!(
+            site_of("(3) Funny cats - YouTube - Google Chrome"),
+            "youtube"
+        );
+        assert_eq!(
+            site_of("Inbox (2) - me@x.com - Gmail - Google Chrome"),
+            "gmail"
+        );
+        assert_eq!(site_of("Rust | docs.rs — Mozilla Firefox"), "docs.rs");
+        assert_eq!(site_of("New Tab"), "new tab");
+    }
+
+    #[test]
+    fn switching_videos_does_not_reset_strikes() {
+        let h = harness(
+            Verdict::OffTask,
+            fg("chrome.exe", "Video 1 - YouTube"),
+            session("thesis"),
+        );
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        *h.current.lock() = Some(fg("chrome.exe", "(1) Video 2 - YouTube"));
+        h.monitor.step(t0 + ChronoDuration::seconds(61));
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+        // Any other YouTube tab is closed straight away now.
+        *h.current.lock() = Some(fg("chrome.exe", "Video 3 - YouTube"));
+        h.monitor.step(t0 + ChronoDuration::seconds(66));
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn timed_blocks_survive_a_task_change_and_a_session_restart() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        h.monitor
+            .store()
+            .update(|c| c.task = "thesis.".into())
+            .unwrap();
+        *h.current.lock() = None;
+        h.monitor.step(t0 + ChronoDuration::seconds(1));
+        h.monitor
+            .store()
+            .update(|c| c.session_active = false)
+            .unwrap();
+        h.monitor.step(t0 + ChronoDuration::seconds(2));
+        let blocks = h
+            .monitor
+            .state()
+            .active_process_blocks(t0 + ChronoDuration::seconds(3));
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn session_long_blocks_end_with_the_session() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        config.block_minutes = 0;
+        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        h.monitor
+            .store()
+            .update(|c| c.session_active = false)
+            .unwrap();
+        h.monitor.step(t0 + ChronoDuration::seconds(1));
+        assert!(h.monitor.state().blocked_processes.is_empty());
+    }
+
+    #[test]
+    fn grant_lifts_a_long_title_block_and_its_tab_stays_open() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        let long = format!("(3) {} - YouTube - Google Chrome", "x".repeat(150));
+        let h = harness(Verdict::OffTask, fg("chrome.exe", &long), config);
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+        let (h, _) = with_reviewer(h, true, 0);
+        h.monitor
+            .request_access(t0, site("youtube"), minutes(30), "강의 영상 시청")
+            .unwrap();
+        assert!(h.monitor.state().blocked_tabs.is_empty());
+        *h.verdict.lock() = Verdict::OnTask;
+        h.monitor.step(t0 + ChronoDuration::seconds(5));
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn verdict_is_discarded_when_access_is_granted_during_the_check() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
+        let (h, _) = with_reviewer(h, true, 0);
+        let monitor = Arc::new(h.monitor);
+        let m = Arc::clone(&monitor);
+        let t0 = Utc::now();
+        *h.during_call.lock() = Some(Box::new(move || {
+            m.request_access(
+                t0,
+                GrantTarget::App {
+                    process: "steam".into(),
+                },
+                minutes(30),
+                "팀 회의용 화면 공유",
+            )
+            .unwrap();
+        }));
+        monitor.step(t0);
+        assert!(monitor.state().blocked_processes.is_empty());
+        assert_eq!(monitor.grants().get().grants.len(), 1);
+    }
+
+    #[test]
+    fn absurd_block_minutes_do_not_panic() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        config.block_minutes = u64::MAX;
+        config.check_interval_secs = u64::MAX;
+        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
+        h.monitor.step(Utc::now());
+        assert_eq!(h.monitor.state().blocked_processes.len(), 1);
     }
 }
