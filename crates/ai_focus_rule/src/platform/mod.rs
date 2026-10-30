@@ -3,6 +3,8 @@
 
 #[cfg(windows)]
 mod windows;
+#[cfg(target_os = "linux")]
+mod x11;
 
 /// Responsibility: Describe the window in front: handle, process and title.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,14 +77,22 @@ pub trait Desktop: Send + Sync {
     }
 }
 
-/// Desktop access for the current OS. On non-Windows builds this reports no
-/// foreground window, so the monitor stays idle.
+/// Desktop access for the current OS: Win32 on Windows, X11 on Linux when `DISPLAY` is set.
+/// Elsewhere (and on Linux without X11) this reports no foreground window, so the monitor
+/// stays idle.
 pub fn native() -> Box<dyn Desktop> {
     #[cfg(windows)]
     {
         Box::new(windows::WindowsDesktop::new())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) {
+            return Box::new(x11::X11Desktop::new());
+        }
+        Box::new(Unsupported)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Box::new(Unsupported)
     }

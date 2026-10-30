@@ -157,6 +157,7 @@ dependencies = [
  "tracing",
  "ureq",
  "windows-sys 0.59.0",
+ "x11rb",
  "xcap",
 ]
 
