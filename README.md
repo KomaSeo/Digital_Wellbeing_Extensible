@@ -101,6 +101,14 @@ admin UI lists every user's blocks with an "unblock" button). The admin sets
 limits and can revoke grants; the admin's blacklist is never lifted this way. Guide (Korean):
 [`docs/access_grants.md`](docs/access_grants.md).
 
+**Claude Desktop** (machine install): `digital-wellbeing-mcp.exe` is an MCP
+server for Claude Desktop in the work account. Its tools show the list and the
+current task, propose a to-do and ask for a change, all through the agent API
+the Focus app uses, so the assistant can do nothing the user cannot. Proposed
+to-dos join the list only if the agent's AI approves them against the admin's
+life rules (Task planner tab); the task-picking prompt is fixed in the code.
+Setup (Korean): [`docs/claude_desktop.md`](docs/claude_desktop.md).
+
 ## Function call API
 
 JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.

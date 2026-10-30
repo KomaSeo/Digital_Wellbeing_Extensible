@@ -74,7 +74,7 @@ jobs:
           $v = "${{ steps.version.outputs.value }}"
           $stage = "dist\DigitalWellbeing-$v"
           New-Item -ItemType Directory -Force "$stage\docs" | Out-Null
-          Copy-Item target\release\digital-wellbeing-service.exe, target\release\digital-wellbeing-focus.exe, target\release\digital-wellbeing.exe, installer\install.cmd $stage
+          Copy-Item target\release\digital-wellbeing-service.exe, target\release\digital-wellbeing-focus.exe, target\release\digital-wellbeing.exe, target\release\digital-wellbeing-mcp.exe, installer\install.cmd $stage
           Copy-Item docs\*.md "$stage\docs"
           Compress-Archive -Path "$stage\*" -DestinationPath "dist\DigitalWellbeing-$v-windows-x64.zip"
           Remove-Item -Recurse $stage

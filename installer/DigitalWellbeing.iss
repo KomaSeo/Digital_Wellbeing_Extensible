@@ -1,5 +1,5 @@
 ; Responsibility: Build DigitalWellbeing-Setup-<version>.exe (Inno Setup 6): copy
-; the three executables to Program Files, ask which Windows account to manage,
+; the four executables to Program Files, ask which Windows account to manage,
 ; and run `digital-wellbeing-service.exe install`; uninstall runs `uninstall`.
 ;
 ; Built by .github/workflows/release.yml:  ISCC.exe installer\DigitalWellbeing.iss
@@ -35,6 +35,7 @@ RestartApplications=no
 Source: "..\target\release\digital-wellbeing-service.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\digital-wellbeing-focus.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\digital-wellbeing.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\digital-wellbeing-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\docs\*.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 
 [Icons]

@@ -11,6 +11,7 @@ members = [
     "apps/service",
     "apps/focus",
     "apps/desktop",
+    "apps/mcp",
 ]
 
 [workspace.package]

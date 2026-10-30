@@ -29,6 +29,8 @@ use std::sync::Mutex;
 pub const SERVICE_EXE: &str = "digital-wellbeing-service.exe";
 pub const FOCUS_EXE: &str = "digital-wellbeing-focus.exe";
 pub const ADMIN_EXE: &str = "digital-wellbeing.exe";
+/// MCP server Claude Desktop starts in the user's account (`docs/claude_desktop.md`).
+pub const MCP_EXE: &str = "digital-wellbeing-mcp.exe";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

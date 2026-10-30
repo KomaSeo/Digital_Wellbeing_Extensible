@@ -5,7 +5,7 @@
 //!
 //! What `install` does, in order:
 //! 1. stop an already-installed service (so its binaries can be replaced);
-//! 2. copy the three executables to `%ProgramFiles%\DigitalWellbeing`
+//! 2. copy the four executables to `%ProgramFiles%\DigitalWellbeing`
 //!    (standard users cannot modify files there — otherwise they could swap
 //!    in their own program and have the service run it as SYSTEM);
 //! 3. create `%ProgramData%\DigitalWellbeing` (on a first install a folder
@@ -21,7 +21,7 @@
 //! again. Running executables are renamed to `*.old` before the new copy.
 
 use crate::service::SERVICE_NAME;
-use crate::{ADMIN_EXE, FOCUS_EXE, SERVICE_EXE};
+use crate::{ADMIN_EXE, FOCUS_EXE, MCP_EXE, SERVICE_EXE};
 use anyhow::{bail, Context};
 use machine::MachineConfig;
 use std::ffi::OsString;
@@ -97,7 +97,7 @@ fn install_steps(
         .parent()
         .map(Path::to_path_buf)
         .context("no exe dir")?;
-    for exe in [SERVICE_EXE, FOCUS_EXE, ADMIN_EXE] {
+    for exe in [SERVICE_EXE, FOCUS_EXE, ADMIN_EXE, MCP_EXE] {
         let from = source_dir.join(exe);
         let to = dir.join(exe);
         if !from.exists() {

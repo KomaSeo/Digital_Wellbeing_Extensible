@@ -938,6 +938,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "digital-wellbeing-mcp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "machine",
+ "serde_json",
+ "task_planner",
+]
+
+[[package]]
 name = "digital-wellbeing-service"
 version = "0.1.0"
 dependencies = [
