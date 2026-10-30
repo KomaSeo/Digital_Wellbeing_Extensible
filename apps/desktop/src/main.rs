@@ -1,3 +1,4 @@
+use ai_focus_rule::grants::GrantState;
 use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
 use eframe::egui;
 use enforcer::{Enforcer, ProcessSnapshot};
@@ -60,7 +61,10 @@ fn start_standalone() -> Started {
     enforcer.register_rule(list_rule.rule());
 
     let ai_store = AiFocusStore::default().expect("failed to open AI focus settings");
-    let ai_rule = AiFocusRuleHandle::new(native_monitor(ai_store));
+    let grants_path = ai_store.grants_path().expect("settings have a file");
+    let grants =
+        JsonStore::<GrantState>::open(grants_path, true).expect("failed to open grants.json");
+    let ai_rule = AiFocusRuleHandle::new(native_monitor(ai_store, grants));
     enforcer.register_rule(ai_rule.rule());
     let _ai_monitor_handle = ai_rule.monitor().start_background();
     // Future: enforcer.register_rule(browser_guard.rule());
@@ -87,7 +91,10 @@ fn start_machine_admin() -> Started {
 
     let ai_store = AiFocusStore::open(machine::ai_focus_path())
         .expect("failed to open machine AI settings (run as administrator)");
-    let ai_rule = AiFocusRuleHandle::settings_only(native_monitor(ai_store));
+    // Read-only view of the agents' grants; the admin revokes through the config.
+    let grants = JsonStore::<GrantState>::open(machine::grants_path(), false)
+        .expect("failed to open grants.json");
+    let ai_rule = AiFocusRuleHandle::settings_only(native_monitor(ai_store, grants));
 
     let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui(), ai_rule.ui()];
 

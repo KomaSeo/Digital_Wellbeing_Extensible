@@ -15,11 +15,13 @@
 //! | `stop_session`   | `{}` (planner inactive)                  | [`Status`] |
 //! | `assign`         | `{}` (planner active)                    | [`Status`] |
 //! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
+//! | `request_access` | `{ "target": GrantTarget, "duration": GrantDuration, "purpose": "…" }` | [`Status`], `last_access` set |
 //!
 //! While the task planner is active the user cannot pick a task or stop
 //! freely: `start_session` / `stop_session` are refused and the Focus app uses
 //! `assign` and `request_change` (which the AI reviews) instead.
 
+use ai_focus_rule::grants::{Grant, GrantDuration, GrantLogEntry, GrantTarget};
 use ai_focus_rule::{FocusMonitor, VerdictLogEntry};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -60,6 +62,12 @@ pub struct Status {
     pub planner: Option<PlannerStatus>,
     /// Set only in the reply to `request_change`.
     pub last_decision: Option<ChangeRecord>,
+    /// Access grants in force (granted apps and sites stay observed).
+    pub grants: Vec<Grant>,
+    /// Recent grant events, newest first.
+    pub grant_log: Vec<GrantLogEntry>,
+    /// Set only in the reply to `request_access`.
+    pub last_access: Option<GrantLogEntry>,
 }
 
 /// What the agent exposes to the Focus app.
@@ -76,6 +84,7 @@ impl AgentApi {
 
 fn status(api: &AgentApi) -> Status {
     let monitor = &api.monitor;
+    let grants = monitor.grants().get();
     let config = monitor.store().get();
     let state = monitor.state();
     let blocked = state
@@ -98,6 +107,13 @@ fn status(api: &AgentApi) -> Status {
         blocked,
         planner: api.planner.as_ref().map(|p| p.status()),
         last_decision: None,
+        grants: grants
+            .grants
+            .into_iter()
+            .filter(|g| g.is_active(Utc::now(), &config))
+            .collect(),
+        grant_log: grants.log.into_iter().rev().take(10).collect(),
+        last_access: None,
     }
 }
 
@@ -105,6 +121,7 @@ fn status(api: &AgentApi) -> Status {
 pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, String> {
     const PLANNER_ON: &str = "the task planner is on: use assign / request_change (needs a reason)";
     let mut last_decision = None;
+    let mut last_access = None;
     match method {
         "status" => {}
         "start_session" => {
@@ -149,10 +166,23 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .map_err(|e| e.to_string())?;
             last_decision = Some(record);
         }
+        "request_access" => {
+            let target: GrantTarget = serde_json::from_value(params["target"].clone())
+                .map_err(|e| format!("params.target: {e}"))?;
+            let duration: GrantDuration = serde_json::from_value(params["duration"].clone())
+                .map_err(|e| format!("params.duration: {e}"))?;
+            let purpose = params["purpose"].as_str().unwrap_or_default();
+            let entry = api
+                .monitor
+                .request_access(Utc::now(), target, duration, purpose)
+                .map_err(|e| e.to_string())?;
+            last_access = Some(entry);
+        }
         other => return Err(format!("unknown method '{other}'")),
     }
     let mut status = status(api);
     status.last_decision = last_decision;
+    status.last_access = last_access;
     serde_json::to_value(status).map_err(|e| e.to_string())
 }
 
@@ -247,6 +277,20 @@ mod tests {
         assert!(!s.session_active);
         assert!(call(session, "set_blacklist", json!({})).is_err());
         assert!(call(session, "assign", json!({})).is_err());
+        // No focus session running: access requests are refused before any AI call.
+        let err = call(
+            session,
+            "request_access",
+            json!({
+                "target": { "kind": "site", "keyword": "youtube" },
+                "duration": { "kind": "minutes", "minutes": 30 },
+                "purpose": "Rust 강의 시청"
+            }),
+        )
+        .unwrap_err();
+        assert!(err.contains("focus session"));
+        let s = call(session, "status", json!({})).unwrap();
+        assert!(s.grants.is_empty());
     }
 
     #[test]
@@ -285,5 +329,6 @@ mod tests {
 }
 
 /// Re-exported so clients need not depend on the rule crates.
+pub use ai_focus_rule::grants;
 pub use ai_focus_rule::Verdict;
 pub use task_planner::{AssignmentSource, TodoItem};

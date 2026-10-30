@@ -26,13 +26,15 @@ pub use monitor::{
 };
 pub use rule::{AiFocusRule, AiFocusRuleHandle};
 
+use grants::GrantState;
 use std::sync::Arc;
+use store::JsonStore;
 
 /// Monitor wired to the native desktop and the Claude judge.
-pub fn native_monitor(store: AiFocusStore) -> Arc<FocusMonitor> {
-    Arc::new(FocusMonitor::new(
-        store,
-        platform::native(),
-        claude_judge_provider(),
-    ))
+/// Monitor wired to the native desktop and the Claude judge and reviewer,
+/// keeping access grants in `grants`.
+pub fn native_monitor(store: AiFocusStore, grants: JsonStore<GrantState>) -> Arc<FocusMonitor> {
+    Arc::new(
+        FocusMonitor::new(store, platform::native(), claude_judge_provider()).with_grants(grants),
+    )
 }

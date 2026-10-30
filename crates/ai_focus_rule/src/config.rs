@@ -170,6 +170,11 @@ impl AiFocusStore {
         Ok(())
     }
 
+    /// `grants.json` next to the settings file (standalone install).
+    pub fn grants_path(&self) -> Option<PathBuf> {
+        self.path.as_ref().map(|p| p.with_file_name("grants.json"))
+    }
+
     /// Path of the backing file, if any.
     pub fn path(&self) -> Option<&std::path::Path> {
         self.path.as_deref()

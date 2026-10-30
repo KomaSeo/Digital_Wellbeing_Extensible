@@ -11,6 +11,7 @@
 //!     machine.json     which Windows accounts are managed
 //!     planner.json     to-do list for the task planner (admin)
 //!     planner_state.json  assignment + change-request log (written by agents)
+//!     grants.json      access grants + their log (written by agents)
 //!     logs\
 //! ```
 
@@ -44,6 +45,11 @@ pub fn planner_path() -> PathBuf {
 /// Shared by every managed session's agent (one person, several sessions is rare).
 pub fn planner_state_path() -> PathBuf {
     data_dir().join("planner_state.json")
+}
+
+/// Access grants and their log; written by agents.
+pub fn grants_path() -> PathBuf {
+    data_dir().join("grants.json")
 }
 
 pub fn machine_config_path() -> PathBuf {
