@@ -5,6 +5,8 @@
 //! the declared task, that history and (optionally) a screenshot to a [`Judge`]
 //! (Claude by default). Apps judged off-task enough times in a row are reported
 //! to the enforcer through [`AiFocusRule`]; browser tabs are closed instead.
+//!
+//! Walkthrough of every module (Korean): `docs/ai_focus_rule.md`.
 
 mod config;
 mod judge;

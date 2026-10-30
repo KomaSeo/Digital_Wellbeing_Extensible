@@ -54,6 +54,8 @@ Settings (`%AppData%\DigitalWellbeing\DigitalWellbeing\config\ai_focus.json`):
 Each check is one Messages API call with one image (~1.2k input tokens at 1280 px wide),
 so the interval is the main cost knob.
 
+Code walkthrough (Korean): [`docs/ai_focus_rule.md`](docs/ai_focus_rule.md).
+
 ## Function call API
 
 JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.

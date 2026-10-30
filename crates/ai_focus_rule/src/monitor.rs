@@ -312,7 +312,7 @@ impl FocusMonitor {
             state.record(now, &fg);
             if !exempt && config.is_browser(&fg.process_name) && state.tab_blocked(now, &fg) {
                 drop(state);
-                if self.desktop.close_active_tab(&fg) {
+                if self.close_tab_if_unchanged(&fg) {
                     info!("closed blocked tab \"{}\"", fg.title);
                 }
                 return;
@@ -335,8 +335,8 @@ impl FocusMonitor {
                 );
                 let action = state.apply_judgement(now, &config, &fg, judgement);
                 drop(state);
-                if action == Action::CloseTab && !self.desktop.close_active_tab(&fg) {
-                    warn!("could not close tab of {}", fg.process_name);
+                if action == Action::CloseTab && !self.close_tab_if_unchanged(&fg) {
+                    warn!("did not close tab of {}: window or tab changed", fg.process_name);
                 }
             }
             Err(err) => {
@@ -344,6 +344,18 @@ impl FocusMonitor {
                 state.last_error = Some(err.to_string());
             }
         }
+    }
+
+    /// Ctrl+W hits whatever tab is active *now*. The judge call can take seconds,
+    /// so only close when the same window still shows the same title; otherwise
+    /// the user switched tabs and we would close the wrong one. The block stays
+    /// recorded, so the tab is closed the next time it comes to the front.
+    fn close_tab_if_unchanged(&self, judged: &Foreground) -> bool {
+        let still_same = self
+            .desktop
+            .foreground()
+            .is_some_and(|now| now.window == judged.window && now.title == judged.title);
+        still_same && self.desktop.close_active_tab(judged)
     }
 
     fn run_judge(&self, config: &AiFocusConfig, fg: &Foreground) -> Result<Judgement, JudgeError> {
@@ -388,7 +400,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     struct FakeDesktop {
-        fg: Mutex<Option<Foreground>>,
+        fg: Arc<Mutex<Option<Foreground>>>,
         tabs_closed: Arc<AtomicUsize>,
     }
 
@@ -411,6 +423,9 @@ mod tests {
 
     struct FixedJudge {
         verdict: Verdict,
+        /// Foreground of the fake desktop, and what to switch it to mid-call.
+        fg: Arc<Mutex<Option<Foreground>>>,
+        switch_to: Arc<Mutex<Option<Foreground>>>,
         calls: Arc<AtomicUsize>,
         saw_screenshot: Arc<AtomicBool>,
     }
@@ -418,6 +433,9 @@ mod tests {
     impl Judge for FixedJudge {
         fn judge(&self, request: &JudgeRequest) -> Result<Judgement, JudgeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(next) = self.switch_to.lock().take() {
+                *self.fg.lock() = Some(next);
+            }
             self.saw_screenshot
                 .store(request.screenshot.is_some(), Ordering::SeqCst);
             Ok(Judgement {
@@ -432,6 +450,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         tabs_closed: Arc<AtomicUsize>,
         saw_screenshot: Arc<AtomicBool>,
+        switch_to: Arc<Mutex<Option<Foreground>>>,
     }
 
     fn fg(process: &str, title: &str) -> Foreground {
@@ -447,15 +466,19 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let tabs_closed = Arc::new(AtomicUsize::new(0));
         let saw_screenshot = Arc::new(AtomicBool::new(false));
+        let current = Arc::new(Mutex::new(Some(current)));
+        let switch_to = Arc::new(Mutex::new(None));
         let judge: Arc<dyn Judge> = Arc::new(FixedJudge {
             verdict,
+            fg: Arc::clone(&current),
+            switch_to: Arc::clone(&switch_to),
             calls: Arc::clone(&calls),
             saw_screenshot: Arc::clone(&saw_screenshot),
         });
         let monitor = FocusMonitor::new(
             AiFocusStore::in_memory(config),
             Box::new(FakeDesktop {
-                fg: Mutex::new(Some(current)),
+                fg: current,
                 tabs_closed: Arc::clone(&tabs_closed),
             }),
             Arc::new(move |_| Ok(Arc::clone(&judge))),
@@ -465,6 +488,7 @@ mod tests {
             calls,
             tabs_closed,
             saw_screenshot,
+            switch_to,
         }
     }
 
@@ -525,6 +549,20 @@ mod tests {
         h.monitor.step(t0 + ChronoDuration::seconds(5));
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 2);
         assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn tab_is_not_closed_if_user_switched_tabs_meanwhile() {
+        let mut config = session("write thesis");
+        config.strikes_to_block = 1;
+        let h = harness(Verdict::OffTask, fg("chrome.exe", "Funny cats - YouTube"), config);
+        // While the judge is "thinking", the user switches to another tab
+        // in the same browser window.
+        *h.switch_to.lock() = Some(fg("chrome.exe", "Overleaf - thesis.tex"));
+        h.monitor.step(Utc::now());
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 0);
+        // The block is still recorded for the next time that tab is in front.
+        assert_eq!(h.monitor.state().blocked_tabs.len(), 1);
     }
 
     #[test]
