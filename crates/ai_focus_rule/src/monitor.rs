@@ -25,8 +25,9 @@ use std::time::Duration;
 use thiserror::Error;
 use tracing::{info, warn};
 
-/// How often the foreground window is sampled for the activity history.
-pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the open windows are sampled. A window without a verdict is judged at the
+/// sample that first sees it, so this is also how long a new app or site can go unjudged.
+pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(3);
 const HISTORY_CAPACITY: usize = 30;
 const VERDICT_LOG_CAPACITY: usize = 100;
 const MAX_TITLE_CHARS: usize = 120;
@@ -66,7 +67,7 @@ pub struct VerdictLogEntry {
 /// unblocked by hand in standalone mode.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockedEntry {
-    /// Unique id, so the admin UI can name this block in the config file
+    /// Unique id, so the Settings tab can name this block in the config file
     /// without writing the agent's blocks file. Empty in files saved before
     /// ids existed; [`FocusMonitor::with_block_store`] fills those in.
     #[serde(default)]
@@ -114,14 +115,15 @@ pub struct MonitorState {
     /// The title names only the video, so this is how a video of a blocked
     /// channel is recognized on the next sample without asking the judge again.
     channels: HashMap<String, String>,
-    /// Verdict key (see [`Self::verdict_key`]) -> when it was last judged
-    /// on_task. Such a window is not judged again for `recheck_minutes`.
-    on_task: HashMap<String, DateTime<Utc>>,
+    /// Verdict key (see [`Self::verdict_key`]) -> when it was last judged, and the
+    /// verdict. A window is judged as soon as it has no verdict for the current task,
+    /// and again once its verdict is due ([`Self::needs_judging`]).
+    last_verdicts: HashMap<String, (DateTime<Utc>, Verdict)>,
+    /// When the judge was last asked.
     pub last_check: Option<DateTime<Utc>>,
-    /// When the next scheduled check is due (randomized; see [`Self::mark_checked`]).
-    next_check: Option<DateTime<Utc>>,
-    /// Window key -> when it was last judged (for early checks on a new window).
-    judged: HashMap<String, DateTime<Utc>>,
+    /// After a failed call (no key, no network, budget spent): no call before this,
+    /// so a failure is not retried at every sample.
+    retry_at: Option<DateTime<Utc>>,
     rng: u64,
     pub last_error: Option<String>,
 }
@@ -179,47 +181,16 @@ impl MonitorState {
             .join("\n")
     }
 
-    /// Is a check due for the window `key`, in front since `front_since`?
-    ///
-    /// Checks must not be predictable, or the user could switch to a work
-    /// window just before each one. So a check is due when
-    /// - the randomized schedule says so, or
-    /// - a window not judged within the interval has been in front for
-    ///   [`EARLY_DWELL`] (and the last check is at least [`EARLY_MIN_GAP`] ago).
-    pub fn check_due(
-        &self,
-        now: DateTime<Utc>,
-        interval_secs: u64,
-        key: &str,
-        front_since: DateTime<Utc>,
-    ) -> bool {
-        let Some(last) = self.last_check else {
-            return true;
-        };
-        if self.next_check.is_none_or(|next| now >= next) {
-            return true;
-        }
-        let interval = ChronoDuration::seconds(clamp_interval(interval_secs));
-        let judged_recently = self.judged.get(key).is_some_and(|at| now - *at < interval);
-        !judged_recently && now - front_since >= EARLY_DWELL && now - last >= EARLY_MIN_GAP
+    /// May the judge be asked now? Not right after a failed call.
+    pub fn call_allowed(&self, now: DateTime<Utc>) -> bool {
+        self.retry_at.is_none_or(|at| now >= at)
     }
 
-    /// Record a check of `key` and schedule the next one at a random point
-    /// between 60 % and 100 % of the interval (never later than configured).
-    pub fn mark_checked(&mut self, now: DateTime<Utc>, interval_secs: u64, key: &str) {
-        self.last_check = Some(now);
-        self.judged.insert(key.to_string(), now);
-        let interval = clamp_interval(interval_secs) * 1000;
-        let jitter = (self.next_random() % 401) as i64; // 0..=400 per mille
-        self.next_check =
-            Some(now + ChronoDuration::milliseconds(interval * (600 + jitter) / 1000));
-        let horizon = ChronoDuration::milliseconds(interval);
-        self.judged.retain(|_, at| now - *at < horizon);
-    }
-
-    /// Has the randomized schedule come round (or was nothing checked yet)?
-    pub fn scheduled_due(&self, now: DateTime<Utc>) -> bool {
-        self.last_check.is_none() || self.next_check.is_none_or(|next| now >= next)
+    /// Record the outcome of a call: a failure holds back the next one for the check
+    /// interval.
+    fn note_call(&mut self, now: DateTime<Utc>, config: &AiFocusConfig, ok: bool) {
+        self.retry_at = (!ok)
+            .then(|| now + ChronoDuration::seconds(clamp_interval(config.check_interval_secs)));
     }
 
     /// Apply the judgement of a window that is open but not in front. Tabs are blocked at
@@ -283,11 +254,6 @@ impl MonitorState {
         minimize
     }
 
-    /// When the current foreground window came to the front (last history entry).
-    pub fn front_since(&self) -> Option<DateTime<Utc>> {
-        self.history.back().map(|e| e.since)
-    }
-
     /// xorshift64; seeded from the clock on first use. Not for security, only
     /// so check times are not guessable.
     fn next_random(&mut self) -> u64 {
@@ -334,18 +300,20 @@ impl MonitorState {
         }
     }
 
-    /// Was this window judged on_task within `recheck_minutes`? Then a check
-    /// would most likely say the same and is skipped.
-    pub fn recently_on_task(
+    /// Does this window need a verdict? Yes when it has none for the current task (a new
+    /// app, a new page), and when its last verdict is due again: an on_task verdict after
+    /// `recheck_minutes`; unsure, or off_task on an app still collecting strikes, after
+    /// `check_interval_secs`. (Blocked tabs and apps are not judged: they are closed.)
+    pub fn needs_judging(
         &self,
         now: DateTime<Utc>,
         config: &AiFocusConfig,
         fg: &Foreground,
     ) -> bool {
-        let window = ChronoDuration::minutes(clamp_recheck_minutes(config.recheck_minutes));
-        self.on_task
-            .get(&self.verdict_key(config, fg))
-            .is_some_and(|at| now - *at < window)
+        match self.last_verdicts.get(&self.verdict_key(config, fg)) {
+            None => true,
+            Some((at, verdict)) => now - *at >= recheck_after(config, *verdict),
+        }
     }
 
     fn remember_verdict(
@@ -356,13 +324,9 @@ impl MonitorState {
         verdict: Verdict,
     ) {
         let key = self.verdict_key(config, fg);
-        if verdict == Verdict::OnTask && config.recheck_minutes > 0 {
-            let window = ChronoDuration::minutes(clamp_recheck_minutes(config.recheck_minutes));
-            self.on_task.retain(|_, at| now - *at < window);
-            self.on_task.insert(key, now);
-        } else {
-            self.on_task.remove(&key);
-        }
+        self.last_verdicts
+            .retain(|_, (at, v)| now - *at < recheck_after(config, *v));
+        self.last_verdicts.insert(key, (now, verdict));
     }
 
     /// A fresh block id (unique enough: time plus a random suffix).
@@ -586,10 +550,14 @@ pub fn strip_browser_noise(title: &str) -> &str {
     t.trim()
 }
 
-/// How long a newly focused window must stay in front before an early check.
-const EARLY_DWELL: ChronoDuration = ChronoDuration::seconds(10);
-/// Least time between two checks, so early checks cannot pile up.
-const EARLY_MIN_GAP: ChronoDuration = ChronoDuration::seconds(15);
+/// How long a verdict stands before the window is judged again.
+fn recheck_after(config: &AiFocusConfig, verdict: Verdict) -> ChronoDuration {
+    if verdict == Verdict::OnTask && config.recheck_minutes > 0 {
+        ChronoDuration::minutes(clamp_recheck_minutes(config.recheck_minutes))
+    } else {
+        ChronoDuration::seconds(clamp_interval(config.check_interval_secs))
+    }
+}
 
 /// Admin-entered values are used in date arithmetic; keep them sane so an
 /// absurd number cannot overflow (and panic) the monitor thread.
@@ -848,33 +816,21 @@ impl FocusMonitor {
                 .map(|w| w.window)
                 .collect();
             let others = self.others_to_judge(now, &config, &state, &fg, &open);
-            let since = state.front_since().unwrap_or(now);
-            let judge_front = !exempt && !state.recently_on_task(now, &config, &fg);
-            let front_due = judge_front
-                && state.check_due(
-                    now,
-                    config.check_interval_secs,
-                    &state.target_key(&config, &fg),
-                    since,
-                );
-            let others_due = !others.is_empty() && state.scheduled_due(now);
+            let judge_front = !exempt && state.needs_judging(now, &config, &fg);
+            let due = (judge_front || !others.is_empty()) && state.call_allowed(now);
             drop(state);
             // A blocked tab shown in a background window (say, a video on a second
             // monitor) is hidden; it is closed once it comes to the front.
             for window in hide {
                 self.desktop.minimize(window);
             }
-            (front_due || others_due, judge_front, others)
+            (due, judge_front, others)
         };
         if !due {
             return;
         }
 
-        {
-            let mut state = self.state.lock();
-            let key = state.target_key(&config, &fg);
-            state.mark_checked(now, config.check_interval_secs, &key);
-        }
+        self.state.lock().last_check = Some(now);
         let listed: Vec<OtherWindow> = others
             .iter()
             .enumerate()
@@ -901,6 +857,7 @@ impl FocusMonitor {
             return;
         }
         let mut state = self.state.lock();
+        state.note_call(now, &config, result.is_ok());
         match result {
             Ok(mut judgement) => {
                 state.last_error = None;
@@ -968,7 +925,7 @@ impl FocusMonitor {
     }
 
     /// Open windows other than `fg` that need a verdict: not exempt, not granted, not
-    /// already blocked, not judged on_task within `recheck_minutes`; one per verdict key
+    /// already blocked, without a verdict that still stands; one per verdict key
     /// (the same app's other windows, the same page in two windows), at most
     /// [`MAX_OTHER_WINDOWS`].
     fn others_to_judge(
@@ -994,7 +951,7 @@ impl FocusMonitor {
                 };
                 !self.exempt(config, &as_fg)
                     && !blocked
-                    && !state.recently_on_task(now, config, &as_fg)
+                    && state.needs_judging(now, config, &as_fg)
                     && self.covering_grant(now, config, w).is_none()
                     && seen.insert(state.verdict_key(config, &as_fg))
             })
@@ -1869,7 +1826,7 @@ mod tests {
         h.monitor.step(t0);
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
 
-        // Another channel stays open: checked (early, after the dwell), on task.
+        // Another channel stays open: judged at once, on task, and not again soon.
         *h.verdict.lock() = Verdict::OnTask;
         *h.channel.lock() = "Rust Lang".into();
         *h.current.lock() = Some(fg("chrome.exe", "Async in depth - YouTube"));
@@ -1878,13 +1835,11 @@ mod tests {
         assert_eq!(h.calls.load(Ordering::SeqCst), 2);
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
 
-        // A new video of the blocked channel: unknown until judged, then closed
-        // even though this verdict alone would have let it stay.
+        // A new video of the blocked channel: unknown until judged (at once), then
+        // closed even though this verdict alone would have let it stay.
         *h.channel.lock() = "cat  tv".into();
         *h.current.lock() = Some(fg("chrome.exe", "More cats - YouTube"));
         h.monitor.step(t0 + ChronoDuration::seconds(40));
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
-        h.monitor.step(t0 + ChronoDuration::seconds(50));
         assert_eq!(h.calls.load(Ordering::SeqCst), 3);
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -1907,7 +1862,8 @@ mod tests {
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
         let keys: Vec<String> = h.monitor.state().blocked_tabs.keys().cloned().collect();
         assert_eq!(keys, ["chrome.exe|youtube page: youtube"]);
-        // A video is not covered by the home page's block.
+        // A video is not covered by the home page's block (it is judged itself).
+        *h.verdict.lock() = Verdict::OnTask;
         *h.current.lock() = Some(fg("chrome.exe", "Async in depth - YouTube"));
         h.monitor.step(t0 + ChronoDuration::seconds(5));
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
@@ -1989,7 +1945,7 @@ mod tests {
     }
 
     #[test]
-    fn a_newly_focused_window_is_checked_early() {
+    fn a_window_without_a_verdict_is_judged_at_once() {
         let h = harness(
             Verdict::OnTask,
             fg("code.exe", "main.rs"),
@@ -1998,31 +1954,39 @@ mod tests {
         let t0 = Utc::now();
         h.monitor.step(t0);
         assert_eq!(h.calls.load(Ordering::SeqCst), 1);
-        // Switch to a game: not judged yet at 3 s in front...
-        *h.current.lock() = Some(fg("game.exe", "Game"));
-        h.monitor.step(t0 + ChronoDuration::seconds(20));
-        h.monitor.step(t0 + ChronoDuration::seconds(23));
+        // The verdict stands: no call on the next samples.
+        h.monitor.step(t0 + ChronoDuration::seconds(3));
         assert_eq!(h.calls.load(Ordering::SeqCst), 1);
-        // ...but judged once it stayed 10 s, long before the 60 s schedule.
-        h.monitor.step(t0 + ChronoDuration::seconds(30));
+        // A game shows up: judged at the first sample that sees it, no dwell.
+        *h.current.lock() = Some(fg("game.exe", "Game"));
+        h.monitor.step(t0 + ChronoDuration::seconds(6));
         assert_eq!(h.calls.load(Ordering::SeqCst), 2);
-        // Back to the editor, judged 30 s ago: no early check for it.
+        // Back to the editor, whose verdict still stands: no call.
         *h.current.lock() = Some(fg("code.exe", "main.rs"));
-        h.monitor.step(t0 + ChronoDuration::seconds(35));
-        h.monitor.step(t0 + ChronoDuration::seconds(46));
+        h.monitor.step(t0 + ChronoDuration::seconds(9));
         assert_eq!(h.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
-    fn scheduled_checks_fall_between_60_and_100_percent_of_the_interval() {
+    fn verdicts_come_due_again() {
+        let mut config = session("thesis");
+        config.check_interval_secs = 60;
+        config.recheck_minutes = 15;
         let mut state = MonitorState::default();
         let t0 = Utc::now();
-        for i in 0..200 {
-            let now = t0 + ChronoDuration::minutes(i);
-            state.mark_checked(now, 60, "k");
-            let gap = state.next_check.unwrap() - now;
-            assert!(gap >= ChronoDuration::seconds(36) && gap <= ChronoDuration::seconds(60));
-        }
+        let app = fg("code.exe", "main.rs");
+        assert!(state.needs_judging(t0, &config, &app));
+        state.remember_verdict(t0, &config, &app, Verdict::OnTask);
+        assert!(!state.needs_judging(t0 + ChronoDuration::minutes(14), &config, &app));
+        assert!(state.needs_judging(t0 + ChronoDuration::minutes(15), &config, &app));
+        // Unsure (and off_task on an app still collecting strikes): after the interval.
+        state.remember_verdict(t0, &config, &app, Verdict::Unsure);
+        assert!(!state.needs_judging(t0 + ChronoDuration::seconds(59), &config, &app));
+        assert!(state.needs_judging(t0 + ChronoDuration::seconds(60), &config, &app));
+        // A new task forgets every verdict.
+        state.remember_verdict(t0, &config, &app, Verdict::OnTask);
+        state.reset("write docs");
+        assert!(state.needs_judging(t0, &config, &app));
     }
 
     #[test]
@@ -2059,6 +2023,10 @@ mod tests {
             .last_error
             .as_deref()
             .is_some_and(|e| e.contains("budget")));
+        // A failed call is not retried at every sample, only after the interval.
+        let first = monitor.state().last_check;
+        monitor.step(Utc::now() + ChronoDuration::seconds(3));
+        assert_eq!(monitor.state().last_check, first);
     }
 
     fn win(window: isize, process: &str, title: &str, minimized: bool) -> OpenWindow {
@@ -2157,7 +2125,7 @@ mod tests {
         h.monitor.step(t0);
         let id = h.monitor.state().blocked_processes["steam.exe"].id.clone();
         assert!(!id.is_empty());
-        // The admin UI names the block in the config; the agent drops it,
+        // The Settings tab names the block in the config; the agent drops it,
         // even without a running session.
         h.monitor
             .store()

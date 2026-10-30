@@ -619,9 +619,8 @@ impl eframe::App for FocusApp {
                 if status.session_active {
                     match status.last_check {
                         Some(at) => ui.label(format!(
-                            "Last AI check {} (every {} s)",
+                            "Last AI check {} (new apps and sites are checked at once)",
                             at.with_timezone(&Local).format("%H:%M:%S"),
-                            status.check_interval_secs
                         )),
                         None => ui.label("First AI check in a moment…"),
                     };

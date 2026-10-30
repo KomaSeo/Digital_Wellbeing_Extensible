@@ -22,17 +22,17 @@ struct AiUiState {
     allow_input: String,
     private_input: String,
     status: String,
-    /// When the admin view last re-read the grants files.
+    /// When the machine-wide view last re-read the grants files.
     grants_read: Option<std::time::Instant>,
-    /// Admin view: (user, grants) read from every file in the grants folder.
+    /// Machine-wide view: (user, grants) read from every file in the grants folder.
     admin_grants: Vec<(String, GrantState)>,
-    /// When the admin view last re-read the blocks files.
+    /// When the machine-wide view last re-read the blocks files.
     blocks_read: Option<std::time::Instant>,
-    /// Admin view: (user, blocks) read from every file in the blocks folder.
+    /// Machine-wide view: (user, blocks) read from every file in the blocks folder.
     admin_blocks: Vec<(String, SavedBlocks)>,
-    /// When the admin view last re-read the usage files.
+    /// When the machine-wide view last re-read the usage files.
     usage_read: Option<std::time::Instant>,
-    /// Admin view: (user, token usage) read from every file in the usage folder.
+    /// Machine-wide view: (user, token usage) read from every file in the usage folder.
     admin_usage: Vec<(String, UsageLog)>,
     show_key: bool,
     /// Result of the last "Check key", written by a background thread.
@@ -46,14 +46,14 @@ struct AiUiState {
 /// Blocks apps that an AI judge finds unrelated to the declared task.
 pub struct AiFocusRule {
     monitor: Arc<FocusMonitor>,
-    /// `false` in the admin UI of a machine install: the session runs in the
+    /// `false` in the Settings tab of a machine install: the session runs in the
     /// user's agent, so this panel only edits settings.
     session_controls: bool,
-    /// Admin view of a machine install: folder with one grants file per user.
+    /// Machine-wide view of a machine install: folder with one grants file per user.
     admin_grants_dir: Option<PathBuf>,
-    /// Admin view of a machine install: folder with one blocks file per user.
+    /// Machine-wide view of a machine install: folder with one blocks file per user.
     admin_blocks_dir: Option<PathBuf>,
-    /// Admin view of a machine install: folder with one token-usage file per user.
+    /// Machine-wide view of a machine install: folder with one token-usage file per user.
     admin_usage_dir: Option<PathBuf>,
     ui_state: Mutex<AiUiState>,
 }
@@ -180,7 +180,7 @@ impl AiFocusRule {
         ui.small("The key is saved without encryption in ai_focus.json. On a machine install only administrators can open that folder.");
     }
 
-    /// Admin view: every user's blocks, each with an "unblock" button. The
+    /// Machine-wide view: every user's blocks, each with an "unblock" button. The
     /// button names the block in the config file (`unblocked`); the user's
     /// agent then drops it, so this UI never writes an agent's blocks file.
     fn admin_blocks_ui(&self, ui: &mut egui::Ui, config: &crate::AiFocusConfig, s: &mut AiUiState) {
@@ -342,7 +342,7 @@ impl AiFocusRule {
 
     /// Access grants in force and their history; the admin can revoke.
     fn grants_ui(&self, ui: &mut egui::Ui, config: &crate::AiFocusConfig, s: &mut AiUiState) {
-        // The admin view reads the agents' files; refresh them now and then.
+        // The machine-wide view reads the agents' files; refresh them now and then.
         // (With session controls this process owns the store: always current.)
         let sources: Vec<(String, GrantState)> = match &self.admin_grants_dir {
             Some(dir) => {
@@ -599,7 +599,7 @@ impl RuleUi for AiFocusRule {
         egui::Grid::new("ai_focus_settings")
             .num_columns(2)
             .show(ui, |ui| {
-                ui.label("Check every (seconds)");
+                ui.label("Re-check unsure windows after (seconds)");
                 let mut interval = config.check_interval_secs;
                 if ui
                     .add(egui::DragValue::new(&mut interval).range(15..=1800))
@@ -609,7 +609,7 @@ impl RuleUi for AiFocusRule {
                 }
                 ui.end_row();
 
-                ui.label("Skip re-checking an on-task window for (minutes, 0 = never)");
+                ui.label("Re-check on-task windows after (minutes)");
                 let mut recheck = config.recheck_minutes;
                 if ui
                     .add(egui::DragValue::new(&mut recheck).range(0..=240))
@@ -803,7 +803,7 @@ impl AiFocusRuleHandle {
         Self::build(monitor, true)
     }
 
-    /// Settings panel only, for editing a machine install's config from the admin UI.
+    /// Settings panel only, for editing a machine install's config (Focus app, Settings tab).
     /// The monitor is never started; grants, blocks and token usage are read from every
     /// file in `grants_dir`, `blocks_dir` and `usage_dir`.
     pub fn settings_only(

@@ -35,7 +35,9 @@ pub struct AiFocusConfig {
     pub session_active: bool,
     /// What the user says they are working on right now.
     pub task: String,
-    /// Seconds between AI checks of the foreground app.
+    /// Seconds after which a window judged unsure (or an app judged off_task that is
+    /// still collecting strikes) is judged again; also the pause after a failed call.
+    /// New windows are judged at once, whatever this says.
     pub check_interval_secs: u64,
     pub model: String,
     /// Used when `ANTHROPIC_API_KEY` is not set in the environment.
@@ -46,8 +48,8 @@ pub struct AiFocusConfig {
     /// blocked. Browser tabs are blocked at the first one. Blocks do not
     /// expire; the user asks for access to lift one.
     pub strikes_to_block: u32,
-    /// A window judged on_task is not judged again for this long (minutes);
-    /// `0` judges it at every check. Changing the task forgets these verdicts.
+    /// Minutes after which a window judged on_task is judged again; `0` uses
+    /// `check_interval_secs`. Changing the task forgets every verdict.
     pub recheck_minutes: u64,
     /// Never judged, never blocked.
     pub always_allow: BTreeSet<String>,
@@ -63,12 +65,12 @@ pub struct AiFocusConfig {
     /// (`0` = no limit). Planner and access-request calls are still allowed: refusing
     /// them could leave the user stuck on a task. See `usage.rs`.
     pub daily_budget_usd: f64,
-    /// Grant ids the admin revoked. Kept here (an admin-owned file) so the
-    /// admin UI never writes the agent's `grants.json`; the monitor drops these.
+    /// Grant ids revoked in the Settings tab. Kept here (the settings file) so the
+    /// settings panels never write an agent's grants file; the monitor drops these.
     pub revoked_grants: BTreeSet<String>,
-    /// Block ids the admin lifted, for the same reason: the admin UI names
-    /// them here and each agent drops them from its own blocks file. The
-    /// admin UI forgets an id once no blocks file holds it any more.
+    /// Block ids lifted in the Settings tab, for the same reason: the panel names
+    /// them here and each agent drops them from its own blocks file. The panel
+    /// forgets an id once no blocks file holds it any more.
     pub unblocked: BTreeSet<String>,
 }
 
@@ -133,7 +135,7 @@ impl AiFocusConfig {
 #[derive(Clone)]
 pub struct AiFocusStore {
     path: Option<PathBuf>,
-    /// `false` for the per-session agent: the file belongs to the admin UI, and
+    /// `false` for the per-session agent: the file is the shared settings, and
     /// session/task changes from the user stay in memory only.
     writable: bool,
     inner: Arc<RwLock<AiFocusConfig>>,
