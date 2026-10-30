@@ -14,10 +14,14 @@
 //!
 //! A second tab, **Settings** (`settings.rs`), edits the admin settings through the
 //! agent while they are unlocked, and locks them for a while.
+//!
+//! The app sits in the tray (`tray.rs`): closing the window hides it, and the tray icon
+//! opens it again (or its Settings tab). Starting the app again shows the running one.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod settings;
+mod tray;
 
 use chrono::{Local, Utc};
 use eframe::egui;
@@ -33,18 +37,23 @@ use std::time::Duration;
 use task_planner::{ChangeKind, ChangeRecord, PlannerStatus, ProposalRecord};
 
 const POLL: Duration = Duration::from_secs(2);
+const TITLE: &str = "Digital Wellbeing Focus";
 const GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
 const RED: egui::Color32 = egui::Color32::from_rgb(200, 80, 80);
 
 fn main() -> eframe::Result<()> {
+    // One Focus app per session: a second start (Start menu, logon) shows the first.
+    if tray::activate_existing(TITLE) {
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([560.0, 680.0])
-            .with_title("Digital Wellbeing Focus"),
+            .with_title(TITLE),
         ..Default::default()
     };
     eframe::run_native(
-        "Digital Wellbeing Focus",
+        TITLE,
         options,
         Box::new(|cc| {
             rule_ui::install_system_fonts(&cc.egui_ctx);
@@ -108,6 +117,8 @@ enum Tab {
 /// without blocking the UI.
 struct FocusApp {
     tab: Tab,
+    /// Set by the tray thread: switch to the Settings tab on the next frame.
+    open_settings: Arc<AtomicBool>,
     settings: settings::SettingsTab,
     session: u32,
     ctx: egui::Context,
@@ -140,8 +151,21 @@ impl FocusApp {
             poll_ctx.request_repaint();
             thread::sleep(POLL);
         });
+        let open_settings = Arc::new(AtomicBool::new(false));
+        let (tray_ctx, tray_flag) = (ctx.clone(), Arc::clone(&open_settings));
+        tray::start(move |command| {
+            if command == tray::TrayCommand::Settings {
+                tray_flag.store(true, Ordering::SeqCst);
+            }
+            // The window may be hidden, and a hidden window draws no frames that
+            // could process a viewport command: show it directly, then sync egui.
+            tray::show_window(TITLE);
+            tray_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            tray_ctx.request_repaint();
+        });
         Self {
             tab: Tab::Focus,
+            open_settings,
             settings: settings::SettingsTab::new(session),
             session,
             ctx,
@@ -539,6 +563,14 @@ impl eframe::App for FocusApp {
             let s = self.shared.lock();
             (s.status.clone(), s.message.clone())
         };
+        if tray::AVAILABLE && ctx.input(|i| i.viewport().close_requested()) {
+            // Keep running in the tray; "Quit" in the tray menu ends the app.
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        if self.open_settings.swap(false, Ordering::SeqCst) {
+            self.tab = Tab::Settings;
+        }
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Focus, "Focus");

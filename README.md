@@ -161,7 +161,8 @@ crates/ai_focus_rule   AI-judged focus BlockRule + RuleUi (activity sampler, Cla
 crates/task_planner    AI picks the task from a to-do list; reviews change requests
 crates/machine         machine-install paths, managed users, session ids, agent<->Focus API
 apps/service           Windows service, per-session agent, installer
-apps/focus             Focus app for standard users (declare task, see verdicts)
+apps/focus             Focus app for standard users (declare task, see verdicts; tray icon, Settings tab)
+apps/mcp               MCP server for Claude Desktop (to-dos through the agent API)
 crates/enforcer        process loop + BlockRule registry
 crates/rule_ui         RuleUi trait (per-rule settings panels)
 crates/tool-api        JSON-RPC function-call router

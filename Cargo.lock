@@ -939,6 +939,7 @@ dependencies = [
  "rule_ui",
  "serde_json",
  "task_planner",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
