@@ -10,6 +10,7 @@
 
 pub mod claude;
 mod config;
+pub mod grants;
 mod judge;
 mod monitor;
 pub mod platform;
