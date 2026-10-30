@@ -37,8 +37,23 @@ const AUTO_ASSIGN_INTERVAL: Duration = Duration::from_secs(60);
 pub fn run() -> anyhow::Result<()> {
     let session = current_session_id();
     crate::init_logging(&format!("agent-session{session}.log"));
-    info!("agent starting in session {session}");
+    info!(
+        "agent starting in session {session} (version {}, user API port {})",
+        env!("CARGO_PKG_VERSION"),
+        machine::user_api::port_for_session(session)
+    );
+    // Nobody sees the agent's stderr: put a panic or a start-up error in its log.
+    std::panic::set_hook(Box::new(|panic| {
+        tracing::error!("agent panicked: {panic}");
+    }));
+    let result = run_agent(session);
+    if let Err(err) = &result {
+        tracing::error!("agent stopped: {err:#}");
+    }
+    result
+}
 
+fn run_agent(session: u32) -> anyhow::Result<()> {
     let list_store =
         ListStore::with_persistence(Arc::new(FileListPersistence::new(machine::policy_path())))?;
     let list_rule = ListBasedRuleHandle::new(list_store.clone());

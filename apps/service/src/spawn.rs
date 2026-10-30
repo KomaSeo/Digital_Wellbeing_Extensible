@@ -16,8 +16,8 @@ use windows_sys::Win32::System::RemoteDesktop::{
     WTS_SESSION_INFOW,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, TerminateProcess,
-    WaitForSingleObject, CREATE_NO_WINDOW, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken,
+    TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 /// Responsibility: Describe one logged-on user session (id and user name).
@@ -71,6 +71,14 @@ impl Child {
     pub fn is_running(&self) -> bool {
         // SAFETY: valid handle owned by self.
         unsafe { WaitForSingleObject(self.process, 0) == WAIT_TIMEOUT }
+    }
+
+    /// The exit code once the process has ended.
+    pub fn exit_code(&self) -> Option<u32> {
+        let mut code = 0u32;
+        // SAFETY: valid handle owned by self; `code` is a valid out-pointer.
+        let ok = unsafe { GetExitCodeProcess(self.process, &mut code) } != 0;
+        (ok && !self.is_running()).then_some(code)
     }
 
     pub fn kill(&self) {

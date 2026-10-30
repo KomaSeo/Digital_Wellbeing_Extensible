@@ -115,6 +115,15 @@ impl Supervisor {
             if alive {
                 continue;
             }
+            // It ran and ended: say how, or a crash loop would look like a
+            // stream of "started" lines only (the agent logs its own reason).
+            if let Some(code) = self.agents.get(&session.id).and_then(Child::exit_code) {
+                warn!(
+                    "agent for {} (session {}) exited with code {code:#x}; see \
+                     agent-session{}.log; starting it again",
+                    session.user, session.id, session.id
+                );
+            }
             match spawn_in_session(session.id, &self.exe, "agent") {
                 Ok(child) => {
                     info!(

@@ -373,8 +373,14 @@ pub fn call(session: u32, method: &str, params: Value) -> Result<Status, String>
 pub fn call_value(session: u32, method: &str, params: Value) -> Result<Value, String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port_for_session(session)));
     let mut stream =
-        TcpStream::connect_timeout(&addr, Duration::from_millis(500)).map_err(|_| {
-            "agent not running for this session (is the service installed?)".to_string()
+        TcpStream::connect_timeout(&addr, Duration::from_millis(500)).map_err(|err| {
+            format!(
+                "agent not running for this session (session {session}, port {}: {err}). \
+                 Is the service installed and this account managed? An administrator can \
+                 read C:\\ProgramData\\DigitalWellbeing\\logs\\service.log and \
+                 agent-session{session}.log.",
+                addr.port()
+            )
         })?;
     stream
         // assign / request_change wait for the AI; an approved "done" makes two
