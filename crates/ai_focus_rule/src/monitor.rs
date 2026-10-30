@@ -80,6 +80,11 @@ pub struct MonitorState {
     /// Browser "process|site" -> block (see [`tab_key`]).
     pub blocked_tabs: HashMap<String, BlockedEntry>,
     pub last_check: Option<DateTime<Utc>>,
+    /// When the next scheduled check is due (randomized; see [`Self::mark_checked`]).
+    next_check: Option<DateTime<Utc>>,
+    /// Window key -> when it was last judged (for early checks on a new window).
+    judged: HashMap<String, DateTime<Utc>>,
+    rng: u64,
     pub last_error: Option<String>,
 }
 
@@ -144,11 +149,61 @@ impl MonitorState {
             .join("\n")
     }
 
-    pub fn check_due(&self, now: DateTime<Utc>, interval_secs: u64) -> bool {
-        match self.last_check {
-            None => true,
-            Some(at) => now - at >= ChronoDuration::seconds(clamp_interval(interval_secs)),
+    /// Is a check due for the window `key`, in front since `front_since`?
+    ///
+    /// Checks must not be predictable, or the user could switch to a work
+    /// window just before each one. So a check is due when
+    /// - the randomized schedule says so, or
+    /// - a window not judged within the interval has been in front for
+    ///   [`EARLY_DWELL`] (and the last check is at least [`EARLY_MIN_GAP`] ago).
+    pub fn check_due(
+        &self,
+        now: DateTime<Utc>,
+        interval_secs: u64,
+        key: &str,
+        front_since: DateTime<Utc>,
+    ) -> bool {
+        let Some(last) = self.last_check else {
+            return true;
+        };
+        if self.next_check.is_none_or(|next| now >= next) {
+            return true;
         }
+        let interval = ChronoDuration::seconds(clamp_interval(interval_secs));
+        let judged_recently = self.judged.get(key).is_some_and(|at| now - *at < interval);
+        !judged_recently && now - front_since >= EARLY_DWELL && now - last >= EARLY_MIN_GAP
+    }
+
+    /// Record a check of `key` and schedule the next one at a random point
+    /// between 60 % and 100 % of the interval (never later than configured).
+    pub fn mark_checked(&mut self, now: DateTime<Utc>, interval_secs: u64, key: &str) {
+        self.last_check = Some(now);
+        self.judged.insert(key.to_string(), now);
+        let interval = clamp_interval(interval_secs) * 1000;
+        let jitter = (self.next_random() % 401) as i64; // 0..=400 per mille
+        self.next_check =
+            Some(now + ChronoDuration::milliseconds(interval * (600 + jitter) / 1000));
+        let horizon = ChronoDuration::milliseconds(interval);
+        self.judged.retain(|_, at| now - *at < horizon);
+    }
+
+    /// When the current foreground window came to the front (last history entry).
+    pub fn front_since(&self) -> Option<DateTime<Utc>> {
+        self.history.back().map(|e| e.since)
+    }
+
+    /// xorshift64; seeded from the clock on first use. Not for security, only
+    /// so check times are not guessable.
+    fn next_random(&mut self) -> u64 {
+        if self.rng == 0 {
+            self.rng = Utc::now().timestamp_nanos_opt().unwrap_or(1) as u64 | 1;
+        }
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng = x;
+        x
     }
 
     pub fn tab_blocked(&self, now: DateTime<Utc>, fg: &Foreground) -> bool {
@@ -310,6 +365,21 @@ pub fn site_of(title: &str) -> String {
         .unwrap_or(t);
     truncate(site.trim(), 60).to_lowercase()
 }
+
+/// What "the same window" means for checks and strikes: the site for a
+/// browser, the program otherwise.
+fn window_key(config: &AiFocusConfig, fg: &Foreground) -> String {
+    if config.is_browser(&fg.process_name) {
+        tab_key(fg)
+    } else {
+        normalize_process_name(&fg.process_name)
+    }
+}
+
+/// How long a newly focused window must stay in front before an early check.
+const EARLY_DWELL: ChronoDuration = ChronoDuration::seconds(10);
+/// Least time between two checks, so early checks cannot pile up.
+const EARLY_MIN_GAP: ChronoDuration = ChronoDuration::seconds(15);
 
 /// Admin-entered values are used in date arithmetic; keep them sane so an
 /// absurd number cannot overflow (and panic) the monitor thread.
@@ -484,13 +554,22 @@ impl FocusMonitor {
                 }
                 return;
             }
-            !exempt && state.check_due(now, config.check_interval_secs)
+            let since = state.front_since().unwrap_or(now);
+            !exempt
+                && state.check_due(
+                    now,
+                    config.check_interval_secs,
+                    &window_key(&config, &fg),
+                    since,
+                )
         };
         if !due {
             return;
         }
 
-        self.state.lock().last_check = Some(now);
+        self.state
+            .lock()
+            .mark_checked(now, config.check_interval_secs, &window_key(&config, &fg));
         let result = self.run_judge(&config, &fg, grant.as_ref());
         // The judge call can take a while; if access to this window was granted
         // (or revoked) meanwhile, the verdict was made under the old terms.
@@ -1360,5 +1439,42 @@ mod tests {
         let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
         h.monitor.step(Utc::now());
         assert_eq!(h.monitor.state().blocked_processes.len(), 1);
+    }
+
+    #[test]
+    fn a_newly_focused_window_is_checked_early() {
+        let h = harness(
+            Verdict::OnTask,
+            fg("code.exe", "main.rs"),
+            session("thesis"),
+        );
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        // Switch to a game: not judged yet at 3 s in front...
+        *h.current.lock() = Some(fg("game.exe", "Game"));
+        h.monitor.step(t0 + ChronoDuration::seconds(20));
+        h.monitor.step(t0 + ChronoDuration::seconds(23));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        // ...but judged once it stayed 10 s, long before the 60 s schedule.
+        h.monitor.step(t0 + ChronoDuration::seconds(30));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+        // Back to the editor, judged 30 s ago: no early check for it.
+        *h.current.lock() = Some(fg("code.exe", "main.rs"));
+        h.monitor.step(t0 + ChronoDuration::seconds(35));
+        h.monitor.step(t0 + ChronoDuration::seconds(46));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn scheduled_checks_fall_between_60_and_100_percent_of_the_interval() {
+        let mut state = MonitorState::default();
+        let t0 = Utc::now();
+        for i in 0..200 {
+            let now = t0 + ChronoDuration::minutes(i);
+            state.mark_checked(now, 60, "k");
+            let gap = state.next_check.unwrap() - now;
+            assert!(gap >= ChronoDuration::seconds(36) && gap <= ChronoDuration::seconds(60));
+        }
     }
 }
