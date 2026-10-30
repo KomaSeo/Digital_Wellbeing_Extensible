@@ -5,12 +5,12 @@ use enforcer::Enforcer;
 use list_based_rule::{ListConfig, ListMode, ListStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::sync::mpsc;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 /// Local function-call endpoint (JSON-RPC over TCP).
@@ -223,59 +223,152 @@ fn parse_mode(params: &Value) -> Result<ListMode, ToolError> {
     }
 }
 
-pub fn serve_tcp(router: ToolRouter, port: u16) -> std::io::Result<()> {
+/// Most simultaneous connections; more are refused with an error reply.
+const MAX_CONNECTIONS: usize = 16;
+/// A whole request must arrive within this time (a slow client cannot hold a thread).
+const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const MAX_REQUEST_BYTES: usize = 1_000_000;
+
+/// Bind `127.0.0.1:port` now (so the caller learns about a busy port) and
+/// serve on a background thread.
+pub fn spawn_tcp(router: ToolRouter, port: u16) -> std::io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     tracing::info!("tool-api listening on 127.0.0.1:{port}");
+    thread::Builder::new()
+        .name("tool-api".into())
+        .spawn(move || serve(router, listener))?;
+    Ok(())
+}
+
+fn serve(router: ToolRouter, listener: TcpListener) {
+    let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
-                let router = router.clone();
-                thread::spawn(move || {
-                    if let Err(err) = handle_stream(&router, &mut stream) {
-                        tracing::debug!("client error: {err}");
-                    }
-                });
-            }
+        let mut stream = match stream {
+            Ok(stream) => stream,
             Err(err) => {
                 tracing::warn!("accept error: {err}");
                 thread::sleep(Duration::from_millis(50));
+                continue;
             }
+        };
+        if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            active.fetch_sub(1, Ordering::SeqCst);
+            let _ = reply(&mut stream, &error_value(-32000, "server busy"));
+            continue;
+        }
+        let (router, active_conn) = (router.clone(), Arc::clone(&active));
+        let spawned = thread::Builder::new().spawn(move || {
+            if let Err(err) = handle_stream(&router, &mut stream) {
+                tracing::debug!("client error: {err}");
+            }
+            active_conn.fetch_sub(1, Ordering::SeqCst);
+        });
+        if spawned.is_err() {
+            active.fetch_sub(1, Ordering::SeqCst);
         }
     }
-    Ok(())
 }
 
-fn handle_stream(router: &ToolRouter, stream: &mut (impl Read + Write)) -> std::io::Result<()> {
+/// Read until the first complete JSON value (trailing data is ignored, so two
+/// requests sent together do not hang), answer it, close.
+fn handle_stream(router: &ToolRouter, stream: &mut TcpStream) -> std::io::Result<()> {
+    let deadline = Instant::now() + REQUEST_DEADLINE;
+    stream.set_write_timeout(Some(REQUEST_DEADLINE))?;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     loop {
-        let n = stream.read(&mut tmp)?;
-        if n == 0 {
-            break;
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return reply(stream, &error_value(-32700, "request timed out"));
         }
+        stream.set_read_timeout(Some(left))?;
+        let n = match stream.read(&mut tmp) {
+            Ok(n) => n,
+            Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return reply(stream, &error_value(-32700, "request timed out"));
+            }
+            Err(err) => return Err(err),
+        };
         buf.extend_from_slice(&tmp[..n]);
-        if let Ok(value) = serde_json::from_slice::<Value>(&buf) {
-            let response = router.handle_value(value);
-            let bytes = serde_json::to_vec(&response)?;
-            stream.write_all(&bytes)?;
-            stream.write_all(b"\n")?;
-            stream.flush()?;
-            break;
-        }
-        if buf.len() > 1_000_000 {
-            break;
+        match serde_json::Deserializer::from_slice(&buf).into_iter::<Value>().next() {
+            Some(Ok(value)) => return reply(stream, &router.handle_value(value)),
+            Some(Err(err)) if !err.is_eof() => {
+                return reply(stream, &error_value(-32700, &format!("parse error: {err}")));
+            }
+            _ if n == 0 => return reply(stream, &error_value(-32700, "incomplete request")),
+            _ if buf.len() > MAX_REQUEST_BYTES => {
+                return reply(stream, &error_value(-32600, "request too large"));
+            }
+            _ => {}
         }
     }
-    Ok(())
 }
 
-pub fn spawn_tcp(router: ToolRouter, port: u16) -> mpsc::Sender<()> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = rx;
-        if let Err(err) = serve_tcp(router, port) {
-            tracing::error!("tool-api server failed: {err}");
+fn error_value(code: i32, message: &str) -> Value {
+    json!({ "id": null, "error": { "code": code, "message": message } })
+}
+
+fn reply(stream: &mut TcpStream, value: &Value) -> std::io::Result<()> {
+    stream.write_all(&serde_json::to_vec(value)?)?;
+    stream.write_all(b"\n")?;
+    stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use list_based_rule::MemoryListPersistence;
+    use std::io::{BufRead, BufReader};
+    use std::net::Shutdown;
+
+    fn server() -> u16 {
+        let store = ListStore::with_persistence(Arc::new(MemoryListPersistence::new())).unwrap();
+        let router = ToolRouter::new(Arc::new(Enforcer::new()), store);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || serve(router, listener));
+        port
+    }
+
+    fn send(port: u16, payload: &[u8], half_close: bool) -> Value {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(payload).unwrap();
+        if half_close {
+            s.shutdown(Shutdown::Write).unwrap();
         }
-    });
-    tx
+        let mut line = String::new();
+        BufReader::new(s).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[test]
+    fn answers_like_the_powershell_client_expects() {
+        let port = server();
+        let v = send(port, br#"{"id":1,"method":"ping","params":{}}"#, true);
+        assert_eq!(v["id"], 1);
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn two_requests_in_one_write_do_not_hang() {
+        let port = server();
+        let v = send(port, br#"{"id":1,"method":"ping"}{"id":2,"method":"ping"}"#, false);
+        assert_eq!(v["id"], 1);
+    }
+
+    #[test]
+    fn bad_and_incomplete_input_get_an_error_reply() {
+        let port = server();
+        assert!(send(port, b"nonsense", true)["error"].is_object());
+        assert!(send(port, br#"{"id":1,"meth"#, true)["error"].is_object());
+    }
+
+    #[test]
+    fn busy_port_is_reported() {
+        let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let store = ListStore::with_persistence(Arc::new(MemoryListPersistence::new())).unwrap();
+        let router = ToolRouter::new(Arc::new(Enforcer::new()), store);
+        assert!(spawn_tcp(router, port).is_err());
+    }
 }

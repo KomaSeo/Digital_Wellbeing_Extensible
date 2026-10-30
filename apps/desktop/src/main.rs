@@ -6,6 +6,7 @@ use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
 use eframe::egui;
 use enforcer::{Enforcer, ProcessSnapshot};
 use list_based_rule::{FileListPersistence, ListBasedRuleHandle, ListStore};
+use machine::session::{current_session_id, process_session_id};
 use rule_ui::{Panel, RuleUi};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,9 +22,9 @@ fn main() -> eframe::Result<()> {
 
     // A machine install (service + agents) exists: this window only edits the
     // shared settings; the agents enforce them. `--standalone` forces the old
-    // single-account mode.
-    let machine_mode =
-        !std::env::args().any(|a| a == "--standalone") && machine::machine_config_path().exists();
+    // single-account mode. Decided by the registered service, not by a file
+    // (a file is left behind by uninstall, and anyone may create one).
+    let machine_mode = !std::env::args().any(|a| a == "--standalone") && service_installed();
     let (router, rule_uis, panels, status) = if machine_mode {
         start_machine_admin()
     } else {
@@ -42,7 +43,13 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             rule_ui::install_system_fonts(&cc.egui_ctx);
-            Ok(Box::new(App::new(router, rule_uis, panels, status)))
+            Ok(Box::new(App::new(
+                router,
+                rule_uis,
+                panels,
+                status,
+                machine_mode,
+            )))
         }),
     )
 }
@@ -69,17 +76,36 @@ fn start_standalone() -> Started {
         JsonStore::<GrantState>::open(grants_path, true).expect("failed to open grants.json");
     let ai_rule = AiFocusRuleHandle::new(native_monitor(ai_store, grants));
     enforcer.register_rule(ai_rule.rule());
-    let _ai_monitor_handle = ai_rule.monitor().start_background();
     // Future: enforcer.register_rule(browser_guard.rule());
+
+    // Only this user's session: other users' programs and Windows services
+    // (session 0) are none of this window's business.
+    let session = current_session_id();
+    enforcer.set_process_filter(Arc::new(move |pid| {
+        process_session_id(pid) == Some(session)
+    }));
 
     let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui(), ai_rule.ui()];
     // Future: rule_uis.push(browser_guard.ui());
 
-    let _enforce_handle = enforcer.start_background(Duration::from_millis(800));
-
     let router = ToolRouter::new(Arc::clone(&enforcer), store);
-    let _api_keep_alive = spawn_tcp(router.clone(), DEFAULT_PORT);
-    let status = format!("Function call API: 127.0.0.1:{DEFAULT_PORT}");
+    // The API port doubles as a single-instance lock: a second window would
+    // enforce the same policy twice.
+    let status = match spawn_tcp(router.clone(), DEFAULT_PORT) {
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            return (
+                router,
+                rule_uis,
+                Vec::new(),
+                "Another Digital Wellbeing window is already running; this one does not enforce."
+                    .into(),
+            );
+        }
+        Err(err) => format!("Function call API unavailable: {err}"),
+        Ok(()) => format!("Function call API: 127.0.0.1:{DEFAULT_PORT}"),
+    };
+    let _ai_monitor_handle = ai_rule.monitor().start_background();
+    let _enforce_handle = enforcer.start_background(Duration::from_millis(800));
     (router, rule_uis, Vec::new(), status)
 }
 
@@ -115,6 +141,24 @@ fn start_machine_admin() -> Started {
     (router, rule_uis, panels, status)
 }
 
+/// Is the machine-wide service registered?
+#[cfg(windows)]
+fn service_installed() -> bool {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+    ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .and_then(|m| m.open_service("DigitalWellbeing", ServiceAccess::QUERY_STATUS))
+        .is_ok()
+}
+
+#[cfg(not(windows))]
+fn service_installed() -> bool {
+    false
+}
+
+/// How often the monitor view re-reads processes and blocks.
+const REFRESH: Duration = Duration::from_millis(700);
+
 /// Responsibility: Remember which tab the window shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MainTab {
@@ -134,7 +178,12 @@ struct App {
     panels: Vec<Arc<dyn Panel>>,
     tab: MainTab,
     status: String,
+    machine_mode: bool,
     last_refresh: Instant,
+    /// Cached between refreshes: listing processes on every repaint (every
+    /// mouse move or key press) made the window slow.
+    snapshots: Vec<ProcessSnapshot>,
+    blocks: serde_json::Value,
     process_filter: String,
 }
 
@@ -144,6 +193,7 @@ impl App {
         rule_uis: Vec<Arc<dyn RuleUi>>,
         panels: Vec<Arc<dyn Panel>>,
         status: String,
+        machine_mode: bool,
     ) -> Self {
         Self {
             router,
@@ -151,7 +201,10 @@ impl App {
             panels,
             tab: MainTab::Monitor,
             status,
+            machine_mode,
             last_refresh: Instant::now() - Duration::from_secs(10),
+            snapshots: Vec::new(),
+            blocks: serde_json::Value::Null,
             process_filter: String::new(),
         }
     }
@@ -159,23 +212,28 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.last_refresh.elapsed() > Duration::from_millis(700) {
+        if self.last_refresh.elapsed() >= REFRESH {
             self.last_refresh = Instant::now();
-            ctx.request_repaint_after(Duration::from_millis(700));
+            self.blocks = self
+                .router
+                .dispatch("list_blocks", serde_json::json!({ "limit": 40 }))
+                .unwrap_or_default();
+            self.snapshots = self
+                .router
+                .enforcer()
+                .list_processes()
+                .into_iter()
+                .map(|p| ProcessSnapshot {
+                    pid: p.pid,
+                    name: p.name,
+                    exe: p.exe,
+                })
+                .collect();
         }
-
-        let blocks = self
-            .router
-            .dispatch("list_blocks", serde_json::json!({ "limit": 40 }));
-        let process_infos = self.router.enforcer().list_processes();
-        let snapshots: Vec<ProcessSnapshot> = process_infos
-            .iter()
-            .map(|p| ProcessSnapshot {
-                pid: p.pid,
-                name: p.name.clone(),
-                exe: p.exe.clone(),
-            })
-            .collect();
+        ctx.request_repaint_after(REFRESH);
+        let snapshots = &self.snapshots;
+        let blocks = &self.blocks;
+        let machine_mode = self.machine_mode;
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -221,7 +279,7 @@ impl eframe::App for App {
                             &mut cols[0],
                             |ui| {
                                 let filter = self.process_filter.to_lowercase();
-                                for process in &snapshots {
+                                for process in snapshots {
                                     if !filter.is_empty()
                                         && !process.name.to_lowercase().contains(&filter)
                                     {
@@ -236,8 +294,14 @@ impl eframe::App for App {
                         egui::ScrollArea::vertical().id_salt("monitor_blocks").show(
                             &mut cols[1],
                             |ui| {
-                                if let Ok(value) = &blocks {
-                                    if let Some(arr) = value.as_array() {
+                                if machine_mode {
+                                    ui.label(
+                                        "The service enforces and logs blocks in each managed \
+                                         account (see logs in the data folder).",
+                                    );
+                                }
+                                {
+                                    if let Some(arr) = blocks.as_array() {
                                         for item in arr {
                                             let name = item
                                                 .get("process_name")
@@ -269,7 +333,7 @@ impl eframe::App for App {
                         egui::ScrollArea::vertical()
                             .id_salt("rule_settings_scroll")
                             .show(ui, |ui| {
-                                rule.settings_ui(ui, &snapshots);
+                                rule.settings_ui(ui, snapshots);
                             });
                     } else {
                         ui.label("Rule not found.");

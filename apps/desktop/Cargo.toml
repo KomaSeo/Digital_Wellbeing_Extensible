@@ -22,5 +22,8 @@ eframe = { version = "0.31", default-features = true, features = ["default_fonts
 egui = { workspace = true }
 serde_json = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+
 [build-dependencies]
 embed-manifest = "1.4"

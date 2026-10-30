@@ -920,6 +920,7 @@ dependencies = [
  "tool-api",
  "tracing",
  "tracing-subscriber",
+ "windows-service",
 ]
 
 [[package]]
