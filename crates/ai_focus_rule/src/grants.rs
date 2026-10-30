@@ -79,7 +79,9 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GrantDuration {
-    Minutes { minutes: u32 },
+    Minutes {
+        minutes: u32,
+    },
     /// Until revoked (by the admin, or by the monitor for misuse).
     Permanent,
 }
@@ -224,9 +226,13 @@ mod tests {
             keyword: "docs.rs".into(),
         })
         .unwrap();
-        assert_eq!(v, serde_json::json!({ "kind": "site", "keyword": "docs.rs" }));
+        assert_eq!(
+            v,
+            serde_json::json!({ "kind": "site", "keyword": "docs.rs" })
+        );
         let d: GrantDuration =
-            serde_json::from_value(serde_json::json!({ "kind": "minutes", "minutes": 30 })).unwrap();
+            serde_json::from_value(serde_json::json!({ "kind": "minutes", "minutes": 30 }))
+                .unwrap();
         assert_eq!(d, GrantDuration::Minutes { minutes: 30 });
     }
 }

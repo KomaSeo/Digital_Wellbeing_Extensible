@@ -197,9 +197,18 @@ mod tests {
     fn ai_may_shorten_but_not_lengthen_or_make_permanent() {
         let c = AiFocusConfig::default();
         let asked = GrantDuration::Minutes { minutes: 30 };
-        assert_eq!(granted_length(asked, &decision(true, 10), &c), Some(Some(10)));
-        assert_eq!(granted_length(asked, &decision(true, 90), &c), Some(Some(30)));
-        assert_eq!(granted_length(asked, &decision(true, 0), &c), Some(Some(30)));
+        assert_eq!(
+            granted_length(asked, &decision(true, 10), &c),
+            Some(Some(10))
+        );
+        assert_eq!(
+            granted_length(asked, &decision(true, 90), &c),
+            Some(Some(30))
+        );
+        assert_eq!(
+            granted_length(asked, &decision(true, 0), &c),
+            Some(Some(30))
+        );
     }
 
     #[test]
@@ -209,7 +218,10 @@ mod tests {
             ..Default::default()
         };
         let asked = GrantDuration::Minutes { minutes: 600 };
-        assert_eq!(granted_length(asked, &decision(true, 0), &c), Some(Some(60)));
+        assert_eq!(
+            granted_length(asked, &decision(true, 0), &c),
+            Some(Some(60))
+        );
     }
 
     #[test]
@@ -218,7 +230,10 @@ mod tests {
         let asked = GrantDuration::Permanent;
         assert_eq!(granted_length(asked, &decision(true, 0), &c), Some(None));
         // The AI downgraded it to a timed grant.
-        assert_eq!(granted_length(asked, &decision(true, 45), &c), Some(Some(45)));
+        assert_eq!(
+            granted_length(asked, &decision(true, 45), &c),
+            Some(Some(45))
+        );
         c.allow_permanent_grants = false;
         assert_eq!(
             granted_length(asked, &decision(true, 0), &c),

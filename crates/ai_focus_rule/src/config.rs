@@ -85,15 +85,18 @@ impl Default for AiFocusConfig {
 
 impl AiFocusConfig {
     pub fn is_always_allowed(&self, process_name: &str) -> bool {
-        self.always_allow.contains(&normalize_process_name(process_name))
+        self.always_allow
+            .contains(&normalize_process_name(process_name))
     }
 
     pub fn is_private(&self, process_name: &str) -> bool {
-        self.private_apps.contains(&normalize_process_name(process_name))
+        self.private_apps
+            .contains(&normalize_process_name(process_name))
     }
 
     pub fn is_browser(&self, process_name: &str) -> bool {
-        self.browsers.contains(&normalize_process_name(process_name))
+        self.browsers
+            .contains(&normalize_process_name(process_name))
     }
 
     /// API key from the environment, falling back to the saved one.

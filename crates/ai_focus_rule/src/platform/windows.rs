@@ -101,8 +101,11 @@ impl Desktop for WindowsDesktop {
                 key(VK_W, true),
                 key(VK_CONTROL, true),
             ];
-            SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32)
-                == inputs.len() as u32
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                size_of::<INPUT>() as i32,
+            ) == inputs.len() as u32
         }
     }
 }

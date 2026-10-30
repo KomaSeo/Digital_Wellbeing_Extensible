@@ -1,6 +1,11 @@
+use crate::access_review::{
+    claude_reviewer_provider, granted_length, AccessRequest, ReviewerProvider,
+};
 use crate::config::{AiFocusConfig, AiFocusStore};
+use crate::grants::{Grant, GrantDuration, GrantEvent, GrantLogEntry, GrantState, GrantTarget};
 use crate::judge::{ClaudeJudge, Judge, JudgeError, JudgeRequest, Judgement, Verdict};
 use crate::platform::{Desktop, Foreground, Screenshot};
+use crate::store::JsonStore;
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use enforcer::{is_never_terminate, normalize_process_name};
 use parking_lot::Mutex;
@@ -10,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use thiserror::Error;
 use tracing::{info, warn};
 
 /// How often the foreground window is sampled for the activity history.
@@ -134,7 +140,8 @@ impl MonitorState {
     pub fn active_process_blocks(&mut self, now: DateTime<Utc>) -> Vec<(String, String)> {
         self.blocked_processes
             .retain(|_, b| b.until.is_none_or(|u| now < u));
-        self.blocked_tabs.retain(|_, b| b.until.is_none_or(|u| now < u));
+        self.blocked_tabs
+            .retain(|_, b| b.until.is_none_or(|u| now < u));
         self.blocked_processes
             .iter()
             .map(|(name, b)| (name.clone(), b.reason.clone()))
@@ -147,12 +154,19 @@ impl MonitorState {
         config: &AiFocusConfig,
         fg: &Foreground,
         judgement: Judgement,
+        grant: Option<&Grant>,
     ) -> Action {
         let is_browser = config.is_browser(&fg.process_name);
-        let key = if is_browser {
+        let block_key = if is_browser {
             tab_key(fg)
         } else {
             normalize_process_name(&fg.process_name)
+        };
+        // Strikes on a granted app/site count per grant, so switching videos
+        // (= tab titles) on a granted site does not reset them.
+        let key = match grant {
+            Some(g) => format!("grant:{}", g.id),
+            None => block_key.clone(),
         };
 
         let mut action = Action::None;
@@ -175,13 +189,16 @@ impl MonitorState {
                         until,
                     };
                     if is_browser {
-                        self.blocked_tabs.insert(key, entry);
+                        self.blocked_tabs.insert(block_key, entry);
                         action = Action::CloseTab;
                         action_label = "tab closed".into();
                     } else {
-                        self.blocked_processes.insert(key.clone(), entry);
-                        action = Action::BlockProcess(key);
+                        self.blocked_processes.insert(block_key.clone(), entry);
+                        action = Action::BlockProcess(block_key);
                         action_label = "blocked".into();
+                    }
+                    if grant.is_some() {
+                        action_label = format!("access revoked, {action_label}");
                     }
                 } else {
                     action_label = format!("strike {strikes}/{needed}");
@@ -207,6 +224,15 @@ impl MonitorState {
         self.blocked_processes.remove(key);
         self.blocked_tabs.remove(key);
     }
+
+    /// Lift every block and strike a new grant covers.
+    pub fn unblock_matching(&mut self, target: &GrantTarget) {
+        self.blocked_processes
+            .retain(|key, _| !target.matches_block_key(key));
+        self.blocked_tabs
+            .retain(|key, _| !target.matches_block_key(key));
+        self.strikes.retain(|key, _| !target.matches_block_key(key));
+    }
 }
 
 pub fn tab_key(fg: &Foreground) -> String {
@@ -223,6 +249,27 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         s.chars().take(max).chain(['…']).collect()
     }
+}
+
+/// Shortest accepted purpose, so "ok" or "pls" never reaches the AI.
+const MIN_PURPOSE_CHARS: usize = 4;
+
+#[derive(Debug, Error)]
+pub enum AccessError {
+    #[error("start a focus session first")]
+    NoSession,
+    #[error("name the app or site")]
+    EmptyTarget,
+    #[error("say what you need it for (at least {MIN_PURPOSE_CHARS} characters)")]
+    PurposeTooShort,
+    #[error("the admin does not allow permanent access")]
+    PermanentNotAllowed,
+    #[error("another request is still being processed")]
+    Busy,
+    #[error("AI: {0}")]
+    Ai(#[from] JudgeError),
+    #[error("could not save: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub type JudgeProvider =
@@ -243,18 +290,41 @@ pub struct FocusMonitor {
     desktop: Box<dyn Desktop>,
     judge: JudgeProvider,
     state: Mutex<MonitorState>,
+    /// Access grants (`grants.json`); see `grants.rs`.
+    grants: JsonStore<GrantState>,
+    reviewer: ReviewerProvider,
+    /// Held for a whole access request, so two clicks cannot race.
+    access_busy: Mutex<()>,
     running: AtomicBool,
 }
 
 impl FocusMonitor {
+    /// Grants start in memory; use [`Self::with_grants`] to keep them in a file.
     pub fn new(store: AiFocusStore, desktop: Box<dyn Desktop>, judge: JudgeProvider) -> Self {
         Self {
             store,
             desktop,
             judge,
             state: Mutex::new(MonitorState::default()),
+            grants: JsonStore::in_memory(GrantState::default()),
+            reviewer: claude_reviewer_provider(),
+            access_busy: Mutex::new(()),
             running: AtomicBool::new(false),
         }
+    }
+
+    pub fn with_grants(mut self, grants: JsonStore<GrantState>) -> Self {
+        self.grants = grants;
+        self
+    }
+
+    pub fn with_reviewer(mut self, reviewer: ReviewerProvider) -> Self {
+        self.reviewer = reviewer;
+        self
+    }
+
+    pub fn grants(&self) -> &JsonStore<GrantState> {
+        &self.grants
     }
 
     pub fn store(&self) -> &AiFocusStore {
@@ -300,9 +370,16 @@ impl FocusMonitor {
             }
         }
 
+        self.tidy_grants(now, &config);
+
         let Some(fg) = self.desktop.foreground() else {
             return;
         };
+        let grant = self
+            .grants
+            .get()
+            .covering(now, &config, &fg.process_name, &fg.title)
+            .cloned();
         let exempt = fg.pid == std::process::id()
             || is_never_terminate(&fg.process_name)
             || config.is_always_allowed(&fg.process_name);
@@ -324,7 +401,7 @@ impl FocusMonitor {
         }
 
         self.state.lock().last_check = Some(now);
-        let result = self.run_judge(&config, &fg);
+        let result = self.run_judge(&config, &fg, grant.as_ref());
         let mut state = self.state.lock();
         match result {
             Ok(judgement) => {
@@ -333,10 +410,19 @@ impl FocusMonitor {
                     "{} \"{}\": {:?} ({})",
                     fg.process_name, fg.title, judgement.verdict, judgement.reason
                 );
-                let action = state.apply_judgement(now, &config, &fg, judgement);
+                let reason = judgement.reason.clone();
+                let action = state.apply_judgement(now, &config, &fg, judgement, grant.as_ref());
                 drop(state);
+                if action != Action::None {
+                    if let Some(grant) = &grant {
+                        self.revoke_for_misuse(now, grant, &reason);
+                    }
+                }
                 if action == Action::CloseTab && !self.close_tab_if_unchanged(&fg) {
-                    warn!("did not close tab of {}: window or tab changed", fg.process_name);
+                    warn!(
+                        "did not close tab of {}: window or tab changed",
+                        fg.process_name
+                    );
                 }
             }
             Err(err) => {
@@ -358,7 +444,129 @@ impl FocusMonitor {
         still_same && self.desktop.close_active_tab(judged)
     }
 
-    fn run_judge(&self, config: &AiFocusConfig, fg: &Foreground) -> Result<Judgement, JudgeError> {
+    /// The user asks for an app or site. The AI decides; an approved request
+    /// is stored and lifts matching blocks right away. Observation continues
+    /// (the judge then weighs use against `purpose`).
+    pub fn request_access(
+        &self,
+        now: DateTime<Utc>,
+        target: GrantTarget,
+        duration: GrantDuration,
+        purpose: &str,
+    ) -> Result<GrantLogEntry, AccessError> {
+        let _busy = self.access_busy.try_lock().ok_or(AccessError::Busy)?;
+        let config = self.store.get();
+        if !config.session_active || config.task.trim().is_empty() {
+            return Err(AccessError::NoSession);
+        }
+        let target = target.normalized();
+        if target.is_empty() {
+            return Err(AccessError::EmptyTarget);
+        }
+        let purpose = purpose.trim();
+        if purpose.chars().count() < MIN_PURPOSE_CHARS {
+            return Err(AccessError::PurposeTooShort);
+        }
+        if duration == GrantDuration::Permanent && !config.allow_permanent_grants {
+            return Err(AccessError::PermanentNotAllowed);
+        }
+
+        let recent: Vec<GrantLogEntry> = self.grants.get().log.iter().rev().cloned().collect();
+        let history = self.state.lock().history_text();
+        let reviewer = (self.reviewer)(&config)?;
+        let decision = reviewer.review(&AccessRequest {
+            task: &config.task,
+            target: &target,
+            duration,
+            purpose,
+            history: &history,
+            recent: &recent,
+        })?;
+
+        let length = granted_length(duration, &decision, &config);
+        let entry = GrantLogEntry {
+            at: now,
+            target: target.clone(),
+            purpose: purpose.to_string(),
+            event: GrantEvent::Requested {
+                duration,
+                approved: length.is_some(),
+                granted_minutes: length.flatten(),
+            },
+            message: decision.reply.clone(),
+        };
+        let grant = length.map(|minutes| Grant {
+            id: format!("g{}", now.timestamp_millis()),
+            target: target.clone(),
+            purpose: purpose.to_string(),
+            until: minutes.map(|m| now + ChronoDuration::minutes(m as i64)),
+            granted_at: now,
+            task: config.task.clone(),
+        });
+        self.grants.update(|s| {
+            if let Some(grant) = grant.clone() {
+                s.grants.push(grant);
+            }
+            s.push_log(entry.clone());
+        })?;
+        if grant.is_some() {
+            info!("access granted: {} ({purpose})", target.label());
+            self.state.lock().unblock_matching(&target);
+        }
+        Ok(entry)
+    }
+
+    /// Drop expired grants and those the admin revoked (logged).
+    fn tidy_grants(&self, now: DateTime<Utc>, config: &AiFocusConfig) {
+        let state = self.grants.get();
+        if state.grants.iter().all(|g| g.is_active(now, config)) {
+            return;
+        }
+        let result = self.grants.update(|s| {
+            let (keep, ended): (Vec<_>, Vec<_>) = std::mem::take(&mut s.grants)
+                .into_iter()
+                .partition(|g| g.is_active(now, config));
+            s.grants = keep;
+            for g in ended {
+                if config.revoked_grants.contains(&g.id) {
+                    s.push_log(GrantLogEntry {
+                        at: now,
+                        target: g.target,
+                        purpose: g.purpose,
+                        event: GrantEvent::RevokedByAdmin,
+                        message: String::new(),
+                    });
+                }
+            }
+        });
+        if let Err(err) = result {
+            warn!("could not save grants: {err}");
+        }
+    }
+
+    fn revoke_for_misuse(&self, now: DateTime<Utc>, grant: &Grant, reason: &str) {
+        info!("access to {} revoked: {reason}", grant.target.label());
+        let result = self.grants.update(|s| {
+            s.grants.retain(|g| g.id != grant.id);
+            s.push_log(GrantLogEntry {
+                at: now,
+                target: grant.target.clone(),
+                purpose: grant.purpose.clone(),
+                event: GrantEvent::RevokedForMisuse,
+                message: reason.to_string(),
+            });
+        });
+        if let Err(err) = result {
+            warn!("could not save grants: {err}");
+        }
+    }
+
+    fn run_judge(
+        &self,
+        config: &AiFocusConfig,
+        fg: &Foreground,
+        grant: Option<&Grant>,
+    ) -> Result<Judgement, JudgeError> {
         let judge = (self.judge)(config)?;
         let screenshot = if config.send_screenshot && !config.is_private(&fg.process_name) {
             self.desktop.screenshot(fg).and_then(|s| encode_jpeg(&s))
@@ -372,7 +580,7 @@ impl FocusMonitor {
             process_name: &fg.process_name,
             title: &fg.title,
             screenshot: screenshot.as_deref(),
-            grant_purpose: None,
+            grant_purpose: grant.map(|g| g.purpose.as_str()),
         })
     }
 }
@@ -423,7 +631,8 @@ mod tests {
     }
 
     struct FixedJudge {
-        verdict: Verdict,
+        verdict: Arc<Mutex<Verdict>>,
+        saw_grant: Arc<Mutex<Option<String>>>,
         /// Foreground of the fake desktop, and what to switch it to mid-call.
         fg: Arc<Mutex<Option<Foreground>>>,
         switch_to: Arc<Mutex<Option<Foreground>>>,
@@ -439,8 +648,9 @@ mod tests {
             }
             self.saw_screenshot
                 .store(request.screenshot.is_some(), Ordering::SeqCst);
+            *self.saw_grant.lock() = request.grant_purpose.map(str::to_string);
             Ok(Judgement {
-                verdict: self.verdict,
+                verdict: *self.verdict.lock(),
                 reason: "test".into(),
             })
         }
@@ -452,6 +662,9 @@ mod tests {
         tabs_closed: Arc<AtomicUsize>,
         saw_screenshot: Arc<AtomicBool>,
         switch_to: Arc<Mutex<Option<Foreground>>>,
+        verdict: Arc<Mutex<Verdict>>,
+        saw_grant: Arc<Mutex<Option<String>>>,
+        current: Arc<Mutex<Option<Foreground>>>,
     }
 
     fn fg(process: &str, title: &str) -> Foreground {
@@ -469,8 +682,11 @@ mod tests {
         let saw_screenshot = Arc::new(AtomicBool::new(false));
         let current = Arc::new(Mutex::new(Some(current)));
         let switch_to = Arc::new(Mutex::new(None));
+        let verdict = Arc::new(Mutex::new(verdict));
+        let saw_grant = Arc::new(Mutex::new(None));
         let judge: Arc<dyn Judge> = Arc::new(FixedJudge {
-            verdict,
+            verdict: Arc::clone(&verdict),
+            saw_grant: Arc::clone(&saw_grant),
             fg: Arc::clone(&current),
             switch_to: Arc::clone(&switch_to),
             calls: Arc::clone(&calls),
@@ -479,7 +695,7 @@ mod tests {
         let monitor = FocusMonitor::new(
             AiFocusStore::in_memory(config),
             Box::new(FakeDesktop {
-                fg: current,
+                fg: Arc::clone(&current),
                 tabs_closed: Arc::clone(&tabs_closed),
             }),
             Arc::new(move |_| Ok(Arc::clone(&judge))),
@@ -490,6 +706,9 @@ mod tests {
             tabs_closed,
             saw_screenshot,
             switch_to,
+            verdict,
+            saw_grant,
+            current,
         }
     }
 
@@ -505,7 +724,11 @@ mod tests {
 
     #[test]
     fn blocks_app_after_strikes() {
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), session("write thesis"));
+        let h = harness(
+            Verdict::OffTask,
+            fg("steam.exe", "Steam"),
+            session("write thesis"),
+        );
         let t0 = Utc::now();
         h.monitor.step(t0);
         assert!(h.monitor.state().blocked_processes.is_empty());
@@ -527,7 +750,11 @@ mod tests {
 
     #[test]
     fn on_task_never_blocks_and_screenshot_is_sent() {
-        let h = harness(Verdict::OnTask, fg("code.exe", "main.rs"), session("coding"));
+        let h = harness(
+            Verdict::OnTask,
+            fg("code.exe", "main.rs"),
+            session("coding"),
+        );
         let t0 = Utc::now();
         for i in 0..5 {
             h.monitor.step(t0 + ChronoDuration::seconds(61 * i));
@@ -541,7 +768,11 @@ mod tests {
     fn browser_tab_is_closed_and_stays_closed() {
         let mut config = session("write thesis");
         config.strikes_to_block = 1;
-        let h = harness(Verdict::OffTask, fg("chrome.exe", "Funny cats - YouTube"), config);
+        let h = harness(
+            Verdict::OffTask,
+            fg("chrome.exe", "Funny cats - YouTube"),
+            config,
+        );
         let t0 = Utc::now();
         h.monitor.step(t0);
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
@@ -556,7 +787,11 @@ mod tests {
     fn tab_is_not_closed_if_user_switched_tabs_meanwhile() {
         let mut config = session("write thesis");
         config.strikes_to_block = 1;
-        let h = harness(Verdict::OffTask, fg("chrome.exe", "Funny cats - YouTube"), config);
+        let h = harness(
+            Verdict::OffTask,
+            fg("chrome.exe", "Funny cats - YouTube"),
+            config,
+        );
         // While the judge is "thinking", the user switches to another tab
         // in the same browser window.
         *h.switch_to.lock() = Some(fg("chrome.exe", "Overleaf - thesis.tex"));
@@ -568,7 +803,11 @@ mod tests {
 
     #[test]
     fn idle_without_session_and_skips_exempt_apps() {
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), AiFocusConfig::default());
+        let h = harness(
+            Verdict::OffTask,
+            fg("steam.exe", "Steam"),
+            AiFocusConfig::default(),
+        );
         h.monitor.step(Utc::now());
         assert_eq!(h.calls.load(Ordering::SeqCst), 0);
 
@@ -629,5 +868,244 @@ mod tests {
         let decoded = image::load_from_memory(&jpeg).unwrap();
         assert_eq!(decoded.width(), 1280);
         assert_eq!(decoded.height(), 720);
+    }
+
+    // --- access grants ---------------------------------------------------------
+
+    use crate::access_review::{AccessDecision, AccessReviewer};
+
+    /// Approves or rejects every request; counts calls.
+    struct FixedReviewer {
+        approve: bool,
+        minutes: u32,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl AccessReviewer for FixedReviewer {
+        fn review(&self, _r: &AccessRequest) -> Result<AccessDecision, JudgeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AccessDecision {
+                approved: self.approve,
+                minutes: self.minutes,
+                reply: if self.approve { "ok" } else { "no" }.into(),
+            })
+        }
+    }
+
+    fn with_reviewer(h: Harness, approve: bool, minutes: u32) -> (Harness, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reviewer: Arc<dyn AccessReviewer> = Arc::new(FixedReviewer {
+            approve,
+            minutes,
+            calls: Arc::clone(&calls),
+        });
+        let Harness {
+            monitor,
+            calls: judge_calls,
+            tabs_closed,
+            saw_screenshot,
+            switch_to,
+            verdict,
+            saw_grant,
+            current,
+        } = h;
+        let monitor = monitor.with_reviewer(Arc::new(move |_| Ok(Arc::clone(&reviewer))));
+        (
+            Harness {
+                monitor,
+                calls: judge_calls,
+                tabs_closed,
+                saw_screenshot,
+                switch_to,
+                verdict,
+                saw_grant,
+                current,
+            },
+            calls,
+        )
+    }
+
+    fn site(keyword: &str) -> GrantTarget {
+        GrantTarget::Site {
+            keyword: keyword.into(),
+        }
+    }
+
+    fn minutes(m: u32) -> GrantDuration {
+        GrantDuration::Minutes { minutes: m }
+    }
+
+    #[test]
+    fn access_needs_a_session_and_a_real_purpose() {
+        let h = harness(
+            Verdict::OnTask,
+            fg("chrome.exe", "x"),
+            AiFocusConfig::default(),
+        );
+        let (h, calls) = with_reviewer(h, true, 0);
+        let r = h
+            .monitor
+            .request_access(Utc::now(), site("youtube"), minutes(30), "강의 시청");
+        assert!(matches!(r, Err(AccessError::NoSession)));
+
+        let h = harness(Verdict::OnTask, fg("chrome.exe", "x"), session("thesis"));
+        let (h, calls2) = with_reviewer(h, true, 0);
+        let r = h
+            .monitor
+            .request_access(Utc::now(), site("youtube"), minutes(30), "응");
+        assert!(matches!(r, Err(AccessError::PurposeTooShort)));
+        let r = h
+            .monitor
+            .request_access(Utc::now(), site(" "), minutes(30), "강의 시청");
+        assert!(matches!(r, Err(AccessError::EmptyTarget)));
+        assert_eq!(
+            calls.load(Ordering::SeqCst) + calls2.load(Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[test]
+    fn rejected_request_is_logged_and_lifts_nothing() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        let h = harness(Verdict::OffTask, fg("chrome.exe", "Cats - YouTube"), config);
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        assert_eq!(h.monitor.state().blocked_tabs.len(), 1);
+
+        let (h, _) = with_reviewer(h, false, 0);
+        let entry = h
+            .monitor
+            .request_access(t0, site("youtube"), minutes(30), "그냥 보고 싶어서")
+            .unwrap();
+        assert!(matches!(
+            entry.event,
+            GrantEvent::Requested {
+                approved: false,
+                ..
+            }
+        ));
+        assert!(h.monitor.grants().get().grants.is_empty());
+        assert_eq!(h.monitor.state().blocked_tabs.len(), 1);
+    }
+
+    #[test]
+    fn approved_request_lifts_the_block_and_is_judged_by_purpose() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        let h = harness(
+            Verdict::OffTask,
+            fg("chrome.exe", "Rust async - YouTube"),
+            config,
+        );
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        assert_eq!(h.monitor.state().blocked_tabs.len(), 1);
+
+        let (h, _) = with_reviewer(h, true, 0);
+        h.monitor
+            .request_access(t0, site("youtube"), minutes(30), "Rust async 강의 시청")
+            .unwrap();
+        assert!(h.monitor.state().blocked_tabs.is_empty());
+
+        // Still observed: the next check sees the grant's purpose.
+        *h.verdict.lock() = Verdict::OnTask;
+        let closed_before = h.tabs_closed.load(Ordering::SeqCst);
+        h.monitor.step(t0 + ChronoDuration::seconds(61));
+        assert_eq!(h.saw_grant.lock().as_deref(), Some("Rust async 강의 시청"));
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), closed_before);
+        assert_eq!(h.monitor.grants().get().grants.len(), 1);
+    }
+
+    #[test]
+    fn off_purpose_use_revokes_the_grant_even_across_tab_titles() {
+        let config = session("thesis"); // 2 strikes
+        let h = harness(
+            Verdict::OnTask,
+            fg("chrome.exe", "Rust async - YouTube"),
+            config,
+        );
+        let (h, _) = with_reviewer(h, true, 0);
+        let t0 = Utc::now();
+        h.monitor
+            .request_access(t0, site("youtube"), minutes(60), "Rust async 강의 시청")
+            .unwrap();
+
+        // Two different videos, both off-purpose.
+        *h.verdict.lock() = Verdict::OffTask;
+        *h.current.lock() = Some(fg("chrome.exe", "Funny cats - YouTube"));
+        h.monitor.step(t0 + ChronoDuration::seconds(1));
+        assert_eq!(h.monitor.grants().get().grants.len(), 1);
+        *h.current.lock() = Some(fg("chrome.exe", "Game trailer - YouTube"));
+        h.monitor.step(t0 + ChronoDuration::seconds(62));
+
+        let grants = h.monitor.grants().get();
+        assert!(grants.grants.is_empty());
+        assert_eq!(
+            grants.log.back().map(|e| e.event.clone()),
+            Some(GrantEvent::RevokedForMisuse)
+        );
+        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+        let last = h.monitor.state().verdicts.back().cloned().unwrap();
+        assert!(last.action.starts_with("access revoked"));
+    }
+
+    #[test]
+    fn grants_expire_and_admin_can_revoke() {
+        let h = harness(
+            Verdict::OnTask,
+            fg("code.exe", "main.rs"),
+            session("thesis"),
+        );
+        let (h, _) = with_reviewer(h, true, 0);
+        let t0 = Utc::now();
+        let app = GrantTarget::App {
+            process: "Spotify".into(),
+        };
+        h.monitor
+            .request_access(t0, app.clone(), minutes(10), "집중용 음악 재생")
+            .unwrap();
+        h.monitor
+            .request_access(t0, app, GrantDuration::Permanent, "업무용 음악 재생")
+            .unwrap();
+        assert_eq!(h.monitor.grants().get().grants.len(), 2);
+
+        // Timed one runs out.
+        h.monitor.step(t0 + ChronoDuration::minutes(11));
+        let grants = h.monitor.grants().get().grants;
+        assert_eq!(grants.len(), 1);
+        assert!(grants[0].until.is_none());
+
+        // Admin revokes the permanent one through the config.
+        let id = grants[0].id.clone();
+        h.monitor
+            .store()
+            .update(|c| {
+                c.revoked_grants.insert(id);
+            })
+            .unwrap();
+        h.monitor.step(t0 + ChronoDuration::minutes(12));
+        let state = h.monitor.grants().get();
+        assert!(state.grants.is_empty());
+        assert_eq!(
+            state.log.back().map(|e| e.event.clone()),
+            Some(GrantEvent::RevokedByAdmin)
+        );
+    }
+
+    #[test]
+    fn permanent_requests_are_refused_when_the_admin_disallows_them() {
+        let mut config = session("thesis");
+        config.allow_permanent_grants = false;
+        let h = harness(Verdict::OnTask, fg("code.exe", "x"), config);
+        let (h, calls) = with_reviewer(h, true, 0);
+        let r = h.monitor.request_access(
+            Utc::now(),
+            site("docs.rs"),
+            GrantDuration::Permanent,
+            "Rust 문서 참고",
+        );
+        assert!(matches!(r, Err(AccessError::PermanentNotAllowed)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }
