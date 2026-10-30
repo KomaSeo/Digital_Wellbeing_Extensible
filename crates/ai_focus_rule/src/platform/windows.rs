@@ -4,12 +4,14 @@ use super::{Desktop, Foreground, Screenshot};
 use parking_lot::Mutex;
 use std::mem::size_of;
 use sysinfo::{Pid, ProcessesToUpdate, System};
-use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    EnumChildWindows, EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible,
 };
 
 const VK_W: VIRTUAL_KEY = 0x57;
@@ -45,19 +47,26 @@ impl Desktop for WindowsDesktop {
             if hwnd.is_null() {
                 return None;
             }
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, &mut pid);
+            let mut pid = window_pid(hwnd);
             if pid == 0 {
                 return None;
             }
-            let mut buf = [0u16; 512];
-            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
-            let title = String::from_utf16_lossy(&buf[..len.max(0) as usize]);
+            let mut process_name = self.process_name(pid)?;
+            // Store (UWP) apps sit inside a frame owned by ApplicationFrameHost,
+            // which is protected; judge the app process hosted in the frame.
+            if process_name.eq_ignore_ascii_case("ApplicationFrameHost.exe") {
+                if let Some(app_pid) = hosted_app_pid(hwnd, pid) {
+                    if let Some(name) = self.process_name(app_pid) {
+                        pid = app_pid;
+                        process_name = name;
+                    }
+                }
+            }
             Some(Foreground {
                 window: hwnd as isize,
                 pid,
-                process_name: self.process_name(pid)?,
-                title,
+                process_name,
+                title: window_title(hwnd),
             })
         }
     }
@@ -93,10 +102,34 @@ impl Desktop for WindowsDesktop {
         })
     }
 
+    fn visible_processes(&self) -> Vec<String> {
+        let mut pids: Vec<u32> = Vec::new();
+        // SAFETY: the callback only writes to `pids`, which outlives the call.
+        unsafe {
+            EnumWindows(Some(collect_visible), &mut pids as *mut Vec<u32> as LPARAM);
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        pids.into_iter()
+            .filter_map(|pid| self.process_name(pid))
+            .collect()
+    }
+
     fn close_active_tab(&self, fg: &Foreground) -> bool {
         // SAFETY: SendInput reads `inputs` for the given count only.
         unsafe {
-            if GetForegroundWindow() as isize != fg.window {
+            let hwnd = GetForegroundWindow();
+            // Same window *and* same tab, checked right before the keys go out.
+            if hwnd as isize != fg.window || window_title(hwnd) != fg.title {
+                return false;
+            }
+            // Keys the user holds would combine with ours: Shift makes Ctrl+W
+            // close the whole window. Try again on a later sample instead.
+            let held = |vk: VIRTUAL_KEY| (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0;
+            if [VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN, VK_CONTROL]
+                .into_iter()
+                .any(held)
+            {
                 return false;
             }
             let inputs = [
@@ -127,4 +160,63 @@ fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
             },
         },
     }
+}
+
+fn window_pid(hwnd: HWND) -> u32 {
+    let mut pid = 0u32;
+    // SAFETY: valid out-pointer; a stale HWND just yields 0.
+    unsafe {
+        GetWindowThreadProcessId(hwnd, &mut pid);
+    }
+    pid
+}
+
+fn window_title(hwnd: HWND) -> String {
+    let mut buf = [0u16; 512];
+    // SAFETY: the buffer length is passed along.
+    let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    String::from_utf16_lossy(&buf[..len.max(0) as usize])
+}
+
+/// Pid of the app inside an ApplicationFrameHost frame: the first child
+/// window owned by a different process.
+fn hosted_app_pid(frame: HWND, frame_pid: u32) -> Option<u32> {
+    struct Search {
+        frame_pid: u32,
+        found: u32,
+    }
+    unsafe extern "system" fn visit(child: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: lparam is the &mut Search passed below, alive for the call.
+        let search = unsafe { &mut *(lparam as *mut Search) };
+        let pid = window_pid(child);
+        if pid != 0 && pid != search.frame_pid {
+            search.found = pid;
+            return 0; // stop
+        }
+        1
+    }
+    let mut search = Search {
+        frame_pid,
+        found: 0,
+    };
+    // SAFETY: `search` outlives the enumeration.
+    unsafe {
+        EnumChildWindows(frame, Some(visit), &mut search as *mut Search as LPARAM);
+    }
+    (search.found != 0).then_some(search.found)
+}
+
+/// EnumWindows callback: collect pids of visible, non-minimized windows.
+unsafe extern "system" fn collect_visible(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: lparam is the &mut Vec<u32> passed by visible_processes.
+    unsafe {
+        if IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 {
+            let pids = &mut *(lparam as *mut Vec<u32>);
+            let pid = window_pid(hwnd);
+            if pid != 0 {
+                pids.push(pid);
+            }
+        }
+    }
+    1
 }

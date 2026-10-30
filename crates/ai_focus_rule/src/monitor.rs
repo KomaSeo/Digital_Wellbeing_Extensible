@@ -763,7 +763,14 @@ impl FocusMonitor {
         grant: Option<&Grant>,
     ) -> Result<Judgement, JudgeError> {
         let judge = (self.judge)(config)?;
-        let screenshot = if config.send_screenshot && !config.is_private(&fg.process_name) {
+        let private_on_screen = config.is_private(&fg.process_name)
+            || (!config.private_apps.is_empty()
+                && self
+                    .desktop
+                    .visible_processes()
+                    .iter()
+                    .any(|name| config.is_private(name)));
+        let screenshot = if config.send_screenshot && !private_on_screen {
             self.desktop.screenshot(fg).and_then(encode_jpeg)
         } else {
             None
@@ -809,6 +816,7 @@ mod tests {
     struct FakeDesktop {
         fg: Arc<Mutex<Option<Foreground>>>,
         tabs_closed: Arc<AtomicUsize>,
+        visible: Arc<Mutex<Vec<String>>>,
     }
 
     impl Desktop for FakeDesktop {
@@ -821,6 +829,9 @@ mod tests {
                 height: 1440,
                 rgba: vec![128; 2560 * 1440 * 4],
             })
+        }
+        fn visible_processes(&self) -> Vec<String> {
+            self.visible.lock().clone()
         }
         fn close_active_tab(&self, _fg: &Foreground) -> bool {
             self.tabs_closed.fetch_add(1, Ordering::SeqCst);
@@ -874,6 +885,7 @@ mod tests {
         saw_grant: Arc<Mutex<Option<String>>>,
         current: Arc<Mutex<Option<Foreground>>>,
         during_call: Hook,
+        visible: Arc<Mutex<Vec<String>>>,
     }
 
     fn fg(process: &str, title: &str) -> Foreground {
@@ -894,6 +906,7 @@ mod tests {
         let verdict = Arc::new(Mutex::new(verdict));
         let saw_grant = Arc::new(Mutex::new(None));
         let during_call: Hook = Arc::new(Mutex::new(None));
+        let visible = Arc::new(Mutex::new(Vec::new()));
         let judge: Arc<dyn Judge> = Arc::new(FixedJudge {
             during_call: Arc::clone(&during_call),
             verdict: Arc::clone(&verdict),
@@ -908,6 +921,7 @@ mod tests {
             Box::new(FakeDesktop {
                 fg: Arc::clone(&current),
                 tabs_closed: Arc::clone(&tabs_closed),
+                visible: Arc::clone(&visible),
             }),
             Arc::new(move |_| Ok(Arc::clone(&judge))),
         );
@@ -921,6 +935,7 @@ mod tests {
             saw_grant,
             current,
             during_call,
+            visible,
         }
     }
 
@@ -1122,6 +1137,7 @@ mod tests {
             saw_grant,
             current,
             during_call,
+            visible,
         } = h;
         let monitor = monitor.with_reviewer(Arc::new(move |_| Ok(Arc::clone(&reviewer))));
         (
@@ -1135,6 +1151,7 @@ mod tests {
                 saw_grant,
                 current,
                 during_call,
+                visible,
             },
             calls,
         )
@@ -1489,5 +1506,14 @@ mod tests {
             let gap = state.next_check.unwrap() - now;
             assert!(gap >= ChronoDuration::seconds(36) && gap <= ChronoDuration::seconds(60));
         }
+    }
+
+    #[test]
+    fn no_screenshot_while_a_private_app_is_visible_behind() {
+        let h = harness(Verdict::OnTask, fg("chrome.exe", "Docs"), session("thesis"));
+        *h.visible.lock() = vec!["chrome.exe".into(), "KeePass.exe".into()];
+        h.monitor.step(Utc::now());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        assert!(!h.saw_screenshot.load(Ordering::SeqCst));
     }
 }

@@ -29,6 +29,11 @@ pub trait Desktop: Send + Sync {
     /// Capture the monitor that shows `fg`.
     fn screenshot(&self, fg: &Foreground) -> Option<Screenshot>;
 
+    /// Process names owning visible, non-minimized top-level windows. A
+    /// screenshot shows the whole monitor, so a private app does not have to be
+    /// in front to appear in it.
+    fn visible_processes(&self) -> Vec<String>;
+
     /// Close the active tab of a browser window, if it is still in front.
     fn close_active_tab(&self, fg: &Foreground) -> bool;
 }
@@ -59,6 +64,10 @@ impl Desktop for Unsupported {
 
     fn screenshot(&self, _fg: &Foreground) -> Option<Screenshot> {
         None
+    }
+
+    fn visible_processes(&self) -> Vec<String> {
+        Vec::new()
     }
 
     fn close_active_tab(&self, _fg: &Foreground) -> bool {
