@@ -46,6 +46,9 @@ pub struct AiFocusConfig {
     /// blocked. Browser tabs are blocked at the first one. Blocks do not
     /// expire; the user asks for access to lift one.
     pub strikes_to_block: u32,
+    /// A window judged on_task is not judged again for this long (minutes);
+    /// `0` judges it at every check. Changing the task forgets these verdicts.
+    pub recheck_minutes: u64,
     /// Never judged, never blocked.
     pub always_allow: BTreeSet<String>,
     /// Judged by process name + title only; never screenshotted.
@@ -59,6 +62,10 @@ pub struct AiFocusConfig {
     /// Grant ids the admin revoked. Kept here (an admin-owned file) so the
     /// admin UI never writes the agent's `grants.json`; the monitor drops these.
     pub revoked_grants: BTreeSet<String>,
+    /// Block ids the admin lifted, for the same reason: the admin UI names
+    /// them here and each agent drops them from its own blocks file. The
+    /// admin UI forgets an id once no blocks file holds it any more.
+    pub unblocked: BTreeSet<String>,
 }
 
 impl Default for AiFocusConfig {
@@ -72,6 +79,7 @@ impl Default for AiFocusConfig {
             api_key: String::new(),
             send_screenshot: true,
             strikes_to_block: 2,
+            recheck_minutes: 15,
             always_allow: BTreeSet::new(),
             private_apps: set(&["keepass.exe", "1password.exe", "bitwarden.exe"]),
             browsers: set(&[
@@ -85,6 +93,7 @@ impl Default for AiFocusConfig {
             allow_permanent_grants: true,
             max_grant_minutes: 120,
             revoked_grants: BTreeSet::new(),
+            unblocked: BTreeSet::new(),
         }
     }
 }

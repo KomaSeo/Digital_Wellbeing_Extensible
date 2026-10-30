@@ -56,10 +56,16 @@ pub struct VerdictLogEntry {
 ///
 /// Blocks do not expire: a block that lifted itself after a while would only
 /// make the monitor judge (and pay for) the same app or site again. A block
-/// ends when the user is granted access (see `request_access`), or when it is
-/// unblocked by hand.
+/// ends when the user is granted access (see `request_access`), when an
+/// administrator lifts it (`AiFocusConfig::unblocked`), or when it is
+/// unblocked by hand in standalone mode.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockedEntry {
+    /// Unique id, so the admin UI can name this block in the config file
+    /// without writing the agent's blocks file. Empty in files saved before
+    /// ids existed; [`FocusMonitor::with_block_store`] fills those in.
+    #[serde(default)]
+    pub id: String,
     pub reason: String,
     /// Full window title when it was blocked (grants are matched against it).
     #[serde(default)]
@@ -103,6 +109,9 @@ pub struct MonitorState {
     /// The title names only the video, so this is how a video of a blocked
     /// channel is recognized on the next sample without asking the judge again.
     channels: HashMap<String, String>,
+    /// Verdict key (see [`Self::verdict_key`]) -> when it was last judged
+    /// on_task. Such a window is not judged again for `recheck_minutes`.
+    on_task: HashMap<String, DateTime<Utc>>,
     pub last_check: Option<DateTime<Utc>>,
     /// When the next scheduled check is due (randomized; see [`Self::mark_checked`]).
     next_check: Option<DateTime<Utc>>,
@@ -238,6 +247,80 @@ impl MonitorState {
         }
     }
 
+    /// What an on_task verdict vouches for: the app for an app (its titles
+    /// change with every file), the page for a browser tab (one good page
+    /// says nothing about the rest of the site), and on YouTube the channel
+    /// or page (see [`Self::target_key`]).
+    pub fn verdict_key(&self, config: &AiFocusConfig, fg: &Foreground) -> String {
+        if config.is_browser(&fg.process_name) && !youtube::is_youtube(&fg.title) {
+            format!(
+                "{}|{}",
+                normalize_process_name(&fg.process_name),
+                strip_browser_noise(&fg.title).to_lowercase()
+            )
+        } else {
+            self.target_key(config, fg)
+        }
+    }
+
+    /// Was this window judged on_task within `recheck_minutes`? Then a check
+    /// would most likely say the same and is skipped.
+    pub fn recently_on_task(
+        &self,
+        now: DateTime<Utc>,
+        config: &AiFocusConfig,
+        fg: &Foreground,
+    ) -> bool {
+        let window = ChronoDuration::minutes(clamp_recheck_minutes(config.recheck_minutes));
+        self.on_task
+            .get(&self.verdict_key(config, fg))
+            .is_some_and(|at| now - *at < window)
+    }
+
+    fn remember_verdict(
+        &mut self,
+        now: DateTime<Utc>,
+        config: &AiFocusConfig,
+        fg: &Foreground,
+        verdict: Verdict,
+    ) {
+        let key = self.verdict_key(config, fg);
+        if verdict == Verdict::OnTask && config.recheck_minutes > 0 {
+            let window = ChronoDuration::minutes(clamp_recheck_minutes(config.recheck_minutes));
+            self.on_task.retain(|_, at| now - *at < window);
+            self.on_task.insert(key, now);
+        } else {
+            self.on_task.remove(&key);
+        }
+    }
+
+    /// A fresh block id (unique enough: time plus a random suffix).
+    fn new_block_id(&mut self, now: DateTime<Utc>) -> String {
+        format!(
+            "b{}-{:04}",
+            now.timestamp_millis(),
+            self.next_random() % 10_000
+        )
+    }
+
+    /// Drop the blocks an administrator lifted; true if any were dropped.
+    pub fn apply_admin_unblocks(&mut self, config: &AiFocusConfig) -> bool {
+        if config.unblocked.is_empty() {
+            return false;
+        }
+        let before = self.blocked_processes.len() + self.blocked_tabs.len();
+        let lifted = |key: &String, b: &mut BlockedEntry| {
+            let keep = !config.unblocked.contains(&b.id);
+            if !keep {
+                info!("block on {key} lifted by an administrator");
+            }
+            keep
+        };
+        self.blocked_processes.retain(lifted);
+        self.blocked_tabs.retain(lifted);
+        before != self.blocked_processes.len() + self.blocked_tabs.len()
+    }
+
     /// Remember which channel a YouTube page belongs to.
     fn learn_channel(&mut self, fg: &Foreground, channel: &str) {
         if !youtube::is_youtube(&fg.title) {
@@ -278,6 +361,7 @@ impl MonitorState {
             self.learn_channel(fg, &judgement.channel);
         }
         let target = self.target_key(config, fg);
+        self.remember_verdict(now, config, fg, judgement.verdict);
 
         let mut action = Action::None;
         let mut action_label = String::new();
@@ -290,9 +374,11 @@ impl MonitorState {
             // a closed tab (and an access request), while waiting for more
             // verdicts leaves the user a whole check interval of distraction.
             if judgement.verdict == Verdict::OffTask {
+                let id = self.new_block_id(now);
                 self.blocked_tabs.insert(
                     target,
                     BlockedEntry {
+                        id,
                         reason: judgement.reason.clone(),
                         title: fg.title.clone(),
                     },
@@ -319,9 +405,11 @@ impl MonitorState {
                     *strikes += 1;
                     if *strikes >= needed {
                         self.strikes.remove(&key);
+                        let id = self.new_block_id(now);
                         self.blocked_processes.insert(
                             target.clone(),
                             BlockedEntry {
+                                id,
                                 reason: judgement.reason.clone(),
                                 title: fg.title.clone(),
                             },
@@ -434,6 +522,10 @@ const EARLY_MIN_GAP: ChronoDuration = ChronoDuration::seconds(15);
 
 /// Admin-entered values are used in date arithmetic; keep them sane so an
 /// absurd number cannot overflow (and panic) the monitor thread.
+fn clamp_recheck_minutes(minutes: u64) -> i64 {
+    minutes.min(24 * 60) as i64
+}
+
 fn clamp_interval(secs: u64) -> i64 {
     secs.clamp(10, 24 * 3600) as i64
 }
@@ -534,6 +626,19 @@ impl FocusMonitor {
             let state = self.state.get_mut();
             state.blocked_processes = saved.processes;
             state.blocked_tabs = saved.tabs;
+            let now = Utc::now();
+            let mut missing: Vec<&mut BlockedEntry> = state
+                .blocked_processes
+                .values_mut()
+                .chain(state.blocked_tabs.values_mut())
+                .filter(|b| b.id.is_empty())
+                .collect();
+            let ids: Vec<String> = (0..missing.len())
+                .map(|i| format!("b{}-{i:04}", now.timestamp_millis()))
+                .collect();
+            for (b, id) in missing.iter_mut().zip(ids) {
+                b.id = id;
+            }
         }
         self.blocks = store;
         self
@@ -606,6 +711,8 @@ impl FocusMonitor {
         let config = self.store.get();
         {
             let mut state = self.state.lock();
+            // Before the session check: blocks apply without a session too.
+            state.apply_admin_unblocks(&config);
             let task = if config.session_active {
                 config.task.trim()
             } else {
@@ -649,6 +756,7 @@ impl FocusMonitor {
             }
             let since = state.front_since().unwrap_or(now);
             !exempt
+                && !state.recently_on_task(now, &config, &fg)
                 && state.check_due(
                     now,
                     config.check_interval_secs,
@@ -1071,6 +1179,9 @@ mod tests {
             fg("code.exe", "main.rs"),
             session("coding"),
         );
+        let mut config = h.monitor.store().get();
+        config.recheck_minutes = 0; // judge at every check
+        h.monitor.store().update(|c| *c = config).unwrap();
         let t0 = Utc::now();
         for i in 0..5 {
             h.monitor.step(t0 + ChronoDuration::seconds(61 * i));
@@ -1078,6 +1189,49 @@ mod tests {
         assert_eq!(h.calls.load(Ordering::SeqCst), 5);
         assert!(h.saw_screenshot.load(Ordering::SeqCst));
         assert!(h.monitor.state().process_blocks().is_empty());
+    }
+
+    #[test]
+    fn an_on_task_app_is_not_rechecked_for_recheck_minutes() {
+        let h = harness(
+            Verdict::OnTask,
+            fg("code.exe", "main.rs"),
+            session("coding"), // recheck_minutes = 15 (default)
+        );
+        let t0 = Utc::now();
+        for i in 0..5 {
+            h.monitor.step(t0 + ChronoDuration::seconds(61 * i));
+        }
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        // Another file of the same app is vouched for too.
+        *h.current.lock() = Some(fg("code.exe", "lib.rs"));
+        h.monitor.step(t0 + ChronoDuration::minutes(10));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        h.monitor.step(t0 + ChronoDuration::minutes(16));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+        // A new task forgets the verdict: judged at once.
+        h.monitor
+            .store()
+            .update(|c| c.task = "write docs".into())
+            .unwrap();
+        h.monitor.step(t0 + ChronoDuration::minutes(17));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn an_on_task_page_does_not_vouch_for_the_rest_of_its_site() {
+        let h = harness(
+            Verdict::OnTask,
+            fg("chrome.exe", "Rust 강의 - NAVER"),
+            session("learn Rust"),
+        );
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        h.monitor.step(t0 + ChronoDuration::seconds(61));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        *h.current.lock() = Some(fg("chrome.exe", "웹툰 - NAVER"));
+        h.monitor.step(t0 + ChronoDuration::seconds(66));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -1641,6 +1795,40 @@ mod tests {
         h.monitor.step(Utc::now());
         assert_eq!(h.calls.load(Ordering::SeqCst), 1);
         assert!(!h.saw_screenshot.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn an_administrator_can_lift_a_block() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
+        let t0 = Utc::now();
+        h.monitor.step(t0);
+        let id = h.monitor.state().blocked_processes["steam.exe"].id.clone();
+        assert!(!id.is_empty());
+        // The admin UI names the block in the config; the agent drops it,
+        // even without a running session.
+        h.monitor
+            .store()
+            .update(|c| {
+                c.session_active = false;
+                c.unblocked.insert(id);
+            })
+            .unwrap();
+        h.monitor.step(t0 + ChronoDuration::seconds(5));
+        assert!(h.monitor.state().process_blocks().is_empty());
+    }
+
+    #[test]
+    fn blocks_saved_without_an_id_get_one() {
+        let mut old = SavedBlocks::default();
+        old.processes.insert(
+            "steam.exe".into(),
+            serde_json::from_str(r#"{"reason":"games","until":null}"#).unwrap(),
+        );
+        let h = harness(Verdict::OnTask, fg("code.exe", "x"), session("thesis"));
+        let monitor = h.monitor.with_block_store(JsonStore::in_memory(old));
+        assert!(!monitor.state().blocked_processes["steam.exe"].id.is_empty());
     }
 
     #[test]

@@ -73,10 +73,15 @@ pub fn grants_path_for(user: &str) -> PathBuf {
     grants_dir().join(format!("{safe}.json"))
 }
 
+/// One blocks file per user (`blocks\<user>.json`), written by that user's agent.
+pub fn blocks_dir() -> PathBuf {
+    data_dir().join("blocks")
+}
+
 /// Blocks in force for `user` (resumed when the agent restarts).
 pub fn blocks_path_for(user: &str) -> PathBuf {
     let file = grants_path_for(user);
-    data_dir().join("blocks").join(file.file_name().unwrap_or_default())
+    blocks_dir().join(file.file_name().unwrap_or_default())
 }
 
 /// `PC\name` or `DOMAIN\name` -> `name` (sessions report bare names).

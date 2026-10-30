@@ -120,9 +120,11 @@ fn start_machine_admin() -> Started {
 
     let ai_store = AiFocusStore::open(machine::ai_focus_path())
         .expect("failed to open machine AI settings (run as administrator)");
-    // The admin view reads every user's grants file; it revokes through the config.
+    // The admin view reads every user's grants and blocks files; it revokes
+    // and unblocks through the config.
     let monitor = native_monitor(ai_store, JsonStore::in_memory(GrantState::default()));
-    let ai_rule = AiFocusRuleHandle::settings_only(monitor, machine::grants_dir());
+    let ai_rule =
+        AiFocusRuleHandle::settings_only(monitor, machine::grants_dir(), machine::blocks_dir());
 
     let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui(), ai_rule.ui()];
 

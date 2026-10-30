@@ -109,6 +109,7 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
     planner_state.json   현재 할당과 변경 요청 기록. agent가 씁니다. (할 일 플래너)
     grants\<사용자>.json  앱·사이트 접근 허용과 그 기록. 그 사용자의 agent가 씁니다. (접근 요청, docs/access_grants.md)
     blocks\<사용자>.json  지금 걸려 있는 차단. 그 사용자의 agent가 씁니다. 로그아웃했다가 다시 로그인해도 차단이 이어집니다.
+                         차단은 시간이 지나도 풀리지 않습니다. 관리자는 관리 UI의 AI focus 탭(Blocked now)에서 차단을 풀 수 있습니다.
     logs\service.log, logs\agent-session<번호>.log   실행 기록
 ```
 

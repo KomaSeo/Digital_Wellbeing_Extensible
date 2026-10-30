@@ -4,7 +4,7 @@
 use crate::config::AiFocusStore;
 use crate::grants::{GrantEvent, GrantState};
 use crate::judge::Verdict;
-use crate::monitor::FocusMonitor;
+use crate::monitor::{FocusMonitor, SavedBlocks};
 use chrono::{Local, Utc};
 use enforcer::{normalize_process_name, BlockEvent, BlockRule, ProcessSnapshot};
 use parking_lot::Mutex;
@@ -25,6 +25,10 @@ struct AiUiState {
     grants_read: Option<std::time::Instant>,
     /// Admin view: (user, grants) read from every file in the grants folder.
     admin_grants: Vec<(String, GrantState)>,
+    /// When the admin view last re-read the blocks files.
+    blocks_read: Option<std::time::Instant>,
+    /// Admin view: (user, blocks) read from every file in the blocks folder.
+    admin_blocks: Vec<(String, SavedBlocks)>,
     show_key: bool,
     /// Result of the last "Check key", written by a background thread.
     key_check: Arc<Mutex<Option<String>>>,
@@ -42,6 +46,8 @@ pub struct AiFocusRule {
     session_controls: bool,
     /// Admin view of a machine install: folder with one grants file per user.
     admin_grants_dir: Option<PathBuf>,
+    /// Admin view of a machine install: folder with one blocks file per user.
+    admin_blocks_dir: Option<PathBuf>,
     ui_state: Mutex<AiUiState>,
 }
 
@@ -49,6 +55,7 @@ impl AiFocusRule {
     pub fn new(monitor: Arc<FocusMonitor>, session_controls: bool) -> Self {
         Self {
             admin_grants_dir: None,
+            admin_blocks_dir: None,
             monitor,
             session_controls,
             ui_state: Mutex::new(AiUiState::default()),
@@ -165,6 +172,74 @@ impl AiFocusRule {
         ui.small("The key is saved without encryption in ai_focus.json. On a machine install only administrators can open that folder.");
     }
 
+    /// Admin view: every user's blocks, each with an "unblock" button. The
+    /// button names the block in the config file (`unblocked`); the user's
+    /// agent then drops it, so this UI never writes an agent's blocks file.
+    fn admin_blocks_ui(&self, ui: &mut egui::Ui, config: &crate::AiFocusConfig, s: &mut AiUiState) {
+        let Some(dir) = &self.admin_blocks_dir else {
+            return;
+        };
+        if s.blocks_read
+            .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
+        {
+            let (blocks, all_read) = read_user_files::<SavedBlocks>(dir);
+            s.blocks_read = Some(std::time::Instant::now());
+            // Forget ids no blocks file holds any more: their agent has
+            // dropped them. Only when every file could be read, or a block
+            // in an unreadable file would come back.
+            if all_read {
+                let present: std::collections::BTreeSet<&String> = blocks
+                    .iter()
+                    .flat_map(|(_, b)| b.processes.values().chain(b.tabs.values()))
+                    .map(|b| &b.id)
+                    .collect();
+                if config.unblocked.iter().any(|id| !present.contains(id)) {
+                    let keep: std::collections::BTreeSet<String> = config
+                        .unblocked
+                        .iter()
+                        .filter(|id| present.contains(id))
+                        .cloned()
+                        .collect();
+                    self.save(s, |c| c.unblocked = keep);
+                }
+            }
+            s.admin_blocks = blocks;
+        }
+
+        ui.separator();
+        ui.heading("Blocked now");
+        ui.label(
+            "Blocks do not expire. A user lifts one by asking for access with a purpose;              here you can lift one directly.",
+        );
+        let blocks: Vec<(String, String, crate::BlockedEntry)> = s
+            .admin_blocks
+            .iter()
+            .flat_map(|(user, b)| {
+                b.processes
+                    .iter()
+                    .chain(b.tabs.iter())
+                    .map(move |(key, e)| (user.clone(), key.clone(), e.clone()))
+            })
+            .collect();
+        if blocks.is_empty() {
+            ui.label("Nothing.");
+        }
+        for (user, key, block) in blocks {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(user.as_str());
+                ui.label(format!("{key} — {}", block.reason));
+                if config.unblocked.contains(&block.id) {
+                    ui.weak("unblocking…");
+                } else if !block.id.is_empty() && ui.small_button("unblock").clicked() {
+                    let id = block.id.clone();
+                    self.save(s, |c| {
+                        c.unblocked.insert(id);
+                    });
+                }
+            });
+        }
+    }
+
     /// Access grants in force and their history; the admin can revoke.
     fn grants_ui(&self, ui: &mut egui::Ui, config: &crate::AiFocusConfig, s: &mut AiUiState) {
         // The admin view reads the agents' files; refresh them now and then.
@@ -174,7 +249,7 @@ impl AiFocusRule {
                 if s.grants_read
                     .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
                 {
-                    s.admin_grants = read_grant_files(dir);
+                    s.admin_grants = read_user_files(dir).0;
                     s.grants_read = Some(std::time::Instant::now());
                 }
                 s.admin_grants.clone()
@@ -434,6 +509,16 @@ impl RuleUi for AiFocusRule {
                 }
                 ui.end_row();
 
+                ui.label("Skip re-checking an on-task window for (minutes, 0 = never)");
+                let mut recheck = config.recheck_minutes;
+                if ui
+                    .add(egui::DragValue::new(&mut recheck).range(0..=240))
+                    .changed()
+                {
+                    self.save(&mut s, |c| c.recheck_minutes = recheck);
+                }
+                ui.end_row();
+
                 ui.label("Off-task checks before an app is closed (tabs: first)");
                 let mut strikes = config.strikes_to_block;
                 if ui
@@ -486,6 +571,7 @@ impl RuleUi for AiFocusRule {
                 ui.end_row();
             });
 
+        self.admin_blocks_ui(ui, &config, &mut s);
         self.grants_ui(ui, &config, &mut s);
 
         // --- Lists ------------------------------------------------------------------
@@ -572,23 +658,33 @@ fn name_list(
     });
 }
 
-/// Every `<user>.json` in `dir` as (user, grants); unreadable files are skipped.
-fn read_grant_files(dir: &std::path::Path) -> Vec<(String, GrantState)> {
+/// Every `<user>.json` in `dir` as (user, contents); unreadable files are
+/// skipped. The flag is false if any file was skipped (or `dir` unreadable).
+fn read_user_files<T: serde::de::DeserializeOwned>(
+    dir: &std::path::Path,
+) -> (Vec<(String, T)>, bool) {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+        // No folder yet (no agent has blocked anything): nothing to miss.
+        return (Vec::new(), !dir.exists());
     };
-    let mut out: Vec<(String, GrantState)> = entries
+    let mut all_read = true;
+    let mut out: Vec<(String, T)> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .filter_map(|p| {
             let user = p.file_stem()?.to_string_lossy().to_string();
-            let state = serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
-            Some((user, state))
+            let read = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok());
+            if read.is_none() {
+                all_read = false;
+            }
+            Some((user, read?))
         })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
+    (out, all_read)
 }
 
 /// Responsibility: Hand out the same AiFocusRule as a block rule and as a settings tab, plus
@@ -607,10 +703,16 @@ impl AiFocusRuleHandle {
     }
 
     /// Settings panel only, for editing a machine install's config from the admin UI.
-    /// The monitor is never started; grants are read from every file in `grants_dir`.
-    pub fn settings_only(monitor: Arc<FocusMonitor>, grants_dir: PathBuf) -> Self {
+    /// The monitor is never started; grants and blocks are read from every file in
+    /// `grants_dir` and `blocks_dir`.
+    pub fn settings_only(
+        monitor: Arc<FocusMonitor>,
+        grants_dir: PathBuf,
+        blocks_dir: PathBuf,
+    ) -> Self {
         let mut rule = AiFocusRule::new(Arc::clone(&monitor), false);
         rule.admin_grants_dir = Some(grants_dir);
+        rule.admin_blocks_dir = Some(blocks_dir);
         Self {
             inner: Arc::new(rule),
             monitor,
@@ -662,6 +764,10 @@ mod tests {
         ));
         render(AiFocusRuleHandle::new(Arc::clone(&monitor)).ui().as_ref());
         let dir = std::env::temp_dir().join("dw_no_grants_dir");
-        render(AiFocusRuleHandle::settings_only(monitor, dir).ui().as_ref());
+        render(
+            AiFocusRuleHandle::settings_only(monitor, dir.clone(), dir)
+                .ui()
+                .as_ref(),
+        );
     }
 }

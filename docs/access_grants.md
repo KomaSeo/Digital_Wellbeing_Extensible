@@ -189,6 +189,7 @@ The user was granted this app/site for this purpose: "Rust async 강의 시청"
 **관리자** (관리 UI의 AI focus 탭)
 - 관리자는 영구 허용 여부와 최대 시간을 정합니다.
 - 관리자는 허용 목록과 기록을 보고, 필요하면 "revoke"를 눌러 허용을 취소합니다.
+- 관리자는 같은 탭의 **Blocked now** 영역에서 사용자별 차단 목록을 보고, "unblock"을 눌러 차단을 직접 풀 수 있습니다([`ai_focus_rule.md`](ai_focus_rule.md) 5.9절).
 
 ---
 
@@ -199,7 +200,7 @@ The user was granted this app/site for this purpose: "Rust async 강의 시청"
 | `access_needs_a_session_and_a_real_purpose` | 집중 세션이 없거나, 목적이 짧거나, 대상이 비어 있으면 AI를 부르지 않고 거부한다. |
 | `rejected_request_is_logged_and_lifts_nothing` | AI가 거절하면 기록만 남고 차단은 그대로다. |
 | `approved_request_lifts_the_block_and_is_judged_by_purpose` | AI가 승인하면 차단이 바로 풀린다. 다음 판정 때 판정기가 허용 목적을 받는다. |
-| `off_purpose_use_revokes_the_grant_even_across_tab_titles` | 허용된 사이트에서 서로 다른 영상 두 개를 목적과 다르게 보면 허용이 취소되고 탭이 닫힌다. |
+| `off_purpose_use_of_a_granted_site_revokes_the_grant_at_once` | 허용된 사이트를 목적과 다르게 쓰면, 첫 판정에서 허용이 취소되고 탭이 닫힌다. |
 | `grants_expire_and_admin_can_revoke` | 시간 허용은 시간이 지나면 사라진다. 관리자가 취소한 영구 허용은 사라지고 기록이 남는다. |
 | `permanent_requests_are_refused_when_the_admin_disallows_them` | 관리자가 영구 허용을 껐으면 영구 요청은 AI에게 가기 전에 거부된다. |
 | `access_review::tests::*` | 4장의 허용 기간 규칙을 모두 확인한다. |
