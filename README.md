@@ -56,7 +56,7 @@ so the interval is the main cost knob.
 
 Code walkthrough (Korean): [`docs/ai_focus_rule.md`](docs/ai_focus_rule.md).
 
-## Machine install (admin + standard work account)
+## Machine install (standard work account; administrator only to install)
 
 **Easiest:** download `DigitalWellbeing-Setup-<version>.exe` from the GitHub
 Releases page and run it; it asks for the work account and registers the
@@ -75,9 +75,27 @@ cargo build --release
 
 The service (LocalSystem) starts a SYSTEM agent inside each managed user's
 session; the agent enforces the rules and runs the AI check there. The user
-declares their task in **Digital Wellbeing Focus** (starts at logon); settings
-are edited with `digital-wellbeing.exe` (administrator) and stored in
-`%ProgramData%\DigitalWellbeing`, which standard users cannot read or write.
+declares their task in **Digital Wellbeing Focus** (starts at logon). Settings
+are stored in `%ProgramData%\DigitalWellbeing`, which standard users cannot read
+or write directly. **All settings** (list rule, AI focus settings and API key,
+blocks and unblock, access grants and revoke, AI usage and daily budget, task
+planner and life rules) are edited in the Focus app's **Settings** tab, from a
+managed (standard) account: the tab keeps a private copy, and that session's
+agent writes the real files as SYSTEM. The program does not tell administrator
+and standard accounts apart; only the **settings lock** decides. While unlocked,
+anyone on the PC can edit; the Settings tab locks them for 1 hour to 366 days,
+a lock can only be extended, and nothing in the program unlocks early. Windows
+cannot stop an administrator account from stopping the service or deleting
+`settings_lock.json`, so work in a standard account and use the administrator
+account only to install and to change which accounts are managed
+(`install --manage` / `machine.json`, which the Settings tab cannot edit).
+
+A machine install ships three executables (`digital-wellbeing-service.exe`,
+`digital-wellbeing-focus.exe`, `digital-wellbeing-mcp.exe`); it no longer ships
+the old admin settings window `digital-wellbeing.exe`, and `install` deletes a
+copy an older version left. Run on a PC with the service installed, a
+`digital-wellbeing.exe` built from source only shows a notice pointing to the
+Focus app's Settings tab (`--standalone` still forces single-account mode).
 Full guide (Korean): [`docs/multi_account.md`](docs/multi_account.md).
 
 Testing changes on your own PC (much faster than a release): from an
@@ -85,28 +103,30 @@ administrator PowerShell, `.\scripts\dev-install.ps1 -Manage <work-account>`
 builds and (re)installs; run it again after each change, add `-Tail` to follow
 the agent log.
 
-**Task planner** (machine install): the admin keeps a to-do list (deadline,
-priority, notes) in the *Task planner* tab. When it is on, the AI picks the
+**Task planner** (machine install): the user keeps a to-do list (deadline,
+priority, notes) and life rules in the *Task planner* page of the Focus app's
+Settings tab, then locks the settings. When it is on, the AI picks the
 user's task from the list ("Get my task" in the Focus app) and that becomes the
 AI focus task; finishing, switching or ending needs a reason the AI approves.
-Every request is logged for the admin. Guide (Korean):
+Every request is logged and shown in that page. Guide (Korean):
 [`docs/task_planner.md`](docs/task_planner.md).
 
 **Access requests**: from the Focus app the user can ask for an app or site
 the AI check blocks, for some minutes or permanently, stating the purpose.
 If the AI approves, the block is lifted, but the app stays observed and is
 judged against that purpose; off-purpose use revokes the grant and blocks
-again. Blocks do not expire: an approved request or the admin lifts them (the
-admin UI lists every user's blocks with an "unblock" button). The admin sets
-limits and can revoke grants; the admin's blacklist is never lifted this way. Guide (Korean):
+again. Blocks do not expire: an approved request lifts them, or, while the
+settings are unlocked, the "unblock" button in the Settings tab (it lists every
+user's blocks). The Settings tab also sets the limits and can revoke grants; the
+blacklist of the settings is never lifted this way. Guide (Korean):
 [`docs/access_grants.md`](docs/access_grants.md).
 
 **Claude Desktop** (machine install): `digital-wellbeing-mcp.exe` is an MCP
 server for Claude Desktop in the work account. Its tools show the list and the
 current task, propose a to-do and ask for a change, all through the agent API
 the Focus app uses, so the assistant can do nothing the user cannot. Proposed
-to-dos join the list only if the agent's AI approves them against the admin's
-life rules (Task planner tab); the task-picking prompt is fixed in the code.
+to-dos join the list only if the agent's AI approves them against the life
+rules (set in the Settings tab); the task-picking prompt is fixed in the code.
 Setup (Korean): [`docs/claude_desktop.md`](docs/claude_desktop.md).
 
 **AI usage**: every Claude call's token counts are recorded per day and purpose
@@ -161,7 +181,7 @@ $json = '{"id":1,"method":"add_blacklist","params":{"name":"discord.exe"}}'
 ## Project layout
 
 ```
-apps/desktop           egui shell: rule tabs + shared process/block views
+apps/desktop           egui shell: rule tabs + shared process/block views (standalone only; with the service installed it only shows a notice)
 crates/list_based_rule blacklist/whitelist BlockRule + RuleUi settings
 crates/ai_focus_rule   AI-judged focus BlockRule + RuleUi (activity sampler, Claude judge)
 crates/task_planner    AI picks the task from a to-do list; reviews change requests

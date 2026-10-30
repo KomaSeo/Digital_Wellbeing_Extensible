@@ -13,7 +13,8 @@
 | **MCP** | Claude 같은 AI 앱이 바깥 프로그램의 기능(도구)을 부를 때 쓰는 약속입니다. Model Context Protocol의 줄임말입니다. |
 | **MCP 서버** | AI 앱에 도구를 제공하는 프로그램입니다. 이 프로젝트의 MCP 서버는 `digital-wellbeing-mcp.exe`입니다. |
 | **agent** | 로그인한 사용자마다 하나씩 SYSTEM 권한으로 도는, 차단과 할 일 플래너를 맡은 프로그램입니다([`multi_account.md`](multi_account.md)). |
-| **생활 규칙** | 관리자가 Task planner 탭에 적는 고정된 규칙입니다. 할 일 고르기, 변경 요청 심사, 할 일 제안 심사가 모두 이 규칙을 따릅니다([`task_planner.md`](task_planner.md) 5.4절). |
+| **Settings 탭** | Focus 앱의 설정 화면입니다. 사용자는 설정이 잠겨 있지 않을 때 이 탭에서 할 일 목록, 생활 규칙, 차단 규칙 같은 모든 설정을 고칩니다([`multi_account.md`](multi_account.md) 6.4절). |
+| **생활 규칙** | 사용자가 Settings 탭의 Task planner 화면에 적는 고정된 규칙입니다. 할 일 고르기, 변경 요청 심사, 할 일 제안 심사가 모두 이 규칙을 따릅니다([`task_planner.md`](task_planner.md) 5.4절). |
 
 ---
 
@@ -28,10 +29,10 @@ Claude Desktop은 `digital-wellbeing-mcp.exe`를 작업 계정의 권한으로 �
 | 할 일 제안하기 (`propose_todo`) | 제안은 목록에 바로 들어가지 않습니다. agent의 AI가 고정된 지시문과 생활 규칙으로 심사하고, 승인한 것만 목록에 들어갑니다. |
 | 할 일 받기 (`get_my_task`) | ✅ 할 수 있습니다. 어떤 할 일을 줄지는 agent의 AI가 고릅니다. |
 | 지금 할 일을 끝내거나 바꾸기 (`request_change`) | Focus 앱처럼 이유를 적어 요청하고, agent의 AI가 심사합니다. |
-| 차단 풀기, 규칙 바꾸기, 생활 규칙이나 관리자 목록 고치기 | ❌ 그런 도구가 없습니다. agent API에도 그런 요청이 없습니다. |
+| 차단 풀기, 규칙 바꾸기, 생활 규칙이나 Settings 탭에서 적은 할 일 목록 고치기 | ❌ MCP 서버에 그런 도구가 없습니다. agent API에는 Settings 탭이 쓰는 설정 요청(`settings_get`, `settings_put`)이 있지만, MCP 서버는 그 요청을 보내지 않습니다. 또 설정이 잠겨 있으면 agent가 그 요청을 거부합니다. |
 
 **할 일을 추천하는 지시문은 고정되어 있습니다.** 추천은 Claude Desktop이 하지 않고, agent가 프로그램 코드 안의 지시문(`PICK_PROMPT`)으로 합니다.
-사용자도 Claude도 이 지시문을 바꿀 수 없습니다. 관리자는 생활 규칙만 바꿀 수 있습니다.
+사용자도 Claude도 이 지시문을 바꿀 수 없습니다. 사용자는 설정이 잠겨 있지 않을 때 Settings 탭에서 생활 규칙만 바꿀 수 있습니다.
 
 예를 들어 놀고 싶은 순간에 사용자가 Claude에게 "할 일에 '놀기' 넣어 줘"라고 하면 다음과 같이 됩니다.
 1. Claude는 `propose_todo`로 "놀기"를 제안합니다.
@@ -106,5 +107,5 @@ agent가 요청을 거부하거나 agent에 연결할 수 없으면, 도구는 �
 ## 6. 한계
 
 1. **실제 Claude Desktop으로는 아직 시험하지 않았습니다.** 개발자는 표준 입출력으로 메시지를 직접 넣어서 응답 형식만 확인했습니다.
-2. **할 일을 지우는 도구는 없습니다.** 할 일은 승인된 변경 요청(`done`)으로 끝나거나, 관리자가 관리 화면에서 지웁니다.
+2. **할 일을 지우는 도구는 없습니다.** 할 일은 승인된 변경 요청(`done`)으로 끝나거나, 사용자가 설정이 잠겨 있지 않을 때 Focus 앱의 Settings 탭(Task planner 화면)에서 지웁니다.
 3. **같은 PC의 어떤 프로그램이든 agent API를 부를 수 있습니다.** 이것은 Focus 앱 때부터 같습니다. 그래서 agent API에는 사용자가 원래 할 수 있는 요청만 있습니다.
