@@ -190,6 +190,28 @@ impl Panel for PlannerAdminUi {
             draft.deadlines.remove(i);
             draft.dirty = true;
         }
+        // --- proposed by the user --------------------------------------------
+        let proposed: Vec<&TodoItem> = state
+            .proposed
+            .iter()
+            .filter(|t| !state.is_done(&t.id) && !draft.config.dismissed.contains(&t.id))
+            .collect();
+        if !proposed.is_empty() {
+            ui.label("Proposed by the user (approved by the AI against the life rules):");
+        }
+        for todo in proposed {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("• {} (priority {})", todo.title, todo.priority));
+                if let Some(deadline) = todo.deadline {
+                    ui.label(format!("due {deadline}"));
+                }
+                if ui.small_button("remove").clicked() {
+                    draft.config.dismissed.insert(todo.id.clone());
+                    draft.dirty = true;
+                }
+            });
+        }
+
         ui.horizontal(|ui| {
             ui.text_edit_singleline(new_title);
             if ui.button("Add").clicked() && !new_title.trim().is_empty() {
@@ -239,6 +261,23 @@ impl Panel for PlannerAdminUi {
                 ui.label("None.");
             }
         }
+        ui.collapsing("Proposals", |ui| {
+            if state.proposals.is_empty() {
+                ui.label("None yet.");
+            }
+            for p in state.proposals.iter().rev() {
+                let (color, verdict) = if p.approved {
+                    (egui::Color32::from_rgb(80, 170, 90), "approved")
+                } else {
+                    (egui::Color32::from_rgb(200, 80, 80), "rejected")
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(p.at.with_timezone(&Local).format("%m-%d %H:%M").to_string());
+                    ui.colored_label(color, verdict);
+                    ui.label(format!("\"{}\" via {} → {}", p.item.title, p.via, p.reply));
+                });
+            }
+        });
         ui.heading("Change requests");
         egui::ScrollArea::vertical()
             .id_salt("planner_requests")

@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use task_planner::{ChangeKind, ChangeRecord, PlannerStatus};
+use task_planner::{ChangeKind, ChangeRecord, PlannerStatus, ProposalRecord};
 
 const POLL: Duration = Duration::from_secs(2);
 const GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
@@ -59,6 +59,8 @@ struct Shared {
     decision: Option<ChangeRecord>,
     /// The AI's answer to the last access request.
     access: Option<GrantLogEntry>,
+    /// The AI's answer to the last proposed to-do.
+    proposal: Option<ProposalRecord>,
 }
 
 /// Responsibility: Keep what the user types into the access request form.
@@ -107,6 +109,8 @@ struct FocusApp {
     free_task: String,
     reason: String,
     access: AccessForm,
+    /// Title of a to-do the user is about to propose.
+    proposal_title: String,
 }
 
 impl FocusApp {
@@ -134,6 +138,7 @@ impl FocusApp {
             free_task: String::new(),
             reason: String::new(),
             access: AccessForm::default(),
+            proposal_title: String::new(),
         }
     }
 
@@ -160,6 +165,9 @@ impl FocusApp {
                         }
                         if status.last_access.is_some() {
                             s.access = status.last_access.clone();
+                        }
+                        if status.last_proposal.is_some() {
+                            s.proposal = status.last_proposal.clone();
                         }
                         s.status = Some(Ok(status));
                     }
@@ -338,6 +346,40 @@ impl FocusApp {
         });
     }
 
+    /// Propose a to-do for the list; the AI reviews it against the admin's
+    /// life rules (the same as a proposal from the user's AI assistant).
+    fn propose_ui(&mut self, ui: &mut egui::Ui) {
+        let idle = !self.pending.load(Ordering::SeqCst);
+        ui.collapsing("Propose a to-do", |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.proposal_title)
+                        .desired_width(300.0)
+                        .hint_text("e.g. Reply to the advisor's email"),
+                );
+                let ready = idle && self.proposal_title.trim().chars().count() >= 2;
+                if ui.add_enabled(ready, egui::Button::new("Propose")).clicked() {
+                    self.send(
+                        "propose_todo",
+                        json!({ "todo": { "title": self.proposal_title.trim() }, "via": "focus app" }),
+                    );
+                    self.proposal_title.clear();
+                }
+            });
+            if let Some(p) = &self.shared.lock().proposal {
+                let (color, label) = if p.approved {
+                    (GREEN, "added")
+                } else {
+                    (RED, "rejected")
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(color, label);
+                    ui.label(format!("\"{}\": {}", p.item.title, p.reply));
+                });
+            }
+        });
+    }
+
     fn planner_ui(&mut self, ui: &mut egui::Ui, status: &Status, planner: &PlannerStatus) {
         let idle = !self.pending.load(Ordering::SeqCst);
         let assignment = planner
@@ -500,6 +542,9 @@ impl eframe::App for FocusApp {
                 match status.planner.clone().filter(|p| p.active) {
                     Some(planner) => self.planner_ui(ui, &status, &planner),
                     None => self.free_mode_ui(ui, &status),
+                }
+                if status.planner.is_some() {
+                    self.propose_ui(ui);
                 }
                 if !message.is_empty() {
                     ui.colored_label(RED, &message);

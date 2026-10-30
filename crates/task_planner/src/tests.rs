@@ -33,6 +33,16 @@ impl Advisor for FakeAdvisor {
         })
     }
 
+    fn review_proposal(&self, r: &ProposalRequest) -> Result<Review, JudgeError> {
+        self.reviews.fetch_add(1, Ordering::SeqCst);
+        *self.saw_rules.lock() = r.life_rules.to_string();
+        let approved = self.approve.load(Ordering::SeqCst);
+        Ok(Review {
+            approved,
+            reply: if approved { "ok" } else { "no" }.into(),
+        })
+    }
+
     fn review(&self, r: &ReviewRequest) -> Result<Review, JudgeError> {
         self.reviews.fetch_add(1, Ordering::SeqCst);
         *self.saw_rules.lock() = r.life_rules.to_string();
@@ -269,4 +279,96 @@ fn approved_done_with_a_failing_pick_ends_the_session() {
     assert!(!h.focus.store().get().session_active);
     // "a" is done; "b" is still open, so the planner stays active.
     assert!(h.planner.is_active());
+}
+
+fn proposal(title: &str) -> ProposalInput {
+    ProposalInput {
+        title: title.into(),
+        priority: Some(9),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn an_approved_proposal_joins_the_list() {
+    let h = harness(true, &[]);
+    assert!(!h.planner.is_active());
+    h.planner
+        .config_store()
+        .update(|c| c.life_rules = "No games on weekdays.".into())
+        .unwrap();
+    let record = h
+        .planner
+        .propose(Utc::now(), proposal("  Buy   groceries "), "claude desktop")
+        .unwrap();
+    assert!(record.approved);
+    assert_eq!(record.via, "claude desktop");
+    assert_eq!(*h.advisor.saw_rules.lock(), "No games on weekdays.");
+    let status = h.planner.status();
+    assert!(status.active);
+    let item = &status.open_todos[0];
+    assert_eq!(item.title, "Buy groceries");
+    assert!(item.proposed);
+    assert_eq!(item.priority, 5, "priority is clamped to 1..=5");
+    assert_eq!(status.recent_proposals.len(), 1);
+}
+
+#[test]
+fn a_rejected_proposal_is_logged_only() {
+    let h = harness(true, &["a"]);
+    h.advisor.approve.store(false, Ordering::SeqCst);
+    let record = h
+        .planner
+        .propose(Utc::now(), proposal("Play games"), "claude desktop")
+        .unwrap();
+    assert!(!record.approved);
+    let status = h.planner.status();
+    assert_eq!(status.open_todos.len(), 1);
+    assert_eq!(status.recent_proposals.len(), 1);
+}
+
+#[test]
+fn bad_and_duplicate_proposals_are_refused_without_asking_the_ai() {
+    let h = harness(true, &["a"]);
+    assert!(matches!(
+        h.planner.propose(Utc::now(), proposal(" "), "x"),
+        Err(PlannerError::BadProposal)
+    ));
+    assert!(matches!(
+        h.planner.propose(Utc::now(), proposal("TITLE A"), "x"),
+        Err(PlannerError::Duplicate(_))
+    ));
+    assert_eq!(h.advisor.reviews.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn the_admin_can_remove_a_proposed_todo() {
+    let h = harness(true, &[]);
+    let record = h
+        .planner
+        .propose(Utc::now(), proposal("Buy groceries"), "focus app")
+        .unwrap();
+    h.planner
+        .config_store()
+        .update(|c| {
+            c.dismissed.insert(record.item.id.clone());
+        })
+        .unwrap();
+    assert!(h.planner.status().open_todos.is_empty());
+    assert!(!h.planner.is_active());
+}
+
+#[test]
+fn the_proposal_question_carries_the_rules_and_the_item() {
+    let item = TodoItem::new("Watch a movie");
+    let text = crate::advisor::proposal_text(&ProposalRequest {
+        now_local: "2026-10-30 Friday 14:05",
+        life_rules: "No movies before 18:00.",
+        item: &item,
+        open: &[],
+        recent_proposals: &[],
+        history: "",
+    });
+    assert!(text.contains("The owner's life rules (binding):\nNo movies before 18:00."));
+    assert!(text.contains("\"title\": \"Watch a movie\""));
 }

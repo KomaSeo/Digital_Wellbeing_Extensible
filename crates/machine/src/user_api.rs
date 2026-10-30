@@ -17,6 +17,10 @@
 //! | `assign`         | `{}` (planner active)                    | [`Status`] |
 //! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
 //! | `request_access` | `{ "target": GrantTarget, "duration": GrantDuration, "purpose": "…" }` | [`Status`], `last_access` set |
+//! | `propose_todo`   | `{ "todo": ProposalInput, "via": "…" }`  | [`Status`], `last_proposal` set |
+//!
+//! `propose_todo` asks the AI to add a to-do to the planner's list; it judges
+//! the proposal against the admin's life rules (see `task_planner`).
 //!
 //! While the task planner is active the user cannot pick a task or stop
 //! freely: `start_session` / `stop_session` are refused and the Focus app uses
@@ -34,12 +38,14 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
-use task_planner::{ChangeKind, ChangeRecord, PlannerStatus, TaskPlanner};
+use task_planner::{
+    ChangeKind, ChangeRecord, PlannerStatus, ProposalInput, ProposalRecord, TaskPlanner,
+};
 
 /// Re-exported so clients need not depend on the rule crates.
 pub use ai_focus_rule::grants;
 pub use ai_focus_rule::Verdict;
-pub use task_planner::{AssignmentSource, TodoItem};
+pub use task_planner::{AssignmentSource, ProposalInput as TodoProposal, TodoItem};
 
 pub const BASE_PORT: u16 = 8770;
 const MAX_REQUEST: usize = 64 * 1024;
@@ -78,6 +84,9 @@ pub struct Status {
     pub grant_log: Vec<GrantLogEntry>,
     /// Set only in the reply to `request_access`.
     pub last_access: Option<GrantLogEntry>,
+    /// Set only in the reply to `propose_todo`.
+    #[serde(default)]
+    pub last_proposal: Option<ProposalRecord>,
 }
 
 /// Responsibility: Hold what the agent exposes (focus monitor, optional planner) and tell
@@ -124,6 +133,7 @@ fn status(api: &AgentApi) -> Status {
             .collect(),
         grant_log: grants.log.into_iter().rev().take(10).collect(),
         last_access: None,
+        last_proposal: None,
     }
 }
 
@@ -132,6 +142,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     const PLANNER_ON: &str = "the task planner is on: use assign / request_change (needs a reason)";
     let mut last_decision = None;
     let mut last_access = None;
+    let mut last_proposal = None;
     match method {
         "status" => {}
         "start_session" => {
@@ -188,11 +199,22 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .map_err(|e| e.to_string())?;
             last_access = Some(entry);
         }
+        "propose_todo" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            let input: ProposalInput = serde_json::from_value(params["todo"].clone())
+                .map_err(|e| format!("params.todo: {e}"))?;
+            let via = params["via"].as_str().unwrap_or("focus app");
+            let record = planner
+                .propose(Utc::now(), input, via)
+                .map_err(|e| e.to_string())?;
+            last_proposal = Some(record);
+        }
         other => return Err(format!("unknown method '{other}'")),
     }
     let mut status = status(api);
     status.last_decision = last_decision;
     status.last_access = last_access;
+    status.last_proposal = last_proposal;
     serde_json::to_value(status).map_err(|e| e.to_string())
 }
 
@@ -404,6 +426,7 @@ mod tests {
             JsonStore::in_memory(PlannerConfig {
                 enabled: true,
                 todos: vec![TodoItem::new("논문 3장")],
+                ..Default::default()
             }),
             JsonStore::in_memory(PlannerState::default()),
             Arc::clone(&monitor),
@@ -424,5 +447,17 @@ mod tests {
             dispatch(&api, "status", &json!({})).unwrap()["session_active"],
             false
         );
+        // A proposal reaches the planner (and fails here at the AI call);
+        // malformed params are refused before that.
+        let err = dispatch(
+            &api,
+            "propose_todo",
+            &json!({ "todo": { "title": "장보기" }, "via": "claude desktop" }),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("AI:"), "{err}");
+        assert!(dispatch(&api, "propose_todo", &json!({ "todo": 5 }))
+            .unwrap_err()
+            .starts_with("params.todo"));
     }
 }

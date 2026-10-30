@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 /// Responsibility: Describe one to-do on the admin's list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -21,6 +21,10 @@ pub struct TodoItem {
     pub priority: u8,
     #[serde(default)]
     pub estimate_minutes: Option<u32>,
+    /// Proposed by the user (from the Focus app or their AI assistant) and
+    /// approved by the AI, rather than written by the admin.
+    #[serde(default)]
+    pub proposed: bool,
 }
 
 fn default_priority() -> u8 {
@@ -36,6 +40,7 @@ impl TodoItem {
             deadline: None,
             priority: default_priority(),
             estimate_minutes: None,
+            proposed: false,
         }
     }
 }
@@ -55,6 +60,10 @@ pub struct PlannerConfig {
     /// AI decision of the planner follows them. Only the admin can edit them,
     /// so a request made in a weak moment cannot change them.
     pub life_rules: String,
+    /// Ids of proposed to-dos the admin removed. Proposals live in the
+    /// agent's `planner_state.json`; the admin removes one by naming it here,
+    /// so neither program writes the other's file.
+    pub dismissed: BTreeSet<String>,
 }
 
 /// Responsibility: Say who chose the current task: the AI, or an approved change request.
@@ -111,6 +120,30 @@ pub struct ChangeRecord {
     pub reply: String,
 }
 
+/// Responsibility: Carry a to-do the user proposes, as it arrives over the agent API.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProposalInput {
+    pub title: String,
+    pub notes: String,
+    pub deadline: Option<NaiveDate>,
+    /// 1 (low) ..= 5 (urgent); 3 when missing.
+    pub priority: Option<u8>,
+    pub estimate_minutes: Option<u32>,
+}
+
+/// Responsibility: Record one proposed to-do and the AI's decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalRecord {
+    pub at: DateTime<Utc>,
+    pub item: TodoItem,
+    /// Who sent it: "focus app", "claude desktop", ...
+    pub via: String,
+    pub approved: bool,
+    /// The AI's answer to the user.
+    pub reply: String,
+}
+
 /// Responsibility: Record that a to-do was finished.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoneRecord {
@@ -130,6 +163,11 @@ pub struct PlannerState {
     pub done: Vec<DoneRecord>,
     /// Newest last, capped.
     pub requests: VecDeque<ChangeRecord>,
+    /// Proposed to-dos the AI approved; they join the admin's list (see
+    /// `TaskPlanner::open_todos`).
+    pub proposed: Vec<TodoItem>,
+    /// Every proposal and the AI's decision, newest last, capped.
+    pub proposals: VecDeque<ProposalRecord>,
 }
 
 impl PlannerState {
@@ -147,4 +185,7 @@ pub struct PlannerStatus {
     pub open_todos: Vec<TodoItem>,
     /// Newest first.
     pub recent_requests: Vec<ChangeRecord>,
+    /// Newest first.
+    #[serde(default)]
+    pub recent_proposals: Vec<ProposalRecord>,
 }

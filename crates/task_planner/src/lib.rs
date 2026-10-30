@@ -5,7 +5,8 @@
 //!
 //! - `planner.json` ([`PlannerConfig`]): the list; edited by the admin only.
 //! - `planner_state.json` ([`PlannerState`]): current assignment, finished
-//!   to-dos, change-request log; written by the agent.
+//!   to-dos, change-request log, to-dos the user proposed and the AI approved;
+//!   written by the agent.
 //!
 //! When the planner is active, the agent refuses free-text tasks and plain
 //! "stop" from the Focus app; everything goes through [`TaskPlanner`].
@@ -18,13 +19,13 @@ mod planner;
 
 pub use admin_ui::PlannerAdminUi;
 pub use advisor::{
-    claude_advisor_provider, Advisor, AdvisorProvider, ClaudeAdvisor, Pick, PickRequest, Review,
-    ReviewRequest,
+    claude_advisor_provider, Advisor, AdvisorProvider, ClaudeAdvisor, Pick, PickRequest,
+    ProposalRequest, Review, ReviewRequest,
 };
 pub use ai_focus_rule::store::JsonStore;
 pub use model::{
     Assignment, AssignmentSource, ChangeKind, ChangeRecord, DoneRecord, PlannerConfig,
-    PlannerState, PlannerStatus, TodoItem,
+    PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TodoItem,
 };
 pub use planner::{PlannerError, TaskPlanner};
 

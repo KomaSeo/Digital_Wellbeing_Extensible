@@ -4,10 +4,10 @@
 //! It drives the AI focus session: an assignment becomes the focus monitor's
 //! task (and starts the session); an approved "end" stops it.
 
-use crate::advisor::{AdvisorProvider, PickRequest, ReviewRequest};
+use crate::advisor::{AdvisorProvider, PickRequest, ProposalRequest, ReviewRequest};
 use crate::model::{
     Assignment, AssignmentSource, ChangeKind, ChangeRecord, DoneRecord, PlannerConfig,
-    PlannerState, PlannerStatus, TodoItem,
+    PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TodoItem,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -18,6 +18,12 @@ use thiserror::Error;
 use tracing::info;
 
 const REQUEST_LOG_CAPACITY: usize = 50;
+/// Most proposals per day (each costs an AI call), and most approved
+/// proposals waiting on the list at once.
+const PROPOSALS_PER_DAY: usize = 30;
+const MAX_OPEN_PROPOSED: usize = 50;
+const MAX_TITLE_CHARS: usize = 120;
+const MAX_NOTES_CHARS: usize = 1000;
 const MIN_REASON_CHARS: usize = 4;
 /// An assignment older than this is not resumed after a restart; a new one is picked.
 const RESUME_WITHIN: Duration = Duration::hours(12);
@@ -37,6 +43,12 @@ pub enum PlannerError {
     EmptyTask,
     #[error("the AI picked a to-do that is not open ('{0}')")]
     BadPick(String),
+    #[error("give the to-do a title (at most {MAX_TITLE_CHARS} characters; notes at most {MAX_NOTES_CHARS})")]
+    BadProposal,
+    #[error("\"{0}\" is already on the list")]
+    Duplicate(String),
+    #[error("too many proposals: at most {PROPOSALS_PER_DAY} a day and {MAX_OPEN_PROPOSED} open")]
+    TooManyProposals,
     #[error("AI: {0}")]
     Ai(#[from] JudgeError),
     #[error("io: {0}")]
@@ -75,12 +87,21 @@ impl TaskPlanner {
         &self.config
     }
 
+    /// The admin's to-dos plus approved proposals the admin has not removed,
+    /// minus finished ones.
     fn open_todos(&self) -> Vec<TodoItem> {
         let state = self.state.get();
-        self.config
-            .get()
+        let config = self.config.get();
+        config
             .todos
             .into_iter()
+            .chain(
+                state
+                    .proposed
+                    .iter()
+                    .filter(|t| !config.dismissed.contains(&t.id))
+                    .cloned(),
+            )
             .filter(|t| !state.is_done(&t.id))
             .collect()
     }
@@ -97,7 +118,98 @@ impl TaskPlanner {
             assignment: state.assignment,
             open_todos: self.open_todos(),
             recent_requests: state.requests.iter().rev().take(10).cloned().collect(),
+            recent_proposals: state.proposals.iter().rev().take(10).cloned().collect(),
         }
+    }
+
+    /// The user proposes a to-do (from the Focus app or their AI assistant,
+    /// named by `via`). The AI reviews it against the life rules; an approved
+    /// one joins the open list. Works whether or not the planner is on.
+    pub fn propose(
+        &self,
+        now: DateTime<Utc>,
+        input: ProposalInput,
+        via: &str,
+    ) -> Result<ProposalRecord, PlannerError> {
+        let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
+        let title = input.title.split_whitespace().collect::<Vec<_>>().join(" ");
+        let notes = input.notes.trim().to_string();
+        if title.chars().count() < 2
+            || title.chars().count() > MAX_TITLE_CHARS
+            || notes.chars().count() > MAX_NOTES_CHARS
+        {
+            return Err(PlannerError::BadProposal);
+        }
+        let open = self.open_todos();
+        if let Some(same) = open
+            .iter()
+            .find(|t| t.title.trim().eq_ignore_ascii_case(&title))
+        {
+            return Err(PlannerError::Duplicate(same.title.clone()));
+        }
+        let state = self.state.get();
+        let today = state
+            .proposals
+            .iter()
+            .filter(|p| now - p.at < Duration::days(1))
+            .count();
+        if today >= PROPOSALS_PER_DAY
+            || open.iter().filter(|t| t.proposed).count() >= MAX_OPEN_PROPOSED
+        {
+            return Err(PlannerError::TooManyProposals);
+        }
+
+        let item = TodoItem {
+            id: format!("p{}", now.timestamp_millis()),
+            title,
+            notes,
+            deadline: input.deadline,
+            priority: input.priority.unwrap_or(3).clamp(1, 5),
+            estimate_minutes: input.estimate_minutes.map(|m| m.min(6000)),
+            proposed: true,
+        };
+        let recent: Vec<ProposalRecord> = state.proposals.iter().rev().cloned().collect();
+        let history = self.focus.state().history_text();
+        let now_local = local_now_text();
+        let life_rules = self.config.get().life_rules;
+        let advisor = (self.advisor)(&self.focus.store().get())?;
+        let review = advisor.review_proposal(&ProposalRequest {
+            now_local: &now_local,
+            life_rules: &life_rules,
+            item: &item,
+            open: &open,
+            recent_proposals: &recent,
+            history: &history,
+        })?;
+
+        let record = ProposalRecord {
+            at: now,
+            item: item.clone(),
+            via: via.trim().chars().take(40).collect(),
+            approved: review.approved,
+            reply: review.reply,
+        };
+        self.state.update(|s| {
+            if s.proposals.len() >= REQUEST_LOG_CAPACITY {
+                s.proposals.pop_front();
+            }
+            s.proposals.push_back(record.clone());
+            if record.approved {
+                s.proposed.push(item.clone());
+            }
+        })?;
+        info!(
+            "proposal \"{}\" via {} ({}): {}",
+            record.item.title,
+            record.via,
+            if record.approved {
+                "approved"
+            } else {
+                "rejected"
+            },
+            record.reply
+        );
+        Ok(record)
     }
 
     /// Start (or resume) the session with an assigned task.
