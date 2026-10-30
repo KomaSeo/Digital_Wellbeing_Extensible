@@ -525,12 +525,8 @@ impl eframe::App for FocusApp {
                     ui.label("Nothing.");
                 }
                 for b in &status.blocked {
-                    let until = b
-                        .until
-                        .map(|u| u.with_timezone(&Local).format("until %H:%M").to_string())
-                        .unwrap_or_else(|| "until the session ends".into());
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(format!("{} ({until}) — {}", b.key, b.reason));
+                        ui.label(format!("{} — {}", b.key, b.reason));
                         if ui.small_button("Ask for access").clicked() {
                             self.prefill_access(&b.key);
                         }

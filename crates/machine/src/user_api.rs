@@ -51,10 +51,10 @@ pub fn port_for_session(session: u32) -> u16 {
 /// Responsibility: Describe one block for the Focus app.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockedItem {
-    /// Process name, or `process|tab title` for a browser tab.
+    /// Process name, `process|site` for a browser tab, or
+    /// `process|youtube channel: …` / `process|youtube page: …` on YouTube.
     pub key: String,
     pub reason: String,
-    pub until: Option<DateTime<Utc>>,
 }
 
 /// Responsibility: Carry everything the Focus app shows; every API call returns it.
@@ -105,7 +105,6 @@ fn status(api: &AgentApi) -> Status {
         .map(|(key, b)| BlockedItem {
             key: key.clone(),
             reason: b.reason.clone(),
-            until: b.until,
         })
         .collect();
     Status {

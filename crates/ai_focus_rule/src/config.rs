@@ -42,10 +42,10 @@ pub struct AiFocusConfig {
     pub api_key: String,
     /// Attach a downscaled screenshot of the foreground monitor to each check.
     pub send_screenshot: bool,
-    /// Consecutive off-task verdicts for the same app before it is blocked.
+    /// Consecutive off-task verdicts for the same app before it is closed and
+    /// blocked. Browser tabs are blocked at the first one. Blocks do not
+    /// expire; the user asks for access to lift one.
     pub strikes_to_block: u32,
-    /// How long a blocked app stays blocked. `0` = until the session ends.
-    pub block_minutes: u64,
     /// Never judged, never blocked.
     pub always_allow: BTreeSet<String>,
     /// Judged by process name + title only; never screenshotted.
@@ -72,7 +72,6 @@ impl Default for AiFocusConfig {
             api_key: String::new(),
             send_screenshot: true,
             strikes_to_block: 2,
-            block_minutes: 30,
             always_allow: BTreeSet::new(),
             private_apps: set(&["keepass.exe", "1password.exe", "bitwarden.exe"]),
             browsers: set(&[

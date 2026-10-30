@@ -333,11 +333,7 @@ impl AiFocusRule {
         }
         for (key, block) in process_blocks.iter().chain(tab_blocks.iter()) {
             ui.horizontal(|ui| {
-                let until = block
-                    .until
-                    .map(|u| u.with_timezone(&Local).format("until %H:%M").to_string())
-                    .unwrap_or_else(|| "until session ends".into());
-                ui.label(format!("{key}  ({until}) — {}", block.reason));
+                ui.label(format!("{key} — {}", block.reason));
                 if ui.small_button("unblock").clicked() {
                     self.monitor.state().unblock(key);
                 }
@@ -388,7 +384,7 @@ impl BlockRule for AiFocusRule {
     }
 
     fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
-        let blocks = self.monitor.state().active_process_blocks(Utc::now());
+        let blocks = self.monitor.state().process_blocks();
         if blocks.is_empty() {
             return Vec::new();
         }
@@ -438,23 +434,13 @@ impl RuleUi for AiFocusRule {
                 }
                 ui.end_row();
 
-                ui.label("Off-task checks before block");
+                ui.label("Off-task checks before an app is closed (tabs: first)");
                 let mut strikes = config.strikes_to_block;
                 if ui
                     .add(egui::DragValue::new(&mut strikes).range(1..=10))
                     .changed()
                 {
                     self.save(&mut s, |c| c.strikes_to_block = strikes);
-                }
-                ui.end_row();
-
-                ui.label("Block for (minutes, 0 = session)");
-                let mut minutes = config.block_minutes;
-                if ui
-                    .add(egui::DragValue::new(&mut minutes).range(0..=600))
-                    .changed()
-                {
-                    self.save(&mut s, |c| c.block_minutes = minutes);
                 }
                 ui.end_row();
 

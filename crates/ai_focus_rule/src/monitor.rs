@@ -52,11 +52,15 @@ pub struct VerdictLogEntry {
     pub action: String,
 }
 
-/// Responsibility: Record why, and until when, something is blocked.
+/// Responsibility: Record why something is blocked.
+///
+/// Blocks do not expire: a block that lifted itself after a while would only
+/// make the monitor judge (and pay for) the same app or site again. A block
+/// ends when the user is granted access (see `request_access`), or when it is
+/// unblocked by hand.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockedEntry {
     pub reason: String,
-    pub until: Option<DateTime<Utc>>,
     /// Full window title when it was blocked (grants are matched against it).
     #[serde(default)]
     pub title: String,
@@ -80,19 +84,6 @@ pub enum Action {
     CloseTab,
 }
 
-/// Responsibility: Count off-task verdicts in a row for one strike key, and remember what
-/// they were about, so that reaching the limit blocks each of those things.
-///
-/// For most windows every verdict in a run is about the same thing. On YouTube the strike key
-/// is the site but blocks are per channel: someone who hops to another channel after each
-/// strike would otherwise never be blocked, so the run collects every channel it saw.
-#[derive(Debug, Default)]
-struct StrikeRun {
-    count: u32,
-    /// (block key, window title, reason), one per distinct block key.
-    targets: Vec<(String, String, String)>,
-}
-
 /// Responsibility: Hold the session's runtime state (history, strikes, blocks, verdicts) and
 /// apply the rules to it, without any I/O.
 #[derive(Debug, Default)]
@@ -100,7 +91,9 @@ pub struct MonitorState {
     pub task: String,
     pub history: VecDeque<ActivityEntry>,
     pub verdicts: VecDeque<VerdictLogEntry>,
-    strikes: HashMap<String, StrikeRun>,
+    /// Off-task verdicts in a row per app (or per grant of an app); see
+    /// [`Self::apply_judgement`]. Browser tabs are blocked at the first one.
+    strikes: HashMap<String, u32>,
     /// Normalized process name -> block.
     pub blocked_processes: HashMap<String, BlockedEntry>,
     /// Browser "process|site" -> block (see [`tab_key`]); on YouTube
@@ -121,25 +114,16 @@ pub struct MonitorState {
 
 impl MonitorState {
     /// Start over for a new task (or a stopped session). Strikes start from
-    /// zero, but blocks keep running until they expire: otherwise re-entering
-    /// the task (or stopping and starting) would lift every block at once.
-    /// Blocks meant to last "until the session ends" end when the session does.
+    /// zero; blocks stay, since they do not depend on the task: re-entering
+    /// the task (or stopping and starting) must not lift them.
     pub fn reset(&mut self, task: &str) {
-        let session_ended = task.is_empty();
-        let keep = |blocks: &mut HashMap<String, BlockedEntry>| {
-            let mut kept = std::mem::take(blocks);
-            if session_ended {
-                kept.retain(|_, b| b.until.is_some());
-            }
-            kept
-        };
         *self = Self {
             task: task.to_string(),
             history: std::mem::take(&mut self.history),
             verdicts: std::mem::take(&mut self.verdicts),
             channels: std::mem::take(&mut self.channels),
-            blocked_processes: keep(&mut self.blocked_processes),
-            blocked_tabs: keep(&mut self.blocked_tabs),
+            blocked_processes: std::mem::take(&mut self.blocked_processes),
+            blocked_tabs: std::mem::take(&mut self.blocked_tabs),
             ..Default::default()
         };
     }
@@ -268,23 +252,13 @@ impl MonitorState {
         self.channels.insert(youtube::page_name(&fg.title), channel);
     }
 
-    /// Is this browser tab blocked right now?
-    pub fn tab_blocked(&self, now: DateTime<Utc>, config: &AiFocusConfig, fg: &Foreground) -> bool {
-        self.key_blocked(now, &self.target_key(config, fg))
+    /// Is this browser tab blocked?
+    pub fn tab_blocked(&self, config: &AiFocusConfig, fg: &Foreground) -> bool {
+        self.blocked_tabs.contains_key(&self.target_key(config, fg))
     }
 
-    fn key_blocked(&self, now: DateTime<Utc>, key: &str) -> bool {
-        self.blocked_tabs
-            .get(key)
-            .is_some_and(|b| b.until.is_none_or(|u| now < u))
-    }
-
-    /// Currently blocked process names with their reasons (expired blocks dropped).
-    pub fn active_process_blocks(&mut self, now: DateTime<Utc>) -> Vec<(String, String)> {
-        self.blocked_processes
-            .retain(|_, b| b.until.is_none_or(|u| now < u));
-        self.blocked_tabs
-            .retain(|_, b| b.until.is_none_or(|u| now < u));
+    /// Blocked process names with their reasons.
+    pub fn process_blocks(&self) -> Vec<(String, String)> {
         self.blocked_processes
             .iter()
             .map(|(name, b)| (name.clone(), b.reason.clone()))
@@ -304,23 +278,36 @@ impl MonitorState {
             self.learn_channel(fg, &judgement.channel);
         }
         let target = self.target_key(config, fg);
-        // Strikes count per site (or app), not per block target: counting per
-        // tab title let a user dodge blocks by moving to the next video, and
-        // per channel by moving to the next channel. Strikes on a granted
-        // app/site count per grant, for the same reason.
-        let key = match grant {
-            Some(g) => format!("grant:{}", g.id),
-            None if is_browser => tab_key(fg),
-            None => target.clone(),
-        };
 
         let mut action = Action::None;
         let mut action_label = String::new();
-        if grant.is_none() && is_browser && self.key_blocked(now, &target) {
+        if grant.is_none() && is_browser && self.blocked_tabs.contains_key(&target) {
             // Only now known to be a blocked channel (its first screenshot).
             action = Action::CloseTab;
             action_label = "tab closed (already blocked)".into();
+        } else if is_browser {
+            // A tab is blocked at the first off-task verdict: a wrong one costs
+            // a closed tab (and an access request), while waiting for more
+            // verdicts leaves the user a whole check interval of distraction.
+            if judgement.verdict == Verdict::OffTask {
+                self.blocked_tabs.insert(
+                    target,
+                    BlockedEntry {
+                        reason: judgement.reason.clone(),
+                        title: fg.title.clone(),
+                    },
+                );
+                action = Action::CloseTab;
+                action_label = "tab closed".into();
+            }
         } else {
+            // Closing an app can lose unsaved work, so an app needs
+            // `strikes_to_block` off-task verdicts in a row. Strikes on a
+            // granted app count per grant.
+            let key = match grant {
+                Some(g) => format!("grant:{}", g.id),
+                None => target.clone(),
+            };
             match judgement.verdict {
                 Verdict::OnTask => {
                     self.strikes.remove(&key);
@@ -328,58 +315,27 @@ impl MonitorState {
                 Verdict::Unsure => {}
                 Verdict::OffTask => {
                     let needed = config.strikes_to_block.max(1);
-                    let run = self.strikes.entry(key.clone()).or_default();
-                    run.count += 1;
-                    if !run.targets.iter().any(|(k, _, _)| *k == target) {
-                        run.targets.push((
+                    let strikes = self.strikes.entry(key.clone()).or_insert(0);
+                    *strikes += 1;
+                    if *strikes >= needed {
+                        self.strikes.remove(&key);
+                        self.blocked_processes.insert(
                             target.clone(),
-                            fg.title.clone(),
-                            judgement.reason.clone(),
-                        ));
-                    }
-                    if run.count >= needed {
-                        let run = self.strikes.remove(&key).unwrap_or_default();
-                        let until = (config.block_minutes > 0).then(|| {
-                            now + ChronoDuration::minutes(clamp_block_minutes(config.block_minutes))
-                        });
-                        if is_browser {
-                            let blocked = run.targets.len();
-                            for (block_key, title, reason) in run.targets {
-                                self.blocked_tabs.insert(
-                                    block_key,
-                                    BlockedEntry {
-                                        reason,
-                                        until,
-                                        title,
-                                    },
-                                );
-                            }
-                            action = Action::CloseTab;
-                            action_label = if blocked > 1 {
-                                format!("tab closed, {blocked} blocked")
-                            } else {
-                                "tab closed".into()
-                            };
-                        } else {
-                            self.blocked_processes.insert(
-                                target.clone(),
-                                BlockedEntry {
-                                    reason: judgement.reason.clone(),
-                                    until,
-                                    title: fg.title.clone(),
-                                },
-                            );
-                            action = Action::BlockProcess(target);
-                            action_label = "blocked".into();
-                        }
-                        if grant.is_some() {
-                            action_label = format!("access revoked, {action_label}");
-                        }
+                            BlockedEntry {
+                                reason: judgement.reason.clone(),
+                                title: fg.title.clone(),
+                            },
+                        );
+                        action = Action::BlockProcess(target);
+                        action_label = "blocked".into();
                     } else {
-                        action_label = format!("strike {}/{needed}", run.count);
+                        action_label = format!("strike {strikes}/{needed}");
                     }
                 }
             }
+        }
+        if grant.is_some() && action != Action::None {
+            action_label = format!("access revoked, {action_label}");
         }
 
         if self.verdicts.len() >= VERDICT_LOG_CAPACITY {
@@ -412,9 +368,9 @@ impl MonitorState {
     }
 }
 
-/// Strike and block key of a browser window: `process|site`. Counting per
-/// exact title let a user dodge blocks by moving to the next video or post
-/// (every title starts a fresh count); counting per site does not.
+/// Block key of a browser window: `process|site`. A block per exact title
+/// would let the user dodge it by moving to the next video or post; a block
+/// per site does not. (YouTube is blocked per channel instead: `youtube.rs`.)
 pub fn tab_key(fg: &Foreground) -> String {
     format!(
         "{}|{}",
@@ -478,10 +434,6 @@ const EARLY_MIN_GAP: ChronoDuration = ChronoDuration::seconds(15);
 
 /// Admin-entered values are used in date arithmetic; keep them sane so an
 /// absurd number cannot overflow (and panic) the monitor thread.
-fn clamp_block_minutes(minutes: u64) -> i64 {
-    minutes.min(7 * 24 * 60) as i64
-}
-
 fn clamp_interval(secs: u64) -> i64 {
     secs.clamp(10, 24 * 3600) as i64
 }
@@ -575,12 +527,9 @@ impl FocusMonitor {
         }
     }
 
-    /// Keep blocks in `store` and resume the ones saved there. Blocks meant to
-    /// last "until the session ends" are not resumed: that session is over.
+    /// Keep blocks in `store` and resume the ones saved there.
     pub fn with_block_store(mut self, store: JsonStore<SavedBlocks>) -> Self {
-        let mut saved = store.get();
-        saved.processes.retain(|_, b| b.until.is_some());
-        saved.tabs.retain(|_, b| b.until.is_some());
+        let saved = store.get();
         {
             let state = self.state.get_mut();
             state.blocked_processes = saved.processes;
@@ -592,10 +541,8 @@ impl FocusMonitor {
 
     /// Save the blocks if they changed since the last save.
     fn save_blocks(&self) {
-        let now = Utc::now();
         let current = {
-            let mut state = self.state.lock();
-            state.active_process_blocks(now); // drops expired entries
+            let state = self.state.lock();
             SavedBlocks {
                 processes: state.blocked_processes.clone(),
                 tabs: state.blocked_tabs.clone(),
@@ -692,7 +639,7 @@ impl FocusMonitor {
             if !exempt
                 && grant.is_none()
                 && config.is_browser(&fg.process_name)
-                && state.tab_blocked(now, &config, &fg)
+                && state.tab_blocked(&config, &fg)
             {
                 drop(state);
                 if self.close_tab_if_unchanged(&fg) {
@@ -1108,15 +1055,13 @@ mod tests {
         assert_eq!(h.calls.load(Ordering::SeqCst), 1);
         h.monitor.step(t0 + ChronoDuration::seconds(61));
         assert_eq!(h.calls.load(Ordering::SeqCst), 2);
-        let blocks = h
-            .monitor
-            .state()
-            .active_process_blocks(t0 + ChronoDuration::seconds(62));
+        let blocks = h.monitor.state().process_blocks();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].0, "steam.exe");
-        // Expires after block_minutes.
-        let later = t0 + ChronoDuration::minutes(31) + ChronoDuration::seconds(61);
-        assert!(h.monitor.state().active_process_blocks(later).is_empty());
+        // Blocks do not expire: a day later steam is still blocked.
+        *h.current.lock() = Some(fg("code.exe", "main.rs"));
+        h.monitor.step(t0 + ChronoDuration::days(1));
+        assert_eq!(h.monitor.state().process_blocks().len(), 1);
     }
 
     #[test]
@@ -1132,7 +1077,7 @@ mod tests {
         }
         assert_eq!(h.calls.load(Ordering::SeqCst), 5);
         assert!(h.saw_screenshot.load(Ordering::SeqCst));
-        assert!(h.monitor.state().active_process_blocks(t0).is_empty());
+        assert!(h.monitor.state().process_blocks().is_empty());
     }
 
     #[test]
@@ -1199,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn changing_task_clears_blocks() {
+    fn changing_task_rechecks_at_once_and_keeps_blocks() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
         let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
@@ -1211,9 +1156,10 @@ mod tests {
             .update(|c| c.task = "play games".into())
             .unwrap();
         h.monitor.step(t0 + ChronoDuration::seconds(1));
-        // Reset, then judged again under the new task (fixed judge blocks again).
+        // Reset, then judged again under the new task; the block stays.
         assert_eq!(h.calls.load(Ordering::SeqCst), 2);
         assert_eq!(h.monitor.state().task, "play games");
+        assert_eq!(h.monitor.state().blocked_processes.len(), 1);
     }
 
     #[test]
@@ -1396,12 +1342,11 @@ mod tests {
     }
 
     #[test]
-    fn off_purpose_use_revokes_the_grant_even_across_tab_titles() {
-        let config = session("thesis"); // 2 strikes
+    fn off_purpose_use_of_a_granted_site_revokes_the_grant_at_once() {
         let h = harness(
             Verdict::OnTask,
             fg("chrome.exe", "Rust async - YouTube"),
-            config,
+            session("thesis"),
         );
         let (h, _) = with_reviewer(h, true, 0);
         let t0 = Utc::now();
@@ -1409,13 +1354,9 @@ mod tests {
             .request_access(t0, site("youtube"), minutes(60), "Rust async 강의 시청")
             .unwrap();
 
-        // Two different videos, both off-purpose.
         *h.verdict.lock() = Verdict::OffTask;
         *h.current.lock() = Some(fg("chrome.exe", "Funny cats - YouTube"));
         h.monitor.step(t0 + ChronoDuration::seconds(1));
-        assert_eq!(h.monitor.grants().get().grants.len(), 1);
-        *h.current.lock() = Some(fg("chrome.exe", "Game trailer - YouTube"));
-        h.monitor.step(t0 + ChronoDuration::seconds(62));
 
         let grants = h.monitor.grants().get();
         assert!(grants.grants.is_empty());
@@ -1425,7 +1366,7 @@ mod tests {
         );
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
         let last = h.monitor.state().verdicts.back().cloned().unwrap();
-        assert!(last.action.starts_with("access revoked"));
+        assert_eq!(last.action, "access revoked, tab closed");
     }
 
     #[test]
@@ -1504,7 +1445,8 @@ mod tests {
     }
 
     #[test]
-    fn switching_channels_does_not_reset_strikes() {
+    fn a_channel_is_blocked_at_the_first_off_task_verdict() {
+        // `strikes_to_block` (2 here) applies to apps only.
         let h = harness(
             Verdict::OffTask,
             fg("chrome.exe", "Video 1 - YouTube"),
@@ -1513,20 +1455,13 @@ mod tests {
         *h.channel.lock() = "Cat TV".into();
         let t0 = Utc::now();
         h.monitor.step(t0);
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 0);
-        *h.current.lock() = Some(fg("chrome.exe", "(1) Video 2 - YouTube"));
-        *h.channel.lock() = "Game World".into();
-        h.monitor.step(t0 + ChronoDuration::seconds(61));
-        // Second strike on YouTube: both channels it saw are blocked.
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
         let blocked: Vec<String> = h.monitor.state().blocked_tabs.keys().cloned().collect();
-        assert_eq!(blocked.len(), 2, "{blocked:?}");
-        assert!(blocked.contains(&"chrome.exe|youtube channel: cat tv".to_string()));
+        assert_eq!(blocked, ["chrome.exe|youtube channel: cat tv"]);
         // Video 1 again: its channel is known, so it is closed without a check.
-        *h.current.lock() = Some(fg("chrome.exe", "Video 1 - YouTube"));
-        h.monitor.step(t0 + ChronoDuration::seconds(66));
+        h.monitor.step(t0 + ChronoDuration::seconds(5));
         assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 2);
-        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1588,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn timed_blocks_survive_a_task_change_and_a_session_restart() {
+    fn blocks_survive_a_task_change_and_a_session_restart() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
         let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
@@ -1605,27 +1540,7 @@ mod tests {
             .update(|c| c.session_active = false)
             .unwrap();
         h.monitor.step(t0 + ChronoDuration::seconds(2));
-        let blocks = h
-            .monitor
-            .state()
-            .active_process_blocks(t0 + ChronoDuration::seconds(3));
-        assert_eq!(blocks.len(), 1);
-    }
-
-    #[test]
-    fn session_long_blocks_end_with_the_session() {
-        let mut config = session("thesis");
-        config.strikes_to_block = 1;
-        config.block_minutes = 0;
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        h.monitor
-            .store()
-            .update(|c| c.session_active = false)
-            .unwrap();
-        h.monitor.step(t0 + ChronoDuration::seconds(1));
-        assert!(h.monitor.state().blocked_processes.is_empty());
+        assert_eq!(h.monitor.state().process_blocks().len(), 1);
     }
 
     #[test]
@@ -1673,10 +1588,9 @@ mod tests {
     }
 
     #[test]
-    fn absurd_block_minutes_do_not_panic() {
+    fn absurd_check_interval_does_not_panic() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
-        config.block_minutes = u64::MAX;
         config.check_interval_secs = u64::MAX;
         let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
         h.monitor.step(Utc::now());
@@ -1747,7 +1661,7 @@ mod tests {
             AiFocusConfig::default(),
         );
         let monitor2 = h2.monitor.with_block_store(saved);
-        let blocks = monitor2.state().active_process_blocks(Utc::now());
+        let blocks = monitor2.state().process_blocks();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].0, "steam.exe");
     }
