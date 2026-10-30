@@ -11,9 +11,10 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use chrono::Local;
+use chrono::{Local, Utc};
 use eframe::egui;
 use machine::session::current_session_id;
+use machine::user_api::grants::{GrantEvent, GrantLogEntry};
 use machine::user_api::{call, Status, Verdict};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -52,6 +53,28 @@ struct Shared {
     message: String,
     /// The AI's answer to the last change request.
     decision: Option<ChangeRecord>,
+    /// The AI's answer to the last access request.
+    access: Option<GrantLogEntry>,
+}
+
+/// Access request form.
+struct AccessForm {
+    site: bool,
+    target: String,
+    /// `None` = permanent.
+    minutes: Option<u32>,
+    purpose: String,
+}
+
+impl Default for AccessForm {
+    fn default() -> Self {
+        Self {
+            site: true,
+            target: String::new(),
+            minutes: Some(30),
+            purpose: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +99,7 @@ struct FocusApp {
     other_todo: Option<String>,
     free_task: String,
     reason: String,
+    access: AccessForm,
 }
 
 impl FocusApp {
@@ -102,6 +126,7 @@ impl FocusApp {
             other_todo: None,
             free_task: String::new(),
             reason: String::new(),
+            access: AccessForm::default(),
         }
     }
 
@@ -126,6 +151,9 @@ impl FocusApp {
                         if status.last_decision.is_some() {
                             s.decision = status.last_decision.clone();
                         }
+                        if status.last_access.is_some() {
+                            s.access = status.last_access.clone();
+                        }
                         s.status = Some(Ok(status));
                     }
                     Err(err) => s.message = err,
@@ -134,6 +162,125 @@ impl FocusApp {
             pending.store(false, Ordering::SeqCst);
             ctx.request_repaint();
         });
+    }
+
+    /// Fill the access form from a block-list key: `steam.exe`, or
+    /// `chrome.exe|Funny cats - YouTube` (site name = text after the last " - ").
+    fn prefill_access(&mut self, key: &str) {
+        match key.split_once('|') {
+            Some((_, title)) => {
+                self.access.site = true;
+                self.access.target = title
+                    .rsplit(" - ")
+                    .next()
+                    .unwrap_or(title)
+                    .trim()
+                    .to_string();
+            }
+            None => {
+                self.access.site = false;
+                self.access.target = key.to_string();
+            }
+        }
+    }
+
+    fn access_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
+        ui.heading("Need an app or website?");
+        if !status.session_active {
+            ui.label("Start a focus session first.");
+            return;
+        }
+        ui.label(
+            "Ask for access and say what it is for. The AI decides. While access is granted, \
+             the AI keeps checking that you use it for that purpose; other use ends the access.",
+        );
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.access.site, true, "Website");
+            ui.radio_value(&mut self.access.site, false, "App");
+            let hint = if self.access.site {
+                "word in the tab title, e.g. YouTube"
+            } else {
+                "program, e.g. spotify.exe"
+            };
+            ui.add(egui::TextEdit::singleline(&mut self.access.target).hint_text(hint));
+        });
+        ui.horizontal(|ui| {
+            ui.label("for");
+            for m in [15, 30, 60, 120] {
+                ui.radio_value(&mut self.access.minutes, Some(m), format!("{m} min"));
+            }
+            ui.radio_value(&mut self.access.minutes, None, "permanently");
+        });
+        ui.add(
+            egui::TextEdit::multiline(&mut self.access.purpose)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .hint_text("what you will use it for, e.g. Rust async 강의 영상 시청"),
+        );
+        let idle = !self.pending.load(Ordering::SeqCst);
+        let ready = idle
+            && !self.access.target.trim().is_empty()
+            && self.access.purpose.trim().chars().count() >= 4;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(ready, egui::Button::new("Ask")).clicked() {
+                let target = if self.access.site {
+                    json!({ "kind": "site", "keyword": self.access.target.trim() })
+                } else {
+                    json!({ "kind": "app", "process": self.access.target.trim() })
+                };
+                let duration = match self.access.minutes {
+                    Some(minutes) => json!({ "kind": "minutes", "minutes": minutes }),
+                    None => json!({ "kind": "permanent" }),
+                };
+                self.send(
+                    "request_access",
+                    json!({ "target": target, "duration": duration, "purpose": self.access.purpose }),
+                );
+                self.access.purpose.clear();
+            }
+            if !idle {
+                ui.spinner();
+            }
+        });
+        if let Some(entry) = &self.shared.lock().access {
+            let approved = matches!(entry.event, GrantEvent::Requested { approved: true, .. });
+            let (color, label) = if approved {
+                (GREEN, "granted")
+            } else {
+                (RED, "refused")
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(color, label);
+                ui.label(&entry.message);
+            });
+        }
+
+        if !status.grants.is_empty() {
+            ui.label("Access you have now (still observed):");
+        }
+        for g in &status.grants {
+            let until = g
+                .until
+                .map(|u| u.with_timezone(&Local).format("until %H:%M").to_string())
+                .unwrap_or_else(|| "permanent".into());
+            ui.label(format!("• {} ({until}) — {}", g.target.label(), g.purpose));
+        }
+        if let Some(revoked) = status
+            .grant_log
+            .iter()
+            .find(|e| e.event == GrantEvent::RevokedForMisuse)
+            .filter(|e| Utc::now() - e.at < chrono::Duration::minutes(30))
+        {
+            ui.colored_label(
+                RED,
+                format!(
+                    "Access to {} was revoked at {}: {}",
+                    revoked.target.label(),
+                    revoked.at.with_timezone(&Local).format("%H:%M"),
+                    revoked.message
+                ),
+            );
+        }
     }
 
     fn free_mode_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
@@ -368,8 +515,16 @@ impl eframe::App for FocusApp {
                         .until
                         .map(|u| u.with_timezone(&Local).format("until %H:%M").to_string())
                         .unwrap_or_else(|| "until the session ends".into());
-                    ui.label(format!("{} ({until}) — {}", b.key, b.reason));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("{} ({until}) — {}", b.key, b.reason));
+                        if ui.small_button("Ask for access").clicked() {
+                            self.prefill_access(&b.key);
+                        }
+                    });
                 }
+
+                ui.separator();
+                self.access_ui(ui, &status);
 
                 ui.separator();
                 ui.heading("Recent AI checks");
