@@ -60,7 +60,9 @@ Code walkthrough (Korean): [`docs/ai_focus_rule.md`](docs/ai_focus_rule.md).
 
 **Easiest:** download `DigitalWellbeing-Setup-<version>.exe` from the GitHub
 Releases page and run it; it asks for the work account and registers the
-service. (Releases are built by `.github/workflows/release.yml` on a `v*` tag.)
+service. (Releases are built by `.github/workflows/release.yml` when a `v*`
+tag is pushed, or when a branch push changes `installer/RELEASE_VERSION` — the
+workflow then creates the `v<version>` tag itself.)
 
 Run the blocker as a Windows service so a standard account cannot stop it, and
 start it at boot:
