@@ -1,5 +1,5 @@
-//! The Windows service: runs as LocalSystem from boot and keeps exactly one
-//! agent alive in every managed user session.
+//! Responsibility: Run as the Windows service and keep exactly one agent alive in every managed
+//! user session.
 
 use crate::spawn::{spawn_in_session, user_sessions, Child};
 use machine::MachineConfig;
@@ -76,6 +76,9 @@ fn run_service() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Responsibility: Track the agent of each session: start missing ones, restart dead ones, stop
+/// those whose session is no longer managed.
+///
 /// Session id -> running agent.
 struct Supervisor {
     exe: PathBuf,

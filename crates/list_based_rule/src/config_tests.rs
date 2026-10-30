@@ -1,3 +1,6 @@
+//! Responsibility: Test ListConfig: name normalization, blacklist/whitelist decisions,
+//! protected names.
+
 use super::*;
 
 #[test]

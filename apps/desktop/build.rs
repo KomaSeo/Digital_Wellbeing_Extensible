@@ -1,3 +1,6 @@
+//! Responsibility: Embed the Windows manifest that makes digital-wellbeing.exe always run as
+//! administrator.
+
 fn main() {
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         use embed_manifest::manifest::ExecutionLevel;

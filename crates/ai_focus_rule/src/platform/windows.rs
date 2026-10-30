@@ -1,3 +1,5 @@
+//! Responsibility: Implement Desktop on Windows with Win32 calls and xcap.
+
 use super::{Desktop, Foreground, Screenshot};
 use parking_lot::Mutex;
 use std::mem::size_of;
@@ -12,6 +14,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const VK_W: VIRTUAL_KEY = 0x57;
 
+/// Responsibility: Answer Desktop queries on Windows; cache a sysinfo System to turn pids into
+/// process names.
 pub struct WindowsDesktop {
     system: Mutex<System>,
 }

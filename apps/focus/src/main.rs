@@ -1,3 +1,6 @@
+//! Responsibility: Show the standard user their focus session, and send their requests (start,
+//! get a task, change it, ask for access) to the agent of their session.
+//!
 //! Digital Wellbeing Focus — the app a *standard* (non-admin) user sees.
 //!
 //! It starts at logon (HKLM Run key written by the installer), runs with the
@@ -45,7 +48,8 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// State shared with background threads (status poller, request sender).
+/// Responsibility: Hold the latest agent status and request results, shared by the UI thread
+/// and the threads that talk to the agent.
 #[derive(Default)]
 struct Shared {
     status: Option<Result<Status, String>>,
@@ -57,7 +61,7 @@ struct Shared {
     access: Option<GrantLogEntry>,
 }
 
-/// Access request form.
+/// Responsibility: Keep what the user types into the access request form.
 struct AccessForm {
     site: bool,
     target: String,
@@ -77,6 +81,7 @@ impl Default for AccessForm {
     }
 }
 
+/// Responsibility: Remember which kind of change the user picked in the planner's change form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChangeChoice {
     Done,
@@ -85,6 +90,8 @@ enum ChangeChoice {
     End,
 }
 
+/// Responsibility: Draw the Focus window, keep the form inputs, and send requests to the agent
+/// without blocking the UI.
 struct FocusApp {
     session: u32,
     ctx: egui::Context,

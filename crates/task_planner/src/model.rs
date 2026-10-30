@@ -1,11 +1,11 @@
-//! Data types: the admin's to-do list, and the runtime record of what was
-//! assigned and which change requests were approved.
+//! Responsibility: Define the planner's data: the admin's to-do list, the current assignment,
+//! change requests and finished to-dos.
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-/// One entry of the admin-maintained to-do list.
+/// Responsibility: Describe one to-do on the admin's list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TodoItem {
     /// Stable id; generated when the admin adds the item.
@@ -40,6 +40,8 @@ impl TodoItem {
     }
 }
 
+/// Responsibility: Hold the admin's planner settings and to-do list (planner.json).
+///
 /// Admin settings (`planner.json`). Standard users cannot edit this file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -50,6 +52,8 @@ pub struct PlannerConfig {
     pub todos: Vec<TodoItem>,
 }
 
+/// Responsibility: Say who chose the current task: the AI, or an approved change request.
+///
 /// Why the current task is what it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +64,7 @@ pub enum AssignmentSource {
     ApprovedChange,
 }
 
+/// Responsibility: Record the task currently given to the user, and why.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {
     /// The to-do this belongs to; `None` for an approved free-text task.
@@ -72,6 +77,8 @@ pub struct Assignment {
     pub at: DateTime<Utc>,
 }
 
+/// Responsibility: Name what a change request asks for.
+///
 /// What the user is asking for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -86,6 +93,7 @@ pub enum ChangeKind {
     End,
 }
 
+/// Responsibility: Record one change request and the AI's decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangeRecord {
     pub at: DateTime<Utc>,
@@ -98,6 +106,7 @@ pub struct ChangeRecord {
     pub reply: String,
 }
 
+/// Responsibility: Record that a to-do was finished.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoneRecord {
     pub todo_id: String,
@@ -105,6 +114,9 @@ pub struct DoneRecord {
     pub at: DateTime<Utc>,
 }
 
+/// Responsibility: Hold the planner's runtime record (planner_state.json): assignment, finished
+/// to-dos, request log.
+///
 /// Runtime state (`planner_state.json`), written by the agent only.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -121,7 +133,7 @@ impl PlannerState {
     }
 }
 
-/// Everything the Focus app shows about the planner.
+/// Responsibility: Carry what the Focus app shows about the planner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannerStatus {
     /// Planner is enabled and has open to-dos: free-text tasks are refused.

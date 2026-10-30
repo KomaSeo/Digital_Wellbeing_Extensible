@@ -1,3 +1,5 @@
+//! Responsibility: Expose the task planner's public API.
+//!
 //! Task planner: the AI picks what to work on from an admin-maintained to-do
 //! list, and changing that task needs a reason the AI approves.
 //!

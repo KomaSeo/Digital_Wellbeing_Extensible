@@ -1,3 +1,6 @@
+//! Responsibility: Define access grants (what is granted, for how long, for which purpose) and
+//! their event log.
+//!
 //! Access grants: the user asks to use an app or website that the focus check
 //! blocks, and says what it is for. If the AI approves, the block is lifted.
 //!
@@ -13,7 +16,8 @@ use std::collections::VecDeque;
 
 const LOG_CAPACITY: usize = 50;
 
-/// What a grant covers.
+/// Responsibility: Name what a grant covers (an app, or browser tabs by title keyword) and
+/// decide whether a window or a block key falls under it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GrantTarget {
@@ -75,7 +79,7 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
-/// How long the user asks for.
+/// Responsibility: Say how long the user asks for access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GrantDuration {
@@ -86,6 +90,8 @@ pub enum GrantDuration {
     Permanent,
 }
 
+/// Responsibility: Record one approved access (target, purpose, end time) and tell whether it
+/// is still in force.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Grant {
     pub id: String,
@@ -105,6 +111,8 @@ impl Grant {
     }
 }
 
+/// Responsibility: Say what happened to a grant: requested and decided, revoked for misuse, or
+/// revoked by the admin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GrantEvent {
@@ -121,6 +129,7 @@ pub enum GrantEvent {
     RevokedByAdmin,
 }
 
+/// Responsibility: Record one grant event with its target, purpose and message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrantLogEntry {
     pub at: DateTime<Utc>,
@@ -131,7 +140,10 @@ pub struct GrantLogEntry {
     pub message: String,
 }
 
-/// Contents of `grants.json`. Only the process running the monitor writes it.
+/// Responsibility: Hold the grants in force and the event log (the contents of grants.json),
+/// and find the grant covering a window.
+///
+/// Only the process running the monitor writes `grants.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GrantState {

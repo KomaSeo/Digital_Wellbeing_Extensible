@@ -1,4 +1,5 @@
-//! Admin tab: edit the to-do list, see what the agent assigned and decided.
+//! Responsibility: Draw the admin's planner tab: edit the to-do list and show the agent's
+//! assignments and change requests.
 
 use crate::model::{ChangeKind, PlannerConfig, PlannerState, TodoItem};
 use ai_focus_rule::store::JsonStore;
@@ -9,6 +10,8 @@ use std::time::{Duration, Instant};
 
 const STATE_REFRESH: Duration = Duration::from_secs(3);
 
+/// Responsibility: Hold unsaved edits to the to-do list until the admin presses Save.
+///
 /// Editable copy of the list. Edits stay here until "Save", so a half-typed
 /// list never reaches the agent.
 struct Draft {
@@ -33,6 +36,8 @@ impl Draft {
     }
 }
 
+/// Responsibility: Keep the tab's draft, inputs and last read of the agent's state between
+/// frames.
 struct UiState {
     draft: Option<Draft>,
     new_title: String,
@@ -41,6 +46,7 @@ struct UiState {
     state_read: Option<Instant>,
 }
 
+/// Responsibility: Implement the Task planner tab over the planner's config and state files.
 pub struct PlannerAdminUi {
     config: JsonStore<PlannerConfig>,
     /// Read-only view of the agent's `planner_state.json`.

@@ -1,3 +1,6 @@
+//! Responsibility: Connect the monitor to the enforcer (BlockRule) and draw the AI focus
+//! settings tab (RuleUi).
+
 use crate::config::AiFocusStore;
 use crate::grants::GrantEvent;
 use crate::judge::Verdict;
@@ -8,6 +11,7 @@ use parking_lot::Mutex;
 use rule_ui::RuleUi;
 use std::sync::Arc;
 
+/// Responsibility: Keep the AI focus tab's edit buffers and status message between frames.
 #[derive(Default)]
 struct AiUiState {
     task_input: Option<String>,
@@ -20,6 +24,9 @@ struct AiUiState {
     grants_read: Option<std::time::Instant>,
 }
 
+/// Responsibility: Report the monitor's blocked processes to the enforcer, and draw the tab:
+/// session, status, grants and settings.
+///
 /// Blocks apps that an AI judge finds unrelated to the declared task.
 pub struct AiFocusRule {
     monitor: Arc<FocusMonitor>,
@@ -467,6 +474,9 @@ fn name_list(
     });
 }
 
+/// Responsibility: Hand out the same AiFocusRule as a block rule and as a settings tab, plus
+/// its monitor.
+///
 /// Shared handle so the app can register block + UI sides of the same rule.
 #[derive(Clone)]
 pub struct AiFocusRuleHandle {

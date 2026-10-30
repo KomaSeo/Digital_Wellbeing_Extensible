@@ -1,3 +1,6 @@
+//! Responsibility: Expose the AI focus rule's public API, and assemble a monitor wired to the
+//! real desktop and Claude.
+//!
 //! AI-judged focus rule.
 //!
 //! While a focus session runs, [`FocusMonitor`] samples the foreground window

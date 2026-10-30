@@ -1,9 +1,12 @@
+//! Responsibility: Turn ListStore into a BlockRule and draw its settings tab.
+
 use crate::{ListMode, ListStore};
 use enforcer::{BlockEvent, BlockRule, ProcessSnapshot};
 use parking_lot::Mutex;
 use rule_ui::RuleUi;
 use std::sync::Arc;
 
+/// Responsibility: Keep the list tab's text inputs and status message between frames.
 #[derive(Default)]
 struct ListUiState {
     name_input: String,
@@ -12,6 +15,9 @@ struct ListUiState {
     status: String,
 }
 
+/// Responsibility: Block processes by the configured blacklist or whitelist, and draw the list
+/// editor.
+///
 /// Blacklist / whitelist [`BlockRule`], backed by [`ListStore`].
 pub struct ListBasedRule {
     store: ListStore,
@@ -220,6 +226,8 @@ impl RuleUi for ListBasedRule {
     }
 }
 
+/// Responsibility: Hand out the same ListBasedRule as a block rule and as a settings tab.
+///
 /// Shared handle so the app can register block + UI sides of the same rule.
 #[derive(Clone)]
 pub struct ListBasedRuleHandle {

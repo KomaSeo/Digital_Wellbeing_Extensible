@@ -1,4 +1,5 @@
-//! Local API between a session's agent (server) and the Focus app (client).
+//! Responsibility: Carry requests from the Focus app to the agent of its session (server and
+//! client), exposing only what the user may control.
 //!
 //! The agent runs as SYSTEM, so the user cannot reach its settings; this API
 //! exposes only what the user is meant to control: their own focus session.
@@ -33,6 +34,11 @@ use std::thread;
 use std::time::Duration;
 use task_planner::{ChangeKind, ChangeRecord, PlannerStatus, TaskPlanner};
 
+/// Re-exported so clients need not depend on the rule crates.
+pub use ai_focus_rule::grants;
+pub use ai_focus_rule::Verdict;
+pub use task_planner::{AssignmentSource, TodoItem};
+
 pub const BASE_PORT: u16 = 8770;
 const MAX_REQUEST: usize = 64 * 1024;
 
@@ -40,6 +46,7 @@ pub fn port_for_session(session: u32) -> u16 {
     BASE_PORT.saturating_add(session.min(1000) as u16)
 }
 
+/// Responsibility: Describe one block for the Focus app.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockedItem {
     /// Process name, or `process|tab title` for a browser tab.
@@ -48,6 +55,7 @@ pub struct BlockedItem {
     pub until: Option<DateTime<Utc>>,
 }
 
+/// Responsibility: Carry everything the Focus app shows; every API call returns it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
     pub session_active: bool,
@@ -70,7 +78,8 @@ pub struct Status {
     pub last_access: Option<GrantLogEntry>,
 }
 
-/// What the agent exposes to the Focus app.
+/// Responsibility: Hold what the agent exposes (focus monitor, optional planner) and tell
+/// whether the planner restricts a request.
 pub struct AgentApi {
     pub monitor: Arc<FocusMonitor>,
     pub planner: Option<Arc<TaskPlanner>>,
@@ -327,8 +336,3 @@ mod tests {
         );
     }
 }
-
-/// Re-exported so clients need not depend on the rule crates.
-pub use ai_focus_rule::grants;
-pub use ai_focus_rule::Verdict;
-pub use task_planner::{AssignmentSource, TodoItem};

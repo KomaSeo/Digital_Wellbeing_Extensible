@@ -1,3 +1,6 @@
+//! Responsibility: Define the AI focus settings, and load, save and reload them from
+//! ai_focus.json.
+
 use directories::ProjectDirs;
 use enforcer::normalize_process_name;
 use parking_lot::RwLock;
@@ -10,6 +13,7 @@ use thiserror::Error;
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 
+/// Responsibility: Report why the settings could not be loaded or saved.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("could not resolve app data directory")]
@@ -20,6 +24,9 @@ pub enum ConfigError {
     Json(#[from] serde_json::Error),
 }
 
+/// Responsibility: Hold every AI focus setting and answer questions about it (is this app
+/// allowed, private, a browser; which API key to use).
+///
 /// Persisted settings for [`crate::AiFocusRule`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -108,7 +115,8 @@ impl AiFocusConfig {
     }
 }
 
-/// Shared, optionally file-backed [`AiFocusConfig`].
+/// Responsibility: Share one AiFocusConfig between threads and keep it in sync with its file
+/// (read-only for agents).
 #[derive(Clone)]
 pub struct AiFocusStore {
     path: Option<PathBuf>,

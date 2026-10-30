@@ -1,3 +1,6 @@
+//! Responsibility: Run the AI focus check: sample the foreground window, ask the judge on
+//! schedule, keep strikes, blocks and grants, and handle access requests.
+
 use crate::access_review::{
     claude_reviewer_provider, granted_length, AccessRequest, ReviewerProvider,
 };
@@ -25,7 +28,7 @@ const VERDICT_LOG_CAPACITY: usize = 100;
 const MAX_TITLE_CHARS: usize = 120;
 const SCREENSHOT_MAX_WIDTH: u32 = 1280;
 
-/// One stretch of time a window stayed in front.
+/// Responsibility: Record one stretch of time a window stayed in front.
 #[derive(Debug, Clone, Serialize)]
 pub struct ActivityEntry {
     pub process_name: String,
@@ -34,6 +37,7 @@ pub struct ActivityEntry {
     pub last_seen: DateTime<Utc>,
 }
 
+/// Responsibility: Record one judgement and what the monitor did about it, for the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerdictLogEntry {
     pub at: DateTime<Utc>,
@@ -45,13 +49,14 @@ pub struct VerdictLogEntry {
     pub action: String,
 }
 
+/// Responsibility: Record why, and until when, something is blocked.
 #[derive(Debug, Clone, Serialize)]
 pub struct BlockedEntry {
     pub reason: String,
     pub until: Option<DateTime<Utc>>,
 }
 
-/// What a judgement asks the monitor to do right away.
+/// Responsibility: Tell the caller what to do right after a judgement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     None,
@@ -60,7 +65,8 @@ pub enum Action {
     CloseTab,
 }
 
-/// Pure focus-session state; no I/O, so it is unit-testable.
+/// Responsibility: Hold the session's runtime state (history, strikes, blocks, verdicts) and
+/// apply the rules to it, without any I/O.
 #[derive(Debug, Default)]
 pub struct MonitorState {
     pub task: String,
@@ -254,6 +260,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// Shortest accepted purpose, so "ok" or "pls" never reaches the AI.
 const MIN_PURPOSE_CHARS: usize = 4;
 
+/// Responsibility: Report why an access request was refused before or during the AI review.
 #[derive(Debug, Error)]
 pub enum AccessError {
     #[error("start a focus session first")]
@@ -283,6 +290,9 @@ pub fn claude_judge_provider() -> JudgeProvider {
     })
 }
 
+/// Responsibility: Drive the check loop and access requests by combining MonitorState with the
+/// desktop, the judge, the reviewer and the grant store.
+///
 /// Background worker: samples the foreground window, asks the judge on schedule,
 /// and keeps the block lists the [`crate::AiFocusRule`] reports to the enforcer.
 pub struct FocusMonitor {
@@ -608,6 +618,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
+    /// Responsibility: Test double for Desktop: a settable foreground window, a gray
+    /// screenshot, counted tab closes.
     struct FakeDesktop {
         fg: Arc<Mutex<Option<Foreground>>>,
         tabs_closed: Arc<AtomicUsize>,
@@ -630,6 +642,8 @@ mod tests {
         }
     }
 
+    /// Responsibility: Test double for Judge: return a settable verdict and record what it was
+    /// asked.
     struct FixedJudge {
         verdict: Arc<Mutex<Verdict>>,
         saw_grant: Arc<Mutex<Option<String>>>,
@@ -656,6 +670,7 @@ mod tests {
         }
     }
 
+    /// Responsibility: Bundle a monitor under test with handles to its fakes.
     struct Harness {
         monitor: FocusMonitor,
         calls: Arc<AtomicUsize>,
@@ -874,7 +889,8 @@ mod tests {
 
     use crate::access_review::{AccessDecision, AccessReviewer};
 
-    /// Approves or rejects every request; counts calls.
+    /// Responsibility: Test double for AccessReviewer: approve or reject everything, counting
+    /// calls.
     struct FixedReviewer {
         approve: bool,
         minutes: u32,

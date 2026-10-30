@@ -1,3 +1,6 @@
+//! Responsibility: Mirror one JSON file in memory for any serde type, with atomic writes and an
+//! optional read-only mode.
+
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -6,7 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// A JSON file mirrored in memory.
+/// Responsibility: Share one value between threads and keep it in sync with its file.
 ///
 /// `writable = false` means this process only reads the file (the agent reading
 /// the admin's `planner.json`); `update` then changes memory only.

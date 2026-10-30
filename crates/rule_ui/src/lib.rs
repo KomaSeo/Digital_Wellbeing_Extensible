@@ -1,6 +1,8 @@
+//! Responsibility: Define the traits for tabs in the desktop shell, and the shared font setup.
+
 use enforcer::{BlockRule, ProcessSnapshot};
 
-/// Settings UI for a [`BlockRule`].
+/// Responsibility: Draw the settings tab of one BlockRule.
 ///
 /// Only types that already implement [`BlockRule`] can implement this trait.
 /// Identity (`id` / `name` / `description`) comes from [`BlockRule`].
@@ -38,7 +40,7 @@ pub fn install_system_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// A tab in the desktop shell that is not a block rule (e.g. the task planner).
+/// Responsibility: Draw a tab that is not tied to a block rule.
 pub trait Panel: Send + Sync {
     fn id(&self) -> &str;
     fn name(&self) -> &str;

@@ -1,4 +1,4 @@
-//! Windows terminal-services session ids.
+//! Responsibility: Find the Windows login session of the current process or of any pid.
 //!
 //! Every logged-on user has their own session (desktop, windows, processes);
 //! services run in session 0. The agent runs inside one user's session and

@@ -1,3 +1,6 @@
+//! Responsibility: Choose the role of digital-wellbeing-service.exe from its first argument
+//! (install, uninstall, service, agent) and set up logging.
+//!
 //! Machine-wide install of Digital Wellbeing.
 //!
 //! One binary, four roles (first argument):

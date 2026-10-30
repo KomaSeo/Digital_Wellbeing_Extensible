@@ -1,9 +1,10 @@
-//! OS access the focus monitor needs: foreground window, screenshot, tab close.
+//! Responsibility: Define the operating-system access the monitor needs (foreground window,
+//! screenshot, tab close) and pick the implementation for the current OS.
 
 #[cfg(windows)]
 mod windows;
 
-/// The window the user is currently looking at.
+/// Responsibility: Describe the window in front: handle, process and title.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Foreground {
     /// Opaque native window handle (HWND on Windows).
@@ -13,13 +14,15 @@ pub struct Foreground {
     pub title: String,
 }
 
-/// Raw RGBA8 pixels.
+/// Responsibility: Hold the raw RGBA pixels of one captured monitor.
 pub struct Screenshot {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
 }
 
+/// Responsibility: Give the monitor the foreground window, a screenshot of its monitor, and a
+/// way to close the active tab.
 pub trait Desktop: Send + Sync {
     fn foreground(&self) -> Option<Foreground>;
 
@@ -43,6 +46,8 @@ pub fn native() -> Box<dyn Desktop> {
     }
 }
 
+/// Responsibility: Stand in on systems without an implementation: report nothing, so the
+/// monitor stays idle.
 #[cfg(not(windows))]
 struct Unsupported;
 

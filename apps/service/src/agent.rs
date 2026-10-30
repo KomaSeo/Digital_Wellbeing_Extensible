@@ -1,4 +1,5 @@
-//! The per-session agent.
+//! Responsibility: Run the rule engine (list rule, AI focus monitor, task planner, access
+//! grants) inside one user session, and reload the admin's settings when they change.
 //!
 //! Started by the service *inside* a user's session but with the service's
 //! SYSTEM token. Consequences:

@@ -1,3 +1,6 @@
+//! Responsibility: Define the blacklist/whitelist configuration and ListStore, which changes
+//! and persists it.
+
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -18,6 +21,7 @@ pub fn always_protected() -> &'static [&'static str] {
     enforcer::never_terminate()
 }
 
+/// Responsibility: Say whether the blacklist or the whitelist is enforced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ListMode {
@@ -26,6 +30,7 @@ pub enum ListMode {
     Whitelist,
 }
 
+/// Responsibility: Keep a named snapshot of the lists so it can be applied again later.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Strategy {
     pub name: String,
@@ -34,6 +39,9 @@ pub struct Strategy {
     pub whitelist: BTreeSet<String>,
 }
 
+/// Responsibility: Hold the lists and the mode, and decide whether a process name must be
+/// blocked.
+///
 /// Persisted blacklist / whitelist configuration for [`ListBasedRule`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListConfig {
@@ -95,6 +103,7 @@ impl ListConfig {
     }
 }
 
+/// Responsibility: Report why a list change failed.
 #[derive(Debug, Error)]
 pub enum ListError {
     #[error("io error: {0}")]
@@ -109,6 +118,7 @@ pub enum ListError {
     NoAppData,
 }
 
+/// Responsibility: Share the ListConfig between threads, apply changes to it, and persist them.
 #[derive(Clone)]
 pub struct ListStore {
     inner: Arc<RwLock<ListConfig>>,

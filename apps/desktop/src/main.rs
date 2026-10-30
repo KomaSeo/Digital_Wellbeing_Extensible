@@ -1,3 +1,6 @@
+//! Responsibility: Start the desktop window. Standalone: enforce the rules in this process and
+//! serve the local API. Machine install: only edit the shared settings files.
+
 use ai_focus_rule::grants::GrantState;
 use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
 use eframe::egui;
@@ -113,6 +116,7 @@ fn start_machine_admin() -> Started {
     (router, rule_uis, panels, status)
 }
 
+/// Responsibility: Remember which tab the window shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MainTab {
     /// Running processes + recent blocks overview.
@@ -123,6 +127,8 @@ enum MainTab {
     Panel(String),
 }
 
+/// Responsibility: Draw the desktop window every frame: tab bar, monitor view, and the selected
+/// rule's or panel's settings.
 struct App {
     router: ToolRouter,
     rule_uis: Vec<Arc<dyn RuleUi>>,

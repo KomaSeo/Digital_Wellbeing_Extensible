@@ -1,3 +1,5 @@
+//! Responsibility: Test ListStore with in-memory persistence.
+
 #![cfg(test)]
 
 use super::*;

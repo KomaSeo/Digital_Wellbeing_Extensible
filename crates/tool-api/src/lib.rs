@@ -1,3 +1,6 @@
+//! Responsibility: Serve the standalone JSON-RPC API on 127.0.0.1: parse requests and route
+//! them to the enforcer and ListStore.
+
 use enforcer::Enforcer;
 use list_based_rule::{ListConfig, ListMode, ListStore};
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,7 @@ use thiserror::Error;
 /// Local function-call endpoint (JSON-RPC over TCP).
 pub const DEFAULT_PORT: u16 = 8765;
 
+/// Responsibility: Parse one JSON-RPC request.
 #[derive(Debug, Deserialize)]
 pub struct RpcRequest {
     pub id: Option<Value>,
@@ -21,6 +25,7 @@ pub struct RpcRequest {
     pub params: Value,
 }
 
+/// Responsibility: Serialize one JSON-RPC response.
 #[derive(Debug, Serialize)]
 pub struct RpcResponse {
     pub id: Option<Value>,
@@ -30,18 +35,21 @@ pub struct RpcResponse {
     pub error: Option<RpcErrorBody>,
 }
 
+/// Responsibility: Describe the error part of a JSON-RPC response.
 #[derive(Debug, Serialize)]
 pub struct RpcErrorBody {
     pub code: i32,
     pub message: String,
 }
 
+/// Responsibility: Report why a method call failed.
 #[derive(Debug, Error)]
 pub enum ToolError {
     #[error("{0}")]
     Message(String),
 }
 
+/// Responsibility: Map method names to enforcer and list-store operations.
 #[derive(Clone)]
 pub struct ToolRouter {
     enforcer: Arc<Enforcer>,

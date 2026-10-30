@@ -1,10 +1,13 @@
+//! Responsibility: Test TaskPlanner end to end with a fake AI advisor.
+
 use super::*;
 use ai_focus_rule::{platform, AiFocusConfig, AiFocusStore, FocusMonitor, JudgeError};
 use chrono::Utc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// Picks the first open to-do (or a bogus id), approves according to a flag.
+/// Responsibility: Test double for Advisor: pick the first open to-do (or a bogus id), approve
+/// per flag, count calls.
 struct FakeAdvisor {
     approve: AtomicBool,
     bogus_pick: AtomicBool,
@@ -37,6 +40,7 @@ impl Advisor for FakeAdvisor {
     }
 }
 
+/// Responsibility: Bundle a planner under test with its focus monitor and fake advisor.
 struct Harness {
     planner: TaskPlanner,
     focus: Arc<FocusMonitor>,

@@ -1,4 +1,5 @@
-//! [`TaskPlanner`]: assigns a task from the list and arbitrates change requests.
+//! Responsibility: Assign the user's task from the list and arbitrate change requests, driving
+//! the focus session.
 //!
 //! It drives the AI focus session: an assignment becomes the focus monitor's
 //! task (and starts the session); an approved "end" stops it.
@@ -21,6 +22,7 @@ const MIN_REASON_CHARS: usize = 4;
 /// An assignment older than this is not resumed after a restart; a new one is picked.
 const RESUME_WITHIN: Duration = Duration::hours(12);
 
+/// Responsibility: Report why an assignment or a change request was refused.
 #[derive(Debug, Error)]
 pub enum PlannerError {
     #[error("the planner is off or every to-do is done")]
@@ -41,6 +43,8 @@ pub enum PlannerError {
     Io(#[from] std::io::Error),
 }
 
+/// Responsibility: Own the planner's config and state stores, and run assign / request_change
+/// against the AI advisor.
 pub struct TaskPlanner {
     config: JsonStore<PlannerConfig>,
     state: JsonStore<PlannerState>,

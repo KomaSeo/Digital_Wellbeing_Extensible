@@ -1,3 +1,6 @@
+//! Responsibility: Run the enforcement loop: snapshot processes, ask every registered
+//! BlockRule, and terminate what they block (never OS-critical or own processes).
+
 mod rule;
 
 pub use rule::{BlockEvent, BlockRule, ProcessSnapshot, RuleInfo};
@@ -66,6 +69,7 @@ pub fn is_never_terminate(name: &str) -> bool {
     never_terminate().iter().any(|p| *p == n)
 }
 
+/// Responsibility: Describe a running process for UIs and the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
     pub pid: u32,
@@ -76,6 +80,8 @@ pub struct ProcessInfo {
 /// Decides which pids the enforcer may see and terminate (e.g. "only my session").
 pub type ProcessFilter = Arc<dyn Fn(u32) -> bool + Send + Sync>;
 
+/// Responsibility: Own the registered rules, the process filter and the block log, and run the
+/// enforcement loop.
 #[derive(Clone)]
 pub struct Enforcer {
     rules: Arc<Mutex<Vec<Arc<dyn BlockRule>>>>,
@@ -274,6 +280,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    /// Responsibility: Test rule: block evil.exe while its flag is set.
     struct FlagRule {
         id: &'static str,
         block: Arc<AtomicBool>,

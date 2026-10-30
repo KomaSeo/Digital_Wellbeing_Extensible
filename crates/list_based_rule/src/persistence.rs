@@ -1,15 +1,21 @@
+//! Responsibility: Load and save ListConfig, keeping file I/O out of ListStore.
+
 use crate::{ListConfig, ListError};
 use directories::ProjectDirs;
 use parking_lot::RwLock;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Responsibility: Load and save a ListConfig somewhere.
+///
 /// Loads and saves list configs. Keeps filesystem (or other I/O) out of [`crate::ListStore`].
 pub trait ListPersistence: Send + Sync {
     fn load(&self) -> Result<ListConfig, ListError>;
     fn save(&self, config: &ListConfig) -> Result<(), ListError>;
 }
 
+/// Responsibility: Keep ListConfig in a JSON file, written atomically.
+///
 /// Persists list config as JSON on disk (atomic write via temp file + rename).
 #[derive(Debug, Clone)]
 pub struct FileListPersistence {
@@ -62,7 +68,7 @@ impl ListPersistence for FileListPersistence {
     }
 }
 
-/// In-memory persistence for unit tests (no filesystem).
+/// Responsibility: Keep ListConfig in memory, for tests.
 #[derive(Debug, Default)]
 pub struct MemoryListPersistence {
     data: RwLock<ListConfig>,

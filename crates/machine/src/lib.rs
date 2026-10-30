@@ -1,3 +1,6 @@
+//! Responsibility: Provide what every part of a machine install shares: the data paths and the
+//! managed-users setting.
+//!
 //! Pieces shared by a machine-wide install (service + per-session agent +
 //! Focus app + admin UI).
 //!
@@ -60,6 +63,8 @@ pub fn log_dir() -> PathBuf {
     data_dir().join("logs")
 }
 
+/// Responsibility: Hold which Windows accounts the service manages, loaded from machine.json.
+///
 /// Settings only the service reads.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]

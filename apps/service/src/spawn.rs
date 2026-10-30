@@ -1,4 +1,5 @@
-//! Win32 plumbing: list logged-on sessions and start a process inside one.
+//! Responsibility: Wrap the Win32 calls that list logged-on sessions and start a SYSTEM process
+//! inside a given session.
 
 use std::ffi::c_void;
 use std::io;
@@ -19,7 +20,7 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject, CREATE_NO_WINDOW, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
-/// A logged-on, interactive user session.
+/// Responsibility: Describe one logged-on user session (id and user name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserSession {
     pub id: u32,
@@ -76,6 +77,9 @@ fn session_user(session: u32) -> Option<String> {
     }
 }
 
+/// Responsibility: Own the handle of a process the service started: report whether it runs,
+/// terminate it, close the handle on drop.
+///
 /// A process we started; the handle is closed on drop (the process keeps running).
 pub struct Child {
     process: HANDLE,

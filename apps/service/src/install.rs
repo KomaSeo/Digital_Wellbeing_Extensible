@@ -1,3 +1,6 @@
+//! Responsibility: Install and uninstall the machine-wide setup: copy the binaries, lock down
+//! the data folder, register the service and the Focus app autostart.
+//!
 //! `install` / `uninstall`, run once from an administrator terminal.
 //!
 //! What `install` does, in order:
