@@ -13,11 +13,14 @@ struct FakeAdvisor {
     bogus_pick: AtomicBool,
     picks: AtomicUsize,
     reviews: AtomicUsize,
+    /// Life rules the last question carried.
+    saw_rules: parking_lot::Mutex<String>,
 }
 
 impl Advisor for FakeAdvisor {
     fn pick(&self, r: &PickRequest) -> Result<Pick, JudgeError> {
         self.picks.fetch_add(1, Ordering::SeqCst);
+        *self.saw_rules.lock() = r.life_rules.to_string();
         let todo_id = if self.bogus_pick.load(Ordering::SeqCst) {
             "nope".into()
         } else {
@@ -30,8 +33,9 @@ impl Advisor for FakeAdvisor {
         })
     }
 
-    fn review(&self, _r: &ReviewRequest) -> Result<Review, JudgeError> {
+    fn review(&self, r: &ReviewRequest) -> Result<Review, JudgeError> {
         self.reviews.fetch_add(1, Ordering::SeqCst);
+        *self.saw_rules.lock() = r.life_rules.to_string();
         let approved = self.approve.load(Ordering::SeqCst);
         Ok(Review {
             approved,
@@ -65,12 +69,14 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
         bogus_pick: AtomicBool::new(false),
         picks: AtomicUsize::new(0),
         reviews: AtomicUsize::new(0),
+        saw_rules: parking_lot::Mutex::new(String::new()),
     });
     let provided = Arc::clone(&advisor);
     let planner = TaskPlanner::new(
         JsonStore::in_memory(PlannerConfig {
             enabled,
             todos: ids.iter().map(|id| todo(id)).collect(),
+            ..Default::default()
         }),
         JsonStore::in_memory(PlannerState::default()),
         Arc::clone(&focus),
@@ -111,6 +117,23 @@ fn assign_starts_focus_session_and_resumes_without_asking_again() {
     h.planner.assign(Utc::now()).unwrap();
     assert_eq!(h.advisor.picks.load(Ordering::SeqCst), 1);
     assert!(h.focus.store().get().session_active);
+}
+
+#[test]
+fn life_rules_reach_every_question() {
+    let h = harness(true, &["a", "b"]);
+    h.planner
+        .config_store()
+        .update(|c| c.life_rules = "No games before 18:00.".into())
+        .unwrap();
+    h.planner.assign(Utc::now()).unwrap();
+    assert_eq!(*h.advisor.saw_rules.lock(), "No games before 18:00.");
+    h.advisor.saw_rules.lock().clear();
+    h.planner
+        .request_change(Utc::now(), ChangeKind::End, "dinner time now")
+        .unwrap();
+    assert_eq!(*h.advisor.saw_rules.lock(), "No games before 18:00.");
+    assert!(crate::advisor::rules_text("").is_empty());
 }
 
 #[test]

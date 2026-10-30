@@ -155,8 +155,10 @@ impl TaskPlanner {
         let history = self.focus.state().history_text();
         let now_local = local_now_text();
         let advisor = (self.advisor)(&self.focus.store().get())?;
+        let life_rules = self.config.get().life_rules;
         let review = advisor.review(&ReviewRequest {
             now_local: &now_local,
+            life_rules: &life_rules,
             current: state.assignment.as_ref(),
             request: &request,
             target_title: target_title.as_deref(),
@@ -273,8 +275,10 @@ impl TaskPlanner {
         let history = self.focus.state().history_text();
         let now_local = local_now_text();
         let advisor = (self.advisor)(&self.focus.store().get())?;
+        let life_rules = self.config.get().life_rules;
         let pick = advisor.pick(&PickRequest {
             now_local: &now_local,
+            life_rules: &life_rules,
             open: &open,
             recently_done: &recently_done,
             previous: state.assignment.as_ref(),

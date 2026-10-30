@@ -108,6 +108,22 @@ impl Panel for PlannerAdminUi {
             draft.dirty = true;
         }
 
+        // --- life rules -------------------------------------------------------
+        ui.heading("Life rules");
+        ui.label(
+            "Standing rules the AI follows when it picks a task, reviews a change and \
+             reviews a to-do the user proposes. Only this admin view can change them.",
+        );
+        draft.dirty |= ui
+            .add(
+                egui::TextEdit::multiline(&mut draft.config.life_rules)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("e.g. No games or videos before 18:00 on weekdays. A 30-minute break after two hours of work is fine."),
+            )
+            .changed();
+        ui.separator();
+
         // --- list -------------------------------------------------------------
         ui.heading("To-do list");
         let mut remove = None;

@@ -50,6 +50,11 @@ pub struct PlannerConfig {
     /// the planner assigns one, and changing it needs an approved reason.
     pub enabled: bool,
     pub todos: Vec<TodoItem>,
+    /// The owner's standing rules for how time is spent ("no leisure before
+    /// 18:00 on weekdays", "a 30-minute break after two hours of work"). Every
+    /// AI decision of the planner follows them. Only the admin can edit them,
+    /// so a request made in a weak moment cannot change them.
+    pub life_rules: String,
 }
 
 /// Responsibility: Say who chose the current task: the AI, or an approved change request.
