@@ -908,6 +908,7 @@ version = "0.1.0"
 dependencies = [
  "ai_focus_rule",
  "anyhow",
+ "chrono",
  "eframe",
  "egui",
  "embed-manifest",
@@ -927,9 +928,12 @@ dependencies = [
 name = "digital-wellbeing-focus"
 version = "0.1.0"
 dependencies = [
+ "ai_focus_rule",
  "chrono",
+ "directories",
  "eframe",
  "egui",
+ "list_based_rule",
  "machine",
  "parking_lot",
  "rule_ui",
@@ -2226,6 +2230,7 @@ version = "0.1.0"
 dependencies = [
  "ai_focus_rule",
  "chrono",
+ "list_based_rule",
  "serde",
  "serde_json",
  "task_planner",

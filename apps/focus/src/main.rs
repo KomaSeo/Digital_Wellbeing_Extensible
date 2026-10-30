@@ -11,8 +11,13 @@
 //! - **planner active** (admin enabled it and to-dos are open): the AI assigns
 //!   the task; changing or ending it needs a reason the AI approves.
 //! - otherwise: the user types their task and starts / ends the session freely.
+//!
+//! A second tab, **Settings** (`settings.rs`), edits the admin settings through the
+//! agent while they are unlocked, and locks them for a while.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
+
+mod settings;
 
 use chrono::{Local, Utc};
 use eframe::egui;
@@ -92,9 +97,18 @@ enum ChangeChoice {
     End,
 }
 
+/// Responsibility: Name the Focus window's two tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Focus,
+    Settings,
+}
+
 /// Responsibility: Draw the Focus window, keep the form inputs, and send requests to the agent
 /// without blocking the UI.
 struct FocusApp {
+    tab: Tab,
+    settings: settings::SettingsTab,
     session: u32,
     ctx: egui::Context,
     shared: Arc<Mutex<Shared>>,
@@ -127,6 +141,8 @@ impl FocusApp {
             thread::sleep(POLL);
         });
         Self {
+            tab: Tab::Focus,
+            settings: settings::SettingsTab::new(session),
             session,
             ctx,
             shared,
@@ -523,8 +539,26 @@ impl eframe::App for FocusApp {
             let s = self.shared.lock();
             (s.status.clone(), s.message.clone())
         };
+        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.tab, Tab::Focus, "Focus");
+                ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
+            });
+        });
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                if self.tab == Tab::Settings {
+                    match &status {
+                        Some(Ok(status)) => self.settings.ui(ui, status.settings_locked_until),
+                        Some(Err(err)) => {
+                            ui.colored_label(RED, err);
+                        }
+                        None => {
+                            ui.label("connecting…");
+                        }
+                    }
+                    return;
+                }
                 ui.heading("Focus session");
                 let status = match status {
                     Some(Ok(status)) => status,

@@ -18,6 +18,12 @@
 //! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
 //! | `request_access` | `{ "target": GrantTarget, "duration": GrantDuration, "purpose": "…" }` | [`Status`], `last_access` set |
 //! | `propose_todo`   | `{ "todo": ProposalInput, "via": "…" }`  | [`Status`], `last_proposal` set |
+//! | `settings_get`   | `{}` (refused while locked)              | [`crate::settings::SettingsSnapshot`] |
+//! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…} }` (refused while locked) | `{ "ok": true }` |
+//! | `settings_lock`  | `{ "hours": n }` (only extends)           | [`crate::settings::SettingsLock`] |
+//!
+//! The `settings_*` methods let a standard user edit the admin settings while
+//! they are unlocked; see [`crate::settings`].
 //!
 //! `propose_todo` asks the AI to add a to-do to the planner's list; it judges
 //! the proposal against the admin's life rules (see `task_planner`).
@@ -48,7 +54,8 @@ pub use ai_focus_rule::Verdict;
 pub use task_planner::{AssignmentSource, ProposalInput as TodoProposal, TodoItem};
 
 pub const BASE_PORT: u16 = 8770;
-const MAX_REQUEST: usize = 64 * 1024;
+/// Large enough for a whole settings file in `settings_put`.
+const MAX_REQUEST: usize = 512 * 1024;
 
 pub fn port_for_session(session: u32) -> u16 {
     BASE_PORT.saturating_add(session.min(1000) as u16)
@@ -87,6 +94,9 @@ pub struct Status {
     /// Set only in the reply to `propose_todo`.
     #[serde(default)]
     pub last_proposal: Option<ProposalRecord>,
+    /// Admin settings are locked for standard users until then; `None` = unlocked.
+    #[serde(default)]
+    pub settings_locked_until: Option<DateTime<Utc>>,
 }
 
 /// Responsibility: Hold what the agent exposes (focus monitor, optional planner) and tell
@@ -134,6 +144,8 @@ fn status(api: &AgentApi) -> Status {
         grant_log: grants.log.into_iter().rev().take(10).collect(),
         last_access: None,
         last_proposal: None,
+        settings_locked_until: crate::settings::read_lock(&crate::settings::lock_path())
+            .locked_until(Utc::now()),
     }
 }
 
@@ -143,6 +155,31 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     let mut last_decision = None;
     let mut last_access = None;
     let mut last_proposal = None;
+    let data = crate::data_dir();
+    match method {
+        "settings_get" => {
+            let snapshot = crate::settings::snapshot(&data, Utc::now())?;
+            return serde_json::to_value(snapshot).map_err(|e| e.to_string());
+        }
+        "settings_put" => {
+            let name = params["name"].as_str().ok_or("params.name required")?;
+            crate::settings::put(&data, Utc::now(), name, &params["content"])?;
+            tracing::info!("settings '{name}' changed through the agent");
+            return Ok(json!({ "ok": true }));
+        }
+        "settings_lock" => {
+            let hours = params["hours"]
+                .as_u64()
+                .and_then(|h| u32::try_from(h).ok())
+                .ok_or("params.hours required")?;
+            let lock =
+                crate::settings::extend_lock(&crate::settings::lock_path(), Utc::now(), hours)
+                    .map_err(|e| e.to_string())?;
+            tracing::info!("settings locked until {:?}", lock.until);
+            return serde_json::to_value(lock).map_err(|e| e.to_string());
+        }
+        _ => {}
+    }
     match method {
         "status" => {}
         "start_session" => {
@@ -321,6 +358,11 @@ fn reply(stream: &mut TcpStream, value: &Value) -> std::io::Result<()> {
 
 /// Client side, used by the Focus app.
 pub fn call(session: u32, method: &str, params: Value) -> Result<Status, String> {
+    serde_json::from_value(call_value(session, method, params)?).map_err(|e| e.to_string())
+}
+
+/// Like [`call`] for methods whose result is not a [`Status`] (`settings_*`).
+pub fn call_value(session: u32, method: &str, params: Value) -> Result<Value, String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port_for_session(session)));
     let mut stream =
         TcpStream::connect_timeout(&addr, Duration::from_millis(500)).map_err(|_| {
@@ -343,7 +385,7 @@ pub fn call(session: u32, method: &str, params: Value) -> Result<Status, String>
     if let Some(err) = response.get("error").and_then(Value::as_str) {
         return Err(err.to_string());
     }
-    serde_json::from_value(response["result"].take()).map_err(|e| e.to_string())
+    Ok(response["result"].take())
 }
 
 #[cfg(test)]

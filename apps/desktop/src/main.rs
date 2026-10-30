@@ -187,6 +187,9 @@ struct App {
     snapshots: Vec<ProcessSnapshot>,
     blocks: serde_json::Value,
     process_filter: String,
+    /// Machine install: until when standard users may not edit the settings
+    /// (`machine::settings`); re-read with the other cached values.
+    settings_locked_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl App {
@@ -208,6 +211,7 @@ impl App {
             snapshots: Vec::new(),
             blocks: serde_json::Value::Null,
             process_filter: String::new(),
+            settings_locked_until: None,
         }
     }
 }
@@ -216,6 +220,11 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.last_refresh.elapsed() >= REFRESH {
             self.last_refresh = Instant::now();
+            if self.machine_mode {
+                self.settings_locked_until =
+                    machine::settings::read_lock(&machine::settings::lock_path())
+                        .locked_until(chrono::Utc::now());
+            }
             self.blocks = self
                 .router
                 .dispatch("list_blocks", serde_json::json!({ "limit": 40 }))
@@ -243,6 +252,30 @@ impl eframe::App for App {
                 ui.separator();
                 ui.label(&self.status);
             });
+            if machine_mode {
+                // Standard users edit these settings from the Focus app while
+                // unlocked; only this (admin) window can lift a lock early.
+                ui.horizontal(|ui| match self.settings_locked_until {
+                    Some(until) => {
+                        ui.label(format!(
+                            "Locked for standard users until {}.",
+                            until.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                        ));
+                        if ui.small_button("Unlock now").clicked() {
+                            if let Err(err) = std::fs::remove_file(machine::settings::lock_path()) {
+                                self.status = format!("could not unlock: {err}");
+                            }
+                            self.settings_locked_until = None;
+                        }
+                    }
+                    None => {
+                        ui.label(
+                            "Unlocked: standard users can also edit these settings from the \
+                             Focus app (Settings tab) until someone locks them.",
+                        );
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(self.tab == MainTab::Monitor, "Monitor")

@@ -16,10 +16,12 @@
 //!     planner_state.json  assignment + change-request log (written by agents)
 //!     grants\<user>.json  access grants + their log (written by that user's agent)
 //!     blocks\<user>.json  blocks in force (written by that user's agent)
+//!     settings_lock.json  until when standard users may not edit settings (see `settings`)
 //!     logs\
 //! ```
 
 pub mod session;
+pub mod settings;
 pub mod user_api;
 
 use serde::{Deserialize, Serialize};

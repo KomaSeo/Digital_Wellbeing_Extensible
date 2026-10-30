@@ -16,3 +16,6 @@ eframe = { version = "0.31", default-features = true, features = ["default_fonts
 serde_json = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
+ai_focus_rule = { workspace = true }
+list_based_rule = { workspace = true }
+directories = { workspace = true }
