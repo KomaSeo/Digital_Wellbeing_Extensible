@@ -12,6 +12,7 @@ enforcer = { workspace = true }
 list_based_rule = { workspace = true }
 ai_focus_rule = { workspace = true }
 machine = { workspace = true }
+task_planner = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

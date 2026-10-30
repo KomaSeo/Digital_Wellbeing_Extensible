@@ -9,6 +9,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 ai_focus_rule = { workspace = true }
+task_planner = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

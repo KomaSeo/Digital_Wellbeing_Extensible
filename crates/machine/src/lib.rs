@@ -9,6 +9,8 @@
 //!     policy.json      list-based rule
 //!     ai_focus.json    AI focus settings
 //!     machine.json     which Windows accounts are managed
+//!     planner.json     to-do list for the task planner (admin)
+//!     planner_state.json  assignment + change-request log (written by agents)
 //!     logs\
 //! ```
 
@@ -33,6 +35,15 @@ pub fn policy_path() -> PathBuf {
 
 pub fn ai_focus_path() -> PathBuf {
     data_dir().join("ai_focus.json")
+}
+
+pub fn planner_path() -> PathBuf {
+    data_dir().join("planner.json")
+}
+
+/// Shared by every managed session's agent (one person, several sessions is rare).
+pub fn planner_state_path() -> PathBuf {
+    data_dir().join("planner_state.json")
 }
 
 pub fn machine_config_path() -> PathBuf {

@@ -37,3 +37,10 @@ pub fn install_system_fonts(ctx: &egui::Context) {
     }
     ctx.set_fonts(fonts);
 }
+
+/// A tab in the desktop shell that is not a block rule (e.g. the task planner).
+pub trait Panel: Send + Sync {
+    fn id(&self) -> &str;
+    fn name(&self) -> &str;
+    fn ui(&self, ui: &mut egui::Ui);
+}

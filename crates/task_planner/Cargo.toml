@@ -1,0 +1,15 @@
+[package]
+name = "task_planner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+egui = { workspace = true }
+ai_focus_rule = { workspace = true }
+rule_ui = { workspace = true }

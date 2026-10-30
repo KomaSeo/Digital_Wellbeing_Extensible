@@ -83,9 +83,8 @@ pub fn install(args: &[String]) -> anyhow::Result<()> {
         if same_file(&from, &to) {
             continue;
         }
-        fs::copy(&from, &to).with_context(|| {
-            format!("copy {} (close the app if it is running)", to.display())
-        })?;
+        fs::copy(&from, &to)
+            .with_context(|| format!("copy {} (close the app if it is running)", to.display()))?;
         println!("copied {}", to.display());
     }
 
@@ -157,7 +156,8 @@ pub fn install(args: &[String]) -> anyhow::Result<()> {
     // 6. Focus app at logon
     let focus = dir.join(FOCUS_EXE);
     if focus.exists() {
-        run(Command::new("reg").args(["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d"])
+        run(Command::new("reg")
+            .args(["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d"])
             .arg(format!("\"{}\"", focus.display()))
             .arg("/f"))?;
         println!("Focus app starts at every logon");

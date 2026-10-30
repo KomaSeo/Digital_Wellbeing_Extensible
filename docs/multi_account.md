@@ -83,6 +83,8 @@ C:\ProgramData\DigitalWellbeing\            SYSTEM + Administrators 만 접근 �
     policy.json       블랙/화이트리스트 규칙
     ai_focus.json     AI 집중 설정 (API 키 포함)
     machine.json      관리 대상 계정 목록
+    planner.json      할 일 목록 (Task planner, 관리자가 편집)
+    planner_state.json  현재 할당 + 변경 요청 기록 (agent가 기록)
     logs\service.log, logs\agent-session<N>.log
 ```
 
@@ -116,8 +118,8 @@ C:\ProgramData\DigitalWellbeing\            SYSTEM + Administrators 만 접근 �
 | 로컬 API(8765 포트)로 규칙 변경 | ❌ | 머신 모드에서는 8765 API를 열지 않음 |
 | agent API(877x)로 규칙 변경 | ❌ | `status / start_session / stop_session`만 존재 |
 | Focus 앱 끄기 | ✅ 가능, 무해 | 차단은 agent가 계속함 |
-| 할 일을 "유튜브 보기"로 적기 | ✅ 가능 | ⚠️ 할 일은 본인이 선언하는 것이라 막지 않음 (7장) |
-| 집중 세션 끝내기 | ✅ 가능 | 목록 규칙(관리자 설정)은 세션과 무관하게 항상 적용 |
+| 할 일을 "유튜브 보기"로 적기 | 플래너 꺼짐: ✅ 가능 / 켜짐: ❌ | 켜져 있으면 AI가 목록에서 고르고, 변경은 이유 + AI 승인 필요 ([`task_planner.md`](task_planner.md)) |
+| 집중 세션 끝내기 | 플래너 꺼짐: ✅ / 켜짐: 이유 + AI 승인 | 목록 규칙(관리자 설정)은 세션과 무관하게 항상 적용 |
 
 **전제: 작업 계정이 "표준 사용자"여야 합니다.** 작업 계정이 관리자면 위 장치가 전부 무의미합니다.
 (설정 → 계정 → 가족 및 기타 사용자 → 계정 → 계정 유형 변경 → **표준 사용자**)
@@ -195,7 +197,8 @@ agent가 안 뜨면 `C:\ProgramData\DigitalWellbeing\logs\service.log`를 관리
 
 ## 6. 매일 사용
 
-**작업 계정에서**
+**작업 계정에서** (아래는 Task planner가 꺼져 있을 때입니다. 켜져 있으면 **Get my task**로 AI가 할 일을 정해 주고,
+바꾸거나 끝낼 때는 이유를 적어 승인을 받습니다. 자세한 내용은 [`task_planner.md`](task_planner.md) 7장)
 1. 로그인하면 Focus 창이 뜹니다.
 2. 할 일을 **구체적으로** 적고 **Start focus**. 예: `졸업논문 3장 작성 — Overleaf, 논문 PDF, Google Scholar 필요`
 3. 하는 일이 바뀌면 내용을 고치고 **Change task**. 바꾸면 AI 차단은 초기화되고 바로 다시 검사합니다.
@@ -219,8 +222,8 @@ agent가 안 뜨면 `C:\ProgramData\DigitalWellbeing\logs\service.log`를 관리
 
 1. **실제 Windows에서 아직 검증하지 못했습니다** (맨 위 경고). 특히 SYSTEM agent의 스크린샷(xcap)과
    `SendInput`이 사용자 데스크톱에서 정상 동작하는지 확인이 필요합니다.
-2. **할 일은 본인이 선언합니다.** "유튜브 보기"라고 적으면 AI도 유튜브를 허용합니다. 강제로 막고 싶은 것은
-   AI가 아니라 **블랙리스트**(관리자 전용)에 넣으세요.
+2. **플래너가 꺼져 있으면 할 일은 본인이 선언합니다.** "유튜브 보기"라고 적으면 AI도 유튜브를 허용합니다.
+   Task planner를 켜면 막을 수 있습니다. 어떤 경우에도 반드시 막을 것은 **블랙리스트**(관리자 전용)에 넣으세요.
 3. **물리적 접근은 막지 못합니다.** 안전 모드 부팅(서비스가 안 뜸), USB 부팅, 다른 OS 등. 안전 모드 진입도 막으려면
    BitLocker나 BIOS 암호 같은 별도 수단이 필요합니다.
 4. **같은 이름의 프로세스는 그 세션 안에서 전부** 죽습니다(1인 1세션이면 문제없음).

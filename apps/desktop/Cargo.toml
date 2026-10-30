@@ -11,6 +11,7 @@ path = "src/main.rs"
 list_based_rule = { workspace = true }
 ai_focus_rule = { workspace = true }
 machine = { workspace = true }
+task_planner = { workspace = true }
 enforcer = { workspace = true }
 rule_ui = { workspace = true }
 tool-api = { workspace = true }

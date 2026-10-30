@@ -8,11 +8,17 @@
 //! Transport: TCP on `127.0.0.1:(BASE_PORT + session id)`, one JSON request
 //! per connection, one JSON line back — same framing as `tool-api`.
 //!
-//! | method          | params             | result                    |
-//! |-----------------|--------------------|---------------------------|
-//! | `status`        | `{}`               | [`Status`]                |
-//! | `start_session` | `{ "task": "..." }`| [`Status`]                |
-//! | `stop_session`  | `{}`               | [`Status`]                |
+//! | method           | params                                   | result     |
+//! |------------------|------------------------------------------|------------|
+//! | `status`         | `{}`                                     | [`Status`] |
+//! | `start_session`  | `{ "task": "..." }` (planner inactive)   | [`Status`] |
+//! | `stop_session`   | `{}` (planner inactive)                  | [`Status`] |
+//! | `assign`         | `{}` (planner active)                    | [`Status`] |
+//! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
+//!
+//! While the task planner is active the user cannot pick a task or stop
+//! freely: `start_session` / `stop_session` are refused and the Focus app uses
+//! `assign` and `request_change` (which the AI reviews) instead.
 
 use ai_focus_rule::{FocusMonitor, VerdictLogEntry};
 use chrono::{DateTime, Utc};
@@ -23,6 +29,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use task_planner::{ChangeKind, ChangeRecord, PlannerStatus, TaskPlanner};
 
 pub const BASE_PORT: u16 = 8770;
 const MAX_REQUEST: usize = 64 * 1024;
@@ -49,9 +56,26 @@ pub struct Status {
     /// Newest first.
     pub verdicts: Vec<VerdictLogEntry>,
     pub blocked: Vec<BlockedItem>,
+    /// `None` when no planner is configured for this agent.
+    pub planner: Option<PlannerStatus>,
+    /// Set only in the reply to `request_change`.
+    pub last_decision: Option<ChangeRecord>,
 }
 
-fn status(monitor: &FocusMonitor) -> Status {
+/// What the agent exposes to the Focus app.
+pub struct AgentApi {
+    pub monitor: Arc<FocusMonitor>,
+    pub planner: Option<Arc<TaskPlanner>>,
+}
+
+impl AgentApi {
+    fn planner_active(&self) -> bool {
+        self.planner.as_ref().is_some_and(|p| p.is_active())
+    }
+}
+
+fn status(api: &AgentApi) -> Status {
+    let monitor = &api.monitor;
     let config = monitor.store().get();
     let state = monitor.state();
     let blocked = state
@@ -72,14 +96,21 @@ fn status(monitor: &FocusMonitor) -> Status {
         check_interval_secs: config.check_interval_secs,
         verdicts: state.verdicts.iter().rev().take(30).cloned().collect(),
         blocked,
+        planner: api.planner.as_ref().map(|p| p.status()),
+        last_decision: None,
     }
 }
 
-/// Handle one request against the agent's monitor.
-pub fn dispatch(monitor: &FocusMonitor, method: &str, params: &Value) -> Result<Value, String> {
+/// Handle one request.
+pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, String> {
+    const PLANNER_ON: &str = "the task planner is on: use assign / request_change (needs a reason)";
+    let mut last_decision = None;
     match method {
         "status" => {}
         "start_session" => {
+            if api.planner_active() {
+                return Err(PLANNER_ON.into());
+            }
             let task = params
                 .get("task")
                 .and_then(Value::as_str)
@@ -87,7 +118,7 @@ pub fn dispatch(monitor: &FocusMonitor, method: &str, params: &Value) -> Result<
                 .filter(|t| !t.is_empty())
                 .ok_or("params.task required")?
                 .to_string();
-            monitor
+            api.monitor
                 .store()
                 .update(|c| {
                     c.task = task;
@@ -96,26 +127,45 @@ pub fn dispatch(monitor: &FocusMonitor, method: &str, params: &Value) -> Result<
                 .map_err(|e| e.to_string())?;
         }
         "stop_session" => {
-            monitor
+            if api.planner_active() {
+                return Err(PLANNER_ON.into());
+            }
+            api.monitor
                 .store()
                 .update(|c| c.session_active = false)
                 .map_err(|e| e.to_string())?;
         }
+        "assign" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            planner.assign(Utc::now()).map_err(|e| e.to_string())?;
+        }
+        "request_change" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            let request: ChangeKind = serde_json::from_value(params["request"].clone())
+                .map_err(|e| format!("params.request: {e}"))?;
+            let reason = params["reason"].as_str().unwrap_or_default();
+            let record = planner
+                .request_change(Utc::now(), request, reason)
+                .map_err(|e| e.to_string())?;
+            last_decision = Some(record);
+        }
         other => return Err(format!("unknown method '{other}'")),
     }
-    serde_json::to_value(status(monitor)).map_err(|e| e.to_string())
+    let mut status = status(api);
+    status.last_decision = last_decision;
+    serde_json::to_value(status).map_err(|e| e.to_string())
 }
 
 /// Serve forever on the port of `session` (blocking; run in a thread).
-pub fn serve(monitor: Arc<FocusMonitor>, session: u32) -> std::io::Result<()> {
+pub fn serve(api: Arc<AgentApi>, session: u32) -> std::io::Result<()> {
     let port = port_for_session(session);
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     tracing::info!("user api listening on 127.0.0.1:{port}");
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        let monitor = Arc::clone(&monitor);
+        let api = Arc::clone(&api);
         thread::spawn(move || {
-            if let Err(err) = handle(&monitor, stream) {
+            if let Err(err) = handle(&api, stream) {
                 tracing::debug!("user api client error: {err}");
             }
         });
@@ -123,14 +173,14 @@ pub fn serve(monitor: Arc<FocusMonitor>, session: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-fn handle(monitor: &FocusMonitor, mut stream: TcpStream) -> std::io::Result<()> {
+fn handle(api: &AgentApi, mut stream: TcpStream) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut line = String::new();
     BufReader::new((&stream).take(MAX_REQUEST as u64)).read_line(&mut line)?;
     let response = match serde_json::from_str::<Value>(&line) {
         Ok(req) => {
             let method = req["method"].as_str().unwrap_or_default();
-            match dispatch(monitor, method, &req["params"]) {
+            match dispatch(api, method, &req["params"]) {
                 Ok(result) => json!({ "result": result }),
                 Err(message) => json!({ "error": message }),
             }
@@ -145,10 +195,13 @@ fn handle(monitor: &FocusMonitor, mut stream: TcpStream) -> std::io::Result<()> 
 /// Client side, used by the Focus app.
 pub fn call(session: u32, method: &str, params: Value) -> Result<Status, String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port_for_session(session)));
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500))
-        .map_err(|_| "agent not running for this session (is the service installed?)".to_string())?;
+    let mut stream =
+        TcpStream::connect_timeout(&addr, Duration::from_millis(500)).map_err(|_| {
+            "agent not running for this session (is the service installed?)".to_string()
+        })?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
+        // assign / request_change wait for the AI.
+        .set_read_timeout(Some(Duration::from_secs(120)))
         .map_err(|e| e.to_string())?;
     let request = json!({ "method": method, "params": params });
     stream
@@ -177,10 +230,13 @@ mod tests {
             platform::native(),
             Arc::new(|_: &AiFocusConfig| Err(JudgeError::NoApiKey)),
         ));
+        let api = Arc::new(AgentApi {
+            monitor,
+            planner: None,
+        });
         // A session id far from real ones so the test port is free.
         let session = 900;
-        let server = Arc::clone(&monitor);
-        thread::spawn(move || serve(server, session));
+        thread::spawn(move || serve(api, session));
         thread::sleep(Duration::from_millis(200));
 
         let s = call(session, "start_session", json!({ "task": "논문 쓰기" })).unwrap();
@@ -190,8 +246,44 @@ mod tests {
         let s = call(session, "stop_session", json!({})).unwrap();
         assert!(!s.session_active);
         assert!(call(session, "set_blacklist", json!({})).is_err());
+        assert!(call(session, "assign", json!({})).is_err());
+    }
+
+    #[test]
+    fn free_task_and_stop_are_refused_while_planner_is_active() {
+        use task_planner::{JsonStore, PlannerConfig, PlannerState, TodoItem};
+        let monitor = Arc::new(FocusMonitor::new(
+            AiFocusStore::in_memory(AiFocusConfig::default()),
+            platform::native(),
+            Arc::new(|_: &AiFocusConfig| Err(JudgeError::NoApiKey)),
+        ));
+        let planner = Arc::new(TaskPlanner::new(
+            JsonStore::in_memory(PlannerConfig {
+                enabled: true,
+                todos: vec![TodoItem::new("논문 3장")],
+            }),
+            JsonStore::in_memory(PlannerState::default()),
+            Arc::clone(&monitor),
+            Arc::new(|_: &AiFocusConfig| Err(JudgeError::NoApiKey)),
+        ));
+        let api = AgentApi {
+            monitor,
+            planner: Some(planner),
+        };
+        let err = dispatch(&api, "start_session", &json!({ "task": "유튜브" })).unwrap_err();
+        assert!(err.contains("planner"));
+        assert!(dispatch(&api, "stop_session", &json!({})).is_err());
+        let status = dispatch(&api, "status", &json!({})).unwrap();
+        assert_eq!(status["planner"]["active"], true);
+        // The AI call fails: nothing changes.
+        assert!(dispatch(&api, "assign", &json!({})).is_err());
+        assert_eq!(
+            dispatch(&api, "status", &json!({})).unwrap()["session_active"],
+            false
+        );
     }
 }
 
-/// Re-exported so clients need not depend on `ai_focus_rule`.
+/// Re-exported so clients need not depend on the rule crates.
 pub use ai_focus_rule::Verdict;
+pub use task_planner::{AssignmentSource, TodoItem};

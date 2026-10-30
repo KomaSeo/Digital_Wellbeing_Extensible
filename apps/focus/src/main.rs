@@ -2,9 +2,12 @@
 //!
 //! It starts at logon (HKLM Run key written by the installer), runs with the
 //! user's own rights, and talks to the agent of the user's session through
-//! [`machine::user_api`]. All it can do is declare / change / end the user's
-//! focus session and show what the AI decided. Closing it changes nothing:
-//! the agent keeps enforcing.
+//! [`machine::user_api`]. Closing it changes nothing: the agent keeps enforcing.
+//!
+//! Two modes, decided by the agent:
+//! - **planner active** (admin enabled it and to-dos are open): the AI assigns
+//!   the task; changing or ending it needs a reason the AI approves.
+//! - otherwise: the user types their task and starts / ends the session freely.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -13,17 +16,21 @@ use eframe::egui;
 use machine::session::current_session_id;
 use machine::user_api::{call, Status, Verdict};
 use parking_lot::Mutex;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use task_planner::{ChangeKind, ChangeRecord, PlannerStatus};
 
 const POLL: Duration = Duration::from_secs(2);
+const GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
+const RED: egui::Color32 = egui::Color32::from_rgb(200, 80, 80);
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 560.0])
+            .with_inner_size([560.0, 680.0])
             .with_title("Digital Wellbeing Focus"),
         ..Default::default()
     };
@@ -37,135 +44,339 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-type Shared = Arc<Mutex<Result<Status, String>>>;
+/// State shared with background threads (status poller, request sender).
+#[derive(Default)]
+struct Shared {
+    status: Option<Result<Status, String>>,
+    /// Error of the last request the user sent.
+    message: String,
+    /// The AI's answer to the last change request.
+    decision: Option<ChangeRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChangeChoice {
+    Done,
+    OtherTodo,
+    Free,
+    End,
+}
 
 struct FocusApp {
     session: u32,
-    status: Shared,
+    ctx: egui::Context,
+    shared: Arc<Mutex<Shared>>,
+    /// A request is in flight (the AI may take tens of seconds).
+    pending: Arc<AtomicBool>,
+    // free mode
     task_input: String,
-    /// Copy the agent's task into the input box once, then leave it to the user.
     task_loaded: bool,
-    message: String,
+    // planner mode
+    choice: ChangeChoice,
+    other_todo: Option<String>,
+    free_task: String,
+    reason: String,
 }
 
 impl FocusApp {
     fn new(ctx: egui::Context) -> Self {
         let session = current_session_id();
-        let status: Shared = Arc::new(Mutex::new(Err("connecting…".into())));
+        let shared = Arc::new(Mutex::new(Shared::default()));
         // Poll off the UI thread so a missing agent never freezes the window.
-        let poll = Arc::clone(&status);
+        let poll = Arc::clone(&shared);
+        let poll_ctx = ctx.clone();
         thread::spawn(move || loop {
-            *poll.lock() = call(session, "status", json!({}));
-            ctx.request_repaint();
+            let result = call(session, "status", json!({}));
+            poll.lock().status = Some(result);
+            poll_ctx.request_repaint();
             thread::sleep(POLL);
         });
         Self {
             session,
-            status,
+            ctx,
+            shared,
+            pending: Arc::new(AtomicBool::new(false)),
             task_input: String::new(),
             task_loaded: false,
-            message: String::new(),
+            choice: ChangeChoice::Done,
+            other_todo: None,
+            free_task: String::new(),
+            reason: String::new(),
         }
     }
 
-    fn send(&mut self, method: &str, params: serde_json::Value) {
-        let result = call(self.session, method, params);
-        self.message = match &result {
-            Ok(_) => String::new(),
-            Err(err) => err.clone(),
-        };
-        *self.status.lock() = result;
+    /// Send a request on a background thread; the reply replaces the status.
+    fn send(&self, method: &'static str, params: Value) {
+        if self.pending.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (session, shared, pending, ctx) = (
+            self.session,
+            Arc::clone(&self.shared),
+            Arc::clone(&self.pending),
+            self.ctx.clone(),
+        );
+        thread::spawn(move || {
+            let result = call(session, method, params);
+            {
+                let mut s = shared.lock();
+                match result {
+                    Ok(status) => {
+                        s.message.clear();
+                        if status.last_decision.is_some() {
+                            s.decision = status.last_decision.clone();
+                        }
+                        s.status = Some(Ok(status));
+                    }
+                    Err(err) => s.message = err,
+                }
+            }
+            pending.store(false, Ordering::SeqCst);
+            ctx.request_repaint();
+        });
     }
+
+    fn free_mode_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
+        if !self.task_loaded {
+            self.task_input = status.task.clone();
+            self.task_loaded = true;
+        }
+        ui.label("What are you working on? Be specific: the AI judges every app against this.");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.task_input)
+                .desired_rows(3)
+                .desired_width(f32::INFINITY)
+                .hint_text("e.g. 졸업논문 3장 작성 — Overleaf, 논문 PDF, Google Scholar 필요"),
+        );
+        let has_task = !self.task_input.trim().is_empty();
+        let idle = !self.pending.load(Ordering::SeqCst);
+        ui.horizontal(|ui| {
+            if status.session_active {
+                ui.colored_label(GREEN, "● running");
+                if ui
+                    .add_enabled(has_task && idle, egui::Button::new("Change task"))
+                    .clicked()
+                {
+                    self.send("start_session", json!({ "task": self.task_input }));
+                }
+                if ui
+                    .add_enabled(idle, egui::Button::new("End session"))
+                    .clicked()
+                {
+                    self.send("stop_session", json!({}));
+                }
+            } else {
+                ui.label("○ not running");
+                if ui
+                    .add_enabled(has_task && idle, egui::Button::new("Start focus"))
+                    .clicked()
+                {
+                    self.send("start_session", json!({ "task": self.task_input }));
+                }
+            }
+        });
+    }
+
+    fn planner_ui(&mut self, ui: &mut egui::Ui, status: &Status, planner: &PlannerStatus) {
+        let idle = !self.pending.load(Ordering::SeqCst);
+        let assignment = planner
+            .assignment
+            .as_ref()
+            .filter(|_| status.session_active);
+
+        let Some(assignment) = assignment else {
+            ui.label("Your task is picked by the AI from your to-do list.");
+            if ui
+                .add_enabled(idle, egui::Button::new("Get my task"))
+                .clicked()
+            {
+                self.send("assign", json!({}));
+            }
+            open_todos_ui(ui, planner);
+            return;
+        };
+
+        ui.colored_label(GREEN, "● running");
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.strong(&assignment.task);
+            ui.small(format!(
+                "{} — since {}",
+                assignment.why,
+                assignment.at.with_timezone(&Local).format("%H:%M")
+            ));
+        });
+
+        // --- change request --------------------------------------------------
+        ui.separator();
+        ui.heading("Ask to change");
+        ui.horizontal_wrapped(|ui| {
+            ui.radio_value(&mut self.choice, ChangeChoice::Done, "I finished it");
+            ui.radio_value(&mut self.choice, ChangeChoice::OtherTodo, "Another to-do");
+            ui.radio_value(&mut self.choice, ChangeChoice::Free, "Something else");
+            ui.radio_value(&mut self.choice, ChangeChoice::End, "End session");
+        });
+        let others: Vec<_> = planner
+            .open_todos
+            .iter()
+            .filter(|t| assignment.todo_id.as_deref() != Some(t.id.as_str()))
+            .collect();
+        match self.choice {
+            ChangeChoice::OtherTodo => {
+                let selected = others
+                    .iter()
+                    .find(|t| Some(&t.id) == self.other_todo.as_ref())
+                    .map(|t| t.title.clone())
+                    .unwrap_or_else(|| "choose…".into());
+                egui::ComboBox::from_id_salt("other_todo")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        for t in &others {
+                            ui.selectable_value(&mut self.other_todo, Some(t.id.clone()), &t.title);
+                        }
+                    });
+            }
+            ChangeChoice::Free => {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.free_task)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("what you want to do instead"),
+                );
+            }
+            ChangeChoice::Done | ChangeChoice::End => {}
+        }
+        ui.add(
+            egui::TextEdit::multiline(&mut self.reason)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .hint_text("reason — the AI decides whether it is good enough"),
+        );
+        let request = match self.choice {
+            ChangeChoice::Done => Some(ChangeKind::Done),
+            ChangeChoice::End => Some(ChangeKind::End),
+            ChangeChoice::OtherTodo => self
+                .other_todo
+                .clone()
+                .filter(|id| others.iter().any(|t| &t.id == id))
+                .map(|todo_id| ChangeKind::SwitchTodo { todo_id }),
+            ChangeChoice::Free => Some(self.free_task.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .map(|task| ChangeKind::SwitchFree { task }),
+        };
+        let ready = idle && request.is_some() && self.reason.trim().chars().count() >= 4;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(ready, egui::Button::new("Send request"))
+                .clicked()
+            {
+                if let Some(request) = request {
+                    self.send(
+                        "request_change",
+                        json!({ "request": request, "reason": self.reason }),
+                    );
+                    self.reason.clear();
+                }
+            }
+            if !idle {
+                ui.spinner();
+                ui.label("the AI is deciding…");
+            }
+        });
+        if let Some(d) = &self.shared.lock().decision {
+            let (color, label) = if d.approved {
+                (GREEN, "approved")
+            } else {
+                (RED, "rejected")
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(color, label);
+                ui.label(&d.reply);
+            });
+        }
+
+        open_todos_ui(ui, planner);
+    }
+}
+
+fn open_todos_ui(ui: &mut egui::Ui, planner: &PlannerStatus) {
+    ui.separator();
+    ui.collapsing(
+        format!("Open to-dos ({})", planner.open_todos.len()),
+        |ui| {
+            for t in &planner.open_todos {
+                let deadline = t
+                    .deadline
+                    .map(|d| format!(" · due {d}"))
+                    .unwrap_or_default();
+                ui.label(format!("P{} {}{deadline}", t.priority, t.title));
+            }
+        },
+    );
 }
 
 impl eframe::App for FocusApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let status = self.status.lock().clone();
+        let (status, message) = {
+            let s = self.shared.lock();
+            (s.status.clone(), s.message.clone())
+        };
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Focus session");
-            let status = match status {
-                Ok(status) => status,
-                Err(err) => {
-                    ui.colored_label(egui::Color32::from_rgb(200, 80, 80), err);
-                    ui.label("Blocking rules are enforced by the service either way.");
-                    return;
-                }
-            };
-            if !self.task_loaded {
-                self.task_input = status.task.clone();
-                self.task_loaded = true;
-            }
-
-            ui.label("What are you working on? Be specific: the AI judges every app against this.");
-            ui.add(
-                egui::TextEdit::multiline(&mut self.task_input)
-                    .desired_rows(3)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("e.g. 졸업논문 3장 작성 — Overleaf, 논문 PDF, Google Scholar 필요"),
-            );
-            let has_task = !self.task_input.trim().is_empty();
-            ui.horizontal(|ui| {
-                if status.session_active {
-                    ui.colored_label(egui::Color32::from_rgb(80, 170, 90), "● running");
-                    if ui
-                        .add_enabled(has_task, egui::Button::new("Change task"))
-                        .clicked()
-                    {
-                        let task = self.task_input.clone();
-                        self.send("start_session", json!({ "task": task }));
-                    }
-                    if ui.button("End session").clicked() {
-                        self.send("stop_session", json!({}));
-                    }
-                } else {
-                    ui.label("○ not running");
-                    if ui
-                        .add_enabled(has_task, egui::Button::new("Start focus"))
-                        .clicked()
-                    {
-                        let task = self.task_input.clone();
-                        self.send("start_session", json!({ "task": task }));
-                    }
-                }
-            });
-            if !self.message.is_empty() {
-                ui.colored_label(egui::Color32::from_rgb(200, 80, 80), &self.message);
-            }
-
-            if status.session_active {
-                match status.last_check {
-                    Some(at) => ui.label(format!(
-                        "Last AI check {} (every {} s)",
-                        at.with_timezone(&Local).format("%H:%M:%S"),
-                        status.check_interval_secs
-                    )),
-                    None => ui.label("First AI check in a moment…"),
-                };
-            }
-            if let Some(err) = &status.last_error {
-                ui.colored_label(egui::Color32::from_rgb(200, 80, 80), format!("AI check failed: {err}"));
-            }
-
-            ui.separator();
-            ui.heading("Blocked now");
-            if status.blocked.is_empty() {
-                ui.label("Nothing.");
-            }
-            for b in &status.blocked {
-                let until = b
-                    .until
-                    .map(|u| u.with_timezone(&Local).format("until %H:%M").to_string())
-                    .unwrap_or_else(|| "until the session ends".into());
-                ui.label(format!("{} ({until}) — {}", b.key, b.reason));
-            }
-
-            ui.separator();
-            ui.heading("Recent AI checks");
             egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("Focus session");
+                let status = match status {
+                    Some(Ok(status)) => status,
+                    Some(Err(err)) => {
+                        ui.colored_label(RED, err);
+                        ui.label("Blocking rules are enforced by the service either way.");
+                        return;
+                    }
+                    None => {
+                        ui.label("connecting…");
+                        return;
+                    }
+                };
+
+                match status.planner.clone().filter(|p| p.active) {
+                    Some(planner) => self.planner_ui(ui, &status, &planner),
+                    None => self.free_mode_ui(ui, &status),
+                }
+                if !message.is_empty() {
+                    ui.colored_label(RED, &message);
+                }
+
+                if status.session_active {
+                    match status.last_check {
+                        Some(at) => ui.label(format!(
+                            "Last AI check {} (every {} s)",
+                            at.with_timezone(&Local).format("%H:%M:%S"),
+                            status.check_interval_secs
+                        )),
+                        None => ui.label("First AI check in a moment…"),
+                    };
+                }
+                if let Some(err) = &status.last_error {
+                    ui.colored_label(RED, format!("AI check failed: {err}"));
+                }
+
+                ui.separator();
+                ui.heading("Blocked now");
+                if status.blocked.is_empty() {
+                    ui.label("Nothing.");
+                }
+                for b in &status.blocked {
+                    let until = b
+                        .until
+                        .map(|u| u.with_timezone(&Local).format("until %H:%M").to_string())
+                        .unwrap_or_else(|| "until the session ends".into());
+                    ui.label(format!("{} ({until}) — {}", b.key, b.reason));
+                }
+
+                ui.separator();
+                ui.heading("Recent AI checks");
                 for v in &status.verdicts {
                     let color = match v.verdict {
-                        Verdict::OnTask => egui::Color32::from_rgb(80, 170, 90),
-                        Verdict::OffTask => egui::Color32::from_rgb(200, 80, 80),
+                        Verdict::OnTask => GREEN,
+                        Verdict::OffTask => RED,
                         Verdict::Unsure => egui::Color32::GRAY,
                     };
                     ui.horizontal_wrapped(|ui| {

@@ -1,12 +1,7 @@
-use base64::Engine;
+use crate::claude::{jpeg_block, text_block, ClaudeClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::time::Duration;
 use thiserror::Error;
-
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
-const API_VERSION: &str = "2026-10-21";
-const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 
 const SYSTEM_PROMPT: &str = "\
 You are the focus checker inside a personal digital-wellbeing app. The user has \
@@ -74,83 +69,37 @@ pub trait Judge: Send + Sync {
 
 /// [`Judge`] backed by the Claude Messages API.
 pub struct ClaudeJudge {
-    agent: ureq::Agent,
-    api_key: String,
-    model: String,
+    client: ClaudeClient,
 }
 
 impl ClaudeJudge {
     pub fn new(api_key: String, model: String) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(90))
-            .try_proxy_from_env(true)
-            .build();
         Self {
-            agent,
-            api_key,
-            model,
+            client: ClaudeClient::new(api_key, model),
         }
     }
 
-    fn body(&self, request: &JudgeRequest) -> Value {
+    fn content(request: &JudgeRequest) -> Vec<Value> {
         let mut content = Vec::new();
         if let Some(jpeg) = request.screenshot {
-            content.push(json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": base64::engine::general_purpose::STANDARD.encode(jpeg),
-                }
-            }));
+            content.push(jpeg_block(jpeg));
         }
-        content.push(json!({ "type": "text", "text": user_text(request) }));
-
-        let mut body = json!({
-            "model": self.model,
-            "max_tokens": 2048,
-            "system": SYSTEM_PROMPT,
-            "output_config": {
-                "effort": "low",
-                "format": { "type": "json_schema", "schema": verdict_schema() },
-            },
-            "messages": [{ "role": "user", "content": content }],
-        });
-        if supports_server_fallback(&self.model) {
-            body["fallbacks"] = json!("default");
-        }
-        body
+        content.push(text_block(user_text(request)));
+        content
     }
 }
 
 impl Judge for ClaudeJudge {
     fn judge(&self, request: &JudgeRequest) -> Result<Judgement, JudgeError> {
-        let mut call = self
-            .agent
-            .post(API_URL)
-            .set("x-api-key", &self.api_key)
-            .set("anthropic-version", API_VERSION)
-            .set("content-type", "application/json");
-        if supports_server_fallback(&self.model) {
-            call = call.set("anthropic-beta", FALLBACK_BETA);
-        }
-        let response: Value = match call.send_json(self.body(request)) {
-            Ok(resp) => resp
-                .into_json()
-                .map_err(|e| JudgeError::BadResponse(e.to_string()))?,
-            Err(ureq::Error::Status(status, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                return Err(JudgeError::Api { status, body });
-            }
-            Err(err) => return Err(JudgeError::Transport(err.to_string())),
-        };
-        parse_response(&response)
+        // Effort `low`: a single classification needs little reasoning, and
+        // this runs every check interval.
+        self.client.structured(
+            SYSTEM_PROMPT,
+            Self::content(request),
+            verdict_schema(),
+            "low",
+        )
     }
-}
-
-/// Models that accept `fallbacks: "default"` on the Claude API.
-fn supports_server_fallback(model: &str) -> bool {
-    ["claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"].contains(&model)
 }
 
 fn verdict_schema() -> Value {
@@ -189,25 +138,10 @@ fn user_text(request: &JudgeRequest) -> String {
     )
 }
 
-fn parse_response(response: &Value) -> Result<Judgement, JudgeError> {
-    if response["stop_reason"] == "refusal" {
-        return Err(JudgeError::Refused);
-    }
-    let text = response["content"]
-        .as_array()
-        .and_then(|blocks| {
-            blocks
-                .iter()
-                .find(|b| b["type"] == "text")
-                .and_then(|b| b["text"].as_str())
-        })
-        .ok_or_else(|| JudgeError::BadResponse(format!("no text block: {response}")))?;
-    serde_json::from_str(text).map_err(|e| JudgeError::BadResponse(format!("{e}: {text}")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude::parse_structured;
 
     #[test]
     fn parses_structured_verdict() {
@@ -218,7 +152,7 @@ mod tests {
                 { "type": "text", "text": "{\"verdict\":\"off_task\",\"reason\":\"YouTube 게임 영상\"}" }
             ]
         });
-        let j = parse_response(&response).unwrap();
+        let j: Judgement = parse_structured(&response).unwrap();
         assert_eq!(j.verdict, Verdict::OffTask);
         assert_eq!(j.reason, "YouTube 게임 영상");
     }
@@ -226,12 +160,15 @@ mod tests {
     #[test]
     fn refusal_is_an_error() {
         let response = json!({ "stop_reason": "refusal", "content": [] });
-        assert!(matches!(parse_response(&response), Err(JudgeError::Refused)));
+        assert!(matches!(
+            parse_structured::<Judgement>(&response),
+            Err(JudgeError::Refused)
+        ));
     }
 
     #[test]
     fn body_includes_image_and_fallback() {
-        let judge = ClaudeJudge::new("k".into(), "claude-opus-5-5".into());
+        let client = ClaudeClient::new("k".into(), "claude-opus-5-5".into());
         let req = JudgeRequest {
             task: "write thesis",
             history: "",
@@ -239,11 +176,22 @@ mod tests {
             title: "YouTube",
             screenshot: Some(&[1, 2, 3]),
         };
-        let body = judge.body(&req);
+        let body = client.body(
+            SYSTEM_PROMPT,
+            ClaudeJudge::content(&req),
+            verdict_schema(),
+            "low",
+        );
         assert_eq!(body["messages"][0]["content"][0]["type"], "image");
         assert_eq!(body["fallbacks"], "default");
 
-        let judge = ClaudeJudge::new("k".into(), "claude-haiku-5-5".into());
-        assert!(judge.body(&req).get("fallbacks").is_none());
+        let client = ClaudeClient::new("k".into(), "claude-haiku-5-5".into());
+        let body = client.body(
+            SYSTEM_PROMPT,
+            ClaudeJudge::content(&req),
+            verdict_schema(),
+            "low",
+        );
+        assert!(body.get("fallbacks").is_none());
     }
 }

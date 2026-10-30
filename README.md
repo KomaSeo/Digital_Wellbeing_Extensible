@@ -74,6 +74,13 @@ are edited with `digital-wellbeing.exe` (administrator) and stored in
 `%ProgramData%\DigitalWellbeing`, which standard users cannot read or write.
 Full guide (Korean): [`docs/multi_account.md`](docs/multi_account.md).
 
+**Task planner** (machine install): the admin keeps a to-do list (deadline,
+priority, notes) in the *Task planner* tab. When it is on, the AI picks the
+user's task from the list ("Get my task" in the Focus app) and that becomes the
+AI focus task; finishing, switching or ending needs a reason the AI approves.
+Every request is logged for the admin. Guide (Korean):
+[`docs/task_planner.md`](docs/task_planner.md).
+
 ## Function call API
 
 JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.
@@ -123,6 +130,7 @@ $json = '{"id":1,"method":"add_blacklist","params":{"name":"discord.exe"}}'
 apps/desktop           egui shell: rule tabs + shared process/block views
 crates/list_based_rule blacklist/whitelist BlockRule + RuleUi settings
 crates/ai_focus_rule   AI-judged focus BlockRule + RuleUi (activity sampler, Claude judge)
+crates/task_planner    AI picks the task from a to-do list; reviews change requests
 crates/machine         machine-install paths, managed users, session ids, agent<->Focus API
 apps/service           Windows service, per-session agent, installer
 apps/focus             Focus app for standard users (declare task, see verdicts)

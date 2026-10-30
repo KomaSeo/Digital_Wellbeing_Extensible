@@ -8,16 +8,19 @@
 //!   of its own session.
 //!
 //! It reads config from `%ProgramData%\DigitalWellbeing` and never writes it;
-//! the admin UI writes, the agent reloads within a few seconds.
+//! the admin UI writes, the agent reloads within a few seconds. The one file
+//! it writes is `planner_state.json` (assignment and change-request log).
 
 use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
 use enforcer::Enforcer;
 use list_based_rule::{FileListPersistence, ListBasedRuleHandle, ListStore};
 use machine::session::{current_session_id, process_session_id};
+use machine::user_api::AgentApi;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
+use task_planner::{claude_advisor_provider, JsonStore, PlannerConfig, PlannerState, TaskPlanner};
 use tracing::{info, warn};
 
 const RELOAD_INTERVAL: Duration = Duration::from_secs(3);
@@ -27,9 +30,8 @@ pub fn run() -> anyhow::Result<()> {
     crate::init_logging(&format!("agent-session{session}.log"));
     info!("agent starting in session {session}");
 
-    let list_store = ListStore::with_persistence(Arc::new(FileListPersistence::new(
-        machine::policy_path(),
-    )))?;
+    let list_store =
+        ListStore::with_persistence(Arc::new(FileListPersistence::new(machine::policy_path())))?;
     let list_rule = ListBasedRuleHandle::new(list_store.clone());
 
     let ai_store = AiFocusStore::open_read_only(machine::ai_focus_path())?;
@@ -37,34 +39,53 @@ pub fn run() -> anyhow::Result<()> {
     let ai_rule = AiFocusRuleHandle::new(Arc::clone(&monitor));
 
     let enforcer = Arc::new(Enforcer::new());
-    enforcer.set_process_filter(Arc::new(move |pid| process_session_id(pid) == Some(session)));
+    enforcer.set_process_filter(Arc::new(move |pid| {
+        process_session_id(pid) == Some(session)
+    }));
     enforcer.register_rule(list_rule.rule());
     enforcer.register_rule(ai_rule.rule());
 
     let enforce = enforcer.start_background(Duration::from_millis(800));
     let _monitor = monitor.start_background();
 
-    let api_monitor = Arc::clone(&monitor);
+    let planner_config = JsonStore::<PlannerConfig>::open(machine::planner_path(), false)?;
+    let planner_state = JsonStore::<PlannerState>::open(machine::planner_state_path(), true)?;
+    let planner = Arc::new(TaskPlanner::new(
+        planner_config.clone(),
+        planner_state,
+        Arc::clone(&monitor),
+        claude_advisor_provider(),
+    ));
+
+    let api = Arc::new(AgentApi {
+        monitor: Arc::clone(&monitor),
+        planner: Some(planner),
+    });
     thread::spawn(move || {
-        if let Err(err) = machine::user_api::serve(api_monitor, session) {
+        if let Err(err) = machine::user_api::serve(api, session) {
             warn!("user api failed: {err}");
         }
     });
 
-    thread::spawn(move || reload_loop(list_store, ai_store));
+    thread::spawn(move || reload_loop(list_store, ai_store, planner_config));
 
     enforce.join().ok();
     Ok(())
 }
 
 /// Pick up edits the admin UI makes to the config files.
-fn reload_loop(list_store: ListStore, ai_store: AiFocusStore) {
+fn reload_loop(
+    list_store: ListStore,
+    ai_store: AiFocusStore,
+    planner_config: JsonStore<PlannerConfig>,
+) {
     let policy = machine::policy_path();
     let ai = machine::ai_focus_path();
-    let mut seen = (modified(&policy), modified(&ai));
+    let plan = machine::planner_path();
+    let mut seen = (modified(&policy), modified(&ai), modified(&plan));
     loop {
         thread::sleep(RELOAD_INTERVAL);
-        let now = (modified(&policy), modified(&ai));
+        let now = (modified(&policy), modified(&ai), modified(&plan));
         if now.0 != seen.0 {
             match list_store.reload() {
                 Ok(()) => info!("reloaded {}", policy.display()),
@@ -75,6 +96,12 @@ fn reload_loop(list_store: ListStore, ai_store: AiFocusStore) {
             match ai_store.reload_keeping_session() {
                 Ok(()) => info!("reloaded {}", ai.display()),
                 Err(err) => warn!("reload {}: {err}", ai.display()),
+            }
+        }
+        if now.2 != seen.2 {
+            match planner_config.reload() {
+                Ok(()) => info!("reloaded {}", plan.display()),
+                Err(err) => warn!("reload {}: {err}", plan.display()),
             }
         }
         seen = now;

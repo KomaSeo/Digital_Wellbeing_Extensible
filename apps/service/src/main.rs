@@ -51,8 +51,8 @@ fn main() -> anyhow::Result<()> {
 /// Log to `%ProgramData%\DigitalWellbeing\logs\<file>`; stderr if that fails.
 /// Files over 10 MB are truncated at start-up (no rotation).
 pub fn init_logging(file: &str) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info".into());
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let dir = machine::log_dir();
     let path = dir.join(file);
     let too_big = fs::metadata(&path).is_ok_and(|m| m.len() > 10 * 1024 * 1024);

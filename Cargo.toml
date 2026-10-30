@@ -6,6 +6,7 @@ members = [
     "crates/rule_ui",
     "crates/tool-api",
     "crates/ai_focus_rule",
+    "crates/task_planner",
     "crates/machine",
     "apps/service",
     "apps/focus",
@@ -37,3 +38,4 @@ rule_ui = { path = "crates/rule_ui" }
 tool-api = { path = "crates/tool-api" }
 ai_focus_rule = { path = "crates/ai_focus_rule" }
 machine = { path = "crates/machine" }
+task_planner = { path = "crates/task_planner" }
