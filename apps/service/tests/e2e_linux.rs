@@ -1,8 +1,11 @@
 //! Responsibility: Run the real agent end to end on Linux: an X server (Xvfb), real windows,
-//! the agent binary, its user API, and a local stand-in for the Claude Messages API.
+//! the agent binary, its user API, and either a local stand-in for the Claude Messages API or
+//! the real one.
 //!
 //! Run with `xvfb-run -a cargo test -p digital-wellbeing-service --test e2e_linux`; without
-//! `DISPLAY` the test is skipped. What it checks, in order:
+//! `DISPLAY` both tests are skipped. The real-API test runs only when
+//! `DW_E2E_ANTHROPIC_API_KEY` holds an API key (each run costs a few cents); it checks only
+//! what any sensible answer satisfies and prints the AI's reasons. What they check, in order:
 //! 1. a focus session starts through the user API (as the Focus app does);
 //! 2. a window without a verdict is judged at once: the off-task tab in front gets Ctrl+W,
 //!    and the on-task window behind it is judged by title too;
@@ -18,6 +21,7 @@ use machine::user_api::{call, call_value, Status};
 use serde_json::json;
 use std::process::{Child, Command};
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
@@ -38,23 +42,46 @@ impl Drop for Agent {
     }
 }
 
+/// The tests share the X server, the agent port (`DW_PORT_BASE` is process-wide) and the
+/// keyboard focus, so they run one at a time.
+static SERIAL: Mutex<()> = Mutex::new(());
+
 #[test]
 fn agent_end_to_end_on_x11() {
+    end_to_end(None);
+}
+
+#[test]
+fn agent_end_to_end_on_x11_with_real_claude() {
+    match std::env::var("DW_E2E_ANTHROPIC_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => end_to_end(Some(key.trim().to_string())),
+        _ => eprintln!("skipped: DW_E2E_ANTHROPIC_API_KEY is not set"),
+    }
+}
+
+/// `real_key`: call the real Claude API with this key; `None`: the local stand-in.
+fn end_to_end(real_key: Option<String>) {
     let Some(display) = std::env::var_os("DISPLAY") else {
         eprintln!("skipped: no DISPLAY (run under xvfb-run)");
         return;
     };
-    let data = std::env::temp_dir().join(format!("dw-e2e-{}", std::process::id()));
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let real = real_key.is_some();
+    let data = std::env::temp_dir().join(format!(
+        "dw-e2e-{}-{}",
+        std::process::id(),
+        if real { "real" } else { "fake" }
+    ));
     let _ = std::fs::remove_dir_all(&data);
     std::fs::create_dir_all(&data).unwrap();
     // Our own process plays "the browser": its windows are tabs.
     let exe = std::env::current_exe().unwrap();
     let browser = exe.file_name().unwrap().to_string_lossy().to_string();
+    let api_key = real_key.clone().unwrap_or_else(|| "test-key".to_string());
     std::fs::write(
         data.join("ai_focus.json"),
         json!({
-            "api_key": "test-key",
-            "model": "claude-opus-5-5",
+            "api_key": api_key,
             "send_screenshot": false,
             "browsers": [browser],
         })
@@ -62,21 +89,28 @@ fn agent_end_to_end_on_x11() {
     )
     .unwrap();
 
-    let (claude_url, claude_calls) = fake_claude("127.0.0.1:0");
+    let mut agent = Command::new(env!("CARGO_BIN_EXE_digital-wellbeing-service"));
+    let fake_calls = (!real).then(|| {
+        let (claude_url, calls) = fake_claude("127.0.0.1:0");
+        agent.env("DW_CLAUDE_API_URL", &claude_url);
+        calls
+    });
     let port_base = 20000 + (std::process::id() % 20000) as u16;
-    // SAFETY (set_var): set before any other thread of this test reads the environment.
+    // SAFETY (set_var): the tests run one at a time (SERIAL), and this test's threads read
+    // the environment only after this line.
     std::env::set_var("DW_PORT_BASE", port_base.to_string());
     let _agent = Agent(
-        Command::new(env!("CARGO_BIN_EXE_digital-wellbeing-service"))
+        agent
             .arg("agent")
             .env("DW_DATA_DIR", &data)
             .env("DW_PORT_BASE", port_base.to_string())
-            .env("DW_CLAUDE_API_URL", &claude_url)
             .env("DISPLAY", &display)
             .env("RUST_LOG", "debug,ureq=info,rustls=info")
             .spawn()
             .unwrap(),
     );
+    // The real API takes seconds per call; the stand-in answers at once.
+    let patience = if real { 4 } else { 1 };
     let session = machine::session::current_session_id();
     let status = wait_for(Duration::from_secs(15), || {
         call(session, "status", json!({})).ok()
@@ -95,13 +129,13 @@ fn agent_end_to_end_on_x11() {
     let started = call(
         session,
         "start_session",
-        json!({ "task": "write my thesis" }),
+        json!({ "task": "write a command-line tool in Rust" }),
     )
     .unwrap();
     assert!(started.session_active);
 
     // 2. Ctrl+W reaches the off-task tab within a few samples.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(20 * patience);
     let mut closed = false;
     while Instant::now() < deadline && !closed {
         match x.poll_for_event().unwrap() {
@@ -115,7 +149,7 @@ fn agent_end_to_end_on_x11() {
     assert!(closed, "the off-task tab did not get Ctrl+W");
 
     // 3. What the Focus app shows.
-    let status = wait_for(Duration::from_secs(10), || {
+    let status = wait_for(Duration::from_secs(10 * patience), || {
         let s: Status = call(session, "status", json!({})).ok()?;
         s.verdicts
             .iter()
@@ -127,20 +161,40 @@ fn agent_end_to_end_on_x11() {
         .verdicts
         .iter()
         .any(|v| v.title == "Funny cats - YouTube" && v.action.contains("tab closed")));
+    if real {
+        for v in &status.verdicts {
+            println!("verdict: {} -> {:?} ({})", v.title, v.verdict, v.reason);
+        }
+    }
+    // The stand-in never names a channel; the real AI may, so only the site is fixed.
+    let block_key = if real {
+        "youtube "
+    } else {
+        "youtube page: funny cats"
+    };
     assert!(
-        status
-            .blocked
-            .iter()
-            .any(|b| b.key.contains("youtube page: funny cats")),
+        status.blocked.iter().any(|b| b.key.contains(block_key)),
         "{:?}",
         status.blocked
     );
-    assert!(status.ai_cost_today_usd.unwrap_or(0.0) > 0.0);
-    assert!(claude_calls.load(Ordering::SeqCst) >= 1);
+    assert!(
+        !status
+            .blocked
+            .iter()
+            .any(|b| b.key.to_lowercase().contains("rust docs")),
+        "{:?}",
+        status.blocked
+    );
+    let cost = status.ai_cost_today_usd.unwrap_or(0.0);
+    println!("estimated cost so far: ${cost:.4}");
+    assert!(cost > 0.0);
+    if let Some(calls) = &fake_calls {
+        assert!(calls.load(Ordering::SeqCst) >= 1);
+    }
 
     // 4. Settings while unlocked, a proposal, then the lock.
     let settings = call_value(session, "settings_get", json!({})).unwrap();
-    assert_eq!(settings["files"]["ai_focus"]["api_key"], "test-key");
+    assert_eq!(settings["files"]["ai_focus"]["api_key"], api_key.as_str());
     call_value(
         session,
         "settings_put",
@@ -155,7 +209,14 @@ fn agent_end_to_end_on_x11() {
         json!({ "todo": { "title": "Buy groceries" }, "via": "e2e" }),
     )
     .unwrap();
-    assert!(proposed.last_proposal.as_ref().is_some_and(|p| p.approved));
+    let proposal = proposed.last_proposal.expect("the proposal was reviewed");
+    println!(
+        "proposal approved: {} ({})",
+        proposal.approved, proposal.reply
+    );
+    // Buying groceries breaks no rule; the real AI could still be strict, so only the
+    // stand-in's answer is fixed.
+    assert!(proposal.approved || real);
     call_value(session, "settings_lock", json!({ "hours": 1 })).unwrap();
     let refused = call_value(session, "settings_get", json!({})).unwrap_err();
     assert!(refused.contains("locked"), "{refused}");

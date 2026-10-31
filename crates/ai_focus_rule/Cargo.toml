@@ -15,7 +15,7 @@ sysinfo = { workspace = true }
 enforcer = { workspace = true }
 rule_ui = { workspace = true }
 egui = { workspace = true }
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "2", features = ["json", "native-certs"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 

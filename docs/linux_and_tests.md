@@ -67,6 +67,16 @@ xvfb-run -a cargo test --workspace
    - 설정 읽기와 쓰기, 할 일 제안이 된다.
    - 설정을 잠그면 agent가 설정 읽기를 거부한다.
 
+**진짜 Claude API로 하는 끝에서 끝까지 테스트** (같은 파일의 `agent_end_to_end_on_x11_with_real_claude`): 위와 같은 일을 가짜 Claude 서버 대신 진짜 Claude API로 합니다.
+- 환경 변수 `DW_E2E_ANTHROPIC_API_KEY`에 API 키가 있을 때만 실행되고, 없으면 건너뜁니다. 그래서 키가 없는 CI와 개발자 PC의 `cargo test`는 비용을 쓰지 않습니다.
+- 실행 방법: `DW_E2E_ANTHROPIC_API_KEY=<키> xvfb-run -a cargo test -p digital-wellbeing-service --test e2e_linux -- --nocapture`
+- 한 번 실행하면 판정 몇 번과 제안 심사 한 번을 부르므로 몇 센트가 듭니다.
+- 진짜 AI의 답은 매번 조금씩 다를 수 있습니다. 그래서 이 테스트는 상식적인 답이면 모두 통과하는 것만 확인합니다. 집중 세션의 할 일은 "write a command-line tool in Rust"입니다. 고양이 영상 탭은 Ctrl+W를 받고 YouTube 차단 목록에 들어가야 합니다. Rust 문서 창은 차단되면 안 됩니다. 할 일 제안("Buy groceries")은 승인 여부와 상관없이 심사 결과가 나오기만 하면 됩니다.
+- 테스트는 AI가 각 창에 내린 판정과 이유, 제안 심사 결과, 예상 비용을 출력합니다(`--nocapture`).
+
+**운영체제의 인증서 저장소:** 프로그램은 Claude API에 HTTPS로 연결할 때 운영체제가 믿는 인증서(Windows는 Windows 인증서 저장소, Linux는 `/etc/ssl/certs`)를 믿습니다(`ureq`의 `native-certs` 기능).
+회사 네트워크나 이 개발 서버처럼 HTTPS를 중간에서 검사하는 네트워크는 자기 인증서를 운영체제에 등록해 둡니다. 프로그램이 자기 안에 든 인증서 목록만 믿으면, 이런 네트워크에서는 연결이 "invalid peer certificate: UnknownIssuer"로 실패합니다.
+
 **`DW_CLAUDE_API_URL`:** 이 환경 변수가 있으면 프로그램은 `https://api.anthropic.com` 대신 그 주소로 Claude를 부릅니다. 주소가 `127.0.0.1`이나 `localhost`이면 환경 변수의 프록시를 거치지 않습니다.
 Windows에서 agent의 환경 변수는 SYSTEM 서비스의 환경 변수이고, 이것은 관리자만 바꿀 수 있습니다. 그래서 일반 사용자가 이 값으로 판정을 바꿀 수는 없습니다.
 
