@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use task_planner::{ChangeKind, ChangeRecord, PlannerStatus, ProposalRecord};
+use task_planner::{ChangeKind, ChangeRecord, PlannerStatus, ProposalRecord, WhenTimeIsUp};
 
 const POLL: Duration = Duration::from_secs(2);
 const TITLE: &str = "Digital Wellbeing Focus";
@@ -104,6 +104,10 @@ enum ChangeChoice {
     OtherTodo,
     Free,
     End,
+    /// Keep the task past its planned end; only show a notice (the AI decides).
+    NotifyWhenTimeIsUp,
+    /// Back to the default: a new task is picked when the time is up.
+    ReassignWhenTimeIsUp,
 }
 
 /// Responsibility: Name the Focus window's tabs: what to do (the focus session, the
@@ -464,6 +468,30 @@ impl FocusApp {
                 assignment.why,
                 assignment.at.with_timezone(&Local).format("%H:%M")
             ));
+            if let Some(until) = assignment.until {
+                let until_text = until.with_timezone(&Local).format("%H:%M");
+                let minutes_left = (until - Utc::now()).num_minutes();
+                match assignment.when_time_is_up {
+                    WhenTimeIsUp::Reassign if minutes_left >= 0 => ui.label(format!(
+                        "Until {until_text} ({minutes_left} min left). Then the AI picks the \
+                         next task."
+                    )),
+                    WhenTimeIsUp::Reassign => ui.label(format!(
+                        "Time was up at {until_text}; picking the next task…"
+                    )),
+                    WhenTimeIsUp::NotifyOnly if minutes_left >= 0 => ui.label(format!(
+                        "Until {until_text} ({minutes_left} min left). Then you only get a \
+                         notice and keep this task."
+                    )),
+                    WhenTimeIsUp::NotifyOnly => ui.colored_label(
+                        RED,
+                        format!(
+                            "Time was up at {until_text}. Keep going, or ask for a change when \
+                             you are done."
+                        ),
+                    ),
+                };
+            }
         });
 
         // --- change request --------------------------------------------------
@@ -474,6 +502,18 @@ impl FocusApp {
             ui.radio_value(&mut self.choice, ChangeChoice::OtherTodo, "Another to-do");
             ui.radio_value(&mut self.choice, ChangeChoice::Free, "Something else");
             ui.radio_value(&mut self.choice, ChangeChoice::End, "End session");
+            match assignment.when_time_is_up {
+                WhenTimeIsUp::Reassign => ui.radio_value(
+                    &mut self.choice,
+                    ChangeChoice::NotifyWhenTimeIsUp,
+                    "Only notify me when time is up",
+                ),
+                WhenTimeIsUp::NotifyOnly => ui.radio_value(
+                    &mut self.choice,
+                    ChangeChoice::ReassignWhenTimeIsUp,
+                    "Pick a new task when time is up",
+                ),
+            };
         });
         let others: Vec<_> = planner
             .open_todos
@@ -506,7 +546,10 @@ impl FocusApp {
                         .hint_text("what you want to do instead"),
                 );
             }
-            ChangeChoice::Done | ChangeChoice::End => {}
+            ChangeChoice::Done
+            | ChangeChoice::End
+            | ChangeChoice::NotifyWhenTimeIsUp
+            | ChangeChoice::ReassignWhenTimeIsUp => {}
         }
         ui.add(
             egui::TextEdit::multiline(&mut self.reason)
@@ -525,6 +568,17 @@ impl FocusApp {
             ChangeChoice::Free => Some(self.free_task.trim().to_string())
                 .filter(|task| !task.is_empty())
                 .map(|task| ChangeKind::SwitchFree { task }),
+            // Offered only for the mode that is not in force.
+            ChangeChoice::NotifyWhenTimeIsUp => (assignment.when_time_is_up
+                == WhenTimeIsUp::Reassign)
+                .then_some(ChangeKind::SetWhenTimeIsUp {
+                    action: WhenTimeIsUp::NotifyOnly,
+                }),
+            ChangeChoice::ReassignWhenTimeIsUp => (assignment.when_time_is_up
+                == WhenTimeIsUp::NotifyOnly)
+                .then_some(ChangeKind::SetWhenTimeIsUp {
+                    action: WhenTimeIsUp::Reassign,
+                }),
         };
         let ready = idle && request.is_some() && self.reason.trim().chars().count() >= 4;
         ui.horizontal(|ui| {

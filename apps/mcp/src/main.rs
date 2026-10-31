@@ -131,11 +131,11 @@ fn tools() -> Value {
         },
         {
             "name": "request_change",
-            "description": "Ask to change the assigned task: it is done, switch to another open to-do, switch to something not on the list, or end the session. The app's AI approves or rejects the reason.",
+            "description": "Ask to change the assigned task: it is done, switch to another open to-do, switch to something not on the list, or end the session. Every task runs until a planned end (\"until\" in get_status) and then the app's AI picks the next one; notify_when_time_is_up asks to keep the current task past that end and only be notified, reassign_when_time_is_up goes back to a new pick. The app's AI approves or rejects the reason (going back to reassign needs no approval).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "change": { "type": "string", "enum": ["done", "switch_todo", "switch_free", "end"] },
+                    "change": { "type": "string", "enum": ["done", "switch_todo", "switch_free", "end", "notify_when_time_is_up", "reassign_when_time_is_up"] },
                     "todo_id": { "type": "string", "description": "For switch_todo: id from get_status" },
                     "task": { "type": "string", "description": "For switch_free: what to do instead" },
                     "reason": { "type": "string", "description": "The user's reason, in their words" }
@@ -175,6 +175,12 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
             let request = match arguments["change"].as_str().unwrap_or_default() {
                 "done" => json!({ "kind": "done" }),
                 "end" => json!({ "kind": "end" }),
+                "notify_when_time_is_up" => {
+                    json!({ "kind": "set_when_time_is_up", "action": "notify_only" })
+                }
+                "reassign_when_time_is_up" => {
+                    json!({ "kind": "set_when_time_is_up", "action": "reassign" })
+                }
                 "switch_todo" => json!({
                     "kind": "switch_todo",
                     "todo_id": arguments["todo_id"].as_str().ok_or("todo_id is required for switch_todo")?,
@@ -216,6 +222,8 @@ fn summary(status: &Status) -> Value {
             "why": assignment.why,
             "todo_id": assignment.todo_id,
             "since": assignment.at,
+            "until": assignment.until,
+            "when_time_is_up": assignment.when_time_is_up,
         })),
         "open_todos": planner.map(|planner| planner.open_todos.iter().map(|todo| json!({
             "id": todo.id,

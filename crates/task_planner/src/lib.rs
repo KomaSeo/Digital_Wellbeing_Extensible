@@ -4,7 +4,8 @@
 //! list, and changing that task needs a reason the AI approves.
 //!
 //! - `planner.json` ([`PlannerConfig`]): the list; edited by the admin only.
-//! - `planner_state.json` ([`PlannerState`]): current assignment, finished
+//! - `planner_state.json` ([`PlannerState`]): current assignment (with the time the AI gave
+//!   it; when that is up the AI picks again, unless the user got "notify only" approved), finished
 //!   to-dos, change-request log, to-dos the user proposed and the AI approved;
 //!   written by the agent.
 //!
@@ -25,7 +26,7 @@ pub use advisor::{
 pub use ai_focus_rule::store::JsonStore;
 pub use model::{
     Assignment, AssignmentSource, ChangeKind, ChangeRecord, DoneRecord, PlannerConfig,
-    PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TodoItem,
+    PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TodoItem, WhenTimeIsUp,
 };
 pub use planner::{PlannerError, TaskPlanner};
 

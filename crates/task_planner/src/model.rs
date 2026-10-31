@@ -80,7 +80,18 @@ pub enum AssignmentSource {
     ApprovedChange,
 }
 
-/// Responsibility: Record the task currently given to the user, and why.
+/// Responsibility: Say what happens when an assignment's time is up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhenTimeIsUp {
+    /// The AI picks the next task (it may pick the same to-do again).
+    #[default]
+    Reassign,
+    /// The task stays; the Focus app only says the time is up. Set by an approved request.
+    NotifyOnly,
+}
+
+/// Responsibility: Record the task currently given to the user, until when, and why.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {
     /// The to-do this belongs to; `None` for an approved free-text task.
@@ -91,6 +102,20 @@ pub struct Assignment {
     pub why: String,
     pub source: AssignmentSource,
     pub at: DateTime<Utc>,
+    /// When the time the AI gave this task is up; `None` for assignments made before
+    /// assignments had an end.
+    #[serde(default)]
+    pub until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub when_time_is_up: WhenTimeIsUp,
+}
+
+impl Assignment {
+    /// The time is up and a new task should be picked now.
+    pub fn due_for_reassignment(&self, now: DateTime<Utc>) -> bool {
+        self.when_time_is_up == WhenTimeIsUp::Reassign
+            && self.until.is_some_and(|until| now >= until)
+    }
 }
 
 /// Responsibility: Name what a change request asks for.
@@ -107,6 +132,10 @@ pub enum ChangeKind {
     SwitchFree { task: String },
     /// Stop the focus session altogether.
     End,
+    /// Change what happens when the current task's time is up. Asking for `NotifyOnly`
+    /// (keep working past the planned end) needs the AI's approval; asking for `Reassign`
+    /// is stricter and is approved without asking.
+    SetWhenTimeIsUp { action: WhenTimeIsUp },
 }
 
 /// Responsibility: Record one change request and the AI's decision.

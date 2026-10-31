@@ -12,7 +12,8 @@
 //! 3. the verdicts, the block and the token usage show in the status;
 //! 4. settings_get / settings_put work while unlocked; with the stand-in, a to-do proposal
 //!    goes through; with the real AI, the planner picks what to do now from a list that
-//!    mixes work, rest and play (urgent work first; rest or play on a rest day);
+//!    mixes work, rest and play (urgent work first; rest or play on a rest day) and how
+//!    long each runs, and decides on a request to keep the task past its planned end;
 //! 5. after settings_lock, a saved edit waits for the lock to end instead of taking effect,
 //!    and can be discarded; when a lock ends, the agent puts the waiting edit in force.
 #![cfg(target_os = "linux")]
@@ -252,6 +253,22 @@ fn end_to_end(real_key: Option<String>) {
             urgent, "a-thesis",
             "work due today comes before rest and play"
         );
+        // Asking the AI to keep this task past its planned end instead of a new pick.
+        let status = call(
+            session,
+            "request_change",
+            json!({
+                "request": { "kind": "set_when_time_is_up", "action": "notify_only" },
+                "reason": "I am in the middle of the final edits and it is due today; \
+                           stopping halfway would cost me the context.",
+            }),
+        )
+        .unwrap();
+        let decision = status.last_decision.expect("the AI decided");
+        println!(
+            "notify only when time is up: approved {} ({})",
+            decision.approved, decision.reply
+        );
         let rest = assign(
             session,
             &[
@@ -349,10 +366,15 @@ fn assign(session: u32, todos: &[Value], life_rules: &str) -> String {
         .planner
         .and_then(|planner| planner.assignment)
         .expect("an assignment");
+    let minutes = assignment
+        .until
+        .map(|until| (until - assignment.at).num_minutes())
+        .expect("the AI gave the task a planned end");
     println!(
-        "rules: {life_rules}\n  -> {:?}: {}\n     why: {}",
+        "rules: {life_rules}\n  -> {:?} for {minutes} min: {}\n     why: {}",
         assignment.todo_id, assignment.task, assignment.why
     );
+    assert!((10..=480).contains(&minutes), "{minutes} minutes");
     assert!(
         status.session_active,
         "the assignment starts a focus session"

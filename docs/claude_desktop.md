@@ -72,6 +72,7 @@ Claude Desktop은 `digital-wellbeing-mcp.exe`를 작업 계정의 권한으로 �
 | "'지도교수 메일 답장'을 할 일에 넣어 줘. 금요일까지야." | `propose_todo` (`title`, `deadline`) |
 | "할 일 하나 줘" | `get_my_task` |
 | "3장 초안 10쪽 다 썼어. 끝났다고 해 줘." | `request_change` (`change: "done"`, `reason`) |
+| "이 증명 거의 다 됐어. 시간 끝나도 새 할 일 주지 말고 계속하게 해 줘." | `request_change` (`change: "notify_when_time_is_up"`, `reason`). agent의 AI가 심사합니다. |
 | "자료가 아직 안 와서 막혔어. 다른 할 일로 바꿔 줘." | `get_status`로 목록을 본 뒤 `request_change` (`change: "switch_todo"`, `todo_id`, `reason`) |
 
 **Claude Docs의 할 일 목록과의 관계:** 이 프로그램은 Claude Docs 문서를 직접 읽지 않습니다. 할 일의 원본은 이 프로그램의 목록입니다.
@@ -83,10 +84,10 @@ Claude Docs에 적어 둔 할 일을 옮기고 싶다면, Claude에게 "문서�
 
 | 도구 | 인자 | 하는 일 |
 |---|---|---|
-| `get_status` | 없음 | agent의 `status`를 부르고, 집중 세션, 지금 할 일, 남은 할 일(id, 제목, 메모, 마감, 중요도, 사용자가 제안했는지), 최근 제안과 변경 요청, 차단 목록만 추려서 돌려줍니다. 판정 기록 같은 긴 내용은 뺍니다. |
+| `get_status` | 없음 | agent의 `status`를 부르고, 집중 세션, 지금 할 일(계획된 끝 `until`과 시간이 다 되었을 때의 동작 `when_time_is_up` 포함), 남은 할 일(id, 제목, 메모, 마감, 중요도, 사용자가 제안했는지), 최근 제안과 변경 요청, 차단 목록만 추려서 돌려줍니다. 판정 기록 같은 긴 내용은 뺍니다. |
 | `propose_todo` | `title`(필수), `notes`, `deadline`(`YYYY-MM-DD`), `priority`(1~5), `estimate_minutes` | agent의 `propose_todo`를 `via: "claude desktop"`으로 부르고, 승인 여부와 AI의 답을 돌려줍니다. |
 | `get_my_task` | 없음 | agent의 `assign`을 부르고, 할당된 할 일을 돌려줍니다. |
-| `request_change` | `change`(`done`, `switch_todo`, `switch_free`, `end`), `todo_id`, `task`, `reason`(필수) | agent의 `request_change`를 부르고, 승인 여부, AI의 답, 바뀐 할당을 돌려줍니다. |
+| `request_change` | `change`(`done`, `switch_todo`, `switch_free`, `end`, `notify_when_time_is_up`, `reassign_when_time_is_up`), `todo_id`, `task`, `reason`(필수) | agent의 `request_change`를 부르고, 승인 여부, AI의 답, 바뀐 할당을 돌려줍니다. |
 
 agent가 요청을 거부하거나 agent에 연결할 수 없으면, 도구는 오류 표시(`isError: true`)와 함께 이유를 돌려줍니다. Claude는 그 이유를 사용자에게 전합니다.
 

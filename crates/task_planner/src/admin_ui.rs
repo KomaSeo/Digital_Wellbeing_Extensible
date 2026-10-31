@@ -1,7 +1,7 @@
 //! Responsibility: Draw the admin's planner tab: edit the to-do list and show the agent's
 //! assignments and change requests.
 
-use crate::model::{ChangeKind, PlannerConfig, PlannerState, TodoItem};
+use crate::model::{ChangeKind, PlannerConfig, PlannerState, TodoItem, WhenTimeIsUp};
 use ai_focus_rule::store::JsonStore;
 use chrono::{Local, NaiveDate};
 use parking_lot::Mutex;
@@ -257,8 +257,18 @@ impl Panel for PlannerAdminUi {
         ui.heading("Current assignment");
         match &state.assignment {
             Some(assignment) => {
+                let until = assignment.until.map_or(String::new(), |until| {
+                    format!(
+                        ", until {}{}",
+                        until.with_timezone(&Local).format("%H:%M"),
+                        match assignment.when_time_is_up {
+                            WhenTimeIsUp::Reassign => "",
+                            WhenTimeIsUp::NotifyOnly => " (then only a notice)",
+                        }
+                    )
+                });
                 ui.label(format!(
-                    "{}  (since {})",
+                    "{}  (since {}{until})",
                     assignment.task,
                     assignment.at.with_timezone(&Local).format("%m-%d %H:%M")
                 ));
@@ -335,5 +345,11 @@ pub(crate) fn request_label(request: &ChangeKind) -> String {
         ChangeKind::SwitchTodo { todo_id } => format!("switch to {todo_id}"),
         ChangeKind::SwitchFree { task } => format!("switch to \"{task}\""),
         ChangeKind::End => "end session".into(),
+        ChangeKind::SetWhenTimeIsUp {
+            action: WhenTimeIsUp::NotifyOnly,
+        } => "only notify when time is up".into(),
+        ChangeKind::SetWhenTimeIsUp {
+            action: WhenTimeIsUp::Reassign,
+        } => "new task when time is up".into(),
     }
 }

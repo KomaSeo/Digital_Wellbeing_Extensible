@@ -3,11 +3,15 @@
 //!
 //! It drives the AI focus session: an assignment becomes the focus monitor's
 //! task (and starts the session); an approved "end" stops it.
+//!
+//! Every assignment runs for the time the AI gave it (`until`). When that is up, the agent
+//! calls [`TaskPlanner::reassign_if_time_is_up`] and the AI picks again, unless the user got
+//! "only notify me" approved for that assignment.
 
-use crate::advisor::{AdvisorProvider, PickRequest, ProposalRequest, ReviewRequest};
+use crate::advisor::{AdvisorProvider, PickRequest, ProposalRequest, Review, ReviewRequest};
 use crate::model::{
     Assignment, AssignmentSource, ChangeKind, ChangeRecord, DoneRecord, PlannerConfig,
-    PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TodoItem,
+    PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TodoItem, WhenTimeIsUp,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -27,6 +31,11 @@ const MAX_NOTES_CHARS: usize = 1000;
 const MIN_REASON_CHARS: usize = 4;
 /// An assignment older than this is not resumed after a restart; a new one is picked.
 const RESUME_WITHIN: Duration = Duration::hours(12);
+/// Bounds on the time the AI gives one assignment, and the time an approved switch gets
+/// when the AI names none.
+const MIN_ASSIGNMENT_MINUTES: u32 = 10;
+const MAX_ASSIGNMENT_MINUTES: u32 = 480;
+const DEFAULT_ASSIGNMENT_MINUTES: u32 = 60;
 
 /// Responsibility: Report why an assignment or a change request was refused.
 #[derive(Debug, Error)]
@@ -224,12 +233,36 @@ impl TaskPlanner {
                 .todo_id
                 .as_deref()
                 .is_none_or(|id| self.open_todos().iter().any(|todo| todo.id == id));
-            if still_open && now - previous.at < RESUME_WITHIN {
+            if still_open
+                && now - previous.at < RESUME_WITHIN
+                && !previous.due_for_reassignment(now)
+            {
                 self.start_focus(&previous)?;
                 return Ok(previous);
             }
         }
         self.pick_and_apply(now)
+    }
+
+    /// When the current assignment's time is up (and the user did not get "notify only"
+    /// approved for it), ask the AI for the next task. Returns the new assignment, or
+    /// `None` when nothing was due or another request is being handled.
+    pub fn reassign_if_time_is_up(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Assignment>, PlannerError> {
+        let Some(_busy) = self.busy.try_lock() else {
+            return Ok(None);
+        };
+        let due = self
+            .state
+            .get()
+            .assignment
+            .is_some_and(|assignment| assignment.due_for_reassignment(now));
+        if !due || !self.is_active() {
+            return Ok(None);
+        }
+        self.pick_and_apply(now).map(Some)
     }
 
     /// The user asks to change the assignment. Returns the AI's decision;
@@ -247,6 +280,24 @@ impl TaskPlanner {
         let reason = reason.trim();
         if reason.chars().count() < MIN_REASON_CHARS {
             return Err(PlannerError::ReasonTooShort);
+        }
+        if request
+            == (ChangeKind::SetWhenTimeIsUp {
+                action: WhenTimeIsUp::Reassign,
+            })
+        {
+            // Stricter than the default it restores: no need to ask the AI.
+            return self.record_and_apply(
+                now,
+                request,
+                reason,
+                Review {
+                    approved: true,
+                    reply: "A new task will be picked when the time is up.".into(),
+                    minutes: 0,
+                },
+                &self.open_todos(),
+            );
         }
         let open = self.open_todos();
         let target_title = match &request {
@@ -279,7 +330,19 @@ impl TaskPlanner {
             recent_requests: &recent,
             history: &history,
         })?;
+        self.record_and_apply(now, request, reason, review, &open)
+    }
 
+    /// Log the decision on a change request and apply it when approved.
+    fn record_and_apply(
+        &self,
+        now: DateTime<Utc>,
+        request: ChangeKind,
+        reason: &str,
+        review: Review,
+        open: &[TodoItem],
+    ) -> Result<ChangeRecord, PlannerError> {
+        let state = self.state.get();
         let record = ChangeRecord {
             at: now,
             request: request.clone(),
@@ -309,7 +372,7 @@ impl TaskPlanner {
             review.reply
         );
         if review.approved {
-            self.apply_change(now, &request, &review.reply, &open)?;
+            self.apply_change(now, &request, &review, open)?;
         }
         Ok(record)
     }
@@ -318,9 +381,10 @@ impl TaskPlanner {
         &self,
         now: DateTime<Utc>,
         request: &ChangeKind,
-        reply: &str,
+        review: &Review,
         open: &[TodoItem],
     ) -> Result<(), PlannerError> {
+        let reply = review.reply.as_str();
         match request {
             ChangeKind::Done => {
                 let current = self.state.get().assignment;
@@ -359,24 +423,45 @@ impl TaskPlanner {
                 } else {
                     format!("{} — {}", todo.title, todo.notes.trim())
                 };
+                let minutes = if review.minutes > 0 {
+                    review.minutes
+                } else {
+                    todo.estimate_minutes.unwrap_or(DEFAULT_ASSIGNMENT_MINUTES)
+                };
                 self.apply(Assignment {
                     todo_id: Some(todo.id.clone()),
                     task,
                     why: reply.to_string(),
                     source: AssignmentSource::ApprovedChange,
                     at: now,
+                    until: Some(end_after(now, minutes)),
+                    when_time_is_up: WhenTimeIsUp::Reassign,
                 })?;
             }
             ChangeKind::SwitchFree { task } => {
+                let minutes = if review.minutes > 0 {
+                    review.minutes
+                } else {
+                    DEFAULT_ASSIGNMENT_MINUTES
+                };
                 self.apply(Assignment {
                     todo_id: None,
                     task: task.trim().to_string(),
                     why: reply.to_string(),
                     source: AssignmentSource::ApprovedChange,
                     at: now,
+                    until: Some(end_after(now, minutes)),
+                    when_time_is_up: WhenTimeIsUp::Reassign,
                 })?;
             }
             ChangeKind::End => self.end(now)?,
+            ChangeKind::SetWhenTimeIsUp { action } => {
+                self.state.update(|planner_state| {
+                    if let Some(assignment) = planner_state.assignment.as_mut() {
+                        assignment.when_time_is_up = *action;
+                    }
+                })?;
+            }
         }
         Ok(())
     }
@@ -406,8 +491,15 @@ impl TaskPlanner {
             why: pick.why,
             source: AssignmentSource::Planner,
             at: now,
+            until: Some(end_after(now, pick.minutes)),
+            when_time_is_up: WhenTimeIsUp::Reassign,
         };
-        info!("assigned: {}", assignment.task);
+        info!(
+            "assigned for {} min: {}",
+            pick.minutes
+                .clamp(MIN_ASSIGNMENT_MINUTES, MAX_ASSIGNMENT_MINUTES),
+            assignment.task
+        );
         self.apply(assignment.clone())?;
         Ok(assignment)
     }
@@ -439,6 +531,11 @@ impl TaskPlanner {
             .map_err(|error| PlannerError::Io(std::io::Error::other(error.to_string())))?;
         Ok(())
     }
+}
+
+/// `now` plus `minutes`, kept within the bounds an assignment may run.
+fn end_after(now: DateTime<Utc>, minutes: u32) -> DateTime<Utc> {
+    now + Duration::minutes(minutes.clamp(MIN_ASSIGNMENT_MINUTES, MAX_ASSIGNMENT_MINUTES) as i64)
 }
 
 fn local_now_text() -> String {

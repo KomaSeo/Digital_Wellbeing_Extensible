@@ -28,12 +28,15 @@ use machine::user_api::AgentApi;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use task_planner::{claude_advisor_provider, JsonStore, PlannerConfig, PlannerState, TaskPlanner};
 use tracing::{info, warn};
 
 const RELOAD_INTERVAL: Duration = Duration::from_secs(3);
-const AUTO_ASSIGN_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the planner loop looks for a missing session or an assignment whose time is
+/// up, and how long it waits after a failed AI call before trying again.
+const PLANNER_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+const PLANNER_RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
 
 pub fn run() -> anyhow::Result<()> {
     let session = current_session_id();
@@ -104,7 +107,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
 
     let auto_planner = Arc::clone(&planner);
     let auto_monitor = Arc::clone(&monitor);
-    thread::spawn(move || auto_assign_loop(auto_planner, auto_monitor));
+    thread::spawn(move || planner_loop(auto_planner, auto_monitor));
 
     let api = Arc::new(AgentApi {
         monitor: Arc::clone(&monitor),
@@ -125,16 +128,32 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
 /// While the planner is on, a focus session is not optional: if none is
 /// running (after logon, or when the user simply never asks for a task),
 /// start one with the assigned task. A recent assignment is resumed without
-/// an AI call; on failure (e.g. no network) try again later.
-fn auto_assign_loop(planner: Arc<TaskPlanner>, monitor: Arc<FocusMonitor>) {
+/// an AI call. When the current assignment's time is up, the AI picks the next
+/// one (unless the user got "notify only" approved). After a failed AI call
+/// (e.g. no network) wait a minute before trying again.
+fn planner_loop(planner: Arc<TaskPlanner>, monitor: Arc<FocusMonitor>) {
+    let mut next_attempt = Instant::now();
     loop {
-        if planner.is_active() && !monitor.store().get().session_active {
-            match planner.assign(chrono::Utc::now()) {
-                Ok(assignment) => info!("started focus session automatically: {}", assignment.task),
-                Err(error) => warn!("could not start the planned session: {error}"),
-            }
+        thread::sleep(PLANNER_CHECK_INTERVAL);
+        if !planner.is_active() || Instant::now() < next_attempt {
+            continue;
         }
-        thread::sleep(AUTO_ASSIGN_INTERVAL);
+        let now = chrono::Utc::now();
+        let result = if monitor.store().get().session_active {
+            planner.reassign_if_time_is_up(now).map(|assignment| {
+                if let Some(assignment) = assignment {
+                    info!("time was up; next assignment: {}", assignment.task);
+                }
+            })
+        } else {
+            planner
+                .assign(now)
+                .map(|assignment| info!("started focus session automatically: {}", assignment.task))
+        };
+        if let Err(error) = result {
+            warn!("planner: {error}");
+            next_attempt = Instant::now() + PLANNER_RETRY_AFTER_FAILURE;
+        }
     }
 }
 

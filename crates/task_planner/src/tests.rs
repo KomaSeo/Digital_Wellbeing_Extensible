@@ -30,6 +30,7 @@ impl Advisor for FakeAdvisor {
             task: format!("work on {todo_id}"),
             todo_id,
             why: "deadline".into(),
+            minutes: 45,
         })
     }
 
@@ -40,6 +41,7 @@ impl Advisor for FakeAdvisor {
         Ok(Review {
             approved,
             reply: if approved { "ok" } else { "no" }.into(),
+            minutes: 30,
         })
     }
 
@@ -50,6 +52,7 @@ impl Advisor for FakeAdvisor {
         Ok(Review {
             approved,
             reply: if approved { "ok" } else { "no" }.into(),
+            minutes: 30,
         })
     }
 }
@@ -382,4 +385,122 @@ fn the_proposal_question_carries_the_rules_and_the_item() {
     });
     assert!(text.contains("The owner's life rules (binding):\nNo movies before 18:00."));
     assert!(text.contains("\"title\": \"Watch a movie\""));
+}
+
+#[test]
+fn an_assignment_runs_for_the_time_the_ai_gave_it_then_a_new_one_is_picked() {
+    let fixture = harness(true, &["a", "b"]);
+    let start = Utc::now();
+    let assignment = fixture.planner.assign(start).unwrap();
+    assert_eq!(
+        assignment.until,
+        Some(start + chrono::Duration::minutes(45))
+    );
+    assert_eq!(assignment.when_time_is_up, WhenTimeIsUp::Reassign);
+
+    // Before the end: nothing happens and the AI is not asked.
+    let before_end = start + chrono::Duration::minutes(44);
+    assert!(fixture
+        .planner
+        .reassign_if_time_is_up(before_end)
+        .unwrap()
+        .is_none());
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 1);
+
+    // At the end: the AI picks again (here the same to-do) with a new end.
+    let at_end = start + chrono::Duration::minutes(45);
+    let next = fixture
+        .planner
+        .reassign_if_time_is_up(at_end)
+        .unwrap()
+        .expect("a new assignment");
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 2);
+    assert_eq!(next.until, Some(at_end + chrono::Duration::minutes(45)));
+
+    // A restart after the time is up picks again instead of resuming.
+    let later = at_end + chrono::Duration::minutes(50);
+    fixture.planner.assign(later).unwrap();
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn notify_only_needs_the_ai_and_keeps_the_task_past_its_end() {
+    let fixture = harness(true, &["a", "b"]);
+    let start = Utc::now();
+    fixture.planner.assign(start).unwrap();
+    let notify_only = ChangeKind::SetWhenTimeIsUp {
+        action: WhenTimeIsUp::NotifyOnly,
+    };
+
+    // Rejected: nothing changes, and the task is replaced when its time is up.
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .request_change(start, notify_only.clone(), "almost done with the proof")
+        .unwrap();
+    assert!(!record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 1);
+    let assignment = fixture.planner.status().assignment.unwrap();
+    assert_eq!(assignment.when_time_is_up, WhenTimeIsUp::Reassign);
+
+    // Approved: the task stays after its end, also across a restart.
+    fixture.advisor.approve.store(true, Ordering::SeqCst);
+    assert!(
+        fixture
+            .planner
+            .request_change(start, notify_only, "almost done with the proof")
+            .unwrap()
+            .approved
+    );
+    let after_end = start + chrono::Duration::minutes(60);
+    assert!(fixture
+        .planner
+        .reassign_if_time_is_up(after_end)
+        .unwrap()
+        .is_none());
+    let resumed = fixture.planner.assign(after_end).unwrap();
+    assert_eq!(resumed.when_time_is_up, WhenTimeIsUp::NotifyOnly);
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 1);
+
+    // Going back to "a new task when time is up" is stricter: no AI call.
+    let record = fixture
+        .planner
+        .request_change(
+            after_end,
+            ChangeKind::SetWhenTimeIsUp {
+                action: WhenTimeIsUp::Reassign,
+            },
+            "back to the plan",
+        )
+        .unwrap();
+    assert!(record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 2);
+    assert!(fixture
+        .planner
+        .reassign_if_time_is_up(after_end)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn an_approved_switch_runs_for_the_time_the_review_gave_it() {
+    let fixture = harness(true, &["a", "b"]);
+    let start = Utc::now();
+    fixture.planner.assign(start).unwrap();
+    fixture
+        .planner
+        .request_change(
+            start,
+            ChangeKind::SwitchTodo {
+                todo_id: "b".into(),
+            },
+            "waiting for the advisor's reply on a",
+        )
+        .unwrap();
+    let assignment = fixture.planner.status().assignment.unwrap();
+    assert_eq!(assignment.todo_id.as_deref(), Some("b"));
+    assert_eq!(
+        assignment.until,
+        Some(start + chrono::Duration::minutes(30))
+    );
 }
