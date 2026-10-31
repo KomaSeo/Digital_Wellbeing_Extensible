@@ -121,7 +121,7 @@ fn tools() -> Value {
         },
         {
             "name": "propose_todo",
-            "description": "Propose a to-do for the user's list. The app's own AI approves or rejects it against the account owner's life rules; only approved to-dos join the list. Use the user's own words for the title; do not inflate deadline or priority.",
+            "description": "Propose a to-do for the user's list. The app's own AI approves or rejects it against the account owner's life rules; only approved to-dos join the list, at once. Leave out fields the user did not give: the app's AI fills them in (notes, deadline, priority, estimate). Use the user's own words for the title; do not inflate deadline or priority.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -129,19 +129,38 @@ fn tools() -> Value {
                     "notes": { "type": "string", "description": "What done means, which apps or sites it needs" },
                     "deadline": { "type": "string", "description": "YYYY-MM-DD" },
                     "priority": { "type": "integer", "minimum": 1, "maximum": 5, "description": "1 low .. 5 urgent (default 3)" },
-                    "estimate_minutes": { "type": "integer", "minimum": 1 }
+                    "estimate_minutes": { "type": "integer", "minimum": 1 },
+                    "reason": { "type": "string", "description": "Why it belongs on the list (optional)" }
                 },
                 "required": ["title"]
             }
         },
         {
+            "name": "change_todo",
+            "description": "Ask to edit or remove an open to-do (ids from get_status). The app's AI reviews the reason against the owner's life rules; an approved change takes effect at once. For an edit, give only the fields that change. When the AI says no, tell the user its reason; only the user, in the app, can push a rejected change through.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "todo_id": { "type": "string" },
+                    "remove": { "type": "boolean", "description": "true to remove it" },
+                    "title": { "type": "string" },
+                    "notes": { "type": "string" },
+                    "deadline": { "type": "string", "description": "YYYY-MM-DD" },
+                    "priority": { "type": "integer", "minimum": 1, "maximum": 5 },
+                    "estimate_minutes": { "type": "integer", "minimum": 1 },
+                    "reason": { "type": "string", "description": "The user's reason, in their words" }
+                },
+                "required": ["todo_id", "reason"]
+            }
+        },
+        {
             "name": "get_my_task",
-            "description": "Ask the app to assign the user's task now (the app's AI picks it from the list) and start the focus session. Only works while the planner is on.",
+            "description": "Ask the app to assign the user's task now (the app's AI picks it from the list) and start the AI checks. Only works while the planner is on.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "request_change",
-            "description": "Ask to change the assigned task: it is done, switch to another open to-do, switch to something not on the list, or end the session. Every task runs until a planned end (\"until\" in get_status) and then the app's AI picks the next one; notify_when_time_is_up asks to keep the current task past that end and only be notified, reassign_when_time_is_up goes back to a new pick. The app's AI approves or rejects the reason (going back to reassign needs no approval).",
+            "description": "Ask to change the assigned task: it is done, switch to another open to-do, switch to something not on the list, or pause the AI checks (end). Every task runs until a planned end (\"until\" in get_status) and then the app's AI picks the next one; notify_when_time_is_up asks to keep the current task past that end and only be notified, reassign_when_time_is_up goes back to a new pick. The app's AI approves or rejects the reason (going back to reassign needs no approval).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -174,6 +193,20 @@ fn tools() -> Value {
 }
 
 /// Run one tool; `Err` carries a message for the assistant (a tool error, not a protocol one).
+/// The AI's decision on a to-do change, for the assistant.
+fn todo_change_answer(status: &Status) -> Result<String, String> {
+    let record = status
+        .last_todo_change
+        .as_ref()
+        .ok_or("the agent did not answer")?;
+    Ok(pretty(&json!({
+        "approved": record.approved,
+        "reply": record.reply,
+        "ai_could_not_review": record.ai_failed,
+        "todo": record.after.as_ref().or(record.before.as_ref()),
+    })))
+}
+
 /// A scheduled update's edits as lines, leaving out any edit of the API key.
 fn changes_without_key(edits: &Value) -> Vec<String> {
     let edits: Vec<machine::setting_edits::Edit> =
@@ -199,15 +232,38 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
             }
             let status = status_from(
                 agent,
-                "propose_todo",
-                json!({ "todo": todo, "via": "claude desktop" }),
+                "todo_change",
+                json!({
+                    "change": { "kind": "add", "todo": todo },
+                    "reason": arguments["reason"].as_str().unwrap_or_default(),
+                    "via": "claude desktop",
+                }),
             )?;
-            let proposal = status.last_proposal.ok_or("the agent did not answer")?;
-            Ok(pretty(&json!({
-                "approved": proposal.approved,
-                "reply": proposal.reply,
-                "todo": { "id": proposal.item.id, "title": proposal.item.title },
-            })))
+            todo_change_answer(&status)
+        }
+        "change_todo" => {
+            let todo_id = arguments["todo_id"].as_str().ok_or("todo_id is required")?;
+            let change = if arguments["remove"].as_bool() == Some(true) {
+                json!({ "kind": "remove", "todo_id": todo_id })
+            } else {
+                let mut todo = json!({});
+                for key in ["title", "notes", "deadline", "priority", "estimate_minutes"] {
+                    if let Some(value) = arguments.get(key).filter(|value| !value.is_null()) {
+                        todo[key] = value.clone();
+                    }
+                }
+                json!({ "kind": "edit", "todo_id": todo_id, "todo": todo })
+            };
+            let status = status_from(
+                agent,
+                "todo_change",
+                json!({
+                    "change": change,
+                    "reason": arguments["reason"].as_str().unwrap_or_default(),
+                    "via": "claude desktop",
+                }),
+            )?;
+            todo_change_answer(&status)
         }
         "get_my_task" => status_from(agent, "assign", json!({}))
             .map(|status| pretty(&summary(&status)["assignment"])),
@@ -434,6 +490,7 @@ mod tests {
             [
                 "get_status",
                 "propose_todo",
+                "change_todo",
                 "get_my_task",
                 "request_change",
                 "get_settings",
@@ -459,9 +516,12 @@ mod tests {
         .unwrap();
         assert_eq!(reply["result"]["isError"], true);
         let (method, params) = seen.borrow()[0].clone();
-        assert_eq!(method, "propose_todo");
+        assert_eq!(method, "todo_change");
         assert_eq!(params["via"], "claude desktop");
-        assert_eq!(params["todo"], json!({ "title": "장보기", "priority": 2 }));
+        assert_eq!(
+            params["change"],
+            json!({ "kind": "add", "todo": { "title": "장보기", "priority": 2 } })
+        );
 
         handle(
             &json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
