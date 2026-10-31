@@ -24,7 +24,7 @@ use std::ptr::null;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, GetKeyState, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU,
@@ -32,7 +32,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, IsIconic, PeekMessageW,
     RegisterClassW, SetForegroundWindow, TranslateMessage, CW_USEDEFAULT, MSG, PM_REMOVE,
-    WM_KEYDOWN, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    SC_KEYMENU, WM_KEYDOWN, WM_SYSCOMMAND, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 const VK_W: usize = 0x57;
@@ -43,6 +43,12 @@ fn installed_agent_end_to_end() {
         eprintln!("skipped: DW_E2E_CLAUDE_ADDR is not set (needs the installed service)");
         return;
     };
+    // A test that hangs would hold the CI job for hours; end it with a message instead.
+    thread::spawn(|| {
+        thread::sleep(Duration::from_secs(300));
+        eprintln!("the end-to-end test took more than 5 minutes; giving up");
+        std::process::exit(2);
+    });
     let (_, claude_calls) = fake_claude(&addr);
     let session = machine::session::current_session_id();
     let port = machine::user_api::port_for_session(session);
@@ -171,7 +177,7 @@ impl Desktop {
             if self.class.is_empty() {
                 self.class = wide("DwE2eWindow");
                 let mut class: WNDCLASSW = std::mem::zeroed();
-                class.lpfnWndProc = Some(DefWindowProcW);
+                class.lpfnWndProc = Some(window_proc);
                 class.hInstance = instance;
                 class.lpszClassName = self.class.as_ptr();
                 assert_ne!(RegisterClassW(&class), 0, "RegisterClassW failed");
@@ -248,6 +254,16 @@ impl Desktop {
         }
         None
     }
+}
+
+/// The default window procedure, except that a lone Alt press does not open the window's
+/// system menu: that menu runs a modal loop inside `DispatchMessageW`, and the test would wait
+/// there until someone pressed a key (`bring_to_front` presses Alt).
+unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if msg == WM_SYSCOMMAND && (w & 0xFFF0) == SC_KEYMENU as usize {
+        return 0;
+    }
+    DefWindowProcW(hwnd, msg, w, l)
 }
 
 fn wide(s: &str) -> Vec<u16> {
