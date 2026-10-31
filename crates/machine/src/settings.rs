@@ -72,6 +72,16 @@ fn question_interval(interval_seconds: i64) -> Duration {
         .unwrap_or_else(|| Duration::seconds(interval_seconds))
 }
 
+/// Held while a settings file or the scheduled updates are read, changed and written back,
+/// so two requests at once (the Focus app and Claude Desktop) cannot lose each other's change.
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn write_lock() -> std::sync::MutexGuard<'static, ()> {
+    WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn settings_interval() -> i64 {
     SETTINGS_QUESTION_INTERVAL_SECONDS
 }
@@ -233,6 +243,7 @@ pub fn is_protected(data_directory: &Path) -> bool {
 
 /// End the setup: from now on every edit is scheduled. Nothing in the program undoes this.
 pub fn protect(data_directory: &Path, now: DateTime<Utc>) -> Result<Protection, String> {
+    let _write = write_lock();
     let path = data_directory.join(PROTECTION_FILE);
     let current: Protection = fs::read_to_string(&path)
         .ok()
@@ -288,6 +299,7 @@ pub fn put(
     content: &Value,
     via: &str,
 ) -> Result<PutOutcome, String> {
+    let _write = write_lock();
     let file = file_of(name)?;
     validate(name, content)?;
     // Both sides as the program reads them (defaults filled in), so only real changes count.
@@ -305,7 +317,7 @@ pub fn put(
         .into_iter()
         .partition(|edit| setting_edits::direction(name, edit, &in_force) != Direction::Looser);
     if !stricter.is_empty() {
-        apply_now(data_directory, name, &stricter)?;
+        apply_edits(data_directory, name, &stricter)?;
     }
     let mut reservations = read_reservations(data_directory);
     let existing = reservations.scheduled.iter().position(|reservation| {
@@ -362,6 +374,12 @@ pub fn put(
 /// Put `edits` of the settings file `name` in force now, on top of the file as it is.
 /// Refused when the result does not parse as that file's settings.
 pub fn apply_now(data_directory: &Path, name: &str, edits: &[Edit]) -> Result<(), String> {
+    let _write = write_lock();
+    apply_edits(data_directory, name, edits)
+}
+
+/// [`apply_now`] for a caller that already holds the write lock.
+fn apply_edits(data_directory: &Path, name: &str, edits: &[Edit]) -> Result<(), String> {
     let file = file_of(name)?;
     let mut updated = normalize(name, &read_json(&data_directory.join(file)))?;
     setting_edits::apply(&mut updated, edits);
@@ -380,6 +398,7 @@ pub fn schedule(
     interval_seconds: i64,
     note: &str,
 ) -> Result<ScheduledUpdate, String> {
+    let _write = write_lock();
     let file = file_of(name)?;
     let mut preview = read_json(&data_directory.join(file));
     setting_edits::apply(&mut preview, &edits);
@@ -442,6 +461,7 @@ pub fn answer(
     id: &str,
     approve: bool,
 ) -> Result<AnswerOutcome, String> {
+    let _write = write_lock();
     let mut reservations = read_reservations(data_directory);
     let index = reservations
         .scheduled
@@ -478,7 +498,7 @@ pub fn answer(
     }
     let applied = reservations.scheduled.remove(index);
     // Applied to the file as it is now; checked again, since it may have changed meanwhile.
-    apply_now(data_directory, &applied.name, &applied.edits)?;
+    apply_edits(data_directory, &applied.name, &applied.edits)?;
     record(
         &mut reservations,
         &applied,
@@ -492,6 +512,7 @@ pub fn answer(
 /// Drop a scheduled update before it takes effect. Withdrawing gains nothing, so it needs
 /// no confirmation.
 pub fn withdraw(data_directory: &Path, now: DateTime<Utc>, id: &str) -> Result<(), String> {
+    let _write = write_lock();
     let mut reservations = read_reservations(data_directory);
     let index = reservations
         .scheduled
@@ -682,7 +703,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+    // Unique per write, so two writers never share a temporary file.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp_path = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::write(&temp_path, bytes)?;
     fs::rename(&temp_path, path)
 }

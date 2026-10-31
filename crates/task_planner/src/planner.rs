@@ -66,6 +66,8 @@ pub enum PlannerError {
     Duplicate(String),
     #[error("too many proposals: at most {PROPOSALS_PER_DAY} a day and {MAX_OPEN_PROPOSED} open")]
     TooManyProposals,
+    #[error("\"{0}\" was made by the app from a to-do finished early; it goes away when it is done or its time is used up")]
+    MadeByTheApp(String),
     #[error("AI: {0}")]
     Ai(#[from] JudgeError),
     #[error("io: {0}")]
@@ -153,7 +155,11 @@ impl TaskPlanner {
 
     /// Enabled and something left to do: the user cannot type a task freely.
     pub fn is_active(&self) -> bool {
-        self.config.get().enabled && !self.open_todos().is_empty()
+        self.is_active_with(&self.open_todos())
+    }
+
+    fn is_active_with(&self, open: &[TodoItem]) -> bool {
+        self.config.get().enabled && !open.is_empty()
     }
 
     pub fn status(&self) -> PlannerStatus {
@@ -192,7 +198,7 @@ impl TaskPlanner {
             }
         }
         PlannerStatus {
-            active: self.is_active(),
+            active: self.is_active_with(&open_todos),
             assignment: state.assignment.clone(),
             recent_requests: state.requests.iter().rev().take(10).cloned().collect(),
             recent_proposals: state.proposals.iter().rev().take(10).cloned().collect(),
@@ -313,6 +319,9 @@ impl TaskPlanner {
                 None
             }
             TodoChange::Edit { todo_id, .. } | TodoChange::Remove { todo_id } => {
+                if is_polish(todo_id) {
+                    return Err(PlannerError::MadeByTheApp(todo_id.clone()));
+                }
                 if reason.chars().count() < MIN_REASON_CHARS {
                     return Err(PlannerError::ReasonTooShort);
                 }
@@ -499,14 +508,9 @@ impl TaskPlanner {
         evidence: Evidence,
     ) -> Result<ChangeRecord, PlannerError> {
         let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
-        if !self.is_active() {
-            return Err(PlannerError::NotActive);
-        }
+        self.check_change(&request, reason)?;
         let reason = reason.trim();
         let evidence_text: String = evidence.text.trim().chars().take(MAX_NOTES_CHARS).collect();
-        if reason.chars().count() < MIN_REASON_CHARS {
-            return Err(PlannerError::ReasonTooShort);
-        }
         if request
             == (ChangeKind::SetWhenTimeIsUp {
                 action: WhenTimeIsUp::Reassign,
@@ -529,15 +533,10 @@ impl TaskPlanner {
         }
         let open = self.open_todos();
         let target_title = match &request {
-            ChangeKind::SwitchTodo { todo_id } => Some(
-                open.iter()
-                    .find(|todo| &todo.id == todo_id)
-                    .map(|todo| todo.title.clone())
-                    .ok_or_else(|| PlannerError::UnknownTodo(todo_id.clone()))?,
-            ),
-            ChangeKind::SwitchFree { task } if task.trim().is_empty() => {
-                return Err(PlannerError::EmptyTask)
-            }
+            ChangeKind::SwitchTodo { todo_id } => open
+                .iter()
+                .find(|todo| &todo.id == todo_id)
+                .map(|todo| todo.title.clone()),
             _ => None,
         };
 
@@ -595,6 +594,28 @@ impl TaskPlanner {
             &open,
             (evidence_text, screenshot_attached),
         )
+    }
+
+    /// Refuse a change request that cannot be sent to the AI: the planner is off, the reason
+    /// is too short, or the request names no open to-do or an empty task. Callers may check
+    /// before doing slow work for the request (such as waiting for a proof screenshot).
+    pub fn check_change(&self, request: &ChangeKind, reason: &str) -> Result<(), PlannerError> {
+        let open = self.open_todos();
+        if !self.is_active_with(&open) {
+            return Err(PlannerError::NotActive);
+        }
+        if reason.trim().chars().count() < MIN_REASON_CHARS {
+            return Err(PlannerError::ReasonTooShort);
+        }
+        match request {
+            ChangeKind::SwitchTodo { todo_id } if !open.iter().any(|todo| &todo.id == todo_id) => {
+                Err(PlannerError::UnknownTodo(todo_id.clone()))
+            }
+            ChangeKind::SwitchFree { task } if task.trim().is_empty() => {
+                Err(PlannerError::EmptyTask)
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Log the decision on a change request and apply it when approved.
@@ -668,18 +689,23 @@ impl TaskPlanner {
                     };
                     // Open-ended work finished early keeps the planned time that is left,
                     // to be spent improving it later.
+                    // The to-do's estimate against all the time spent on it; without an
+                    // estimate, this assignment's planned time against the time it ran.
                     let polish_left = if review.outcome == "open_ended" && !is_polish(&todo.id) {
-                        let planned = current.as_ref().and_then(|assignment| {
-                            assignment
-                                .until
-                                .map(|until| (until - assignment.at).num_minutes())
-                        });
-                        let needed = todo
-                            .estimate_minutes
-                            .map(i64::from)
-                            .or(planned)
-                            .unwrap_or(0);
-                        needed - self.minutes_spent_on(&todo.id, now)
+                        match todo.estimate_minutes {
+                            Some(estimate) => {
+                                i64::from(estimate) - self.minutes_spent_on(&todo.id, now)
+                            }
+                            None => current
+                                .as_ref()
+                                .and_then(|assignment| {
+                                    assignment.until.map(|until| {
+                                        (until - assignment.at).num_minutes()
+                                            - (now - assignment.at).num_minutes().max(0)
+                                    })
+                                })
+                                .unwrap_or(0),
+                        }
                     } else {
                         0
                     };

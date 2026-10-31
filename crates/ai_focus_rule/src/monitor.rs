@@ -1127,11 +1127,14 @@ impl FocusMonitor {
         }
     }
 
-    /// A screenshot of the foreground window offered as proof that a to-do is finished, or
-    /// `None` when nothing is in front or a private app is on screen.
-    pub fn capture_proof(&self) -> Option<Vec<u8>> {
+    /// A screenshot of the foreground window offered as proof that a to-do is finished.
+    /// Refused, with the reason, when nothing is in front or a private app is on screen.
+    pub fn capture_proof(&self) -> Result<Vec<u8>, String> {
         let config = self.store.get();
-        let foreground = self.desktop.foreground()?;
+        let foreground = self
+            .desktop
+            .foreground()
+            .ok_or("no window is in front to take the proof screenshot of")?;
         let private_on_screen = config.is_private(&foreground.process_name)
             || (!config.private_apps.is_empty()
                 && self
@@ -1140,9 +1143,16 @@ impl FocusMonitor {
                     .iter()
                     .any(|name| config.is_private(name)));
         if private_on_screen {
-            return None;
+            return Err(
+                "a private app is on screen, so no proof screenshot was taken; \
+                        close it or send the request without a screenshot"
+                    .into(),
+            );
         }
-        self.desktop.screenshot(&foreground).and_then(encode_jpeg)
+        self.desktop
+            .screenshot(&foreground)
+            .and_then(encode_jpeg)
+            .ok_or_else(|| "the proof screenshot could not be taken".into())
     }
 
     fn run_judge(

@@ -301,16 +301,16 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let request: ChangeKind = serde_json::from_value(params["request"].clone())
                 .map_err(|error| format!("params.request: {error}"))?;
             let reason = params["reason"].as_str().unwrap_or_default();
-            // A proof screenshot is taken a few seconds later, so the user can switch to the
-            // window that shows the result.
+            // Refuse a request that cannot go to the AI before waiting for a screenshot.
+            planner
+                .check_change(&request, reason)
+                .map_err(|error| error.to_string())?;
+            // A proof screenshot (for "done" only) is taken a few seconds later, so the user
+            // can switch to the window that shows the result.
             let screenshot_jpeg = match params["proof_screenshot_after_secs"].as_u64() {
-                Some(delay_seconds @ 1..=30) => {
+                Some(delay_seconds @ 1..=30) if request == ChangeKind::Done => {
                     thread::sleep(Duration::from_secs(delay_seconds));
-                    Some(
-                        api.monitor
-                            .capture_proof()
-                            .ok_or("could not take the proof screenshot")?,
-                    )
+                    Some(api.monitor.capture_proof()?)
                 }
                 _ => None,
             };

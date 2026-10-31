@@ -1007,3 +1007,73 @@ fn decisive_or_nearly_full_work_leaves_no_improve_todo() {
         );
     }
 }
+
+#[test]
+fn improve_todos_cannot_be_edited_or_removed() {
+    let fixture = harness(true, &["a", "b"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.todos[0].estimate_minutes = Some(240))
+        .unwrap();
+    fixture.planner.assign(Utc::now()).unwrap();
+    *fixture.advisor.outcome.lock() = "open_ended".into();
+    fixture
+        .planner
+        .request_change(
+            Utc::now(),
+            ChangeKind::Done,
+            "the report is written",
+            Evidence::default(),
+        )
+        .unwrap();
+    let reviews_before = fixture.advisor.reviews.load(Ordering::SeqCst);
+    let refused = fixture.planner.review_todo_change(
+        Utc::now(),
+        TodoChange::Remove {
+            todo_id: "polish:a".into(),
+        },
+        "no need to improve it",
+        "e2e",
+    );
+    assert!(matches!(refused, Err(PlannerError::MadeByTheApp(_))));
+    assert_eq!(
+        fixture.advisor.reviews.load(Ordering::SeqCst),
+        reviews_before,
+        "the AI is not asked"
+    );
+}
+
+#[test]
+fn without_an_estimate_only_this_assignment_counts_for_improving() {
+    let fixture = harness(true, &["a", "b"]);
+    // An earlier hour on a, then a new 45-minute assignment finished after 10 minutes.
+    let start = Utc::now() - chrono::Duration::minutes(70);
+    fixture.planner.assign(start).unwrap();
+    fixture
+        .planner
+        .request_change(
+            start + chrono::Duration::minutes(60),
+            ChangeKind::SwitchTodo {
+                todo_id: "a".into(),
+            },
+            "start a fresh session on a",
+            Evidence::default(),
+        )
+        .unwrap();
+    *fixture.advisor.outcome.lock() = "open_ended".into();
+    fixture
+        .planner
+        .request_change(
+            start + chrono::Duration::minutes(70),
+            ChangeKind::Done,
+            "the draft is usable",
+            Evidence::default(),
+        )
+        .unwrap();
+    // The approved switch runs for the review's 30 minutes; 10 of them were used.
+    assert_eq!(
+        fixture.planner.state_store_for_tests().get().polish["a"].minutes_left,
+        20
+    );
+}
