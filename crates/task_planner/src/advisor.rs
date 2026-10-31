@@ -30,8 +30,8 @@ Pick exactly one open to-do to work on now. Weigh deadlines first (overdue, \
 then due today or tomorrow), then priority, then fit with the time of day. \
 Prefer continuing the previous assignment if it is still open and nothing more \
 urgent appeared; constant switching wastes the user's time. To-dos marked \
-\"proposed\": true were added by the user and approved against the life rules, \
-not written in the settings; when urgency is equal, prefer the ones from the settings.
+\"proposed\": true were added by the user and approved by an AI review against the \
+life rules; weigh them like any other.
 
 Decide `minutes`: how long this session should run before you pick again \
 (15 to 240). Base it on the to-do's estimate, its deadline, the time of day and \

@@ -27,8 +27,10 @@ Policy file:
 
 ## AI focus rule
 
-Tell the app what you are working on and press **Start session** in the *AI focus* tab.
-While the session runs:
+Tell the app what you are working on and turn the AI checks on (**Start** in the
+Focus app's To-do tab, "daily wellbeing"; **Start session** in the standalone app's
+*AI focus* tab). The app runs all day; **Pause the AI checks** turns them off.
+While the AI checks are on:
 
 1. Every 3 s the open windows are sampled; the foreground one goes into an activity history.
 2. Any app or page without a verdict for the current task is judged at once: the task,
@@ -77,23 +79,31 @@ cargo build --release
 
 The service (LocalSystem) starts a SYSTEM agent inside each managed user's
 session; the agent enforces the rules and runs the AI check there. The user
-declares their task in **Digital Wellbeing Focus** (starts at logon). Settings
-are stored in `%ProgramData%\DigitalWellbeing`, which standard users cannot read
-or write directly. **All settings** (list rule, AI focus settings and API key,
-blocks and unblock, access grants and revoke, AI usage and daily budget, task
-planner and life rules) are edited in the Focus app's **Settings** tab, from a
-managed (standard) account: the tab keeps a private copy, and that session's
-agent writes the real files as SYSTEM. The program does not tell administrator
-and standard accounts apart; only the **settings protection** decides. During
-**setup** (right after installing) an edit takes effect at once, and anyone on
-the PC can make it. The user ends setup with "Protect the settings" in the
-Settings tab; this is one way, and nothing in the program turns it off. From
-then on every saved file (from the Settings tab or Claude Desktop) becomes a
-**scheduled update**: two days later the Focus app asks "Is this update really
-right?", each "yes" brings the next question two days after the answer, and the
-third "yes" in a row puts it in force (so at least six days); one "no" rejects
-it, and an unanswered question waits. The Settings tab shows what each update
-changes and can withdraw it. Windows cannot stop an administrator account from
+works in **Digital Wellbeing Focus** (starts at logon; tabs To-do, Blocking,
+Settings). Settings are stored in `%ProgramData%\DigitalWellbeing`, which
+standard users cannot read or write directly. The settings the app needs (AI connection
+and API key, daily budget and usage; the rules for the AI: planner on/off, life
+rules, the planner's instructions; blocking: blacklist, blocks and unblock,
+access grants and revoke; the AI checks) are edited in the Focus app's
+**Settings** tab, from a managed (standard) account: the tab reads them through
+that session's agent, which writes the real files as SYSTEM. The program does
+not tell administrator and standard accounts apart; only the **settings
+protection** decides. During **setup** (right after installing) an edit takes
+effect at once, and anyone on the PC can make it. The user ends setup with
+"Protect the settings" in the Settings tab; this is one way, and nothing in the
+program turns it off. From then on a saved file (from the Settings tab or
+Claude Desktop) is split field by field (`machine::setting_edits`): edits that
+make the rules **stricter** (blacklist an app, fewer strikes, shorter recheck
+times, screenshots on, fewer always-allowed or private apps, revoke a grant, a
+larger or no daily budget, planner on, no permanent access) take effect at once;
+everything else, including what cannot be judged (API key, model, life rules,
+instructions, browser list), becomes a **scheduled update**: two days later the
+Focus app asks "Is this update really right?", each "yes" brings the next
+question two days after the answer, and the third "yes" in a row applies the
+edits to the file as it is then (so at least six days); one "no" rejects it,
+and an unanswered question waits. Before saving, the Settings tab marks every
+edit "now" or "scheduled"; it shows what each scheduled update changes and can
+withdraw it. Windows cannot stop an administrator account from
 stopping the service or deleting `settings_protection.json`, so work in a
 standard account and use the administrator
 account only to install and to change which accounts are managed
@@ -113,15 +123,22 @@ builds and (re)installs; run it again after each change, add `-Tail` to follow
 the agent log.
 
 **Task planner** (machine install): the user keeps a to-do list (deadline,
-priority, notes) and life rules in the *Task planner* page of the Focus app's
-Settings tab, then protects the settings. When it is on, the AI picks the
-user's task from the list ("Get my task" in the Focus app) and that becomes the
-AI focus task; finishing, switching or ending needs a reason the AI approves.
-Every request is logged and shown in that page. The three instructions the
-planner's AI follows (picking a task, reviewing a change request, reviewing a
-proposed to-do) are settings too: empty means the built-in text, and an edit
-goes through the same scheduled-update confirmations. Guide (Korean):
-[`docs/task_planner.md`](docs/task_planner.md).
+priority, estimate, notes) in the Focus app's **To-do** tab, and the life rules
+in the Settings tab. Every addition, edit or removal of a to-do goes to the
+AI, which reviews it against the life rules and fills in the fields of a new
+to-do the user left empty; an approved change is in force at once, even when
+the settings are protected. A rejected one can still be done by the user (not
+by Claude Desktop) after three confirmations two hours apart. When the planner
+is on, the AI picks the user's task from the list ("Get my task") and that
+becomes the task the AI checks judge against; finishing, switching or pausing
+the AI checks needs a reason the AI approves. The To-do tab also shows the
+progress to the task's planned end, notes and steps (saved at once and shown
+to the AI when it reviews "I finished it"), the time spent per to-do, an
+optional AI plan for the rest of the day, finished to-dos and every request
+with its answer. The four instructions the planner's AI follows (picking a
+task, reviewing a change request, reviewing a to-do change, planning the day)
+are settings: empty means the built-in text, and an edit is scheduled like any
+looser edit. Guide (Korean): [`docs/task_planner.md`](docs/task_planner.md).
 
 **Access requests**: from the Focus app the user can ask for an app or site
 the AI check blocks, for some minutes or permanently, stating the purpose.
@@ -129,23 +146,26 @@ If the AI approves, the block is lifted, but the app stays observed and is
 judged against that purpose; off-purpose use revokes the grant and blocks
 again. Blocks do not expire: an approved request lifts them, or the "unblock"
 button in the Settings tab (it lists every user's blocks; once the settings are
-protected, an unblock is a scheduled update like any other edit). The Settings tab also sets the limits and can revoke grants; the
-blacklist of the settings is never lifted this way. Guide (Korean):
+protected, an unblock is a scheduled update). The Settings tab also sets the
+limits and can revoke grants (revoking takes effect at once); the blacklist of
+the settings is never lifted this way. Guide (Korean):
 [`docs/access_grants.md`](docs/access_grants.md).
 
 **Claude Desktop** (machine install): `digital-wellbeing-mcp.exe` is an MCP
 server for Claude Desktop in the work account. Its tools show the list and the
-current task, propose a to-do and ask for a change, read the settings (without
-the API key) and, once they are protected, schedule an update of them, all
-through the agent API the Focus app uses, so the assistant can do nothing the
-user cannot. Proposed to-dos join the list only if the agent's AI approves them
-against the life rules. A scheduled update takes effect only after the user
-confirms it three times in the Focus app; no tool answers those questions.
+current task, add a to-do (`propose_todo`, returning it as the AI completed
+it), edit or remove one (`change_todo`), ask for a change of the task, read the
+settings (without the API key) and, once they are protected, save them (stricter
+edits at once, the rest scheduled), all through the agent API the Focus app
+uses, so the assistant can do nothing the user cannot. To-do changes take
+effect only if the agent's AI approves them against the life rules; no tool
+pushes a rejected one through. A scheduled update takes effect only after the
+user confirms it three times in the Focus app; no tool answers those questions.
 Setup (Korean): [`docs/claude_desktop.md`](docs/claude_desktop.md).
 
 **AI usage**: every Claude call's token counts are recorded per day and purpose
 with an estimated cost (price table in `crates/ai_focus_rule/src/usage.rs`); the
-AI focus tab shows today and this month, and an optional daily budget pauses
+Settings tab (AI connection) shows today and this month, and an optional daily budget pauses
 focus checks (not planner or access requests) once it is spent. The API has no
 way to read the remaining credit; the Claude Console shows it.
 
@@ -207,10 +227,10 @@ $json = '{"id":1,"method":"add_blacklist","params":{"name":"discord.exe"}}'
 apps/desktop           egui shell: rule tabs + shared process/block views (standalone only; with the service installed it only shows a notice)
 crates/list_based_rule blacklist/whitelist BlockRule + RuleUi settings
 crates/ai_focus_rule   AI-judged focus BlockRule + RuleUi (activity sampler, Claude judge)
-crates/task_planner    AI picks the task from a to-do list; reviews change requests
-crates/machine         machine-install paths, managed users, session ids, agent<->Focus API
+crates/task_planner    AI picks the task from a to-do list; reviews change requests and to-do changes; day plan
+crates/machine         machine-install paths, managed users, session ids, agent<->Focus API, settings protection (stricter/looser edits)
 apps/service           Windows service, per-session agent, installer
-apps/focus             Focus app for standard users (declare task, see verdicts; tray icon, Settings tab)
+apps/focus             Focus app for standard users (To-do tab, Blocking tab, Settings tab; tray icon)
 apps/mcp               MCP server for Claude Desktop (to-dos through the agent API)
 crates/enforcer        process loop + BlockRule registry
 crates/rule_ui         RuleUi trait (per-rule settings panels)

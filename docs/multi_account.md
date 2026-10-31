@@ -5,7 +5,7 @@
 - 차단 프로그램은 **관리자 권한**으로 돌아갑니다. 사용자는 일반 계정에서 차단 프로그램을 끌 수 없습니다.
 - 컴퓨터가 켜지면 차단 프로그램이 **자동으로** 시작합니다.
 - 사용자는 모든 설정을 작업 계정에서 **Focus 앱의 Settings 탭**으로 고칩니다. 사용자는 설정을 다 고친 뒤 설정을 **보호합니다**.
-  설정이 보호된 뒤에도 Settings 탭은 열리지만, 저장한 변경은 바로 적용되지 않고 예약됩니다. 사용자가 이틀 간격으로 세 번 "이 업데이트가 정말 맞는가?"라는 질문에 "예"라고 답해야 그 변경이 적용됩니다.
+  설정이 보호된 뒤에도 Settings 탭은 열립니다. 규칙을 더 엄격하게 만드는 변경은 바로 적용되고, 그 밖의 변경은 예약됩니다. 예약된 변경은 사용자가 이틀 간격으로 세 번 "이 업데이트가 정말 맞는가?"라는 질문에 "예"라고 답해야 적용됩니다.
   프로그램 안의 어떤 것도 보호를 끄지 못합니다(6.4절).
 - 관리자 계정은 프로그램을 설치하고, 어떤 계정을 관리할지 정하고, 로그를 읽을 때만 씁니다.
 
@@ -29,17 +29,20 @@
 | **사용자** | 작업용 표준 계정으로 일하는 사람입니다. |
 | **관리 대상 계정** | 서비스가 agent를 띄우는 Windows 계정입니다. 관리자는 설치할 때 `--manage` 옵션으로 관리 대상 계정을 정합니다(4.2절). |
 | **Windows 로그인 세션** | Windows가 로그인한 계정마다 따로 만드는 작업 공간입니다. 세션마다 화면, 창, 실행 중인 프로그램이 따로 있습니다. 세션에는 번호(세션 1, 세션 2, …)가 붙습니다. |
-| **집중 세션** | AI가 "지금 하는 일"을 기준으로 창을 검사하는 시간입니다. Windows 로그인 세션과는 다른 것입니다. |
+| **데일리 웰빙(daily wellbeing)** | AI가 "지금 하는 일"을 기준으로 창을 검사하는 상태입니다. 이 앱은 하루 종일 돌고, 데일리 웰빙이 켜져 있을 때만 AI 검사가 돌아갑니다. Windows 로그인 세션과는 관계가 없습니다. 코드에서는 `session_active` 값이 이 상태를 나타냅니다. |
+| **AI 검사 멈추기** | 사용자가 Focus 앱의 "Pause the AI checks"로 데일리 웰빙을 끄는 것입니다(코드의 `stop_session`, 또는 변경 요청 `End`). AI 검사를 멈춰도 블랙리스트와 이미 걸린 차단은 그대로 적용됩니다. |
 | **서비스** | Windows가 부팅할 때 로그인과 상관없이 실행하는 백그라운드 프로그램입니다. 서비스는 세션 0에서 돌아갑니다. |
 | **SYSTEM** | Windows에서 가장 높은 권한을 가진 내장 계정입니다. 관리자 계정보다도 권한이 높습니다. |
 | **agent** | 서비스가 사용자의 Windows 로그인 세션 안에 SYSTEM 권한으로 띄우는 프로그램입니다. agent가 실제로 앱을 차단하고 AI 검사를 합니다. |
-| **Focus 앱** | 사용자가 보는 작은 창입니다. 사용자는 Focus 앱으로 집중 세션을 시작하고, AI의 판정을 봅니다. |
+| **Focus 앱** | 사용자가 보는 작은 창입니다. 사용자는 Focus 앱으로 지금 할 일과 할 일 목록을 다루고, AI 검사를 켜고 멈추고, AI의 판정을 봅니다. |
 | **설정** | 블랙리스트·화이트리스트 규칙(`policy.json`), AI 집중 설정(`ai_focus.json`, API 키 포함), 할 일 플래너 설정(`planner.json`)을 합쳐서 부르는 말입니다. |
 | **설정 화면 (Settings 탭)** | Focus 앱의 **Settings** 탭입니다. 머신 설치에서는 사용자가 이 탭에서 모든 설정을 고칩니다. Settings 탭은 설정 파일을 직접 쓰지 않고, 그 세션의 agent에게 저장을 맡깁니다(6.4절). |
 | **설정 단계** | 프로그램을 설치한 직후부터 사용자가 설정을 보호할 때까지의 기간입니다. 이 기간에 Settings 탭에서 저장한 변경은 바로 적용됩니다(6.4절). |
-| **설정 보호** | 설정 단계를 끝내는 장치입니다. 사용자가 Settings 탭에서 **Protect the settings**를 누르면, agent는 `settings_protection.json` 파일을 만듭니다. 그때부터 저장한 변경은 모두 예약된 업데이트가 됩니다. 보호는 한 방향입니다. 프로그램 안의 어떤 화면이나 요청도 보호를 끄지 못합니다. 프로그램은 관리자 계정과 표준 계정을 구별하지 않고, 설정이 보호되어 있는지만 보고 변경을 언제 적용할지 정합니다(6.4절). |
-| **예약된 업데이트** | 설정이 보호된 뒤 저장한 설정 파일입니다. agent는 새 파일 전체를 `settings_reservations.json`에 보관하고, 지금 적용된 설정 파일은 그대로 둡니다. 사용자가 확인 질문(바로 아래 줄)에 세 번 연속 "예"라고 답하면, agent는 그 업데이트를 적용합니다(6.4절). |
-| **확인 질문** | Focus 앱이 예약된 업데이트마다 묻는 "Is this update of <파일> really right? (question n of 3)"라는 질문입니다. 첫 질문은 예약하고 이틀 뒤에 오고, 다음 질문은 앞 질문에 "예"라고 답하고 이틀 뒤에 옵니다. 사용자가 한 번이라도 "아니요"라고 답하면, 그 업데이트는 거절됩니다(6.4절). |
+| **설정 보호** | 설정 단계를 끝내는 장치입니다. 사용자가 Settings 탭에서 **Protect the settings**를 누르면, agent는 `settings_protection.json` 파일을 만듭니다. 그때부터 저장한 변경 중 규칙을 더 엄격하게 만드는 변경만 바로 적용되고, 나머지는 예약된 업데이트가 됩니다. 보호는 한 방향입니다. 프로그램 안의 어떤 화면이나 요청도 보호를 끄지 못합니다. 프로그램은 관리자 계정과 표준 계정을 구별하지 않고, 설정이 보호되어 있는지만 보고 변경을 언제 적용할지 정합니다(6.4절). |
+| **설정 변경 하나(편집)** | agent는 저장한 설정 파일을 지금 적용된 파일과 비교해서, 설정 하나하나의 변경으로 나눕니다. 예: "값 하나를 바꾼다", "목록에 이름을 넣는다", "목록에서 이름을 뺀다", "할 일 하나를 넣거나 바꾸거나 뺀다"(`machine::setting_edits`의 `Edit`: `set`, `add_items`, `remove_items`, `put_list_item`). |
+| **엄격한 변경과 느슨한 변경** | 규칙을 더 엄격하게 만드는 설정 변경(더 많이 막고, 덜 허용하고, 더 자주 검사하는 변경)을 **엄격한 변경**이라고 합니다. 그 밖의 변경, 그리고 어느 쪽인지 알 수 없는 변경(API 키, 모델, 생활 규칙, 지시문 등)을 **느슨한 변경**이라고 합니다. 어느 설정이 어느 쪽인지는 6.4절의 표에 있습니다. |
+| **예약된 업데이트** | agent가 바로 적용하지 않고 `settings_reservations.json`에 보관해 두는 설정 변경의 묶음입니다. 지금 적용된 설정 파일은 그대로 남습니다. 설정이 보호된 뒤 저장한 느슨한 변경이 예약된 업데이트가 됩니다. AI가 승인하지 않은 할 일 변경을 사용자가 AI 없이 하기로 한 것도 예약된 업데이트가 됩니다([`task_planner.md`](task_planner.md) 4.6절). 사용자가 확인 질문(바로 아래 줄)에 세 번 연속 "예"라고 답하면, agent는 그 변경을 그때의 설정 파일에 적용합니다(6.4절). |
+| **확인 질문** | Focus 앱이 예약된 업데이트마다 묻는 "Is this update of <파일> really right? (question n of 3)"라는 질문입니다. 설정의 예약된 업데이트는 첫 질문이 예약하고 이틀 뒤에 오고, 다음 질문은 앞 질문에 "예"라고 답하고 이틀 뒤에 옵니다. 할 일 변경의 예약된 업데이트는 같은 질문을 두 시간 간격으로 합니다. 사용자가 한 번이라도 "아니요"라고 답하면, 그 업데이트는 거절됩니다(6.4절). |
 
 ---
 
@@ -75,10 +78,10 @@
        │    │      · agent는 블랙리스트 규칙과 AI 규칙을 실행하고, 세션 2의 프로그램만 차단합니다.
        │    │      · agent는 세션 2의 창 제목을 읽고, 화면을 캡처하고, Ctrl+W를 보냅니다.
        │    │      · agent는 127.0.0.1:8772 포트로 Focus 앱의 요청을 받습니다. (8770 + 세션 번호)
-       │    │      · agent는 Focus 앱의 요청을 받아 C:\ProgramData\DigitalWellbeing\ 안의 설정 파일을 씁니다. 설정이 보호되어 있으면, 확인 질문에 세 번 "예"라는 답을 받은 뒤에 씁니다.
+       │    │      · agent는 Focus 앱의 요청을 받아 C:\ProgramData\DigitalWellbeing\ 안의 설정 파일을 씁니다. 설정이 보호되어 있으면, 엄격한 변경은 바로 쓰고 느슨한 변경은 확인 질문에 세 번 "예"라는 답을 받은 뒤에 씁니다.
        │    │      · 모든 agent는 설정 파일이 바뀐 것을 3초 안에 알아채고 다시 읽습니다.
        │    └─ [Focus 앱] digital-wellbeing-focus.exe          ← 사용자 권한, 로그인할 때 자동 실행
-       │           · 사용자는 Focus 앱으로 할 일을 적고, 집중 세션을 시작하고 끝내고, AI 판정을 봅니다.
+       │           · 사용자는 Focus 앱으로 할 일을 정하고, AI 검사를 켜고 멈추고, AI 판정을 봅니다.
        │           · 사용자는 Focus 앱의 Settings 탭에서 설정을 고치고, 설정을 보호하고, 확인 질문에 답합니다(6.4절).
        │           · Focus 앱은 agent와만 통신합니다.
        │
@@ -106,7 +109,7 @@
 | `digital-wellbeing-service.exe install` | 관리자가 처음에 한 번 실행합니다. | 프로그램을 설치합니다(4장). |
 | `digital-wellbeing-service.exe run` | Windows가 부팅할 때 실행합니다. | 서비스로 돌면서 agent를 띄우고, agent가 꺼지면 다시 띄웁니다. |
 | `digital-wellbeing-service.exe agent` | 서비스가 SYSTEM 권한으로 실행합니다. | 사용자의 세션 안에서 프로그램을 차단하고 AI 검사를 합니다. |
-| `digital-wellbeing-focus.exe` | 사용자가 로그인하면 자동으로 실행됩니다. | 사용자가 할 일을 정하고 상태를 보는 창입니다. 창에는 탭이 세 개 있습니다. **To-do** 탭은 집중 세션, 플래너가 정한 지금 할 일, 변경 요청, 할 일 제안을 보여 줍니다. **Blocking** 탭은 AI 검사 상태와 비용, 지금 걸린 차단, 접근 요청, 최근 판정을 보여 줍니다. 사용자는 **Settings** 탭에서 모든 설정을 고치고, 설정을 보호하고, 예약된 업데이트의 확인 질문에 답합니다(6.4절). |
+| `digital-wellbeing-focus.exe` | 사용자가 로그인하면 자동으로 실행됩니다. | 사용자가 할 일을 정하고 상태를 보는 창입니다. 창에는 탭이 세 개 있습니다. **To-do** 탭(제목 "Daily wellbeing")은 지금 할 일과 그 진행, AI 검사 켜기와 멈추기, 변경 요청, 할 일 목록과 할 일 변경, 오늘의 기록을 보여 줍니다([`task_planner.md`](task_planner.md) 7.1절). **Blocking** 탭은 AI 검사 상태와 비용, 지금 걸린 차단, 접근 요청, 최근 판정을 보여 줍니다. 사용자는 **Settings** 탭에서 모든 설정을 고치고, 설정을 보호하고, 예약된 업데이트의 확인 질문에 답합니다(6.4절). |
 | `digital-wellbeing-mcp.exe` | 사용자가 설정하면 Claude Desktop이 실행합니다. | Claude Desktop이 할 일을 관리하게 하는 도구 모음입니다([`claude_desktop.md`](claude_desktop.md)). |
 
 **머신 설치는 `digital-wellbeing.exe`를 설치하지 않습니다.** `digital-wellbeing.exe`는 예전 버전에서 관리자가 설정을 고치던 창입니다.
@@ -125,11 +128,12 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
     policy.json          블랙리스트/화이트리스트 규칙
     ai_focus.json        AI 집중 설정 (API 키 포함)
     machine.json         관리 대상 계정 목록
-    planner.json         할 일 목록, 생활 규칙, 플래너 AI의 지시문. 사용자가 Focus 앱의 Settings 탭에서 고치면, agent가 이 파일을 씁니다. (할 일 플래너)
-    planner_state.json   현재 할당과 변경 요청 기록. agent가 씁니다. (할 일 플래너)
+    planner.json         할 일 목록, 생활 규칙, 플래너 AI의 지시문. agent가 씁니다. 할 일 목록은 To-do 탭의 할 일 변경으로(AI가 승인하면 바로),
+                         나머지는 Settings 탭의 저장으로 바뀝니다. (할 일 플래너)
+    planner_state.json   현재 할당, 변경 요청과 할 일 변경의 기록, 메모와 단계, 들인 시간, 하루 계획. agent가 씁니다. (할 일 플래너)
     grants\<사용자>.json  앱·사이트 접근 허용과 그 기록. 그 사용자의 agent가 씁니다. (접근 요청, docs/access_grants.md)
     blocks\<사용자>.json  지금 걸려 있는 차단. 그 사용자의 agent가 씁니다. 로그아웃했다가 다시 로그인해도 차단이 이어집니다.
-                         차단은 시간이 지나도 풀리지 않습니다. 사용자는 Settings 탭의 AI focus 화면(Blocked now)에서 차단을 풀 수 있습니다.
+                         차단은 시간이 지나도 풀리지 않습니다. 사용자는 Settings 탭의 Blocking 영역(Blocked now)에서 차단을 풀 수 있습니다.
                          설정이 보호된 뒤에는 이 풀기도 예약된 업데이트가 되므로, 확인 질문에 세 번 답한 뒤에야 풀립니다.
     usage\<사용자>.json   그 사용자의 Claude 호출 토큰 수와 예상 비용(날짜·용도별). 그 사용자의 agent가 씁니다. (docs/ai_focus_rule.md 5.10절)
     settings_protection.json    설정을 보호한 시각. 이 파일이 있으면 설정이 보호된 것입니다. (6.4절)
@@ -147,9 +151,10 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
 | `apps/service/src/agent.rs` | agent의 본체입니다. 차단 규칙을 등록하고, 자기 세션의 프로그램만 다루게 하고, 설정 파일이 바뀌면 다시 읽습니다. |
 | `apps/service/src/install.rs` | 설치와 제거를 합니다. |
 | `apps/focus/src/main.rs` | Focus 앱입니다. |
-| `apps/focus/src/settings.rs` | Focus 앱의 Settings 탭입니다. 설정의 복사본을 만들고, 바뀐 파일을 agent에게 보내고, 예약된 업데이트와 확인 질문, 설정 보호 양식을 보여 줍니다(6.4절). |
+| `apps/focus/src/todo.rs` | Focus 앱의 To-do 탭입니다([`task_planner.md`](task_planner.md) 7.1절). |
+| `apps/focus/src/settings.rs` | Focus 앱의 Settings 탭입니다. agent에게서 설정을 받아 보여 주고, 저장하기 전에 고친 내용마다 바로 적용될지 예약될지 보여 주고, 바뀐 파일을 agent에게 보내고, 예약된 업데이트와 확인 질문, 설정 보호 양식을 보여 줍니다(6.4절). |
 | `apps/desktop/src/main.rs` | `digital-wellbeing.exe`입니다. 단독 실행 모드의 창이고, 서비스가 등록된 PC에서는 안내 창만 보여 줍니다(2.1절). |
-| `crates/machine/` | 여러 프로그램이 함께 쓰는 코드입니다. 파일 경로, 관리 대상 계정 설정(`MachineConfig`), 세션 번호, agent와 Focus 앱 사이의 통신, 설정 보호와 예약된 업데이트(`settings.rs`)가 있습니다. |
+| `crates/machine/` | 여러 프로그램이 함께 쓰는 코드입니다. 파일 경로, 관리 대상 계정 설정(`MachineConfig`), 세션 번호, agent와 Focus 앱 사이의 통신(`user_api.rs`), 설정 보호와 예약된 업데이트(`settings.rs`), 설정 파일을 설정 하나하나의 변경으로 나누고 변경의 방향을 정하는 코드(`setting_edits.rs`)가 있습니다. |
 | `crates/enforcer` | 개발자가 `set_process_filter`를 추가했습니다. agent는 이 함수로 자기 세션의 프로그램만 차단하게 만듭니다. |
 | `crates/ai_focus_rule` | 개발자가 읽기 전용 설정 저장소와 설정 편집 전용 화면 모드를 추가했습니다. |
 
@@ -162,18 +167,19 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
 | 작업 관리자에서 agent를 끈다 | ❌ Windows가 "액세스 거부"로 막습니다. | agent가 SYSTEM 권한으로 돌기 때문입니다. |
 | 서비스를 멈춘다 (`sc stop`, 서비스 관리 창) | ❌ Windows가 "액세스 거부"로 막습니다. | Windows의 기본 설정에서 일반 사용자는 서비스 상태를 볼 수만 있고 멈출 수는 없습니다. |
 | 설정 파일을 직접 고치거나 API 키를 직접 읽는다 | ❌ 사용자는 폴더를 열 수 없습니다. | 설치기가 `icacls` 명령으로 ProgramData 폴더를 SYSTEM과 관리자만 쓰도록 잠갔습니다. 다만 사용자는 Settings 탭에서 설정을 고치고 API 키를 볼 수 있습니다(바로 아래 줄). |
-| Focus 앱의 Settings 탭에서 설정을 고친다 | **설정 단계**에서는 ✅ 바로 적용됩니다. 설정이 **보호된 뒤에는** 변경이 예약된 업데이트가 되고, 사용자가 이틀 간격으로 세 번 "예"라고 답하기 전까지 ❌ 적용되지 않습니다(빨라도 6일 뒤). | agent가 보호 파일(`settings_protection.json`)을 확인합니다. 그래서 순간적인 충동으로 차단을 풀거나 규칙을 느슨하게 바꿔도, 지금은 얻는 것이 없습니다. 사용자는 그 변경을 서로 다른 세 날에 세 번 다시 승인해야 합니다. 프로그램 안의 어떤 화면도 보호를 끄거나 질문을 앞당기지 못합니다(6.4절). |
-| Claude Desktop에게 설정을 바꾸게 한다 | 설정 단계에서는 ❌ Claude Desktop의 도구가 거부합니다. 설정이 보호된 뒤에는 Claude Desktop이 업데이트를 **예약만** 할 수 있습니다. | 예약된 업데이트는 Settings 탭에서 저장한 것과 똑같이 확인 질문에 세 번 "예"라는 답을 받아야 적용됩니다. 확인 질문에 답하는 도구는 없으므로, 사용자만 Focus 앱에서 답할 수 있습니다([`claude_desktop.md`](claude_desktop.md)). |
+| Focus 앱의 Settings 탭에서 설정을 고친다 | **설정 단계**에서는 ✅ 바로 적용됩니다. 설정이 **보호된 뒤에는** 엄격한 변경만 ✅ 바로 적용됩니다. 느슨한 변경은 예약된 업데이트가 되고, 사용자가 이틀 간격으로 세 번 "예"라고 답하기 전까지 ❌ 적용되지 않습니다(빨라도 6일 뒤). | agent가 보호 파일(`settings_protection.json`)을 확인하고, 변경마다 방향을 판단합니다. 그래서 순간적인 충동으로 차단을 풀거나 규칙을 느슨하게 바꿔도, 지금은 얻는 것이 없습니다. 사용자는 그 변경을 서로 다른 세 날에 세 번 다시 승인해야 합니다. 프로그램 안의 어떤 화면도 보호를 끄거나 질문을 앞당기지 못합니다(6.4절). |
+| To-do 탭에서 할 일 목록을 고친다(추가, 고치기, 지우기) | AI가 생활 규칙에 비추어 승인하면 ✅ 바로 적용됩니다. 설정이 보호되어 있어도 바로 적용됩니다. AI가 거절하면 ❌ 적용되지 않습니다. | 사용자는 거절된 변경을 AI 없이 하기로 할 수 있습니다. 그 변경은 예약된 업데이트가 되어, 두 시간 간격으로 세 번 "예"라는 답을 받은 뒤에 적용됩니다([`task_planner.md`](task_planner.md) 4.6절). |
+| Claude Desktop에게 설정을 바꾸게 한다 | 설정 단계에서는 ❌ Claude Desktop의 도구가 거부합니다. 설정이 보호된 뒤에는 Settings 탭과 같습니다. 엄격한 변경은 바로 적용되고, 느슨한 변경은 예약된 업데이트가 됩니다. | 예약된 업데이트는 Settings 탭에서 저장한 것과 똑같이 확인 질문에 세 번 "예"라는 답을 받아야 적용됩니다. 확인 질문에 답하는 도구와 거절된 할 일 변경을 밀어붙이는 도구는 없으므로, 사용자만 Focus 앱에서 할 수 있습니다([`claude_desktop.md`](claude_desktop.md)). |
 | 실행 파일을 다른 프로그램으로 바꿔치기한다 | ❌ 사용자는 파일을 바꿀 수 없습니다. | Program Files 폴더에는 관리자만 쓸 수 있습니다. |
 | 시작 프로그램에서 끄거나 컴퓨터를 다시 켠다 | 효과가 없습니다. 차단도 풀리지 않습니다(agent가 차단을 파일에 저장해 두고 이어서 적용합니다). | 서비스는 로그인 전에 자동으로 시작하고, 사용자가 로그인할 때마다 agent를 다시 띄웁니다. |
 | agent가 어떤 이유로든 꺼진다 | 서비스가 2초 안에 agent를 다시 띄웁니다. | `Supervisor`가 agent를 감시합니다. |
 | 서비스가 오류로 꺼진다 | Windows가 5초 뒤에 서비스를 다시 시작합니다(최대 3번). | 설치기가 서비스 복구 설정을 넣었습니다. |
 | 8765 포트의 로컬 API로 규칙을 바꾼다 | ❌ 그 API가 열려 있지 않습니다. | 8765 API는 단독 실행 모드의 `digital-wellbeing.exe`만 엽니다. 머신 설치는 이 파일을 설치하지 않고, 서비스가 등록된 PC에서 이 파일을 실행해도 안내 창만 뜹니다(2.1절). |
-| agent의 API(877x 포트)로 규칙을 바꾼다 | Settings 탭과 같습니다. 설정이 **보호되어 있으면** 변경은 예약된 업데이트가 되고, 확인 질문에 세 번 "예"라는 답을 받기 전까지 ❌ 적용되지 않습니다. | agent의 API에는 집중 세션, 할 일 플래너, 접근 요청에 관한 요청(`status`, `start_session`, `stop_session`, `assign`, `request_change`, `request_access`, `propose_todo`)과 설정에 관한 요청(`settings_get`, `settings_put`, `settings_answer`, `settings_withdraw`, `settings_protect`)이 있습니다. agent는 `settings_put`을 받을 때마다 설정이 보호되어 있는지 확인하고, `settings_answer`를 받으면 질문할 때가 되었는지 확인합니다(6.4절). |
+| agent의 API(877x 포트)로 규칙을 바꾼다 | Settings 탭과 같습니다. 설정이 **보호되어 있으면** 느슨한 변경은 예약된 업데이트가 되고, 확인 질문에 세 번 "예"라는 답을 받기 전까지 ❌ 적용되지 않습니다. | agent의 API에는 데일리 웰빙, 할 일 플래너, 접근 요청에 관한 요청(`status`, `start_session`, `stop_session`, `assign`, `request_change`, `request_access`, `todo_change`, `propose_todo`, `todo_change_schedule`, `task_notes_put`, `plan_day`)과 설정에 관한 요청(`settings_get`, `settings_put`, `settings_answer`, `settings_withdraw`, `settings_protect`)이 있습니다. agent는 `settings_put`을 받을 때마다 설정이 보호되어 있는지 확인하고 변경마다 방향을 판단하며, `settings_answer`를 받으면 질문할 때가 되었는지 확인합니다(6.4절). |
 | Focus 앱을 끈다 | ✅ 끌 수 있습니다. 하지만 차단에는 영향이 없습니다. | 차단은 Focus 앱이 아니라 agent가 합니다. |
 | 할 일을 "유튜브 보기"라고 적는다 | 할 일 플래너가 꺼져 있으면 ✅ 적을 수 있습니다. 켜져 있으면 ❌ 적을 수 없습니다. | 할 일 플래너가 켜져 있으면 AI가 목록에서 할 일을 고릅니다. 사용자가 할 일을 바꾸려면 이유를 적고 AI의 승인을 받아야 합니다([`task_planner.md`](task_planner.md)). |
 | 차단된 앱이나 사이트를 쓰게 해 달라고 한다 | 목적을 적어 요청하면, AI가 승인할 때만 차단이 풀립니다. | 허용된 동안에도 AI가 목적대로 쓰는지 계속 확인하고, 다르게 쓰면 다시 차단합니다. 설정의 블랙리스트에 있는 프로그램은 이 방법으로 풀리지 않습니다([`access_grants.md`](access_grants.md)). |
-| 집중 세션을 끝낸다 | 할 일 플래너가 꺼져 있으면 ✅ 끝낼 수 있습니다. 켜져 있으면 이유를 적고 AI의 승인을 받아야 합니다. | 집중 세션이 꺼져 있어도, 블랙리스트 규칙은 항상 적용됩니다. |
+| AI 검사를 멈춘다("Pause the AI checks") | 할 일 플래너가 꺼져 있으면 ✅ 멈출 수 있습니다. 켜져 있으면 이유를 적고 AI의 승인을 받아야 합니다. | AI 검사가 멈춰 있어도, 블랙리스트 규칙과 이미 걸린 차단은 항상 적용됩니다. |
 
 **전제 조건: 작업 계정이 "표준 사용자"여야 합니다.** 작업 계정이 관리자 계정이면, 사용자가 위의 장치를 모두 풀 수 있습니다.
 관리자는 설정 → 계정 → 가족 및 기타 사용자 → 해당 계정 → 계정 유형 변경에서 작업 계정을 **표준 사용자**로 바꾸면 됩니다.
@@ -236,25 +242,26 @@ cd <저장소 폴더>\target\release
 
 1. 사용자는 작업 계정으로 로그인합니다. 로그인하면 Focus 앱이 자동으로 뜹니다.
    Focus 앱이 보이지 않으면, 사용자는 시작 메뉴의 **Digital Wellbeing Focus**를 실행하거나 알림 영역(트레이)의 Focus 아이콘을 클릭합니다.
-2. 사용자는 Focus 앱의 **Settings** 탭을 열고 **Open the settings**를 누릅니다. Focus 앱은 agent에게서 설정을 받아 오고,
-   **List-based rule**, **AI focus**, **Task planner** 화면을 보여 줍니다(동작 방식은 6.4절).
-3. 사용자는 **AI focus** 화면의 **API key** 칸에 Anthropic API 키를 붙여 넣고 **Save**를 누릅니다.
+2. 사용자는 Focus 앱의 **Settings** 탭을 엽니다. Focus 앱은 agent에게서 설정을 받아 오고, 네 영역을 보여 줍니다(동작 방식은 6.4절).
+   **AI connection**(API 키, 모델, 하루 예산, AI 사용량), **Rules for the AI**(플래너 켜기, 생활 규칙, 플래너 AI의 지시문), **Blocking**(항상 막을 프로그램, 지금 걸린 차단, AI가 준 접근 허용, 접근 요청의 한도), **AI checks**(다시 검사하기까지의 시간, 앱을 끄기까지의 판정 수, 화면 캡처, 검사하지 않을 앱 목록)입니다.
+3. 사용자는 **AI connection** 영역의 **Anthropic API key** 칸에 Anthropic API 키를 붙여 넣고 **Use this key**를 누른 뒤, 화면 아래쪽의 **Save**를 누릅니다.
    - 저장하면 칸 위에 "A key is saved (…abcd)."처럼 저장된 키의 마지막 4글자가 보입니다.
    - 사용자는 **Check key**를 눌러 키가 맞는지 확인할 수 있습니다. 이 버튼은 Anthropic의 모델 목록을 조회하므로 비용이 들지 않습니다.
-     "✔ The key works…"가 나오면 키가 맞습니다. "rejected (401)"이 나오면 키가 틀렸고, "not found (404)"가 나오면 설정의 모델 이름이 틀렸습니다.
+     "✔ The key works…"가 나오면 키가 맞습니다. "The key was not accepted: …"가 나오면 그 뒤의 오류 내용을 읽습니다. 오류 내용에 "rejected (401)"이 있으면 키가 틀렸고, "not found (404)"가 있으면 설정의 모델 이름이 틀렸습니다.
    - agent는 SYSTEM 권한으로 돌기 때문에, **관리자나 사용자 계정에 설정된 `ANTHROPIC_API_KEY` 환경 변수를 읽지 못합니다.** 그래서 사용자는 환경 변수가 있더라도 이 칸에 키를 저장해야 합니다.
    - 프로그램은 키를 암호화하지 않고 `C:\ProgramData\DigitalWellbeing\ai_focus.json`에 저장합니다. 작업 계정은 그 폴더를 열 수 없습니다.
-     하지만 Settings 탭은 키를 포함한 설정의 복사본을 작업 계정의 폴더에 두므로, 작업 계정에서도 키를 읽을 수 있습니다.
-     설정이 보호된 뒤에도 Settings 탭은 열리므로, 키는 계속 읽을 수 있습니다. 키를 숨겨야 한다면, 그 사람이 쓰는 계정을 관리 대상에서 빼십시오.
-   - 키를 지우려면 **Clear**를 누릅니다. 입력한 키를 눈으로 확인하려면 **show**를 체크합니다.
-4. 사용자는 필요하면 **List-based rule** 화면에서 항상 막을 프로그램(게임 등)을 블랙리스트에 넣습니다.
-   할 일 플래너를 쓰려면, 사용자는 **Task planner** 화면에서 할 일과 생활 규칙을 적고 플래너를 켭니다([`task_planner.md`](task_planner.md) 8.1절).
-   플래너 AI의 지시문을 고치고 싶으면, 사용자는 같은 화면의 **AI instructions**를 펼쳐서 고칩니다. 설정 단계에서 고치면 바로 적용되므로, 지시문을 시험해 보기 좋은 때입니다.
-5. 사용자가 화면에서 저장한 내용은 1초 안에 agent에게 전달되고, agent가 진짜 설정 파일을 씁니다. 모든 agent는 바뀐 설정을 3초 안에 다시 읽습니다.
-   화면 위쪽에 "Saved policy.json at 14:05:10; in force now."처럼 저장 결과가 나옵니다. 설정이 보호된 뒤에는 "…; scheduled. You will be asked about it from … on; …"가 나옵니다.
+     하지만 agent는 설정 읽기 요청(`settings_get`)에 키를 포함한 설정을 돌려주므로, 작업 계정의 프로그램은 키를 읽을 수 있습니다. Settings 탭은 화면에 키의 마지막 4글자만 보여 줍니다.
+     설정이 보호된 뒤에도 마찬가지입니다. 키를 숨겨야 한다면, 그 사람이 쓰는 계정을 관리 대상에서 빼십시오.
+   - 키를 지우려면 **Clear**를 누르고 저장합니다. 입력한 키를 눈으로 확인하려면 **show**를 체크합니다.
+4. 사용자는 필요하면 **Blocking** 영역의 **Always blocked programs**에 항상 막을 프로그램(게임 등)을 넣습니다(블랙리스트).
+   할 일 플래너를 쓰려면, 사용자는 **To-do** 탭에서 할 일을 추가하고, **Rules for the AI** 영역에서 생활 규칙을 적고 플래너를 켭니다([`task_planner.md`](task_planner.md) 8.1절).
+   플래너 AI의 지시문을 고치고 싶으면, 사용자는 같은 영역의 **AI instructions**를 펼쳐서 고칩니다. 설정 단계에서 고치면 바로 적용되므로, 지시문을 시험해 보기 좋은 때입니다.
+5. 사용자가 고친 내용은 **Save**를 누르기 전까지 화면 안에만 있습니다. 저장하기 전에 화면 아래쪽의 "Unsaved changes"가 고친 내용을 하나하나 보여 줍니다. 설정 단계에서는 모두 "now"(바로 적용)입니다.
+   **Save**를 누르면 Focus 앱이 바뀐 파일을 agent에게 보내고, agent가 진짜 설정 파일을 씁니다. 모든 agent는 바뀐 설정을 3초 안에 다시 읽습니다. **Discard**를 누르면 고친 내용을 버립니다.
+   화면 위쪽에 "policy.json: in force now."처럼 저장 결과가 나옵니다. 설정이 보호된 뒤에 느슨한 변경을 저장하면 "planner.json: 1 in force now, the rest scheduled; first question 2026-11-02 14:05."처럼 나옵니다.
    설정 단계에서는 Settings 탭 위쪽에 "Setup: changes take effect at once, and anyone using this PC can make them."라는 노란 안내가 보입니다.
 6. 설정을 다 고쳤으면, 사용자는 Settings 탭 위쪽에서 "I understand that nothing in the program turns the protection off."를 체크한 뒤 **Protect the settings**를 누릅니다.
-   **보호는 끌 수 없습니다.** 보호한 뒤에 고친 설정은 빨라도 6일 뒤에 적용됩니다(이틀 간격의 확인 질문 세 개). 그래서 사용자는 보호하기 전에 설정이 원하는 대로 동작하는지 며칠 써 보며 확인하는 편이 안전합니다(6.4절).
+   **보호는 끌 수 없습니다.** 보호한 뒤에 규칙을 느슨하게 바꾸는 설정은 빨라도 6일 뒤에 적용됩니다(이틀 간격의 확인 질문 세 개). 그래서 사용자는 보호하기 전에 설정이 원하는 대로 동작하는지 며칠 써 보며 확인하는 편이 안전합니다(6.4절).
 
 ### 4.4 코드를 고치며 내 PC에서 빠르게 시험하기
 
@@ -284,10 +291,10 @@ PowerShell이 스크립트 실행을 막으면, 개발자는 한 번만 `Set-Exe
 2. Focus 창에 빨간 글씨로 "agent not running…"이 **보이지 않는가?**
 3. 작업 관리자 → 세부 정보 탭에서, `digital-wellbeing-service.exe`가 **사용자 이름 SYSTEM**으로 **두 개** 있는가? 하나는 서비스이고, 하나는 agent입니다.
    사용자가 agent에서 "작업 끝내기"를 누르면, Windows가 "액세스 거부"라고 답하는가?
-4. 사용자가 To-do 탭에서 할 일을 적고 **Start focus**를 누르면, 1분 안에 Blocking 탭의 "Recent AI checks"에 판정이 나오는가?
-   - 오류가 보이면, 사용자는 오류 메시지를 읽습니다. 키가 없거나 잘못되었다면, 사용자는 4.3절 3번을 다시 합니다. 설정이 이미 보호되어 있으면, 새 키도 예약된 업데이트가 되어 확인 질문에 세 번 답한 뒤에 적용됩니다.
+4. 사용자가 To-do 탭에서 할 일을 적고 **Start**를 누르면, 1분 안에 Blocking 탭의 "Recent AI checks"에 판정이 나오는가?
+   - 오류가 보이면, 사용자는 오류 메시지를 읽습니다. 키가 없거나 잘못되었다면, 사용자는 4.3절 3번을 다시 합니다. 설정이 이미 보호되어 있으면, 새 키도 예약된 업데이트가 되어 확인 질문에 세 번 답한 뒤에 적용됩니다(프로그램은 키의 변경이 엄격한지 느슨한지 판단할 수 없습니다).
    - AI가 이상한 판정을 내리면, 관리자는 관리자 계정에서 `logs\agent-session<번호>.log`를 엽니다.
-5. 사용자가 Settings 탭의 List-based rule 화면에서 블랙리스트에 `notepad.exe`를 넣은 뒤 메모장을 켜면, 1초 안에 메모장이 꺼지는가?
+5. 사용자가 Settings 탭의 Blocking 영역에서 **Always blocked programs**에 `notepad.exe`를 넣고 저장한 뒤 메모장을 켜면, 1초 안에 메모장이 꺼지는가? (블랙리스트에 넣는 것은 엄격한 변경이므로, 설정이 보호되어 있어도 바로 적용됩니다.)
 6. 사용자가 유튜브 같은 사이트를 열어 두고 2분쯤 기다리면, 그 탭이 닫히는가?
 
 agent가 뜨지 않으면, 관리자는 관리자 계정에서 `C:\ProgramData\DigitalWellbeing\logs\service.log`를 엽니다.
@@ -303,10 +310,10 @@ agent가 뜨지 않으면, 관리자는 관리자 계정에서 `C:\ProgramData\D
 사용자가 할 일을 바꾸거나 끝내려면 이유를 적고 AI의 승인을 받아야 합니다. 자세한 방법은 [`task_planner.md`](task_planner.md) 8장에 있습니다.
 
 1. 사용자가 로그인하면 Focus 창이 뜹니다.
-2. 사용자는 할 일을 **구체적으로** 적고 **Start focus**를 누릅니다. 예: `졸업논문 3장 작성 — Overleaf, 논문 PDF, Google Scholar 필요`
-3. 하는 일이 바뀌면, 사용자는 내용을 고치고 **Change task**를 누릅니다. 그러면 agent는 경고 횟수를 지우고, 새 할 일로 곧바로 다시 검사합니다. 이미 걸린 차단은 할 일이 바뀌어도 풀리지 않습니다. 차단된 앱이나 사이트가 새 할 일에 필요하면, 사용자는 목적을 적어 접근을 요청합니다.
-4. 일이 끝나면, 사용자는 **End session**을 누릅니다. 사용자가 로그아웃하거나 컴퓨터를 다시 켜도 집중 세션은 끝납니다.
-   agent는 할 일을 저장하지 않으므로, 사용자는 다음에 할 일을 다시 적어야 합니다.
+2. 사용자는 To-do 탭에 지금 하는 일을 **구체적으로** 적고 **Start**를 누릅니다. 그러면 데일리 웰빙이 켜지고 AI 검사가 시작됩니다. 예: `졸업논문 3장 작성 — Overleaf, 논문 PDF, Google Scholar 필요`
+3. 하는 일이 바뀌면, 사용자는 내용을 고치고 **Change what I do**를 누릅니다. 그러면 agent는 경고 횟수를 지우고, 새 할 일로 곧바로 다시 검사합니다. 이미 걸린 차단은 할 일이 바뀌어도 풀리지 않습니다. 차단된 앱이나 사이트가 새 할 일에 필요하면, 사용자는 목적을 적어 접근을 요청합니다.
+4. AI 검사를 쉬고 싶으면, 사용자는 **Pause the AI checks**를 누릅니다(AI 검사 멈추기). 사용자가 로그아웃하거나 컴퓨터를 다시 켜도 AI 검사는 멈춥니다.
+   agent는 할 일을 저장하지 않으므로, 사용자는 다음에 할 일을 다시 적고 **Start**를 눌러야 합니다.
 5. 일에 필요한 앱이나 사이트가 차단되면, 사용자는 Focus 창에서 "Ask for access"를 누르고 목적을 적어 요청합니다. 자세한 방법은 [`access_grants.md`](access_grants.md) 10장에 있습니다.
 6. 사용자가 Focus 창의 X를 누르면, 창은 닫히지 않고 **알림 영역(트레이)**으로 숨습니다. 트레이의 Focus 아이콘을 클릭하면 창이 다시 열립니다.
    아이콘을 오른쪽 클릭하면 메뉴가 나옵니다. **Open**은 창을 열고, **Settings**는 창의 Settings 탭을 열고, **Quit**은 Focus 앱을 끝냅니다.
@@ -316,12 +323,17 @@ agent가 뜨지 않으면, 관리자는 관리자 계정에서 `C:\ProgramData\D
 
 ### 6.2 설정을 바꿀 때
 
-- 사용자는 작업 계정의 Focus 앱에서 Settings 탭을 열고 설정을 고칩니다(6.4절). 설정이 보호되어 있으면, 저장한 변경은 예약된 업데이트가 되고, 사용자가 확인 질문에 이틀 간격으로 세 번 "예"라고 답한 뒤에 적용됩니다.
-- 확인 질문에 답할 때가 되면, Focus 앱은 창을 띄워 Settings 탭을 보여 줍니다. To-do 탭에도 "A scheduled settings update is waiting for your answer…"라는 빨간 줄과 Settings 탭으로 가는 링크가 보입니다.
-- Settings 탭에서 고칠 수 있는 것은 다음과 같습니다.
-  - **List-based rule** 화면: 블랙리스트와 화이트리스트(`policy.json`).
-  - **AI focus** 화면: Anthropic API 키를 포함한 AI 집중 설정, 지금 걸린 차단 목록(**Blocked now**)과 "unblock" 버튼, 접근 허용 목록과 "revoke" 버튼, AI 사용량(**AI usage**)과 하루 예산(`ai_focus.json`).
-  - **Task planner** 화면: 할 일 목록, 생활 규칙(**Life rules**), 플래너 AI의 지시문(**AI instructions**), 플래너 켜기, 사용자가 제안한 할 일 빼기(`planner.json`).
+- 사용자는 작업 계정의 Focus 앱에서 Settings 탭을 열고 설정을 고칩니다(6.4절). 설정이 보호되어 있으면, 엄격한 변경은 바로 적용되고, 느슨한 변경은 예약된 업데이트가 되어 사용자가 확인 질문에 이틀 간격으로 세 번 "예"라고 답한 뒤에 적용됩니다.
+- 확인 질문에 답할 때가 되면, Focus 앱은 창을 띄워 Settings 탭을 보여 줍니다. To-do 탭에도 "A scheduled update is waiting for your answer: is it really right?"라는 빨간 줄과 Settings 탭으로 가는 링크(**Answer in the Settings tab**)가 보입니다.
+- Settings 탭은 이 앱에 필요한 설정만 네 영역으로 나눠 보여 줍니다. 각 영역의 설명 문구는 어떤 변경이 바로 적용되고 어떤 변경이 예약되는지도 알려 줍니다.
+  - **AI connection** (`ai_focus.json`): Anthropic API 키(**Use this key**, **Clear**, **Check key**, **show**), 모델, AI 검사의 하루 예산(USD, 0은 예산 없음), 오늘과 이번 달의 AI 사용량(호출 수와 예상 비용).
+  - **Rules for the AI** (`planner.json`): 플래너 켜기("The AI picks what I do from my to-do list (planner)"), 생활 규칙(**Life rules**), 플래너 AI의 지시문 네 개(**AI instructions**: 할 일 고르기, 변경 요청 심사, 할 일 변경 심사, 하루 계획).
+    플래너가 켜져 있으면 AI가 할 일 목록에서 사용자가 할 일을 고르고, 사용자가 그것을 바꾸려면 AI의 승인이 필요합니다. 꺼져 있으면 사용자가 하는 일을 직접 적습니다. 켜기는 바로 적용되고, 끄기는 예약됩니다.
+    지시문마다 기본 지시문의 글이 보이고, **Edit a copy of the built-in text**와 **Back to the built-in text** 버튼이 있습니다([`task_planner.md`](task_planner.md) 7.2절).
+  - **Blocking** (`policy.json`, `ai_focus.json`): 항상 막을 프로그램(**Always blocked programs**, 블랙리스트), 지금 걸린 모든 사용자의 차단(**Blocked now**)과 "unblock"(예약됨)·"keep blocked" 버튼, AI가 준 접근 허용(**Access granted by the AI**)과 "revoke"(바로 적용) 버튼, 접근 요청의 한도(**Asking for access**: 시간 허용의 최대 길이, 영구 허용을 줄 수 있는지).
+  - **AI checks** (`ai_focus.json`): on_task 판정을 다시 검사하기까지의 분(0은 unsure 창만큼 자주), unsure 창을 다시 검사하기까지의 초, 앱을 끄기까지의 off_task 판정 수, 화면 캡처를 보낼지, 검사하지 않는 앱(**Never judged (always allowed)**), 화면 캡처 없이 검사하는 앱(**Judged without a screenshot (private)**), 브라우저 목록.
+- 할 일 목록은 Settings 탭이 아니라 To-do 탭에서 고칩니다. 할 일 변경은 AI가 심사합니다([`task_planner.md`](task_planner.md) 4.6절).
+- 예전 Settings 탭에 있던 화이트리스트 모드 선택, 저장한 목록 묶음(strategies), 실행 중인 프로그램 표는 없어졌습니다. 이 값들은 `policy.json`에 그대로 남아 있습니다. 기본 모드는 블랙리스트 모드입니다.
 - 관리 대상 계정은 Settings 탭에서 바꿀 수 없습니다. 관리 대상 계정을 바꾸려면, 관리자는 관리자 계정에서 `machine.json`의 `managed_users`를 고치거나 `install --manage …` 명령을 다시 실행합니다.
 
 ### 6.3 제거
@@ -338,19 +350,44 @@ agent가 뜨지 않으면, 관리자는 관리자 계정에서 `C:\ProgramData\D
 
 머신 설치의 모든 설정은 Focus 앱의 **Settings** 탭에서 고칩니다. 사용자는 관리 대상 계정(표준 계정)에서 Settings 탭을 열고,
 Settings 탭은 그 세션의 agent를 거쳐 설정 파일을 고칩니다. **프로그램은 관리자 계정과 표준 계정을 구별하지 않습니다.**
-저장한 변경이 언제 적용되는지는 설정이 보호되어 있는지 하나만 정합니다. 그래서 설정은 두 상태 중 하나에 있습니다.
+저장한 변경이 언제 적용되는지는 두 가지가 정합니다. 하나는 설정이 보호되어 있는지이고, 다른 하나는 그 변경이 규칙을 엄격하게 만드는지 느슨하게 만드는지입니다.
 
 | 상태 | Settings 탭에서 저장하면 |
 |---|---|
-| **설정 단계** (`settings_protection.json`이 없음) | 변경이 바로 적용됩니다. 화면 위에 "Setup: changes take effect at once, and anyone using this PC can make them."라는 노란 안내가 보입니다. |
-| **보호됨** | 변경은 **예약된 업데이트**가 됩니다. 지금 적용된 설정 파일은 그대로 유지됩니다. 사용자가 확인 질문에 이틀 간격으로 세 번 연속 "예"라고 답하면, 그때 업데이트가 적용됩니다. 화면 위에는 "The settings are protected. Every change you save is scheduled…"라는 설명이 보입니다. |
+| **설정 단계** (`settings_protection.json`이 없음) | 모든 변경이 바로 적용됩니다. 화면 위에 "Setup: changes take effect at once, and anyone using this PC can make them."라는 노란 안내가 보입니다. |
+| **보호됨** | agent는 저장한 파일을 설정 하나하나의 변경으로 나눕니다. **엄격한 변경은 바로 적용됩니다.** **느슨한 변경은 예약된 업데이트가 됩니다.** 사용자가 확인 질문에 이틀 간격으로 세 번 연속 "예"라고 답하면, 그때 그 변경이 적용됩니다. 화면 위에는 "The settings are protected. A change that makes the rules stricter takes effect at once. Any other change is scheduled…"라는 설명이 보입니다. |
 
-**보호된 뒤에 확인 질문을 거치는 이유:** 사용자가 순간적인 충동으로 차단을 풀거나 규칙을 느슨하게 바꿔도, 그 변경은 빨라도 6일 뒤에야 적용됩니다.
+**보호된 뒤에 느슨한 변경이 확인 질문을 거치는 이유:** 사용자가 순간적인 충동으로 차단을 풀거나 규칙을 느슨하게 바꿔도, 그 변경은 빨라도 6일 뒤에야 적용됩니다.
 게다가 사용자는 그 변경을 서로 다른 세 날에 세 번 다시 승인해야 합니다. 그래서 충동적인 변경으로는 즉시 얻는 것이 없고, 사용자가 차분한 날에 그 변경을 거절할 기회가 세 번 있습니다.
-반대로 사용자가 여러 날 동안 계속 원하는 변경(새 할 일, 고친 생활 규칙 등)은 결국 적용됩니다.
-- 설정을 더 엄격하게 바꾸는 변경(블랙리스트에 추가 등)도 똑같이 확인 질문을 거칩니다. 프로그램은 변경이 엄격한지 느슨한지 판단하지 않습니다.
-- Settings 탭의 AI focus 화면에서 누르는 "unblock"(차단 풀기)과 "revoke"(접근 허용 취소)도 `ai_focus.json`을 고치는 일입니다. 그래서 설정이 보호된 뒤에는 이 버튼도 예약된 업데이트가 되어, 빨라도 6일 뒤에 적용됩니다.
-  차단된 앱이나 사이트를 바로 써야 하면, 사용자는 목적을 적어 접근을 요청하고 AI의 승인을 받습니다([`access_grants.md`](access_grants.md)).
+반대로 사용자가 여러 날 동안 계속 원하는 변경(고친 생활 규칙 등)은 결국 적용됩니다.
+
+**엄격한 변경을 바로 적용하는 이유:** 규칙을 더 엄격하게 만드는 변경으로는 충동적으로 얻는 것이 없습니다. 그런 변경까지 6일을 기다리게 하면, 사용자가 차분할 때 내린 좋은 결정(예: 게임을 블랙리스트에 넣기)이 늦어질 뿐입니다.
+
+**어떤 변경이 엄격한가** (`machine::setting_edits`의 `direction()`): 아래 표에 없는 설정과, 어느 쪽인지 알 수 없는 변경은 모두 느슨한 변경으로 봅니다. 그래서 다음 변경은 언제나 예약됩니다.
+API 키(`api_key`), 모델(`model`), 생활 규칙(`life_rules`), 플래너 AI의 지시문(`instructions`), 브라우저 목록(`browsers`), 화이트리스트와 모드와 저장한 목록 묶음(`whitelist`, `mode`, `strategies`), 설정 파일을 거친 할 일 목록 변경(`todos`, `dismissed`).
+
+| 파일 | 설정 | 바로 적용(엄격한 변경) | 예약(느슨한 변경) |
+|---|---|---|---|
+| `policy.json` | 블랙리스트(`blacklist`, "Always blocked programs") | 프로그램을 넣기 | 프로그램을 빼기 |
+| `ai_focus.json` | 앱을 끄기까지의 off_task 판정 수(`strikes_to_block`) | 줄이기 | 늘리기 |
+| `ai_focus.json` | 시간 허용의 최대 길이(`max_grant_minutes`) | 줄이기 | 늘리기 |
+| `ai_focus.json` | unsure 창을 다시 검사하기까지의 초(`check_interval_secs`) | 줄이기 | 늘리기 |
+| `ai_focus.json` | on_task 창을 다시 검사하기까지의 분(`recheck_minutes`) | 줄이기. 0은 "unsure 창만큼 자주"라는 뜻이므로 가장 엄격합니다. | 늘리기 |
+| `ai_focus.json` | 화면 캡처 보내기(`send_screenshot`) | 켜기 | 끄기 |
+| `ai_focus.json` | 영구 허용을 줄 수 있음(`allow_permanent_grants`) | 끄기 | 켜기 |
+| `ai_focus.json` | AI 검사의 하루 예산(`daily_budget_usd`) | 늘리기, 또는 0(예산 없음). 예산을 다 쓰면 AI 검사가 멈추므로, 예산이 클수록 검사가 오래 이어집니다. | 줄이기, 또는 0에서 금액으로 바꾸기 |
+| `ai_focus.json` | 검사하지 않는 앱(`always_allow`)과 화면 캡처 없이 검사하는 앱(`private_apps`) | 앱을 빼기 | 앱을 넣기 |
+| `ai_focus.json` | 취소한 접근 허용(`revoked_grants`, "revoke") | 넣기(허용 취소) | 빼기 |
+| `ai_focus.json` | 푼 차단(`unblocked`, "unblock") | 빼기("keep blocked") | 넣기(차단 풀기) |
+| `planner.json` | 플래너 켜기(`enabled`) | 켜기 | 끄기 |
+| 모든 파일 | 고친 시각(`updated_at`) | 규칙과 관계없으므로 언제나 바로 적용됩니다. | — |
+
+예를 들어 사용자가 한 번에 "앱을 끄기까지의 off_task 판정 수를 2에서 1로 줄이기"와 "모델 바꾸기"를 저장하면, 판정 수는 바로 1이 되고 모델 변경만 예약됩니다.
+
+- Settings 탭은 저장하기 전에 고친 내용을 하나하나 "Unsaved changes" 아래에 보여 주고, 각 줄 앞에 초록 "now"(바로 적용) 또는 노란 "scheduled"(예약)를 붙입니다. 그래서 사용자는 저장하기 전에 무엇이 바로 적용되고 무엇이 예약될지 압니다.
+- Settings 탭의 **Blocked now**에서 누르는 "unblock"(차단 풀기)은 느슨한 변경이므로, 설정이 보호된 뒤에는 예약된 업데이트가 되어 빨라도 6일 뒤에 적용됩니다. 차단된 앱이나 사이트를 바로 써야 하면, 사용자는 목적을 적어 접근을 요청하고 AI의 승인을 받습니다([`access_grants.md`](access_grants.md)).
+- **Access granted by the AI**에서 누르는 "revoke"(접근 허용 취소)는 엄격한 변경이므로 바로 적용됩니다.
+- 할 일 목록은 설정 파일(`planner.json`)에 있지만, 사용자는 To-do 탭에서 AI의 심사를 거쳐 고칩니다. AI가 승인한 할 일 변경은 이 표와 상관없이 바로 적용됩니다([`task_planner.md`](task_planner.md) 4.6절).
 
 **설정을 보호하는 방법:** 사용자는 Focus 앱의 Settings 탭 위쪽에서 "I understand that nothing in the program turns the protection off."를 체크한 뒤 **Protect the settings**를 누릅니다.
 - Focus 앱은 agent에게 `settings_protect`를 보내고, agent는 보호한 시각을 `settings_protection.json`에 씁니다.
@@ -359,39 +396,62 @@ Settings 탭은 그 세션의 agent를 거쳐 설정 파일을 고칩니다. **�
   예전 버전이 "잠금이 끝날 때 적용"하려고 보관해 둔 변경(`settings_pending.json`)은, 저장했던 시각에 예약한 업데이트로 옮겨집니다. 이 업데이트도 같은 확인 질문을 거칩니다.
 
 **예약된 업데이트와 확인 질문:**
-- 설정이 보호된 뒤 사용자가 화면에서 설정을 저장하면, agent는 그 **파일 전체**를 예약된 업데이트로 보관합니다. 화면 위에는 "Saved planner.json at …; scheduled. You will be asked about it from … on; it takes effect after 3 "yes" answers."처럼 첫 질문이 오는 시각이 나옵니다.
-- Settings 탭은 예약된 업데이트를 "Scheduled updates" 아래에 하나씩 보여 줍니다. 각 업데이트에는 파일 이름, 예약한 시각과 경로(예: "settings tab", "claude desktop"), 지금까지 받은 "예" 답의 수(예: "1/3 confirmed"), 다음 질문 시각("Next question: …")이 나옵니다.
-- 각 업데이트의 **What changes**를 펼치면, 설정 하나하나가 지금 어떤 값이고("now: …") 업데이트 뒤에 어떤 값이 되는지("after: …")가 보입니다. 질문할 때가 된 업데이트는 이 부분이 처음부터 펼쳐져 있습니다.
-- 예약하고 이틀이 지나면, 그 업데이트 아래에 빨간 글씨로 "Is this update of planner.json really right? (question 1 of 3)"라는 확인 질문이 나옵니다. 사용자는 **Yes, I still want it** 또는 **No, reject it**을 누릅니다.
-  - 사용자가 "예"라고 답하면, 다음 질문은 그 답을 한 때부터 이틀 뒤에 옵니다. 세 번째 "예"를 받으면, agent는 그 업데이트를 진짜 설정 파일에 씁니다. 모든 agent는 3초 안에 바뀐 파일을 다시 읽습니다.
+- 예약된 업데이트는 파일 전체가 아니라 **설정 하나하나의 변경**을 담습니다. 업데이트가 적용될 때, agent는 그 변경을 **그때의 설정 파일**에 적용합니다. 그래서 업데이트를 기다리는 동안 바로 적용된 다른 변경(엄격한 변경, AI가 승인한 할 일 변경)은 지워지지 않고 남습니다.
+- 설정이 보호된 뒤 사용자가 느슨한 변경을 저장하면, 화면 위에 "planner.json: scheduled; first question 2026-11-02 14:05."처럼 첫 질문이 오는 시각이 나옵니다. 엄격한 변경이 함께 있었으면 "1 in force now, the rest scheduled; …"처럼 나옵니다.
+- Settings 탭은 예약된 업데이트를 맨 위의 "Scheduled updates" 아래에 하나씩 보여 줍니다. 각 업데이트에는 파일 이름(할 일 변경이면 "a to-do change"), 예약한 시각과 경로(예: "settings tab", "claude desktop", "to-do tab"), 지금까지 받은 "예" 답의 수(예: "1/3 confirmed"), 질문 간격("asked every 2 days" 또는 "asked every 2 hours"), 다음 질문 시각("Next question: …")이 나옵니다. 할 일 변경이면 그 변경과 이유와 AI의 답을 적은 메모도 나옵니다.
+- 각 업데이트의 **What changes**를 펼치면, 바뀌는 설정이 한 줄에 하나씩 보입니다. 예: "strikes_to_block = 3", "blacklist: − steam.exe", "always_allow: + zoom.exe", "todos: p1761830000000 = {…}". API 키는 "api_key = (a new key)"로만 보입니다. 질문할 때가 된 업데이트는 이 부분이 처음부터 펼쳐져 있습니다.
+- 예약하고 이틀이 지나면(할 일 변경은 두 시간), 그 업데이트 아래에 빨간 글씨로 "Is this update of planner.json really right? (question 1 of 3)"라는 확인 질문이 나옵니다. 사용자는 **Yes, I still want it** 또는 **No, reject it**을 누릅니다.
+  - 사용자가 "예"라고 답하면, 다음 질문은 그 답을 한 때부터 이틀 뒤(할 일 변경은 두 시간 뒤)에 옵니다. 세 번째 "예"를 받으면, agent는 그 변경을 그때의 설정 파일에 적용하고 형식을 한 번 더 검사한 뒤 씁니다. 모든 agent는 3초 안에 바뀐 파일을 다시 읽습니다.
   - 사용자가 한 번이라도 "아니요"라고 답하면, agent는 그 업데이트를 거절하고 버립니다. 지금의 설정은 그대로입니다.
   - 사용자가 질문에 답하지 않으면, 질문은 답할 때까지 기다립니다. 시간이 지나도 저절로 승인되거나 거절되지 않습니다.
-  - 질문할 때가 되기 전에 답을 보내면, agent는 그 답을 거부합니다. 그래서 사용자는 이틀 간격을 건너뛸 수 없습니다.
+  - 질문할 때가 되기 전에 답을 보내면, agent는 그 답을 거부합니다. 그래서 사용자는 질문 간격을 건너뛸 수 없습니다.
 - 질문할 때가 되면, Focus 앱은 숨어 있던 창을 띄우고 Settings 탭을 보여 줍니다. To-do 탭에도 빨간 줄과 **Answer in the Settings tab** 링크가 보입니다.
 - 사용자는 언제든 **Withdraw this update**를 눌러 예약된 업데이트를 거둘 수 있습니다. 거두기는 확인을 거치지 않습니다. 적용되지 않은 변경을 거둬도 얻는 것이 없기 때문입니다.
-- 같은 파일을 다시 저장하면, 새 업데이트가 예전 예약된 업데이트를 대신합니다. 이때 예전 업데이트가 받은 "예" 답은 사라지고, 확인 질문은 처음부터 다시 시작합니다.
-- 예약된 업데이트가 있으면, Settings 탭의 각 화면은 지금 적용된 설정이 아니라 예약된 업데이트의 내용을 보여 줍니다. 그래서 사용자는 예약해 둔 변경에 이어서 고칠 수 있습니다. (이어서 고쳐 저장하면, 바로 위의 규칙대로 확인 질문이 처음부터 다시 시작합니다.)
+- 한 설정 파일에는 Settings 탭과 Claude Desktop의 저장으로 생긴 예약된 업데이트(출처 `settings`)가 많아야 하나 있습니다. 같은 파일을 다시 저장하면 다음과 같이 됩니다.
+  - 저장한 파일의 느슨한 변경이 예약된 업데이트의 변경과 **같으면**, 그 업데이트와 지금까지 받은 "예" 답이 그대로 남습니다. 예를 들어 사용자가 엄격한 변경 하나만 더 저장하면, 그 변경은 바로 적용되고 예약된 업데이트는 그대로입니다.
+  - 저장한 파일에 느슨한 변경이 **하나도 없으면**, 예약된 업데이트는 거둔 것으로 처리됩니다.
+  - 느슨한 변경이 **다르면**, 새 업데이트가 예전 업데이트를 대신합니다. 이때 예전 업데이트가 받은 "예" 답은 사라지고, 확인 질문은 처음부터 다시 시작합니다.
+- AI 없이 하기로 한 할 일 변경의 예약된 업데이트(출처 `todo_change`)는 설정 파일을 저장해도 대신되지 않습니다. 이 업데이트는 그 할 일 변경 하나만 담고 있기 때문입니다.
+- Settings 탭의 각 영역은 지금 적용된 설정에 그 파일의 예약된 업데이트(출처 `settings`)의 변경을 더한 내용을 보여 줍니다. 그래서 사용자는 예약해 둔 변경에 이어서 고칠 수 있습니다. 예약해 둔 변경을 그대로 두고 다른 것만 고치면, 위의 규칙대로 예약된 업데이트와 그 "예" 답이 남습니다.
+- agent는 저장한 파일과 지금의 파일을 모두 기본값을 채운 모양으로 바꾼 뒤 비교합니다(`settings::normalize`). 그래서 예전 버전이 쓴 파일에 없던 설정이 기본값으로 저장되어도, 그것을 변경으로 보지 않습니다.
+- 예전 버전이 파일 전체로 보관한 예약된 업데이트는, agent가 읽을 때 설정 하나하나의 변경으로 바뀝니다.
 - agent는 업데이트가 어떻게 끝났는지(적용됨, 거절됨, 거둠, 새 업데이트로 대체됨)를 최근 50개까지 기록합니다.
 - 작업 계정 사용자는 Windows 시계를 바꿀 수 없습니다(그 권한은 관리자 계정에만 있습니다). 그래서 사용자는 시계를 앞으로 돌려 질문을 앞당길 수도 없습니다.
-- 환경 변수 `DW_SETTINGS_CONFIRM_INTERVAL_SECONDS`가 있으면, agent는 이틀 대신 그 초만큼 기다립니다. 이 변수는 자동 테스트만을 위한 것입니다. 머신 설치에서 agent의 환경 변수는 SYSTEM 서비스의 환경 변수이고, 이것은 관리자만 바꿀 수 있습니다.
+- 환경 변수 `DW_SETTINGS_CONFIRM_INTERVAL_SECONDS`가 있으면, agent는 이틀이나 두 시간 대신 그 초만큼 기다립니다. 이 변수는 자동 테스트만을 위한 것입니다. 머신 설치에서 agent의 환경 변수는 SYSTEM 서비스의 환경 변수이고, 이것은 관리자만 바꿀 수 있습니다.
 
 **솔직한 한계:** Windows는 관리자 계정이 서비스를 멈추거나 `C:\ProgramData\DigitalWellbeing\settings_protection.json`이나 설정 파일을 지우고 고치는 것을 막지 못합니다.
 그래서 사용자는 표준 계정에서 일하고, 관리자 계정은 설치할 때와 관리 대상 계정을 바꿀 때(`install --manage` 또는 `machine.json`)만 씁니다.
 관리 대상 계정 목록(`machine.json`)은 Settings 탭에서 고칠 수 없습니다. 또 ProgramData 폴더의 로그를 읽을 때도 관리자 계정이 필요합니다.
 
-**동작 방식** (`machine::settings`, `apps/focus/src/settings.rs`):
-1. Focus 앱은 관리자 권한이 없으므로 ProgramData 폴더를 열 수 없습니다. 대신 사용자가 **Open the settings**를 누르면, Focus 앱은 agent에게 `settings_get`을 보냅니다. agent는 SYSTEM 권한으로 설정 파일 세 개(`policy.json`, `ai_focus.json`, `planner.json`), 설정이 보호되어 있는지, 예약된 업데이트와 지난 결과 기록, 화면에 필요한 읽기 전용 파일(`planner_state.json`, 사용자별 허용·차단·사용량 파일)을 읽어서 돌려줍니다. 설정이 보호되어 있어도 돌려줍니다.
-2. Focus 앱은 이 내용을 자기 계정의 폴더(`%LOCALAPPDATA%\DigitalWellbeing\…\settings_mirror`)에 복사본(mirror)으로 씁니다. 예약된 업데이트가 있는 파일은 그 업데이트의 내용을 씁니다. 그리고 Focus 앱은 List-based rule, AI focus, Task planner 화면을 이 복사본 위에 엽니다.
-3. 사용자가 화면에서 설정을 저장하면, 복사본 파일이 바뀝니다. Focus 앱의 백그라운드 스레드는 1초마다 복사본을 확인하고, 바뀐 파일을 `settings_put`으로 agent에게 보냅니다.
-4. agent는 내용이 그 설정의 형식에 맞는지 확인합니다. 형식에 맞지 않으면 설정 단계이든 보호된 뒤이든 거부합니다. 그다음 agent는 설정이 보호되어 있는지 확인합니다.
-   - 설정 단계이면, agent는 진짜 설정 파일을 쓰고 `applied`라고 답합니다. 다른 agent들도 3초 안에 바뀐 파일을 다시 읽습니다.
-   - 보호되어 있으면, agent는 내용을 `settings_reservations.json`에 예약된 업데이트로 저장하고 `scheduled`와 그 업데이트의 번호(`id`), 첫 질문 시각(`first_question_at`)을 답합니다. 같은 파일의 예약된 업데이트가 이미 있었다면, agent는 그것을 "대체됨"으로 기록하고 새 업데이트로 바꿉니다. 진짜 설정 파일은 그대로입니다.
-5. Focus 앱은 3초마다 `settings_get`으로 예약된 업데이트를 새로 받아 오고, 질문할 때가 된 업데이트에 확인 질문을 보여 줍니다. agent의 상태(`status`)에도 설정이 보호되어 있는지(`settings_protected`)와 질문할 때가 된 업데이트의 수(`settings_questions_due`)가 들어 있습니다. Focus 앱은 이 수가 늘면 창을 띄웁니다.
-6. 사용자가 확인 질문에 답하면, Focus 앱은 `settings_answer`(업데이트 번호와 "예"/"아니요")를 보냅니다. agent는 질문할 때가 되었는지 확인하고, 아직 이르면 거부합니다.
-   - "예"이면 agent는 답한 시각을 기록합니다. 세 번째 "예"이면, agent는 내용을 한 번 더 형식 검사한 뒤 진짜 설정 파일에 쓰고 업데이트를 "적용됨"으로 기록합니다.
+**동작 방식** (`machine::settings`, `machine::setting_edits`, `apps/focus/src/settings.rs`):
+1. Focus 앱은 관리자 권한이 없으므로 ProgramData 폴더를 열 수 없습니다. 대신 Settings 탭이 보이는 동안, Focus 앱은 3초마다 agent에게 `settings_get`을 보냅니다. agent는 SYSTEM 권한으로 설정 파일 세 개(`policy.json`, `ai_focus.json`, `planner.json`), 설정이 보호되어 있는지, 예약된 업데이트와 지난 결과 기록, 화면에 필요한 읽기 전용 파일(`planner_state.json`, 사용자별 허용·차단·사용량 파일)을 읽어서 돌려줍니다. 설정이 보호되어 있어도 돌려줍니다.
+2. Settings 탭은 받은 설정 파일 세 개로 화면에서 고칠 사본을 메모리에 만듭니다. 이때 각 파일에 그 파일의 예약된 업데이트(출처 `settings`)의 변경을 더합니다. Settings 탭은 사용자 계정의 폴더에 설정 파일을 쓰지 않습니다.
+3. 사용자가 화면에서 설정을 고치면, Settings 탭은 처음 받은 사본과 지금의 사본을 비교해서 고친 내용을 하나하나 "Unsaved changes" 아래에 보여 줍니다. 설정이 보호되어 있으면, Settings 탭은 agent와 같은 함수(`setting_edits::direction`)로 각 변경이 "now"인지 "scheduled"인지 정해서 보여 줍니다.
+4. 사용자가 **Save**를 누르면, Settings 탭은 바뀐 파일마다 파일 전체를 `settings_put`(`via: "settings tab"`)으로 agent에게 보냅니다. **Discard**를 누르면 사본을 버리고 agent에게서 다시 받습니다.
+5. agent는 내용이 그 설정의 형식에 맞는지 확인합니다. 형식에 맞지 않으면 설정 단계이든 보호된 뒤이든 거부합니다. 그다음 agent는 지금의 파일과 보낸 파일을 기본값을 채운 모양으로 바꾸고, 둘을 비교해서 설정 하나하나의 변경으로 나눕니다(`setting_edits::diff`).
+   - 설정 단계이면, agent는 진짜 설정 파일을 씁니다.
+   - 보호되어 있으면, agent는 엄격한 변경을 지금의 파일에 바로 적용합니다(`apply_now`). 느슨한 변경은 위의 규칙대로 예약된 업데이트로 저장하거나, 예약된 업데이트를 그대로 두거나, 거두거나, 대신합니다. 느슨한 변경은 진짜 설정 파일에 쓰지 않습니다.
+   - agent는 `{ "applied": [바로 적용된 변경], "scheduled": { "id": 업데이트 번호, "first_question_at": 첫 질문 시각, "edits": [예약된 변경] } }`로 답합니다. 예약된 변경이 없으면 `scheduled`는 `null`입니다. 다른 agent들도 3초 안에 바뀐 파일을 다시 읽습니다.
+6. Focus 앱은 `settings_get`으로 예약된 업데이트를 새로 받아 오고, 질문할 때가 된 업데이트에 확인 질문을 보여 줍니다. agent의 상태(`status`)에도 설정이 보호되어 있는지(`settings_protected`)와 질문할 때가 된 업데이트의 수(`settings_questions_due`)가 들어 있습니다. Focus 앱은 이 수가 늘면 창을 띄웁니다.
+7. 사용자가 확인 질문에 답하면, Focus 앱은 `settings_answer`(업데이트 번호와 "예"/"아니요")를 보냅니다. agent는 질문할 때가 되었는지 확인하고, 아직 이르면 거부합니다.
+   - "예"이면 agent는 답한 시각을 기록합니다. 세 번째 "예"이면, agent는 업데이트의 변경을 그때의 설정 파일에 적용하고, 한 번 더 형식 검사한 뒤 진짜 설정 파일에 쓰고, 업데이트를 "적용됨"으로 기록합니다.
    - "아니요"이면 agent는 업데이트를 지우고 "거절됨"으로 기록합니다.
-7. **Withdraw this update**를 누르면, Focus 앱은 `settings_withdraw`를 보내고, agent는 그 업데이트를 지우고 "거둠"으로 기록합니다. 업데이트에 답하거나 업데이트를 거두면, Focus 앱은 지금 맞는 내용으로 화면을 다시 엽니다.
-8. 백그라운드 스레드는 3초마다 읽기 전용 파일도 새로 받아 옵니다. 그래서 차단 목록과 할 일 진행 기록이 화면에 계속 갱신됩니다.
+8. **Withdraw this update**를 누르면, Focus 앱은 `settings_withdraw`를 보내고, agent는 그 업데이트를 지우고 "거둠"으로 기록합니다. 업데이트에 답하거나 업데이트를 거두면, Focus 앱은 지금 맞는 내용으로 화면을 다시 만듭니다.
+9. 할 일 변경은 이 길을 거치지 않습니다. To-do 탭은 `todo_change`를 보내고, AI가 승인하면 agent가 그 변경을 바로 적용합니다(`apply_now`). 사용자가 AI 없이 하기로 하면(`todo_change_schedule`), agent는 그 변경을 두 시간 간격의 예약된 업데이트로 만듭니다(`schedule`). 자세한 내용은 [`task_planner.md`](task_planner.md) 4.6절에 있습니다.
+
+**테스트** (`crates/machine/src/settings.rs`, `crates/machine/src/setting_edits.rs`):
+
+| 테스트 이름 | 이 테스트가 확인하는 것 |
+|---|---|
+| `diff_then_apply_reproduces_the_new_file` | 두 파일의 차이를 설정 하나하나의 변경으로 나눈 뒤 예전 파일에 적용하면 새 파일과 같아진다(값, 이름 목록, `id`로 구별하는 할 일 목록). 같은 파일끼리는 변경이 없다. |
+| `stricter_and_looser_edits_are_told_apart` | 6.4절 표의 방향이 맞다. 예: 검사하지 않는 앱 빼기, 앱을 끄기까지의 판정 수 줄이기, 화면 캡처 켜기, 하루 예산 늘리기나 0, `recheck_minutes` 0, 허용 취소, 블랙리스트에 넣기, 플래너 켜기는 엄격하고, 그 반대와 차단 풀기, 모델과 생활 규칙 바꾸기는 느슨하다. |
+| `during_setup_edits_take_effect_at_once` | 설정 단계에서는 저장한 변경이 모두 바로 적용되고, 설정 읽기에 파일과 차단 파일이 들어 있다. 형식에 맞지 않는 내용과 고칠 수 없는 파일(`machine`)은 거부된다. |
+| `once_protected_stricter_edits_apply_at_once_and_looser_ones_are_scheduled` | 보호된 뒤 한 번에 저장한 변경 중 엄격한 변경(앱을 끄기까지의 판정 수 줄이기, 검사하지 않는 앱 빼기)은 바로 적용되고, 느슨한 변경(모델 바꾸기)만 예약된다. 같은 느슨한 변경과 엄격한 변경 하나를 더 저장하면, 예약된 업데이트와 "예" 답이 그대로 남는다. |
+| `missing_defaults_in_the_file_in_force_are_not_changes` | 예전 버전이 쓴, 설정이 빠진 파일 위에 Settings 탭이 기본값을 채운 파일을 저장해도, 실제로 바꾼 설정 하나만 변경으로 본다. |
+| `a_protected_edit_takes_effect_after_three_yes_answers_two_days_apart` | 보호된 뒤 생활 규칙의 변경은 예약된다. 질문할 때가 되기 전의 답은 거부되고, 질문은 답할 때까지 기다리고, 다음 질문은 답한 때부터 이틀 뒤이며, 세 번째 "예"에서 적용된다. |
+| `one_no_rejects_and_other_looser_edits_start_over` | 보호는 다시 눌러도 처음 시각이 남는다. 다른 느슨한 변경을 저장하면 예약된 업데이트가 대신되고 "예" 답이 사라진다. "아니요" 한 번이면 거절된다. 느슨한 변경 없이 다시 저장하면 예약된 업데이트를 거둔다. |
+| `a_scheduled_todo_change_is_asked_about_every_two_hours` | AI 없이 하기로 한 할 일 변경은 두 시간 뒤부터 묻는다. 설정 파일을 저장해도 대신되지 않고, 두 시간 간격으로 세 번 "예"라고 답하면 할 일이 목록에 들어간다. |
+| `an_older_lock_means_protected_and_its_pending_edits_become_scheduled` | 예전 잠금 파일이 있으면 보호된 것으로 보고, 예전에 보관해 둔 변경은 저장했던 시각에 예약된 업데이트(설정 하나하나의 변경)로 옮겨진다. |
 
 **주의:** 보호 파일이 없으면 설정 단계입니다. 그래서 이 프로그램을 처음 설치하면, 사용자가 설정을 보호하기 전까지 이 PC의 누구든 작업 계정에서 고친 설정이 바로 적용됩니다.
 사용자는 설치한 뒤 Focus 앱의 Settings 탭에서 설정을 마치고(4.3절) 설정을 보호하세요.
@@ -410,7 +470,8 @@ Settings 탭은 그 세션의 agent를 거쳐 설정 파일을 고칩니다. **�
 5. **화면이 잠겨 있거나 다른 계정으로 전환된 동안에는**, agent가 지금 보는 창을 찾지 못하거나 화면이 검게 캡처될 수 있습니다.
    그러면 AI의 판정이 이상할 수 있습니다(대개 "모르겠음"). 하지만 그 시간에는 사용자가 작업 계정을 쓰고 있지 않습니다.
 6. **agent의 로컬 포트는 같은 컴퓨터의 다른 계정도 접속할 수 있습니다.** agent는 `127.0.0.1:(8770 + 세션 번호)`에서 요청을 받습니다.
-   다른 계정이 이 포트에 접속해도, 그 계정이 할 수 있는 일은 그 세션의 집중 세션, 할 일 플래너, 접근 요청, 설정 요청뿐입니다. 설정이 보호되어 있으면, 그 계정이 바꾼 규칙도 예약된 업데이트가 됩니다.
+   다른 계정이 이 포트에 접속해도, 그 계정이 할 수 있는 일은 그 세션의 데일리 웰빙, 할 일 플래너, 접근 요청, 설정 요청뿐입니다. 설정이 보호되어 있으면, 그 계정이 저장한 느슨한 변경도 예약된 업데이트가 됩니다.
+   할 일 변경도 같습니다. 다른 계정이 보낸 할 일 변경도 AI가 심사하고, AI가 승인하지 않은 변경을 AI 없이 하기로 하는 요청(`todo_change_schedule`)도 세 번의 확인 질문을 거칩니다.
    다만 확인 질문에 답하는 요청(`settings_answer`)도 같은 포트로 받으므로, 다른 계정도 질문할 때가 된 업데이트에 답할 수 있습니다. 그래도 이틀 간격은 건너뛸 수 없습니다.
    설정 단계에서는 이 PC의 어느 계정이든 `settings_put`으로 설정을 바로 바꿀 수 있습니다. Settings 탭이 "anyone using this PC can make them"이라고 안내하는 이유입니다.
    플래너가 켜져 있으면, 다른 계정도 이유를 적고 AI의 승인을 받아야 합니다.

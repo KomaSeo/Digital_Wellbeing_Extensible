@@ -575,15 +575,31 @@ impl SettingsTab {
                 });
             }
         }
+        let loaded = drafts.loaded.clone();
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
+                // Only the user's own edits, applied to the files as they are now: another tab
+                // (a to-do added in the To-do tab) or another program may have changed them
+                // since this tab loaded its copies.
+                let fresh: Option<SettingsSnapshot> =
+                    call_value(self.session, "settings_get", json!({}))
+                        .and_then(|reply| {
+                            serde_json::from_value(reply).map_err(|error| error.to_string())
+                        })
+                        .ok();
                 let mut results = Vec::new();
                 for index in &changed {
                     let (name, file) = EDITABLE[*index];
+                    let user_edits = setting_edits::diff(&loaded[*index], &current[*index]);
+                    let mut content = match &fresh {
+                        Some(fresh) => file_view(fresh, name),
+                        None => loaded[*index].clone(),
+                    };
+                    setting_edits::apply(&mut content, &user_edits);
                     let reply = call_value(
                         self.session,
                         "settings_put",
-                        json!({ "name": name, "content": current[*index], "via": "settings tab" }),
+                        json!({ "name": name, "content": content, "via": "settings tab" }),
                     )
                     .and_then(|reply| {
                         serde_json::from_value::<PutOutcome>(reply)
@@ -738,25 +754,28 @@ impl SettingsTab {
     }
 }
 
-/// The files in force with the scheduled settings updates applied: what the user saved last.
+/// The file `name` in force with its scheduled settings updates applied (what the user saved
+/// last), with defaults filled in.
+fn file_view(snapshot: &SettingsSnapshot, name: &str) -> Value {
+    let mut file = snapshot.files.get(name).cloned().unwrap_or(Value::Null);
+    for reservation in snapshot
+        .reservations
+        .scheduled
+        .iter()
+        .filter(|reservation| {
+            reservation.name == name && reservation.origin == ReservationOrigin::Settings
+        })
+    {
+        setting_edits::apply(&mut file, &reservation.edits);
+    }
+    machine::settings::normalize(name, &file).unwrap_or(file)
+}
+
+/// Editable copies of the three files as [`file_view`] shows them.
 fn drafts_from(snapshot: &SettingsSnapshot) -> Drafts {
-    let view = |name: &str| {
-        let mut file = snapshot.files.get(name).cloned().unwrap_or(Value::Null);
-        for reservation in snapshot
-            .reservations
-            .scheduled
-            .iter()
-            .filter(|reservation| {
-                reservation.name == name && reservation.origin == ReservationOrigin::Settings
-            })
-        {
-            setting_edits::apply(&mut file, &reservation.edits);
-        }
-        file
-    };
-    let policy: ListConfig = from_value(&view("policy"));
-    let ai_focus: AiFocusConfig = from_value(&view("ai_focus"));
-    let planner: PlannerConfig = from_value(&view("planner"));
+    let policy: ListConfig = from_value(&file_view(snapshot, "policy"));
+    let ai_focus: AiFocusConfig = from_value(&file_view(snapshot, "ai_focus"));
+    let planner: PlannerConfig = from_value(&file_view(snapshot, "planner"));
     let loaded = [to_value(&policy), to_value(&ai_focus), to_value(&planner)];
     Drafts {
         policy,

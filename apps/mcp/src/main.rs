@@ -116,7 +116,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "get_status",
-            "description": "The focus session, the task assigned now, the open to-dos (id, title, deadline, priority, whether the user proposed it), recent proposals and change requests with the app's answers, and what is blocked.",
+            "description": "Whether the AI checks (daily wellbeing) are on, the task assigned now, the open to-dos (id, title, deadline, priority, whether the user added it), recent to-do changes and change requests with the app's answers, and what is blocked.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -354,6 +354,7 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
                     "pick": task_planner::PICK_PROMPT,
                     "change_review": task_planner::REVIEW_PROMPT,
                     "proposal_review": task_planner::PROPOSAL_PROMPT,
+                    "day_plan": task_planner::DAY_PLAN_PROMPT,
                 },
                 "scheduled_updates": scheduled,
                 "recent_outcomes": settings["reservations"]["history"],
@@ -394,7 +395,7 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
 fn summary(status: &Status) -> Value {
     let planner = status.planner.as_ref();
     json!({
-        "focus_session_active": status.session_active,
+        "daily_wellbeing_on": status.session_active,
         "focus_task": status.task,
         "planner_on": planner.is_some_and(|planner| planner.active),
         "assignment": planner.and_then(|planner| planner.assignment.as_ref()).map(|assignment| json!({
@@ -413,11 +414,12 @@ fn summary(status: &Status) -> Value {
             "priority": todo.priority,
             "proposed_by_user": todo.proposed,
         })).collect::<Vec<_>>()),
-        "recent_proposals": planner.map(|planner| planner.recent_proposals.iter().map(|proposal| json!({
-            "title": proposal.item.title,
-            "approved": proposal.approved,
-            "reply": proposal.reply,
-            "at": proposal.at,
+        "recent_todo_changes": planner.map(|planner| planner.recent_todo_changes.iter().map(|record| json!({
+            "change": task_planner::change_summary(&record.change, record.before.as_ref()),
+            "approved": record.approved,
+            "ai_could_not_review": record.ai_failed,
+            "reply": record.reply,
+            "at": record.at,
         })).collect::<Vec<_>>()),
         "recent_change_requests": planner.map(|planner| planner.recent_requests.iter().map(|change_request| json!({
             "request": change_request.request,
