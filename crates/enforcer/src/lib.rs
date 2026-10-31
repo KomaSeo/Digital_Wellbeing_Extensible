@@ -104,7 +104,7 @@ pub fn normalize_process_name(name: &str) -> String {
     let trimmed = name.trim().to_lowercase();
     let file_name = Path::new(&trimmed)
         .file_name()
-        .and_then(|s| s.to_str())
+        .and_then(|os_file_name| os_file_name.to_str())
         .unwrap_or(&trimmed);
     if file_name.ends_with(".exe") {
         file_name.to_string()
@@ -117,8 +117,10 @@ pub fn normalize_process_name(name: &str) -> String {
 
 /// True for processes in [`never_terminate`].
 pub fn is_never_terminate(name: &str) -> bool {
-    let n = normalize_process_name(name);
-    never_terminate().iter().any(|p| *p == n)
+    let normalized = normalize_process_name(name);
+    never_terminate()
+        .iter()
+        .any(|protected| *protected == normalized)
 }
 
 /// Responsibility: Describe a running process for UIs and the API.
@@ -164,16 +166,19 @@ impl Enforcer {
         *self.filter.lock() = Some(filter);
     }
 
-    fn in_scope(&self, pid: u32) -> bool {
-        self.filter.lock().as_ref().is_none_or(|f| f(pid))
+    fn in_scope(&self, process_id: u32) -> bool {
+        self.filter
+            .lock()
+            .as_ref()
+            .is_none_or(|filter| filter(process_id))
     }
 
     /// Register a rule. Later rules run after earlier ones; the first event for a pid wins.
     pub fn register_rule(&self, rule: Arc<dyn BlockRule>) {
         let id = rule.id().to_string();
         let mut rules = self.rules.lock();
-        if let Some(pos) = rules.iter().position(|r| r.id() == id) {
-            rules[pos] = rule;
+        if let Some(position) = rules.iter().position(|registered| registered.id() == id) {
+            rules[position] = rule;
             info!("replaced block rule '{id}'");
         } else {
             rules.push(rule);
@@ -184,7 +189,7 @@ impl Enforcer {
     pub fn unregister_rule(&self, id: &str) -> bool {
         let mut rules = self.rules.lock();
         let before = rules.len();
-        rules.retain(|r| r.id() != id);
+        rules.retain(|rule| rule.id() != id);
         before != rules.len()
     }
 
@@ -192,10 +197,10 @@ impl Enforcer {
         self.rules
             .lock()
             .iter()
-            .map(|r| RuleInfo {
-                id: r.id().to_string(),
-                name: r.name().to_string(),
-                description: r.description().to_string(),
+            .map(|rule| RuleInfo {
+                id: rule.id().to_string(),
+                name: rule.name().to_string(),
+                description: rule.description().to_string(),
             })
             .collect()
     }
@@ -208,8 +213,8 @@ impl Enforcer {
             info!("enforcer loop started");
             let mut system = System::new();
             while this.generation.load(Ordering::SeqCst) == generation {
-                if let Err(err) = this.reconcile(&mut system) {
-                    warn!("reconcile error: {err:#}");
+                if let Err(error) = this.reconcile(&mut system) {
+                    warn!("reconcile error: {error:#}");
                 }
                 thread::sleep(interval);
             }
@@ -231,18 +236,20 @@ impl Enforcer {
         let mut list: Vec<ProcessInfo> = system
             .processes()
             .iter()
-            .filter(|(pid, _)| self.in_scope(pid.as_u32()))
-            .map(|(pid, proc)| ProcessInfo {
-                pid: pid.as_u32(),
-                name: proc.name().to_string_lossy().to_string(),
-                exe: proc.exe().map(|p| p.to_string_lossy().to_string()),
+            .filter(|(process_id, _)| self.in_scope(process_id.as_u32()))
+            .map(|(process_id, process)| ProcessInfo {
+                pid: process_id.as_u32(),
+                name: process.name().to_string_lossy().to_string(),
+                exe: process
+                    .exe()
+                    .map(|exe_path| exe_path.to_string_lossy().to_string()),
             })
             .collect();
-        list.sort_by(|a, b| {
-            a.name
+        list.sort_by(|left, right| {
+            left.name
                 .to_lowercase()
-                .cmp(&b.name.to_lowercase())
-                .then(a.pid.cmp(&b.pid))
+                .cmp(&right.name.to_lowercase())
+                .then(left.pid.cmp(&right.pid))
         });
         list
     }
@@ -251,24 +258,26 @@ impl Enforcer {
     pub fn reconcile(&self, system: &mut System) -> anyhow::Result<usize> {
         system.refresh_processes(ProcessesToUpdate::All, true);
         let rules = self.rules.lock().clone();
-        let self_pid = std::process::id();
+        let own_process_id = std::process::id();
 
         let snapshots: Vec<ProcessSnapshot> = system
             .processes()
             .iter()
-            .filter_map(|(pid, proc)| {
-                let pid_u32 = pid.as_u32();
-                if pid_u32 == self_pid || !self.in_scope(pid_u32) {
+            .filter_map(|(sysinfo_process_id, process)| {
+                let process_id = sysinfo_process_id.as_u32();
+                if process_id == own_process_id || !self.in_scope(process_id) {
                     return None;
                 }
-                let name = proc.name().to_string_lossy().to_string();
+                let name = process.name().to_string_lossy().to_string();
                 if is_never_terminate(&name) {
                     return None;
                 }
                 Some(ProcessSnapshot {
-                    pid: pid_u32,
+                    pid: process_id,
                     name,
-                    exe: proc.exe().map(|p| p.to_string_lossy().to_string()),
+                    exe: process
+                        .exe()
+                        .map(|exe_path| exe_path.to_string_lossy().to_string()),
                 })
             })
             .collect();
@@ -277,21 +286,21 @@ impl Enforcer {
         let mut killed = 0usize;
         let now = Instant::now();
         let mut failed = self.failed_kills.lock();
-        failed.retain(|(pid, start), _| {
+        failed.retain(|(process_id, start_time), _| {
             system
-                .process(sysinfo::Pid::from_u32(*pid))
-                .is_some_and(|p| p.start_time() == *start)
+                .process(sysinfo::Pid::from_u32(*process_id))
+                .is_some_and(|process| process.start_time() == *start_time)
         });
 
         for event in blocks {
-            let Some(proc) = system.process(sysinfo::Pid::from_u32(event.pid)) else {
+            let Some(process) = system.process(sysinfo::Pid::from_u32(event.pid)) else {
                 continue;
             };
-            let key = (event.pid, proc.start_time());
+            let key = (event.pid, process.start_time());
             if failed.get(&key).is_some_and(|retry| now < *retry) {
                 continue;
             }
-            if terminate(proc) {
+            if terminate(process) {
                 failed.remove(&key);
                 killed += 1;
                 info!(
@@ -330,40 +339,40 @@ impl Default for Enforcer {
 /// Terminate directly. (sysinfo's `kill()` starts `taskkill.exe` on Windows: one
 /// child process per kill, found via the exe's own folder before System32.)
 #[cfg(windows)]
-fn terminate(proc: &sysinfo::Process) -> bool {
+fn terminate(process: &sysinfo::Process) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     // SAFETY: the handle is checked for null and closed before returning.
     unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, proc.pid().as_u32());
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, process.pid().as_u32());
         if handle.is_null() {
             return false;
         }
-        let ok = TerminateProcess(handle, 1) != 0;
+        let terminated = TerminateProcess(handle, 1) != 0;
         CloseHandle(handle);
-        ok
+        terminated
     }
 }
 
 #[cfg(not(windows))]
-fn terminate(proc: &sysinfo::Process) -> bool {
-    proc.kill()
+fn terminate(process: &sysinfo::Process) -> bool {
+    process.kill()
 }
 
 /// Merge rule outputs: first event for each pid wins; reasons are prefixed with rule id.
 fn collect_blocks(rules: &[Arc<dyn BlockRule>], processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
     let mut seen = HashSet::new();
-    let mut out = Vec::new();
+    let mut merged = Vec::new();
     for rule in rules {
         for mut event in rule.evaluate(processes) {
             if !seen.insert(event.pid) {
                 continue;
             }
             event.reason = format!("{}: {}", rule.id(), event.reason);
-            out.push(event);
+            merged.push(event);
         }
     }
-    out
+    merged
 }
 
 #[cfg(test)]
@@ -396,8 +405,8 @@ mod tests {
             }
             processes
                 .iter()
-                .filter(|p| p.name.eq_ignore_ascii_case("evil.exe"))
-                .map(|p| BlockEvent::new(p, "flagged"))
+                .filter(|process| process.name.eq_ignore_ascii_case("evil.exe"))
+                .map(|process| BlockEvent::new(process, "flagged"))
                 .collect()
         }
     }
@@ -425,12 +434,12 @@ mod tests {
     fn works_with_zero_rules() {
         let enforcer = Enforcer::new();
         assert!(enforcer.list_rules().is_empty());
-        let snaps = [ProcessSnapshot {
+        let snapshots = [ProcessSnapshot {
             pid: 1,
             name: "evil.exe".into(),
             exe: None,
         }];
-        assert!(collect_blocks(&[], &snaps).is_empty());
+        assert!(collect_blocks(&[], &snapshots).is_empty());
     }
 
     #[test]
@@ -442,16 +451,16 @@ mod tests {
             block: Arc::clone(&flag),
         }));
 
-        let snaps = [ProcessSnapshot {
+        let snapshots = [ProcessSnapshot {
             pid: 1,
             name: "evil.exe".into(),
             exe: None,
         }];
         let rules = enforcer.rules.lock().clone();
-        assert!(collect_blocks(&rules, &snaps).is_empty());
+        assert!(collect_blocks(&rules, &snapshots).is_empty());
 
         flag.store(true, Ordering::SeqCst);
-        let blocks = collect_blocks(&rules, &snaps);
+        let blocks = collect_blocks(&rules, &snapshots);
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].reason.contains("flag"));
         assert_eq!(blocks[0].pid, 1);

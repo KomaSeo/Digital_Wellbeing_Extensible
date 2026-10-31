@@ -68,7 +68,9 @@ fn end_to_end(real_key: Option<String>) {
         eprintln!("skipped: no DISPLAY (run under xvfb-run)");
         return;
     };
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let real = real_key.is_some();
     let data = std::env::temp_dir().join(format!(
         "dw-e2e-{}-{}",
@@ -78,8 +80,12 @@ fn end_to_end(real_key: Option<String>) {
     let _ = std::fs::remove_dir_all(&data);
     std::fs::create_dir_all(&data).unwrap();
     // Our own process plays "the browser": its windows are tabs.
-    let exe = std::env::current_exe().unwrap();
-    let browser = exe.file_name().unwrap().to_string_lossy().to_string();
+    let test_executable = std::env::current_exe().unwrap();
+    let browser = test_executable
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     let api_key = real_key.clone().unwrap_or_else(|| "test-key".to_string());
     std::fs::write(
         data.join("ai_focus.json"),
@@ -122,12 +128,14 @@ fn end_to_end(real_key: Option<String>) {
     assert!(!status.session_active);
 
     // Two "tabs": an off-task one in front, an on-task one behind.
-    let (x, screen) = x11rb::connect(None).unwrap();
-    let root = x.setup().roots[screen].root;
-    let cats = window(&x, root, "Funny cats - YouTube");
-    let _docs = window(&x, root, "Rust docs - Google Chrome");
-    x.set_input_focus(InputFocus::PARENT, cats, 0u32).unwrap();
-    x.sync().unwrap();
+    let (connection, screen) = x11rb::connect(None).unwrap();
+    let root = connection.setup().roots[screen].root;
+    let cats = window(&connection, root, "Funny cats - YouTube");
+    let _docs = window(&connection, root, "Rust docs - Google Chrome");
+    connection
+        .set_input_focus(InputFocus::PARENT, cats, 0u32)
+        .unwrap();
+    connection.sync().unwrap();
 
     let started = call(
         session,
@@ -141,9 +149,9 @@ fn end_to_end(real_key: Option<String>) {
     let deadline = Instant::now() + Duration::from_secs(20 * patience);
     let mut closed = false;
     while Instant::now() < deadline && !closed {
-        match x.poll_for_event().unwrap() {
-            Some(Event::KeyPress(e)) if e.event == cats => {
-                closed = u16::from(e.state) & u16::from(KeyButMask::CONTROL) != 0;
+        match connection.poll_for_event().unwrap() {
+            Some(Event::KeyPress(key_press)) if key_press.event == cats => {
+                closed = u16::from(key_press.state) & u16::from(KeyButMask::CONTROL) != 0;
             }
             Some(_) => {}
             None => thread::sleep(Duration::from_millis(50)),
@@ -153,20 +161,27 @@ fn end_to_end(real_key: Option<String>) {
 
     // 3. What the Focus app shows.
     let status = wait_for(Duration::from_secs(10 * patience), || {
-        let s: Status = call(session, "status", json!({})).ok()?;
-        s.verdicts
+        let current_status: Status = call(session, "status", json!({})).ok()?;
+        current_status
+            .verdicts
             .iter()
-            .any(|v| v.title.starts_with("(background) Rust docs"))
-            .then_some(s)
+            .any(|verdict_record| verdict_record.title.starts_with("(background) Rust docs"))
+            .then_some(current_status)
     })
     .expect("the window behind was judged by title");
     assert!(status
         .verdicts
         .iter()
-        .any(|v| v.title == "Funny cats - YouTube" && v.action.contains("tab closed")));
+        .any(
+            |verdict_record| verdict_record.title == "Funny cats - YouTube"
+                && verdict_record.action.contains("tab closed")
+        ));
     if real {
-        for v in &status.verdicts {
-            println!("verdict: {} -> {:?} ({})", v.title, v.verdict, v.reason);
+        for verdict_record in &status.verdicts {
+            println!(
+                "verdict: {} -> {:?} ({})",
+                verdict_record.title, verdict_record.verdict, verdict_record.reason
+            );
         }
     }
     // The stand-in never names a channel; the real AI may, so only the site is fixed.
@@ -176,7 +191,10 @@ fn end_to_end(real_key: Option<String>) {
         "youtube page: funny cats"
     };
     assert!(
-        status.blocked.iter().any(|b| b.key.contains(block_key)),
+        status
+            .blocked
+            .iter()
+            .any(|blocked_entry| blocked_entry.key.contains(block_key)),
         "{:?}",
         status.blocked
     );
@@ -184,7 +202,7 @@ fn end_to_end(real_key: Option<String>) {
         !status
             .blocked
             .iter()
-            .any(|b| b.key.to_lowercase().contains("rust docs")),
+            .any(|blocked_entry| blocked_entry.key.to_lowercase().contains("rust docs")),
         "{:?}",
         status.blocked
     );
@@ -266,7 +284,10 @@ fn end_to_end(real_key: Option<String>) {
             json!({ "todo": { "title": "Buy groceries" }, "via": "e2e" }),
         )
         .unwrap();
-        assert!(proposed.last_proposal.as_ref().is_some_and(|p| p.approved));
+        assert!(proposed
+            .last_proposal
+            .as_ref()
+            .is_some_and(|proposal| proposal.approved));
     }
     // A short lock (written directly; the API only locks for whole hours): the edit saved
     // meanwhile takes effect once the lock ends, through the agent's reload loop.
@@ -285,11 +306,13 @@ fn end_to_end(real_key: Option<String>) {
     .unwrap();
     assert_eq!(outcome["outcome"], "pending", "{outcome}");
     let applied = wait_for(Duration::from_secs(20), || {
-        let s = call_value(session, "settings_get", json!({})).ok()?;
-        (s["files"]["planner"]["life_rules"] == "After the lock.").then_some(s)
+        let settings = call_value(session, "settings_get", json!({})).ok()?;
+        (settings["files"]["planner"]["life_rules"] == "After the lock.").then_some(settings)
     })
     .expect("the pending edit took effect when the lock ended");
-    assert!(applied["pending"].as_object().is_none_or(|p| p.is_empty()));
+    assert!(applied["pending"]
+        .as_object()
+        .is_none_or(|pending| pending.is_empty()));
     assert!(chrono::Utc::now() >= until);
 
     common::check_lock_delays_edits(session);
@@ -300,7 +323,7 @@ fn end_to_end(real_key: Option<String>) {
 /// A to-do due in `due_in_days` (None: no deadline).
 fn todo(id: &str, title: &str, notes: &str, due_in_days: Option<i64>, priority: u8) -> Value {
     let deadline = due_in_days
-        .map(|d| (chrono::Local::now().date_naive() + chrono::Duration::days(d)).to_string());
+        .map(|days| (chrono::Local::now().date_naive() + chrono::Duration::days(days)).to_string());
     json!({ "id": id, "title": title, "notes": notes, "deadline": deadline, "priority": priority })
 }
 
@@ -316,67 +339,72 @@ fn assign(session: u32, todos: &[Value], life_rules: &str) -> String {
     // The agent reloads changed settings every few seconds.
     let first = todos[0]["id"].as_str().unwrap().to_string();
     wait_for(Duration::from_secs(15), || {
-        let s: Status = call(session, "status", json!({})).ok()?;
-        let p = s.planner?;
-        (p.active && p.open_todos.iter().any(|t| t.id == first)).then_some(())
+        let current_status: Status = call(session, "status", json!({})).ok()?;
+        let planner = current_status.planner?;
+        (planner.active && planner.open_todos.iter().any(|todo| todo.id == first)).then_some(())
     })
     .expect("the agent picked up the planner settings");
     let status = call(session, "assign", json!({})).unwrap();
-    let a = status
+    let assignment = status
         .planner
-        .and_then(|p| p.assignment)
+        .and_then(|planner| planner.assignment)
         .expect("an assignment");
     println!(
         "rules: {life_rules}\n  -> {:?}: {}\n     why: {}",
-        a.todo_id, a.task, a.why
+        assignment.todo_id, assignment.task, assignment.why
     );
     assert!(
         status.session_active,
         "the assignment starts a focus session"
     );
-    a.todo_id.expect("the AI picked a to-do from the list")
+    assignment
+        .todo_id
+        .expect("the AI picked a to-do from the list")
 }
 
 /// A mapped, titled window owned by this process, listening for key presses.
-fn window(x: &impl Connection, root: u32, title: &str) -> u32 {
-    let win = x.generate_id().unwrap();
-    x.create_window(
-        0,
-        win,
-        root,
-        0,
-        0,
-        320,
-        200,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        0,
-        &CreateWindowAux::new().event_mask(EventMask::KEY_PRESS),
-    )
-    .unwrap();
-    x.change_property8(
-        PropMode::REPLACE,
-        win,
-        AtomEnum::WM_NAME,
-        AtomEnum::STRING,
-        title.as_bytes(),
-    )
-    .unwrap();
-    let pid_atom = x
+fn window(connection: &impl Connection, root: u32, title: &str) -> u32 {
+    let window_id = connection.generate_id().unwrap();
+    connection
+        .create_window(
+            0,
+            window_id,
+            root,
+            0,
+            0,
+            320,
+            200,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new().event_mask(EventMask::KEY_PRESS),
+        )
+        .unwrap();
+    connection
+        .change_property8(
+            PropMode::REPLACE,
+            window_id,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        )
+        .unwrap();
+    let process_id_atom = connection
         .intern_atom(false, b"_NET_WM_PID")
         .unwrap()
         .reply()
         .unwrap()
         .atom;
-    x.change_property32(
-        PropMode::REPLACE,
-        win,
-        pid_atom,
-        AtomEnum::CARDINAL,
-        &[std::process::id()],
-    )
-    .unwrap();
-    x.map_window(win).unwrap();
-    x.sync().unwrap();
-    win
+    connection
+        .change_property32(
+            PropMode::REPLACE,
+            window_id,
+            process_id_atom,
+            AtomEnum::CARDINAL,
+            &[std::process::id()],
+        )
+        .unwrap();
+    connection.map_window(window_id).unwrap();
+    connection.sync().unwrap();
+    window_id
 }

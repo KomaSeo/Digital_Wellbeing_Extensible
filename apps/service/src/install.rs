@@ -58,8 +58,8 @@ pub fn install_dir() -> PathBuf {
     base.join("DigitalWellbeing")
 }
 
-pub fn install(args: &[String]) -> anyhow::Result<()> {
-    let managed = parse_manage(args)?;
+pub fn install(arguments: &[String]) -> anyhow::Result<()> {
+    let managed = parse_manage(arguments)?;
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -92,20 +92,24 @@ fn install_steps(
     upgrade: bool,
 ) -> anyhow::Result<()> {
     // 2. binaries
-    let dir = install_dir();
-    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let install_directory = install_dir();
+    fs::create_dir_all(&install_directory)
+        .with_context(|| format!("create {}", install_directory.display()))?;
     let source_dir = std::env::current_exe()?
         .parent()
         .map(Path::to_path_buf)
         .context("no exe dir")?;
-    for exe in [SERVICE_EXE, FOCUS_EXE, MCP_EXE] {
-        let from = source_dir.join(exe);
-        let to = dir.join(exe);
+    for executable_name in [SERVICE_EXE, FOCUS_EXE, MCP_EXE] {
+        let from = source_dir.join(executable_name);
+        let to = install_directory.join(executable_name);
         if !from.exists() {
-            if exe == SERVICE_EXE {
+            if executable_name == SERVICE_EXE {
                 bail!("{} not found", from.display());
             }
-            println!("warning: {} not found next to the installer, skipped", exe);
+            println!(
+                "warning: {} not found next to the installer, skipped",
+                executable_name
+            );
             continue;
         }
         if same_file(&from, &to) {
@@ -117,11 +121,11 @@ fn install_steps(
 
     // Settings are edited in the Focus app now; a leftover admin window would
     // only confuse. If it is running, it goes on the next install.
-    let legacy = dir.join(LEGACY_ADMIN_EXE);
+    let legacy = install_directory.join(LEGACY_ADMIN_EXE);
     if legacy.exists() {
         match fs::remove_file(&legacy) {
             Ok(()) => println!("removed {}", legacy.display()),
-            Err(err) => println!("warning: could not remove {}: {err}", legacy.display()),
+            Err(error) => println!("warning: could not remove {}: {error}", legacy.display()),
         }
     }
 
@@ -154,12 +158,12 @@ fn install_steps(
     .context("restrict data dir")?;
     // Everything inside inherits that ACL; this also repairs files an earlier
     // version left without any ACE.
-    if let Err(err) = run(Command::new("icacls")
+    if let Err(error) = run(Command::new("icacls")
         .arg(data.join("*"))
         .args(["/reset", "/T", "/C", "/L", "/Q"]))
     {
         println!(
-            "warning: could not reset the ACLs inside {}: {err:#}",
+            "warning: could not reset the ACLs inside {}: {error:#}",
             data.display()
         );
     }
@@ -178,13 +182,13 @@ fn install_steps(
     }
 
     // 5. service
-    let info = ServiceInfo {
+    let service_info = ServiceInfo {
         name: OsString::from(SERVICE_NAME),
         display_name: OsString::from("Digital Wellbeing"),
         service_type: ServiceType::OWN_PROCESS,
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
-        executable_path: dir.join(SERVICE_EXE),
+        executable_path: install_directory.join(SERVICE_EXE),
         launch_arguments: vec![OsString::from("run")],
         dependencies: vec![],
         account_name: None, // LocalSystem
@@ -192,10 +196,10 @@ fn install_steps(
     };
     let service = match manager.open_service(SERVICE_NAME, service_access()) {
         Ok(service) => {
-            service.change_config(&info)?;
+            service.change_config(&service_info)?;
             service
         }
-        Err(_) => manager.create_service(&info, service_access())?,
+        Err(_) => manager.create_service(&service_info, service_access())?,
     };
     service.set_description(
         "Blocks apps and websites according to your rules and the AI focus check. \
@@ -215,7 +219,7 @@ fn install_steps(
     println!("registered service '{SERVICE_NAME}' (automatic start)");
 
     // 6. Focus app at logon
-    let focus = dir.join(FOCUS_EXE);
+    let focus = install_directory.join(FOCUS_EXE);
     if focus.exists() {
         run(Command::new("reg")
             .args(["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d"])
@@ -268,7 +272,7 @@ fn prepare_data_dir(data: &Path, upgrade: bool) -> anyhow::Result<()> {
             "DigitalWellbeing.untrusted-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
+                .map(|since_epoch| since_epoch.as_secs())
                 .unwrap_or(0)
         ));
         fs::rename(data, &aside)
@@ -283,7 +287,7 @@ fn is_reparse_point(path: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     fs::symlink_metadata(path)
-        .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
 }
 
 /// Copy `from` over `to` even while `to` is running: a running exe cannot be
@@ -298,9 +302,9 @@ fn replace_file(from: &Path, to: &Path) -> anyhow::Result<()> {
             to.with_extension(format!("exe.old.{}", std::process::id()))
         };
         fs::rename(to, &old)?;
-        if let Err(err) = fs::copy(from, to) {
+        if let Err(error) = fs::copy(from, to) {
             let _ = fs::rename(&old, to);
-            return Err(err.into());
+            return Err(error.into());
         }
         let _ = fs::remove_file(&old); // fails while still running; removed next time
     } else {
@@ -326,13 +330,18 @@ fn stop_and_wait(service: &Service) -> anyhow::Result<()> {
 
 /// Which accounts to manage: `--manage <user>` (repeatable) names them, `--manage-all`
 /// manages every account (administrators too), neither keeps what `machine.json` says.
-fn parse_manage(args: &[String]) -> anyhow::Result<Option<Vec<String>>> {
+fn parse_manage(arguments: &[String]) -> anyhow::Result<Option<Vec<String>>> {
     let mut users = Vec::new();
     let mut all = false;
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--manage" => users.push(it.next().context("--manage needs a user name")?.clone()),
+    let mut remaining = arguments.iter();
+    while let Some(argument) = remaining.next() {
+        match argument.as_str() {
+            "--manage" => users.push(
+                remaining
+                    .next()
+                    .context("--manage needs a user name")?
+                    .clone(),
+            ),
             "--manage-all" => all = true,
             other => bail!("unknown option '{other}'"),
         }
@@ -345,17 +354,19 @@ fn parse_manage(args: &[String]) -> anyhow::Result<Option<Vec<String>>> {
     }
 }
 
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
+fn same_file(first: &Path, second: &Path) -> bool {
+    match (fs::canonicalize(first), fs::canonicalize(second)) {
+        (Ok(first_canonical), Ok(second_canonical)) => first_canonical == second_canonical,
         _ => false,
     }
 }
 
-fn run(cmd: &mut Command) -> anyhow::Result<()> {
-    let status = cmd.status().with_context(|| format!("run {cmd:?}"))?;
+fn run(command: &mut Command) -> anyhow::Result<()> {
+    let status = command
+        .status()
+        .with_context(|| format!("run {command:?}"))?;
     if !status.success() {
-        bail!("{cmd:?} failed ({status})");
+        bail!("{command:?} failed ({status})");
     }
     Ok(())
 }
@@ -364,22 +375,22 @@ fn run(cmd: &mut Command) -> anyhow::Result<()> {
 mod tests {
     use super::parse_manage;
 
-    fn args(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
+    fn arguments(list: &[&str]) -> Vec<String> {
+        list.iter().map(|argument| argument.to_string()).collect()
     }
 
     #[test]
     fn manage_options() {
-        assert_eq!(parse_manage(&args(&[])).unwrap(), None);
+        assert_eq!(parse_manage(&arguments(&[])).unwrap(), None);
         assert_eq!(
-            parse_manage(&args(&["--manage-all"])).unwrap(),
+            parse_manage(&arguments(&["--manage-all"])).unwrap(),
             Some(vec![])
         );
         assert_eq!(
-            parse_manage(&args(&["--manage", "work", "--manage", "admin"])).unwrap(),
-            Some(args(&["work", "admin"]))
+            parse_manage(&arguments(&["--manage", "work", "--manage", "admin"])).unwrap(),
+            Some(arguments(&["work", "admin"]))
         );
-        assert!(parse_manage(&args(&["--manage", "work", "--manage-all"])).is_err());
-        assert!(parse_manage(&args(&["--manage"])).is_err());
+        assert!(parse_manage(&arguments(&["--manage", "work", "--manage-all"])).is_err());
+        assert!(parse_manage(&arguments(&["--manage"])).is_err());
     }
 }

@@ -48,8 +48,8 @@ pub fn run() -> anyhow::Result<()> {
         tracing::error!("agent panicked: {panic}");
     }));
     let result = run_agent(session);
-    if let Err(err) = &result {
-        tracing::error!("agent stopped: {err:#}");
+    if let Err(error) = &result {
+        tracing::error!("agent stopped: {error:#}");
     }
     result
 }
@@ -84,8 +84,8 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     let ai_rule = AiFocusRuleHandle::new(Arc::clone(&monitor));
 
     let enforcer = Arc::new(Enforcer::new());
-    enforcer.set_process_filter(Arc::new(move |pid| {
-        process_session_id(pid) == Some(session)
+    enforcer.set_process_filter(Arc::new(move |process_id| {
+        process_session_id(process_id) == Some(session)
     }));
     enforcer.register_rule(list_rule.rule());
     enforcer.register_rule(ai_rule.rule());
@@ -111,8 +111,8 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         planner: Some(planner),
     });
     thread::spawn(move || {
-        if let Err(err) = machine::user_api::serve(api, session) {
-            warn!("user api failed: {err}");
+        if let Err(error) = machine::user_api::serve(api, session) {
+            warn!("user api failed: {error}");
         }
     });
 
@@ -130,8 +130,8 @@ fn auto_assign_loop(planner: Arc<TaskPlanner>, monitor: Arc<FocusMonitor>) {
     loop {
         if planner.is_active() && !monitor.store().get().session_active {
             match planner.assign(chrono::Utc::now()) {
-                Ok(a) => info!("started focus session automatically: {}", a.task),
-                Err(err) => warn!("could not start the planned session: {err}"),
+                Ok(assignment) => info!("started focus session automatically: {}", assignment.task),
+                Err(error) => warn!("could not start the planned session: {error}"),
             }
         }
         thread::sleep(AUTO_ASSIGN_INTERVAL);
@@ -144,10 +144,14 @@ fn reload_loop(
     ai_store: AiFocusStore,
     planner_config: JsonStore<PlannerConfig>,
 ) {
-    let policy = machine::policy_path();
-    let ai = machine::ai_focus_path();
-    let plan = machine::planner_path();
-    let mut seen = (modified(&policy), modified(&ai), modified(&plan));
+    let policy_path = machine::policy_path();
+    let ai_focus_path = machine::ai_focus_path();
+    let planner_path = machine::planner_path();
+    let mut seen = (
+        modified(&policy_path),
+        modified(&ai_focus_path),
+        modified(&planner_path),
+    );
     loop {
         thread::sleep(RELOAD_INTERVAL);
         // Edits saved while the settings were locked take effect once the lock has ended;
@@ -159,39 +163,45 @@ fn reload_loop(
                 applied.join(", ")
             );
         }
-        let now = (modified(&policy), modified(&ai), modified(&plan));
+        let now = (
+            modified(&policy_path),
+            modified(&ai_focus_path),
+            modified(&planner_path),
+        );
         // A change counts as seen only once its reload worked; a file that was
         // locked or half-written (e.g. saved in place by an editor) is retried.
         if now.0 != seen.0 {
             match list_store.reload() {
                 Ok(()) => {
-                    info!("reloaded {}", policy.display());
+                    info!("reloaded {}", policy_path.display());
                     seen.0 = now.0;
                 }
-                Err(err) => warn!("reload {}: {err}; retrying", policy.display()),
+                Err(error) => warn!("reload {}: {error}; retrying", policy_path.display()),
             }
         }
         if now.1 != seen.1 {
             match ai_store.reload_keeping_session() {
                 Ok(()) => {
-                    info!("reloaded {}", ai.display());
+                    info!("reloaded {}", ai_focus_path.display());
                     seen.1 = now.1;
                 }
-                Err(err) => warn!("reload {}: {err}; retrying", ai.display()),
+                Err(error) => warn!("reload {}: {error}; retrying", ai_focus_path.display()),
             }
         }
         if now.2 != seen.2 {
             match planner_config.reload() {
                 Ok(()) => {
-                    info!("reloaded {}", plan.display());
+                    info!("reloaded {}", planner_path.display());
                     seen.2 = now.2;
                 }
-                Err(err) => warn!("reload {}: {err}; retrying", plan.display()),
+                Err(error) => warn!("reload {}: {error}; retrying", planner_path.display()),
             }
         }
     }
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
-    path.metadata().and_then(|m| m.modified()).ok()
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }

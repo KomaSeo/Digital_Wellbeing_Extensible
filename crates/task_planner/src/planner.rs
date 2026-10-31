@@ -99,10 +99,10 @@ impl TaskPlanner {
                 state
                     .proposed
                     .iter()
-                    .filter(|t| !config.dismissed.contains(&t.id))
+                    .filter(|todo| !config.dismissed.contains(&todo.id))
                     .cloned(),
             )
-            .filter(|t| !state.is_done(&t.id))
+            .filter(|todo| !state.is_done(&todo.id))
             .collect()
     }
 
@@ -141,20 +141,20 @@ impl TaskPlanner {
             return Err(PlannerError::BadProposal);
         }
         let open = self.open_todos();
-        if let Some(same) = open
+        if let Some(duplicate) = open
             .iter()
-            .find(|t| t.title.trim().eq_ignore_ascii_case(&title))
+            .find(|todo| todo.title.trim().eq_ignore_ascii_case(&title))
         {
-            return Err(PlannerError::Duplicate(same.title.clone()));
+            return Err(PlannerError::Duplicate(duplicate.title.clone()));
         }
         let state = self.state.get();
         let today = state
             .proposals
             .iter()
-            .filter(|p| now - p.at < Duration::days(1))
+            .filter(|proposal| now - proposal.at < Duration::days(1))
             .count();
         if today >= PROPOSALS_PER_DAY
-            || open.iter().filter(|t| t.proposed).count() >= MAX_OPEN_PROPOSED
+            || open.iter().filter(|todo| todo.proposed).count() >= MAX_OPEN_PROPOSED
         {
             return Err(PlannerError::TooManyProposals);
         }
@@ -165,7 +165,7 @@ impl TaskPlanner {
             notes,
             deadline: input.deadline,
             priority: input.priority.unwrap_or(3).clamp(1, 5),
-            estimate_minutes: input.estimate_minutes.map(|m| m.min(6000)),
+            estimate_minutes: input.estimate_minutes.map(|minutes| minutes.min(6000)),
             proposed: true,
         };
         let recent: Vec<ProposalRecord> = state.proposals.iter().rev().cloned().collect();
@@ -189,13 +189,13 @@ impl TaskPlanner {
             approved: review.approved,
             reply: review.reply,
         };
-        self.state.update(|s| {
-            if s.proposals.len() >= REQUEST_LOG_CAPACITY {
-                s.proposals.pop_front();
+        self.state.update(|planner_state| {
+            if planner_state.proposals.len() >= REQUEST_LOG_CAPACITY {
+                planner_state.proposals.pop_front();
             }
-            s.proposals.push_back(record.clone());
+            planner_state.proposals.push_back(record.clone());
             if record.approved {
-                s.proposed.push(item.clone());
+                planner_state.proposed.push(item.clone());
             }
         })?;
         info!(
@@ -223,7 +223,7 @@ impl TaskPlanner {
             let still_open = previous
                 .todo_id
                 .as_deref()
-                .is_none_or(|id| self.open_todos().iter().any(|t| t.id == id));
+                .is_none_or(|id| self.open_todos().iter().any(|todo| todo.id == id));
             if still_open && now - previous.at < RESUME_WITHIN {
                 self.start_focus(&previous)?;
                 return Ok(previous);
@@ -252,8 +252,8 @@ impl TaskPlanner {
         let target_title = match &request {
             ChangeKind::SwitchTodo { todo_id } => Some(
                 open.iter()
-                    .find(|t| &t.id == todo_id)
-                    .map(|t| t.title.clone())
+                    .find(|todo| &todo.id == todo_id)
+                    .map(|todo| todo.title.clone())
                     .ok_or_else(|| PlannerError::UnknownTodo(todo_id.clone()))?,
             ),
             ChangeKind::SwitchFree { task } if task.trim().is_empty() => {
@@ -286,17 +286,17 @@ impl TaskPlanner {
             from_task: state
                 .assignment
                 .as_ref()
-                .map(|a| a.task.clone())
+                .map(|assignment| assignment.task.clone())
                 .unwrap_or_default(),
             reason: reason.to_string(),
             approved: review.approved,
             reply: review.reply.clone(),
         };
-        self.state.update(|s| {
-            if s.requests.len() >= REQUEST_LOG_CAPACITY {
-                s.requests.pop_front();
+        self.state.update(|planner_state| {
+            if planner_state.requests.len() >= REQUEST_LOG_CAPACITY {
+                planner_state.requests.pop_front();
             }
-            s.requests.push_back(record.clone());
+            planner_state.requests.push_back(record.clone());
         })?;
         info!(
             "change request {:?} ({}): {}",
@@ -326,22 +326,23 @@ impl TaskPlanner {
                 let current = self.state.get().assignment;
                 if let Some(todo) = current
                     .as_ref()
-                    .and_then(|a| a.todo_id.as_deref())
-                    .and_then(|id| open.iter().find(|t| t.id == id))
+                    .and_then(|assignment| assignment.todo_id.as_deref())
+                    .and_then(|id| open.iter().find(|todo| todo.id == id))
                 {
                     let record = DoneRecord {
                         todo_id: todo.id.clone(),
                         title: todo.title.clone(),
                         at: now,
                     };
-                    self.state.update(|s| s.done.push(record))?;
+                    self.state
+                        .update(|planner_state| planner_state.done.push(record))?;
                 }
                 // Next one, or stop when the list is empty. If picking fails
                 // (AI or network error), do not stay on the finished to-do:
                 // end the session so "Get my task" can be used again.
                 if self.is_active() {
-                    if let Err(err) = self.pick_and_apply(now) {
-                        tracing::warn!("could not pick the next to-do: {err}");
+                    if let Err(error) = self.pick_and_apply(now) {
+                        tracing::warn!("could not pick the next to-do: {error}");
                         self.end(now)?;
                     }
                 } else {
@@ -351,7 +352,7 @@ impl TaskPlanner {
             ChangeKind::SwitchTodo { todo_id } => {
                 let todo = open
                     .iter()
-                    .find(|t| &t.id == todo_id)
+                    .find(|todo| &todo.id == todo_id)
                     .ok_or_else(|| PlannerError::UnknownTodo(todo_id.clone()))?;
                 let task = if todo.notes.trim().is_empty() {
                     todo.title.clone()
@@ -396,7 +397,7 @@ impl TaskPlanner {
             previous: state.assignment.as_ref(),
             history: &history,
         })?;
-        if !open.iter().any(|t| t.id == pick.todo_id) {
+        if !open.iter().any(|todo| todo.id == pick.todo_id) {
             return Err(PlannerError::BadPick(pick.todo_id));
         }
         let assignment = Assignment {
@@ -413,7 +414,7 @@ impl TaskPlanner {
 
     fn apply(&self, assignment: Assignment) -> Result<(), PlannerError> {
         self.state
-            .update(|s| s.assignment = Some(assignment.clone()))?;
+            .update(|planner_state| planner_state.assignment = Some(assignment.clone()))?;
         self.start_focus(&assignment)
     }
 
@@ -421,20 +422,21 @@ impl TaskPlanner {
         let task = assignment.task.clone();
         self.focus
             .store()
-            .update(|c| {
-                c.task = task;
-                c.session_active = true;
+            .update(|config| {
+                config.task = task;
+                config.session_active = true;
             })
-            .map_err(|e| PlannerError::Io(std::io::Error::other(e.to_string())))?;
+            .map_err(|error| PlannerError::Io(std::io::Error::other(error.to_string())))?;
         Ok(())
     }
 
     fn end(&self, _now: DateTime<Utc>) -> Result<(), PlannerError> {
-        self.state.update(|s| s.assignment = None)?;
+        self.state
+            .update(|planner_state| planner_state.assignment = None)?;
         self.focus
             .store()
-            .update(|c| c.session_active = false)
-            .map_err(|e| PlannerError::Io(std::io::Error::other(e.to_string())))?;
+            .update(|config| config.session_active = false)
+            .map_err(|error| PlannerError::Io(std::io::Error::other(error.to_string())))?;
         Ok(())
     }
 }

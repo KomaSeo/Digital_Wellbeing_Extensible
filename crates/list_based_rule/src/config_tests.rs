@@ -12,21 +12,21 @@ fn test_normalize_name() {
 
 #[test]
 fn blacklist_blocks_listed() {
-    let mut p = ListConfig::default();
-    p.blacklist.insert("steam.exe".into());
-    assert!(p.should_block("Steam.EXE"));
-    assert!(!p.should_block("notepad.exe"));
-    assert!(!p.should_block("explorer.exe"));
+    let mut config = ListConfig::default();
+    config.blacklist.insert("steam.exe".into());
+    assert!(config.should_block("Steam.EXE"));
+    assert!(!config.should_block("notepad.exe"));
+    assert!(!config.should_block("explorer.exe"));
 }
 
 #[test]
 fn whitelist_blocks_unknown() {
-    let mut p = ListConfig::default();
-    p.mode = ListMode::Whitelist;
-    p.whitelist.insert("notepad.exe".into());
-    assert!(!p.should_block("notepad.exe"));
-    assert!(p.should_block("steam.exe"));
-    assert!(!p.should_block("csrss.exe"));
+    let mut config = ListConfig::default();
+    config.mode = ListMode::Whitelist;
+    config.whitelist.insert("notepad.exe".into());
+    assert!(!config.should_block("notepad.exe"));
+    assert!(config.should_block("steam.exe"));
+    assert!(!config.should_block("csrss.exe"));
 }
 
 #[test]

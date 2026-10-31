@@ -41,10 +41,10 @@ fn main() {
         }
         let reply = match serde_json::from_str::<Value>(&line) {
             Ok(message) => handle(&message, &agent),
-            Err(err) => Some(error_reply(
+            Err(error) => Some(error_reply(
                 Value::Null,
                 -32700,
-                &format!("parse error: {err}"),
+                &format!("parse error: {error}"),
             )),
         };
         if let Some(reply) = reply {
@@ -75,11 +75,11 @@ fn handle(message: &Value, agent: Agent) -> Option<Value> {
         "tools/list" => json!({ "tools": tools() }),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or_default();
-            let args = params
+            let arguments = params
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            match call_tool(name, &args, agent) {
+            match call_tool(name, &arguments, agent) {
                 Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
                 Err(text) => json!({
                     "content": [{ "type": "text", "text": text }],
@@ -147,54 +147,56 @@ fn tools() -> Value {
 }
 
 /// Run one tool; `Err` carries a message for the assistant (a tool error, not a protocol one).
-fn call_tool(name: &str, args: &Value, agent: Agent) -> Result<String, String> {
+fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, String> {
     match name {
-        "get_status" => agent("status", json!({})).map(|s| pretty(&summary(&s))),
+        "get_status" => agent("status", json!({})).map(|status| pretty(&summary(&status))),
         "propose_todo" => {
-            let mut todo = json!({ "title": args["title"].as_str().unwrap_or_default() });
+            let mut todo = json!({ "title": arguments["title"].as_str().unwrap_or_default() });
             for key in ["notes", "deadline", "priority", "estimate_minutes"] {
-                if let Some(v) = args.get(key).filter(|v| !v.is_null()) {
-                    todo[key] = v.clone();
+                if let Some(value) = arguments.get(key).filter(|value| !value.is_null()) {
+                    todo[key] = value.clone();
                 }
             }
             let status = agent(
                 "propose_todo",
                 json!({ "todo": todo, "via": "claude desktop" }),
             )?;
-            let p = status.last_proposal.ok_or("the agent did not answer")?;
+            let proposal = status.last_proposal.ok_or("the agent did not answer")?;
             Ok(pretty(&json!({
-                "approved": p.approved,
-                "reply": p.reply,
-                "todo": { "id": p.item.id, "title": p.item.title },
+                "approved": proposal.approved,
+                "reply": proposal.reply,
+                "todo": { "id": proposal.item.id, "title": proposal.item.title },
             })))
         }
-        "get_my_task" => agent("assign", json!({})).map(|s| pretty(&summary(&s)["assignment"])),
+        "get_my_task" => {
+            agent("assign", json!({})).map(|status| pretty(&summary(&status)["assignment"]))
+        }
         "request_change" => {
-            let request = match args["change"].as_str().unwrap_or_default() {
+            let request = match arguments["change"].as_str().unwrap_or_default() {
                 "done" => json!({ "kind": "done" }),
                 "end" => json!({ "kind": "end" }),
                 "switch_todo" => json!({
                     "kind": "switch_todo",
-                    "todo_id": args["todo_id"].as_str().ok_or("todo_id is required for switch_todo")?,
+                    "todo_id": arguments["todo_id"].as_str().ok_or("todo_id is required for switch_todo")?,
                 }),
                 "switch_free" => json!({
                     "kind": "switch_free",
-                    "task": args["task"].as_str().ok_or("task is required for switch_free")?,
+                    "task": arguments["task"].as_str().ok_or("task is required for switch_free")?,
                 }),
                 other => return Err(format!("unknown change '{other}'")),
             };
-            let reason = args["reason"].as_str().unwrap_or_default();
+            let reason = arguments["reason"].as_str().unwrap_or_default();
             let status = agent(
                 "request_change",
                 json!({ "request": request, "reason": reason }),
             )?;
-            let d = status
+            let decision = status
                 .last_decision
                 .clone()
                 .ok_or("the agent did not answer")?;
             Ok(pretty(&json!({
-                "approved": d.approved,
-                "reply": d.reply,
+                "approved": decision.approved,
+                "reply": decision.reply,
                 "assignment": summary(&status)["assignment"],
             })))
         }
@@ -208,35 +210,35 @@ fn summary(status: &Status) -> Value {
     json!({
         "focus_session_active": status.session_active,
         "focus_task": status.task,
-        "planner_on": planner.is_some_and(|p| p.active),
-        "assignment": planner.and_then(|p| p.assignment.as_ref()).map(|a| json!({
-            "task": a.task,
-            "why": a.why,
-            "todo_id": a.todo_id,
-            "since": a.at,
+        "planner_on": planner.is_some_and(|planner| planner.active),
+        "assignment": planner.and_then(|planner| planner.assignment.as_ref()).map(|assignment| json!({
+            "task": assignment.task,
+            "why": assignment.why,
+            "todo_id": assignment.todo_id,
+            "since": assignment.at,
         })),
-        "open_todos": planner.map(|p| p.open_todos.iter().map(|t| json!({
-            "id": t.id,
-            "title": t.title,
-            "notes": t.notes,
-            "deadline": t.deadline,
-            "priority": t.priority,
-            "proposed_by_user": t.proposed,
+        "open_todos": planner.map(|planner| planner.open_todos.iter().map(|todo| json!({
+            "id": todo.id,
+            "title": todo.title,
+            "notes": todo.notes,
+            "deadline": todo.deadline,
+            "priority": todo.priority,
+            "proposed_by_user": todo.proposed,
         })).collect::<Vec<_>>()),
-        "recent_proposals": planner.map(|p| p.recent_proposals.iter().map(|r| json!({
-            "title": r.item.title,
-            "approved": r.approved,
-            "reply": r.reply,
-            "at": r.at,
+        "recent_proposals": planner.map(|planner| planner.recent_proposals.iter().map(|proposal| json!({
+            "title": proposal.item.title,
+            "approved": proposal.approved,
+            "reply": proposal.reply,
+            "at": proposal.at,
         })).collect::<Vec<_>>()),
-        "recent_change_requests": planner.map(|p| p.recent_requests.iter().map(|r| json!({
-            "request": r.request,
-            "reason": r.reason,
-            "approved": r.approved,
-            "reply": r.reply,
-            "at": r.at,
+        "recent_change_requests": planner.map(|planner| planner.recent_requests.iter().map(|change_request| json!({
+            "request": change_request.request,
+            "reason": change_request.reason,
+            "approved": change_request.approved,
+            "reply": change_request.reply,
+            "at": change_request.at,
         })).collect::<Vec<_>>()),
-        "blocked": status.blocked.iter().map(|b| json!({ "what": b.key, "reason": b.reason })).collect::<Vec<_>>(),
+        "blocked": status.blocked.iter().map(|blocked_entry| json!({ "what": blocked_entry.key, "reason": blocked_entry.reason })).collect::<Vec<_>>(),
     })
 }
 
@@ -270,14 +272,14 @@ mod tests {
     #[test]
     fn initialize_and_list_tools() {
         let agent = |_: &str, _: Value| Ok(empty_status());
-        let init = handle(
+        let initialize_reply = handle(
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
                      "params": { "protocolVersion": "2025-03-26" } }),
             &agent,
         )
         .unwrap();
-        assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-        assert!(init["result"]["capabilities"]["tools"].is_object());
+        assert_eq!(initialize_reply["result"]["protocolVersion"], "2025-03-26");
+        assert!(initialize_reply["result"]["capabilities"]["tools"].is_object());
         // Notifications get no reply.
         assert!(handle(
             &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
@@ -293,7 +295,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|t| t["name"].as_str().unwrap())
+            .map(|tool| tool["name"].as_str().unwrap())
             .collect();
         assert_eq!(
             names,

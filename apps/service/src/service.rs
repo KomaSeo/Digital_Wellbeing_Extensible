@@ -27,20 +27,20 @@ pub fn run_dispatcher() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn service_main(_args: Vec<OsString>) {
+fn service_main(_arguments: Vec<OsString>) {
     crate::init_logging("service.log");
-    if let Err(err) = run_service() {
-        error!("service failed: {err:#}");
+    if let Err(error) = run_service() {
+        error!("service failed: {error:#}");
     }
 }
 
 fn run_service() -> anyhow::Result<()> {
-    let (stop_tx, stop_rx) = mpsc::channel();
+    let (stop_sender, stop_receiver) = mpsc::channel();
     // Only administrators may send Stop: the default service ACL gives
     // standard users query rights only.
     let handler = move |control| match control {
         ServiceControl::Stop | ServiceControl::Shutdown => {
-            let _ = stop_tx.send(());
+            let _ = stop_sender.send(());
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -65,7 +65,7 @@ fn run_service() -> anyhow::Result<()> {
     let mut supervisor = Supervisor::new(std::env::current_exe()?);
     loop {
         supervisor.tick();
-        match stop_rx.recv_timeout(TICK) {
+        match stop_receiver.recv_timeout(TICK) {
             Err(RecvTimeoutError::Timeout) => {}
             _ => break,
         }
@@ -81,14 +81,14 @@ fn run_service() -> anyhow::Result<()> {
 ///
 /// Session id -> running agent.
 struct Supervisor {
-    exe: PathBuf,
+    executable: PathBuf,
     agents: HashMap<u32, Child>,
 }
 
 impl Supervisor {
-    fn new(exe: PathBuf) -> Self {
+    fn new(executable: PathBuf) -> Self {
         Self {
-            exe,
+            executable,
             agents: HashMap::new(),
         }
     }
@@ -97,12 +97,12 @@ impl Supervisor {
         let config = MachineConfig::load();
         let wanted: Vec<_> = user_sessions()
             .into_iter()
-            .filter(|s| config.manages(&s.user))
+            .filter(|session| config.manages(&session.user))
             .collect();
 
         // Drop agents whose session ended or is no longer managed.
         self.agents.retain(|id, child| {
-            let keep = wanted.iter().any(|s| s.id == *id);
+            let keep = wanted.iter().any(|session| session.id == *id);
             if !keep && child.is_running() {
                 info!("stopping agent for session {id}");
                 child.kill();
@@ -124,7 +124,7 @@ impl Supervisor {
                     session.user, session.id, session.id
                 );
             }
-            match spawn_in_session(session.id, &self.exe, "agent") {
+            match spawn_in_session(session.id, &self.executable, "agent") {
                 Ok(child) => {
                     info!(
                         "started agent pid {} for {} (session {})",
@@ -132,7 +132,7 @@ impl Supervisor {
                     );
                     self.agents.insert(session.id, child);
                 }
-                Err(err) => warn!("could not start agent for session {}: {err}", session.id),
+                Err(error) => warn!("could not start agent for session {}: {error}", session.id),
             }
         }
     }

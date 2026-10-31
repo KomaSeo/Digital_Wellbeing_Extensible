@@ -241,17 +241,17 @@ fn others_text(others: &[OtherWindow]) -> String {
     }
     let lines: Vec<String> = others
         .iter()
-        .map(|w| {
+        .map(|window| {
             format!(
                 "[{}] {} {} — \"{}\"",
-                w.id,
-                if w.is_browser {
+                window.id,
+                if window.is_browser {
                     "browser tab"
                 } else {
                     "program"
                 },
-                w.process_name,
-                w.title
+                window.process_name,
+                window.title
             )
         })
         .collect();
@@ -275,9 +275,9 @@ mod tests {
                 { "type": "text", "text": "{\"verdict\":\"off_task\",\"reason\":\"YouTube 게임 영상\"}" }
             ]
         });
-        let j: Judgement = parse_structured(&response).unwrap();
-        assert_eq!(j.verdict, Verdict::OffTask);
-        assert_eq!(j.reason, "YouTube 게임 영상");
+        let judgement: Judgement = parse_structured(&response).unwrap();
+        assert_eq!(judgement.verdict, Verdict::OffTask);
+        assert_eq!(judgement.reason, "YouTube 게임 영상");
     }
 
     #[test]
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn body_includes_image_and_fallback() {
         let client = ClaudeClient::new("k".into(), "claude-opus-5-5".into());
-        let req = JudgeRequest {
+        let request = JudgeRequest {
             task: "write thesis",
             history: "",
             process_name: "chrome.exe",
@@ -304,7 +304,7 @@ mod tests {
         };
         let body = client.body(
             SYSTEM_PROMPT,
-            ClaudeJudge::content(&req),
+            ClaudeJudge::content(&request),
             verdict_schema(),
             "low",
         );
@@ -314,12 +314,12 @@ mod tests {
         let client = ClaudeClient::new("k".into(), "claude-haiku-5-5".into());
         let body = client.body(
             SYSTEM_PROMPT,
-            ClaudeJudge::content(&req),
+            ClaudeJudge::content(&request),
             verdict_schema(),
             "low",
         );
         assert!(body.get("fallbacks").is_none());
-        assert!(user_text(&req).contains("This is YouTube"));
+        assert!(user_text(&request).contains("This is YouTube"));
         assert_eq!(
             body["output_config"]["format"]["schema"]["required"][2],
             "channel"
@@ -328,14 +328,14 @@ mod tests {
 
     #[test]
     fn a_judgement_without_channel_still_parses() {
-        let j: Judgement =
+        let judgement: Judgement =
             serde_json::from_str(r#"{"verdict":"on_task","reason":"docs"}"#).unwrap();
-        assert!(j.channel.is_empty());
+        assert!(judgement.channel.is_empty());
     }
 
     #[test]
     fn grant_purpose_is_part_of_the_question() {
-        let req = JudgeRequest {
+        let request = JudgeRequest {
             task: "write thesis",
             history: "",
             process_name: "chrome.exe",
@@ -345,11 +345,11 @@ mod tests {
             grant_purpose: Some("Rust 비동기 강의 시청"),
             others: &[],
         };
-        assert!(user_text(&req)
+        assert!(user_text(&request)
             .contains("granted this app/site for this purpose: \"Rust 비동기 강의 시청\""));
         let plain = JudgeRequest {
             grant_purpose: None,
-            ..req
+            ..request
         };
         assert!(!user_text(&plain).contains("granted"));
     }

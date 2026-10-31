@@ -76,7 +76,7 @@ pub struct AiFocusConfig {
 
 impl Default for AiFocusConfig {
     fn default() -> Self {
-        let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect();
+        let set = |names: &[&str]| names.iter().map(|name| name.to_string()).collect();
         Self {
             session_active: false,
             task: String::new(),
@@ -129,8 +129,8 @@ impl AiFocusConfig {
     pub fn resolve_api_key(&self) -> Option<String> {
         std::env::var("ANTHROPIC_API_KEY")
             .ok()
-            .filter(|k| !k.trim().is_empty())
-            .or_else(|| Some(self.api_key.trim().to_string()).filter(|k| !k.is_empty()))
+            .filter(|key| !key.trim().is_empty())
+            .or_else(|| Some(self.api_key.trim().to_string()).filter(|key| !key.is_empty()))
     }
 }
 
@@ -148,9 +148,9 @@ pub struct AiFocusStore {
 impl AiFocusStore {
     /// `ai_focus.json` in the app config directory (next to `policy.json`).
     pub fn default() -> Result<Self, ConfigError> {
-        let dirs = ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
+        let project_directories = ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
             .ok_or(ConfigError::NoAppData)?;
-        Self::open(dirs.config_dir().join("ai_focus.json"))
+        Self::open(project_directories.config_dir().join("ai_focus.json"))
     }
 
     pub fn open(path: PathBuf) -> Result<Self, ConfigError> {
@@ -177,8 +177,8 @@ impl AiFocusStore {
         };
         // A damaged file must not stop the agent: run on defaults (which
         // block nothing extra) and pick up the file once it is readable again.
-        if let Err(err) = store.reload_keeping_session() {
-            tracing::warn!("cannot read AI focus settings ({err}); using defaults for now");
+        if let Err(error) = store.reload_keeping_session() {
+            tracing::warn!("cannot read AI focus settings ({error}); using defaults for now");
         }
         Ok(store)
     }
@@ -203,12 +203,16 @@ impl AiFocusStore {
 
     /// `grants.json` next to the settings file (standalone install).
     pub fn grants_path(&self) -> Option<PathBuf> {
-        self.path.as_ref().map(|p| p.with_file_name("grants.json"))
+        self.path
+            .as_ref()
+            .map(|settings_path| settings_path.with_file_name("grants.json"))
     }
 
     /// Standalone mode: `usage.json` next to the settings (token usage, see `usage.rs`).
     pub fn usage_path(&self) -> Option<PathBuf> {
-        self.path.as_ref().map(|p| p.with_file_name("usage.json"))
+        self.path
+            .as_ref()
+            .map(|settings_path| settings_path.with_file_name("usage.json"))
     }
 
     /// Path of the backing file, if any.
@@ -229,11 +233,14 @@ impl AiFocusStore {
         self.inner.read().clone()
     }
 
-    /// Apply `f` to the config and persist the result.
-    pub fn update(&self, f: impl FnOnce(&mut AiFocusConfig)) -> Result<AiFocusConfig, ConfigError> {
+    /// Apply `change` to the config and persist the result.
+    pub fn update(
+        &self,
+        change: impl FnOnce(&mut AiFocusConfig),
+    ) -> Result<AiFocusConfig, ConfigError> {
         let snapshot = {
             let mut config = self.inner.write();
-            f(&mut config);
+            change(&mut config);
             config.clone()
         };
         self.save(&snapshot)?;
@@ -247,9 +254,9 @@ impl AiFocusStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(config)?)?;
-        fs::rename(&tmp, path)?;
+        let temporary_path = path.with_extension("json.tmp");
+        fs::write(&temporary_path, serde_json::to_string_pretty(config)?)?;
+        fs::rename(&temporary_path, path)?;
         Ok(())
     }
 }
@@ -282,30 +289,34 @@ mod tests {
 
     #[test]
     fn read_only_store_keeps_session_across_reload_and_never_writes() {
-        let dir = std::env::temp_dir().join(format!("dw_ai_cfg_{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("ai_focus.json");
+        let directory = std::env::temp_dir().join(format!("dw_ai_cfg_{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("ai_focus.json");
         let admin = AiFocusStore::open(path.clone()).unwrap();
-        admin.update(|c| c.check_interval_secs = 120).unwrap();
+        admin
+            .update(|config| config.check_interval_secs = 120)
+            .unwrap();
 
         let agent = AiFocusStore::open_read_only(path.clone()).unwrap();
         assert_eq!(agent.get().check_interval_secs, 120);
         agent
-            .update(|c| {
-                c.session_active = true;
-                c.task = "thesis".into();
+            .update(|config| {
+                config.session_active = true;
+                config.task = "thesis".into();
             })
             .unwrap();
         let on_disk: AiFocusConfig =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert!(!on_disk.session_active);
 
-        admin.update(|c| c.check_interval_secs = 300).unwrap();
+        admin
+            .update(|config| config.check_interval_secs = 300)
+            .unwrap();
         agent.reload_keeping_session().unwrap();
-        let c = agent.get();
-        assert_eq!(c.check_interval_secs, 300);
-        assert!(c.session_active);
-        assert_eq!(c.task, "thesis");
-        fs::remove_dir_all(&dir).unwrap();
+        let reloaded = agent.get();
+        assert_eq!(reloaded.check_interval_secs, 300);
+        assert!(reloaded.session_active);
+        assert_eq!(reloaded.task, "thesis");
+        fs::remove_dir_all(&directory).unwrap();
     }
 }

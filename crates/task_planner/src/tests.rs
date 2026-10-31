@@ -18,13 +18,13 @@ struct FakeAdvisor {
 }
 
 impl Advisor for FakeAdvisor {
-    fn pick(&self, r: &PickRequest) -> Result<Pick, JudgeError> {
+    fn pick(&self, request: &PickRequest) -> Result<Pick, JudgeError> {
         self.picks.fetch_add(1, Ordering::SeqCst);
-        *self.saw_rules.lock() = r.life_rules.to_string();
+        *self.saw_rules.lock() = request.life_rules.to_string();
         let todo_id = if self.bogus_pick.load(Ordering::SeqCst) {
             "nope".into()
         } else {
-            r.open[0].id.clone()
+            request.open[0].id.clone()
         };
         Ok(Pick {
             task: format!("work on {todo_id}"),
@@ -33,9 +33,9 @@ impl Advisor for FakeAdvisor {
         })
     }
 
-    fn review_proposal(&self, r: &ProposalRequest) -> Result<Review, JudgeError> {
+    fn review_proposal(&self, request: &ProposalRequest) -> Result<Review, JudgeError> {
         self.reviews.fetch_add(1, Ordering::SeqCst);
-        *self.saw_rules.lock() = r.life_rules.to_string();
+        *self.saw_rules.lock() = request.life_rules.to_string();
         let approved = self.approve.load(Ordering::SeqCst);
         Ok(Review {
             approved,
@@ -43,9 +43,9 @@ impl Advisor for FakeAdvisor {
         })
     }
 
-    fn review(&self, r: &ReviewRequest) -> Result<Review, JudgeError> {
+    fn review(&self, request: &ReviewRequest) -> Result<Review, JudgeError> {
         self.reviews.fetch_add(1, Ordering::SeqCst);
-        *self.saw_rules.lock() = r.life_rules.to_string();
+        *self.saw_rules.lock() = request.life_rules.to_string();
         let approved = self.approve.load(Ordering::SeqCst);
         Ok(Review {
             approved,
@@ -103,77 +103,80 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
 fn inactive_when_disabled_or_empty() {
     assert!(!harness(false, &["a"]).planner.is_active());
     assert!(!harness(true, &[]).planner.is_active());
-    let h = harness(false, &["a"]);
+    let fixture = harness(false, &["a"]);
     assert!(matches!(
-        h.planner.assign(Utc::now()),
+        fixture.planner.assign(Utc::now()),
         Err(PlannerError::NotActive)
     ));
 }
 
 #[test]
 fn assign_starts_focus_session_and_resumes_without_asking_again() {
-    let h = harness(true, &["a", "b"]);
-    let a = h.planner.assign(Utc::now()).unwrap();
-    assert_eq!(a.todo_id.as_deref(), Some("a"));
-    let focus = h.focus.store().get();
+    let fixture = harness(true, &["a", "b"]);
+    let assignment = fixture.planner.assign(Utc::now()).unwrap();
+    assert_eq!(assignment.todo_id.as_deref(), Some("a"));
+    let focus = fixture.focus.store().get();
     assert!(focus.session_active);
     assert_eq!(focus.task, "work on a");
 
     // e.g. after logging on again
-    h.focus
+    fixture
+        .focus
         .store()
-        .update(|c| c.session_active = false)
+        .update(|config| config.session_active = false)
         .unwrap();
-    h.planner.assign(Utc::now()).unwrap();
-    assert_eq!(h.advisor.picks.load(Ordering::SeqCst), 1);
-    assert!(h.focus.store().get().session_active);
+    fixture.planner.assign(Utc::now()).unwrap();
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 1);
+    assert!(fixture.focus.store().get().session_active);
 }
 
 #[test]
 fn life_rules_reach_every_question() {
-    let h = harness(true, &["a", "b"]);
-    h.planner
+    let fixture = harness(true, &["a", "b"]);
+    fixture
+        .planner
         .config_store()
-        .update(|c| c.life_rules = "No games before 18:00.".into())
+        .update(|config| config.life_rules = "No games before 18:00.".into())
         .unwrap();
-    h.planner.assign(Utc::now()).unwrap();
-    assert_eq!(*h.advisor.saw_rules.lock(), "No games before 18:00.");
-    h.advisor.saw_rules.lock().clear();
-    h.planner
+    fixture.planner.assign(Utc::now()).unwrap();
+    assert_eq!(*fixture.advisor.saw_rules.lock(), "No games before 18:00.");
+    fixture.advisor.saw_rules.lock().clear();
+    fixture
+        .planner
         .request_change(Utc::now(), ChangeKind::End, "dinner time now")
         .unwrap();
-    assert_eq!(*h.advisor.saw_rules.lock(), "No games before 18:00.");
+    assert_eq!(*fixture.advisor.saw_rules.lock(), "No games before 18:00.");
     assert!(crate::advisor::rules_text("").is_empty());
 }
 
 #[test]
 fn bogus_pick_is_refused() {
-    let h = harness(true, &["a"]);
-    h.advisor.bogus_pick.store(true, Ordering::SeqCst);
+    let fixture = harness(true, &["a"]);
+    fixture.advisor.bogus_pick.store(true, Ordering::SeqCst);
     assert!(matches!(
-        h.planner.assign(Utc::now()),
+        fixture.planner.assign(Utc::now()),
         Err(PlannerError::BadPick(_))
     ));
-    assert!(!h.focus.store().get().session_active);
+    assert!(!fixture.focus.store().get().session_active);
 }
 
 #[test]
 fn short_reason_is_refused_without_asking_the_ai() {
-    let h = harness(true, &["a"]);
-    h.planner.assign(Utc::now()).unwrap();
-    let r = h
+    let fixture = harness(true, &["a"]);
+    fixture.planner.assign(Utc::now()).unwrap();
+    let result = fixture
         .planner
         .request_change(Utc::now(), ChangeKind::End, " 응 ");
-    assert!(matches!(r, Err(PlannerError::ReasonTooShort)));
-    assert_eq!(h.advisor.reviews.load(Ordering::SeqCst), 0);
+    assert!(matches!(result, Err(PlannerError::ReasonTooShort)));
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
 }
 
 #[test]
 fn rejected_request_is_logged_and_changes_nothing() {
-    let h = harness(true, &["a", "b"]);
-    h.planner.assign(Utc::now()).unwrap();
-    h.advisor.approve.store(false, Ordering::SeqCst);
-    let record = h
+    let fixture = harness(true, &["a", "b"]);
+    fixture.planner.assign(Utc::now()).unwrap();
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let record = fixture
         .planner
         .request_change(
             Utc::now(),
@@ -184,35 +187,38 @@ fn rejected_request_is_logged_and_changes_nothing() {
         )
         .unwrap();
     assert!(!record.approved);
-    assert_eq!(h.focus.store().get().task, "work on a");
-    let status = h.planner.status();
+    assert_eq!(fixture.focus.store().get().task, "work on a");
+    let status = fixture.planner.status();
     assert_eq!(status.recent_requests.len(), 1);
     assert_eq!(status.recent_requests[0].reason, "그냥 지루해서");
 }
 
 #[test]
 fn approved_done_moves_to_next_and_ends_after_the_last() {
-    let h = harness(true, &["a", "b"]);
-    h.planner.assign(Utc::now()).unwrap();
-    h.planner
+    let fixture = harness(true, &["a", "b"]);
+    fixture.planner.assign(Utc::now()).unwrap();
+    fixture
+        .planner
         .request_change(Utc::now(), ChangeKind::Done, "3장 초안 제출함")
         .unwrap();
-    assert_eq!(h.focus.store().get().task, "work on b");
-    assert_eq!(h.planner.status().open_todos.len(), 1);
+    assert_eq!(fixture.focus.store().get().task, "work on b");
+    assert_eq!(fixture.planner.status().open_todos.len(), 1);
 
-    h.planner
+    fixture
+        .planner
         .request_change(Utc::now(), ChangeKind::Done, "4장도 끝냄")
         .unwrap();
-    assert!(!h.planner.is_active());
-    assert!(h.planner.status().assignment.is_none());
-    assert!(!h.focus.store().get().session_active);
+    assert!(!fixture.planner.is_active());
+    assert!(fixture.planner.status().assignment.is_none());
+    assert!(!fixture.focus.store().get().session_active);
 }
 
 #[test]
 fn approved_switches_set_the_task() {
-    let h = harness(true, &["a", "b"]);
-    h.planner.assign(Utc::now()).unwrap();
-    h.planner
+    let fixture = harness(true, &["a", "b"]);
+    fixture.planner.assign(Utc::now()).unwrap();
+    fixture
+        .planner
         .request_change(
             Utc::now(),
             ChangeKind::SwitchTodo {
@@ -221,9 +227,10 @@ fn approved_switches_set_the_task() {
             "a는 교수님 답장 대기 중",
         )
         .unwrap();
-    assert_eq!(h.focus.store().get().task, "title b");
+    assert_eq!(fixture.focus.store().get().task, "title b");
 
-    h.planner
+    fixture
+        .planner
         .request_change(
             Utc::now(),
             ChangeKind::SwitchFree {
@@ -232,33 +239,33 @@ fn approved_switches_set_the_task() {
             "오늘 마감인 서류 제출",
         )
         .unwrap();
-    let status = h.planner.status();
+    let status = fixture.planner.status();
     assert_eq!(status.assignment.unwrap().todo_id, None);
-    assert_eq!(h.focus.store().get().task, "은행 업무");
+    assert_eq!(fixture.focus.store().get().task, "은행 업무");
 }
 
 #[test]
 fn switch_to_unknown_todo_is_refused() {
-    let h = harness(true, &["a"]);
-    h.planner.assign(Utc::now()).unwrap();
-    let r = h.planner.request_change(
+    let fixture = harness(true, &["a"]);
+    fixture.planner.assign(Utc::now()).unwrap();
+    let result = fixture.planner.request_change(
         Utc::now(),
         ChangeKind::SwitchTodo {
             todo_id: "zzz".into(),
         },
         "this one instead",
     );
-    assert!(matches!(r, Err(PlannerError::UnknownTodo(_))));
+    assert!(matches!(result, Err(PlannerError::UnknownTodo(_))));
 }
 
 #[test]
 fn change_kind_json_shape() {
-    let v = serde_json::to_value(ChangeKind::SwitchTodo {
+    let json_value = serde_json::to_value(ChangeKind::SwitchTodo {
         todo_id: "a".into(),
     })
     .unwrap();
     assert_eq!(
-        v,
+        json_value,
         serde_json::json!({ "kind": "switch_todo", "todo_id": "a" })
     );
     let done: ChangeKind = serde_json::from_value(serde_json::json!({ "kind": "done" })).unwrap();
@@ -267,18 +274,18 @@ fn change_kind_json_shape() {
 
 #[test]
 fn approved_done_with_a_failing_pick_ends_the_session() {
-    let h = harness(true, &["a", "b"]);
-    h.planner.assign(Utc::now()).unwrap();
-    h.advisor.bogus_pick.store(true, Ordering::SeqCst);
-    let record = h
+    let fixture = harness(true, &["a", "b"]);
+    fixture.planner.assign(Utc::now()).unwrap();
+    fixture.advisor.bogus_pick.store(true, Ordering::SeqCst);
+    let record = fixture
         .planner
         .request_change(Utc::now(), ChangeKind::Done, "3장 초안 제출함")
         .unwrap();
     assert!(record.approved);
-    assert!(h.planner.status().assignment.is_none());
-    assert!(!h.focus.store().get().session_active);
+    assert!(fixture.planner.status().assignment.is_none());
+    assert!(!fixture.focus.store().get().session_active);
     // "a" is done; "b" is still open, so the planner stays active.
-    assert!(h.planner.is_active());
+    assert!(fixture.planner.is_active());
 }
 
 fn proposal(title: &str) -> ProposalInput {
@@ -291,20 +298,21 @@ fn proposal(title: &str) -> ProposalInput {
 
 #[test]
 fn an_approved_proposal_joins_the_list() {
-    let h = harness(true, &[]);
-    assert!(!h.planner.is_active());
-    h.planner
+    let fixture = harness(true, &[]);
+    assert!(!fixture.planner.is_active());
+    fixture
+        .planner
         .config_store()
-        .update(|c| c.life_rules = "No games on weekdays.".into())
+        .update(|config| config.life_rules = "No games on weekdays.".into())
         .unwrap();
-    let record = h
+    let record = fixture
         .planner
         .propose(Utc::now(), proposal("  Buy   groceries "), "claude desktop")
         .unwrap();
     assert!(record.approved);
     assert_eq!(record.via, "claude desktop");
-    assert_eq!(*h.advisor.saw_rules.lock(), "No games on weekdays.");
-    let status = h.planner.status();
+    assert_eq!(*fixture.advisor.saw_rules.lock(), "No games on weekdays.");
+    let status = fixture.planner.status();
     assert!(status.active);
     let item = &status.open_todos[0];
     assert_eq!(item.title, "Buy groceries");
@@ -315,47 +323,50 @@ fn an_approved_proposal_joins_the_list() {
 
 #[test]
 fn a_rejected_proposal_is_logged_only() {
-    let h = harness(true, &["a"]);
-    h.advisor.approve.store(false, Ordering::SeqCst);
-    let record = h
+    let fixture = harness(true, &["a"]);
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let record = fixture
         .planner
         .propose(Utc::now(), proposal("Play games"), "claude desktop")
         .unwrap();
     assert!(!record.approved);
-    let status = h.planner.status();
+    let status = fixture.planner.status();
     assert_eq!(status.open_todos.len(), 1);
     assert_eq!(status.recent_proposals.len(), 1);
 }
 
 #[test]
 fn bad_and_duplicate_proposals_are_refused_without_asking_the_ai() {
-    let h = harness(true, &["a"]);
+    let fixture = harness(true, &["a"]);
     assert!(matches!(
-        h.planner.propose(Utc::now(), proposal(" "), "x"),
+        fixture.planner.propose(Utc::now(), proposal(" "), "x"),
         Err(PlannerError::BadProposal)
     ));
     assert!(matches!(
-        h.planner.propose(Utc::now(), proposal("TITLE A"), "x"),
+        fixture
+            .planner
+            .propose(Utc::now(), proposal("TITLE A"), "x"),
         Err(PlannerError::Duplicate(_))
     ));
-    assert_eq!(h.advisor.reviews.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
 }
 
 #[test]
 fn the_admin_can_remove_a_proposed_todo() {
-    let h = harness(true, &[]);
-    let record = h
+    let fixture = harness(true, &[]);
+    let record = fixture
         .planner
         .propose(Utc::now(), proposal("Buy groceries"), "focus app")
         .unwrap();
-    h.planner
+    fixture
+        .planner
         .config_store()
-        .update(|c| {
-            c.dismissed.insert(record.item.id.clone());
+        .update(|config| {
+            config.dismissed.insert(record.item.id.clone());
         })
         .unwrap();
-    assert!(h.planner.status().open_todos.is_empty());
-    assert!(!h.planner.is_active());
+    assert!(fixture.planner.status().open_todos.is_empty());
+    assert!(!fixture.planner.is_active());
 }
 
 #[test]

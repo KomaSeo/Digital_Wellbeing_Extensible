@@ -59,7 +59,7 @@ pub struct SettingsLock {
 
 impl SettingsLock {
     pub fn locked(&self, now: DateTime<Utc>) -> bool {
-        self.until.is_some_and(|u| now < u)
+        self.until.is_some_and(|until| now < until)
     }
 
     /// `until` while locked, `None` once it has run out.
@@ -87,7 +87,11 @@ pub fn extend_lock(path: &Path, now: DateTime<Utc>, hours: u32) -> io::Result<Se
     let current = read_lock(path);
     let wanted = now + Duration::hours(hours as i64);
     let lock = SettingsLock {
-        until: Some(current.locked_until(now).map_or(wanted, |u| u.max(wanted))),
+        until: Some(
+            current
+                .locked_until(now)
+                .map_or(wanted, |current_until| current_until.max(wanted)),
+        ),
         set_at: Some(now),
     };
     write_atomic(
@@ -132,35 +136,35 @@ pub struct SettingsSnapshot {
     pub usage: BTreeMap<String, Value>,
 }
 
-/// Read everything the admin panels need from `dir`, locked or not.
-pub fn snapshot(dir: &Path, now: DateTime<Utc>) -> Result<SettingsSnapshot, String> {
+/// Read everything the admin panels need from `data_directory`, locked or not.
+pub fn snapshot(data_directory: &Path, now: DateTime<Utc>) -> Result<SettingsSnapshot, String> {
     let files = EDITABLE
         .iter()
-        .map(|(name, file)| (name.to_string(), read_json(&dir.join(file))))
+        .map(|(name, file)| (name.to_string(), read_json(&data_directory.join(file))))
         .collect();
     Ok(SettingsSnapshot {
         files,
-        pending: read_pending(dir),
-        locked_until: locked_until(dir, now),
-        planner_state: read_json(&dir.join("planner_state.json")),
-        grants: read_folder(&dir.join("grants")),
-        blocks: read_folder(&dir.join("blocks")),
-        usage: read_folder(&dir.join("usage")),
+        pending: read_pending(data_directory),
+        locked_until: locked_until(data_directory, now),
+        planner_state: read_json(&data_directory.join("planner_state.json")),
+        grants: read_folder(&data_directory.join("grants")),
+        blocks: read_folder(&data_directory.join("blocks")),
+        usage: read_folder(&data_directory.join("usage")),
     })
 }
 
 /// Save `content` as the editable file `name`: in force at once while unlocked, as a pending
 /// change while locked. Refused when `content` does not parse as that file's settings.
 pub fn put(
-    dir: &Path,
+    data_directory: &Path,
     now: DateTime<Utc>,
     name: &str,
     content: &Value,
 ) -> Result<PutOutcome, String> {
     let file = file_of(name)?;
     validate(name, content)?;
-    let mut pending = read_pending(dir);
-    if let Some(until) = locked_until(dir, now) {
+    let mut pending = read_pending(data_directory);
+    if let Some(until) = locked_until(data_directory, now) {
         pending.insert(
             name.to_string(),
             PendingFile {
@@ -168,21 +172,21 @@ pub fn put(
                 saved_at: now,
             },
         );
-        write_pending(dir, &pending)?;
+        write_pending(data_directory, &pending)?;
         return Ok(PutOutcome::Pending { applies_at: until });
     }
-    write_setting(dir, file, content)?;
+    write_setting(data_directory, file, content)?;
     // A pending edit is older than this one; applying it later would undo this.
     if pending.remove(name).is_some() {
-        write_pending(dir, &pending)?;
+        write_pending(data_directory, &pending)?;
     }
     Ok(PutOutcome::Applied)
 }
 
 /// Drop the pending edit of `name`, or every pending edit (`None`). Allowed while locked:
 /// dropping an edit that never took effect gains nothing.
-pub fn discard_pending(dir: &Path, name: Option<&str>) -> Result<(), String> {
-    let mut pending = read_pending(dir);
+pub fn discard_pending(data_directory: &Path, name: Option<&str>) -> Result<(), String> {
+    let mut pending = read_pending(data_directory);
     match name {
         Some(name) => {
             file_of(name)?;
@@ -190,32 +194,32 @@ pub fn discard_pending(dir: &Path, name: Option<&str>) -> Result<(), String> {
         }
         None => pending.clear(),
     }
-    write_pending(dir, &pending)
+    write_pending(data_directory, &pending)
 }
 
 /// Once the lock has ended, put every pending edit in force and return their names. Called
 /// every few seconds by each agent; two agents applying the same edit write the same bytes.
-pub fn apply_pending(dir: &Path, now: DateTime<Utc>) -> Vec<String> {
-    let pending = read_pending(dir);
-    if pending.is_empty() || locked_until(dir, now).is_some() {
+pub fn apply_pending(data_directory: &Path, now: DateTime<Utc>) -> Vec<String> {
+    let pending = read_pending(data_directory);
+    if pending.is_empty() || locked_until(data_directory, now).is_some() {
         return Vec::new();
     }
     let mut applied = Vec::new();
     for (name, edit) in &pending {
         let written = file_of(name).and_then(|file| {
             validate(name, &edit.content)?;
-            write_setting(dir, file, &edit.content)
+            write_setting(data_directory, file, &edit.content)
         });
         match written {
             Ok(()) => applied.push(name.clone()),
-            Err(err) => tracing::warn!("pending settings '{name}' dropped: {err}"),
+            Err(error) => tracing::warn!("pending settings '{name}' dropped: {error}"),
         }
     }
     // Remove what was handled, unless it was saved again meanwhile.
-    let mut left = read_pending(dir);
+    let mut left = read_pending(data_directory);
     left.retain(|name, edit| pending.get(name) != Some(edit));
-    if let Err(err) = write_pending(dir, &left) {
-        tracing::warn!("{err}");
+    if let Err(error) = write_pending(data_directory, &left) {
+        tracing::warn!("{error}");
     }
     applied
 }
@@ -223,39 +227,43 @@ pub fn apply_pending(dir: &Path, now: DateTime<Utc>) -> Vec<String> {
 fn file_of(name: &str) -> Result<&'static str, String> {
     EDITABLE
         .iter()
-        .find(|(n, _)| *n == name)
+        .find(|(editable_name, _)| *editable_name == name)
         .map(|(_, file)| *file)
         .ok_or_else(|| format!("'{name}' is not an editable setting"))
 }
 
-fn write_setting(dir: &Path, file: &str, content: &Value) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(content).map_err(|e| e.to_string())?;
-    write_atomic(&dir.join(file), &bytes).map_err(|e| format!("could not save {file}: {e}"))
+fn write_setting(data_directory: &Path, file: &str, content: &Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(content).map_err(|error| error.to_string())?;
+    write_atomic(&data_directory.join(file), &bytes)
+        .map_err(|error| format!("could not save {file}: {error}"))
 }
 
-fn locked_until(dir: &Path, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    read_lock(&dir.join("settings_lock.json")).locked_until(now)
+fn locked_until(data_directory: &Path, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    read_lock(&data_directory.join("settings_lock.json")).locked_until(now)
 }
 
-fn read_pending(dir: &Path) -> BTreeMap<String, PendingFile> {
-    fs::read_to_string(dir.join(PENDING_FILE))
+fn read_pending(data_directory: &Path) -> BTreeMap<String, PendingFile> {
+    fs::read_to_string(data_directory.join(PENDING_FILE))
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
 }
 
-fn write_pending(dir: &Path, pending: &BTreeMap<String, PendingFile>) -> Result<(), String> {
-    let path = dir.join(PENDING_FILE);
+fn write_pending(
+    data_directory: &Path,
+    pending: &BTreeMap<String, PendingFile>,
+) -> Result<(), String> {
+    let path = data_directory.join(PENDING_FILE);
     if pending.is_empty() {
         return match fs::remove_file(&path) {
-            Err(err) if err.kind() != io::ErrorKind::NotFound => {
-                Err(format!("could not update {PENDING_FILE}: {err}"))
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                Err(format!("could not update {PENDING_FILE}: {error}"))
             }
             _ => Ok(()),
         };
     }
-    let bytes = serde_json::to_vec_pretty(pending).map_err(|e| e.to_string())?;
-    write_atomic(&path, &bytes).map_err(|e| format!("could not save {PENDING_FILE}: {e}"))
+    let bytes = serde_json::to_vec_pretty(pending).map_err(|error| error.to_string())?;
+    write_atomic(&path, &bytes).map_err(|error| format!("could not save {PENDING_FILE}: {error}"))
 }
 
 /// The content must load as the program that reads the file expects it.
@@ -272,7 +280,7 @@ fn validate(name: &str, content: &Value) -> Result<(), String> {
         }
         _ => return Err(format!("'{name}' is not an editable setting")),
     };
-    result.map_err(|e| format!("{name}: {e}"))
+    result.map_err(|error| format!("{name}: {error}"))
 }
 
 fn read_json(path: &Path) -> Value {
@@ -282,18 +290,21 @@ fn read_json(path: &Path) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// Every `<name>.json` in `dir` by file stem; unreadable files are left out.
-fn read_folder(dir: &Path) -> BTreeMap<String, Value> {
-    let Ok(entries) = fs::read_dir(dir) else {
+/// Every `<name>.json` in `data_directory` by file stem; unreadable files are left out.
+fn read_folder(data_directory: &Path) -> BTreeMap<String, Value> {
+    let Ok(entries) = fs::read_dir(data_directory) else {
         return BTreeMap::new();
     };
     entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .filter_map(|p| {
-            let value = read_json(&p);
-            let name = p.file_stem()?.to_string_lossy().to_string();
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|path| {
+            let value = read_json(&path);
+            let name = path.file_stem()?.to_string_lossy().to_string();
             (!value.is_null()).then_some((name, value))
         })
         .collect()
@@ -304,9 +315,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)
+    let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+    fs::write(&temp_path, bytes)?;
+    fs::rename(&temp_path, path)
 }
 
 #[cfg(test)]
@@ -315,39 +326,50 @@ mod tests {
     use serde_json::json;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("dw_settings_{name}_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        let data_directory =
+            std::env::temp_dir().join(format!("dw_settings_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&data_directory);
+        fs::create_dir_all(&data_directory).unwrap();
+        data_directory
     }
 
     #[test]
     fn unlocked_settings_can_be_read_and_written() {
-        let dir = temp_dir("rw");
+        let data_directory = temp_dir("rw");
         let now = Utc::now();
         put(
-            &dir,
+            &data_directory,
             now,
             "planner",
             &json!({ "enabled": true, "todos": [] }),
         )
         .unwrap();
-        fs::create_dir_all(dir.join("blocks")).unwrap();
-        fs::write(dir.join("blocks").join("work.json"), r#"{"processes":{}}"#).unwrap();
-        let snap = snapshot(&dir, now).unwrap();
-        assert_eq!(snap.files["planner"]["enabled"], true);
-        assert!(snap.files["policy"].is_null());
-        assert!(snap.blocks.contains_key("work"));
-        assert!(snap.pending.is_empty() && snap.locked_until.is_none());
+        fs::create_dir_all(data_directory.join("blocks")).unwrap();
+        fs::write(
+            data_directory.join("blocks").join("work.json"),
+            r#"{"processes":{}}"#,
+        )
+        .unwrap();
+        let settings_snapshot = snapshot(&data_directory, now).unwrap();
+        assert_eq!(settings_snapshot.files["planner"]["enabled"], true);
+        assert!(settings_snapshot.files["policy"].is_null());
+        assert!(settings_snapshot.blocks.contains_key("work"));
+        assert!(settings_snapshot.pending.is_empty() && settings_snapshot.locked_until.is_none());
         // Content that would not load is refused, and so are other files.
-        assert!(put(&dir, now, "planner", &json!({ "enabled": "yes" })).is_err());
-        assert!(put(&dir, now, "machine", &json!({})).is_err());
+        assert!(put(
+            &data_directory,
+            now,
+            "planner",
+            &json!({ "enabled": "yes" })
+        )
+        .is_err());
+        assert!(put(&data_directory, now, "machine", &json!({})).is_err());
     }
 
     #[test]
     fn a_lock_can_only_grow() {
-        let dir = temp_dir("lock");
-        let path = dir.join("settings_lock.json");
+        let data_directory = temp_dir("lock");
+        let path = data_directory.join("settings_lock.json");
         let now = Utc::now();
         let lock = extend_lock(&path, now, 48).unwrap();
         assert!(lock.locked(now));
@@ -361,65 +383,114 @@ mod tests {
 
     #[test]
     fn edits_saved_while_locked_wait_for_the_lock_to_end() {
-        let dir = temp_dir("pending");
+        let data_directory = temp_dir("pending");
         let now = Utc::now();
-        put(&dir, now, "planner", &json!({ "life_rules": "no games" })).unwrap();
-        let until = extend_lock(&dir.join("settings_lock.json"), now, 24)
+        put(
+            &data_directory,
+            now,
+            "planner",
+            &json!({ "life_rules": "no games" }),
+        )
+        .unwrap();
+        let until = extend_lock(&data_directory.join("settings_lock.json"), now, 24)
             .unwrap()
             .until
             .unwrap();
 
         // Locked: readable, and an edit is kept aside, not put in force.
-        let outcome = put(&dir, now, "planner", &json!({ "life_rules": "games ok" })).unwrap();
+        let outcome = put(
+            &data_directory,
+            now,
+            "planner",
+            &json!({ "life_rules": "games ok" }),
+        )
+        .unwrap();
         assert_eq!(outcome, PutOutcome::Pending { applies_at: until });
-        let snap = snapshot(&dir, now).unwrap();
-        assert_eq!(snap.files["planner"]["life_rules"], "no games");
-        assert_eq!(snap.pending["planner"].content["life_rules"], "games ok");
-        assert_eq!(snap.locked_until, Some(until));
-        // A bad edit is refused at once, locked or not.
-        assert!(put(&dir, now, "planner", &json!({ "enabled": "yes" })).is_err());
-        // Nothing is applied before the lock ends.
-        assert!(apply_pending(&dir, now + Duration::hours(23)).is_empty());
+        let settings_snapshot = snapshot(&data_directory, now).unwrap();
+        assert_eq!(settings_snapshot.files["planner"]["life_rules"], "no games");
         assert_eq!(
-            snapshot(&dir, now).unwrap().files["planner"]["life_rules"],
+            settings_snapshot.pending["planner"].content["life_rules"],
+            "games ok"
+        );
+        assert_eq!(settings_snapshot.locked_until, Some(until));
+        // A bad edit is refused at once, locked or not.
+        assert!(put(
+            &data_directory,
+            now,
+            "planner",
+            &json!({ "enabled": "yes" })
+        )
+        .is_err());
+        // Nothing is applied before the lock ends.
+        assert!(apply_pending(&data_directory, now + Duration::hours(23)).is_empty());
+        assert_eq!(
+            snapshot(&data_directory, now).unwrap().files["planner"]["life_rules"],
             "no games"
         );
 
         // Once it has ended, the edit takes effect and is no longer pending.
         let later = until + Duration::seconds(1);
-        assert_eq!(apply_pending(&dir, later), vec!["planner".to_string()]);
-        let snap = snapshot(&dir, later).unwrap();
-        assert_eq!(snap.files["planner"]["life_rules"], "games ok");
-        assert!(snap.pending.is_empty());
-        assert!(!dir.join(PENDING_FILE).exists());
+        assert_eq!(
+            apply_pending(&data_directory, later),
+            vec!["planner".to_string()]
+        );
+        let settings_snapshot = snapshot(&data_directory, later).unwrap();
+        assert_eq!(settings_snapshot.files["planner"]["life_rules"], "games ok");
+        assert!(settings_snapshot.pending.is_empty());
+        assert!(!data_directory.join(PENDING_FILE).exists());
     }
 
     #[test]
     fn pending_edits_can_be_discarded_and_are_replaced_by_newer_ones() {
-        let dir = temp_dir("discard");
+        let data_directory = temp_dir("discard");
         let now = Utc::now();
-        extend_lock(&dir.join("settings_lock.json"), now, 1).unwrap();
-        put(&dir, now, "planner", &json!({ "life_rules": "a" })).unwrap();
-        put(&dir, now, "planner", &json!({ "life_rules": "b" })).unwrap();
-        put(&dir, now, "policy", &json!({})).unwrap();
-        let snap = snapshot(&dir, now).unwrap();
-        assert_eq!(snap.pending["planner"].content["life_rules"], "b");
-        discard_pending(&dir, Some("planner")).unwrap();
-        let names: Vec<String> = snapshot(&dir, now).unwrap().pending.into_keys().collect();
+        extend_lock(&data_directory.join("settings_lock.json"), now, 1).unwrap();
+        put(
+            &data_directory,
+            now,
+            "planner",
+            &json!({ "life_rules": "a" }),
+        )
+        .unwrap();
+        put(
+            &data_directory,
+            now,
+            "planner",
+            &json!({ "life_rules": "b" }),
+        )
+        .unwrap();
+        put(&data_directory, now, "policy", &json!({})).unwrap();
+        let settings_snapshot = snapshot(&data_directory, now).unwrap();
+        assert_eq!(
+            settings_snapshot.pending["planner"].content["life_rules"],
+            "b"
+        );
+        discard_pending(&data_directory, Some("planner")).unwrap();
+        let names: Vec<String> = snapshot(&data_directory, now)
+            .unwrap()
+            .pending
+            .into_keys()
+            .collect();
         assert_eq!(names, ["policy"]);
-        assert!(discard_pending(&dir, Some("machine")).is_err());
-        discard_pending(&dir, None).unwrap();
-        assert!(snapshot(&dir, now).unwrap().pending.is_empty());
+        assert!(discard_pending(&data_directory, Some("machine")).is_err());
+        discard_pending(&data_directory, None).unwrap();
+        assert!(snapshot(&data_directory, now).unwrap().pending.is_empty());
 
         // Unlocked, a save takes effect at once and drops an older pending edit.
         let later = now + Duration::hours(2);
         let old = json!({ "planner": { "content": { "life_rules": "old" }, "saved_at": now } });
-        fs::write(dir.join(PENDING_FILE), old.to_string()).unwrap();
-        let outcome = put(&dir, later, "planner", &json!({ "life_rules": "new" })).unwrap();
+        fs::write(data_directory.join(PENDING_FILE), old.to_string()).unwrap();
+        let outcome = put(
+            &data_directory,
+            later,
+            "planner",
+            &json!({ "life_rules": "new" }),
+        )
+        .unwrap();
         assert_eq!(outcome, PutOutcome::Applied);
-        assert!(apply_pending(&dir, later).is_empty());
+        assert!(apply_pending(&data_directory, later).is_empty());
         assert_eq!(
-            snapshot(&dir, later).unwrap().files["planner"]["life_rules"],
+            snapshot(&data_directory, later).unwrap().files["planner"]["life_rules"],
             "new"
         );
     }

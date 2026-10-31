@@ -78,7 +78,7 @@ impl ListConfig {
         let trimmed = name.trim().to_lowercase();
         let file_name = Path::new(&trimmed)
             .file_name()
-            .and_then(|s| s.to_str())
+            .and_then(|os_file_name| os_file_name.to_str())
             .unwrap_or(&trimmed);
         if file_name.ends_with(".exe") {
             file_name.to_string()
@@ -96,20 +96,21 @@ impl ListConfig {
         fn clean(set: &mut BTreeSet<String>) {
             *set = set
                 .iter()
-                .map(|n| ListConfig::normalize_name(n))
-                .filter(|n| !n.is_empty())
+                .map(|name| ListConfig::normalize_name(name))
+                .filter(|name| !name.is_empty())
                 .collect();
         }
         fn fix_lists(blacklist: &mut BTreeSet<String>, whitelist: &mut BTreeSet<String>) {
             clean(blacklist);
             clean(whitelist);
-            blacklist.retain(|n| !ListConfig::is_protected(n));
+            blacklist.retain(|name| !ListConfig::is_protected(name));
             for protected in always_protected() {
                 whitelist.insert((*protected).to_string());
             }
         }
         fix_lists(&mut self.blacklist, &mut self.whitelist);
-        self.strategies.retain(|s| !s.name.trim().is_empty());
+        self.strategies
+            .retain(|strategy| !strategy.name.trim().is_empty());
         for strategy in &mut self.strategies {
             strategy.name = strategy.name.trim().to_string();
             fix_lists(&mut strategy.blacklist, &mut strategy.whitelist);
@@ -117,8 +118,10 @@ impl ListConfig {
     }
 
     pub fn is_protected(name: &str) -> bool {
-        let n = Self::normalize_name(name);
-        always_protected().iter().any(|p| *p == n)
+        let normalized = Self::normalize_name(name);
+        always_protected()
+            .iter()
+            .any(|protected| *protected == normalized)
     }
 
     pub fn should_block(&self, process_name: &str) -> bool {
@@ -186,7 +189,7 @@ impl ListStore {
         Ok(())
     }
 
-    fn mutate<F, T>(&self, f: F) -> Result<T, ListError>
+    fn mutate<F, T>(&self, change: F) -> Result<T, ListError>
     where
         F: FnOnce(&mut ListConfig) -> Result<T, ListError>,
     {
@@ -194,7 +197,7 @@ impl ListStore {
         // matching the file (and what the agent enforces).
         let mut guard = self.inner.write();
         let mut next = guard.clone();
-        let result = f(&mut next)?;
+        let result = change(&mut next)?;
         next.updated_at = Utc::now();
         self.persistence.save(&next)?;
         *guard = next;
@@ -202,9 +205,9 @@ impl ListStore {
     }
 
     pub fn set_mode(&self, mode: ListMode) -> Result<ListConfig, ListError> {
-        self.mutate(|p| {
-            p.mode = mode;
-            Ok(p.clone())
+        self.mutate(|config| {
+            config.mode = mode;
+            Ok(config.clone())
         })
     }
 
@@ -213,25 +216,25 @@ impl ListStore {
         if ListConfig::is_protected(&name) {
             return Err(ListError::Protected(name));
         }
-        self.mutate(|p| {
-            p.blacklist.insert(name);
-            Ok(p.clone())
+        self.mutate(|config| {
+            config.blacklist.insert(name);
+            Ok(config.clone())
         })
     }
 
     pub fn remove_blacklist(&self, name: &str) -> Result<ListConfig, ListError> {
         let name = ListConfig::normalize_name(name);
-        self.mutate(|p| {
-            p.blacklist.remove(&name);
-            Ok(p.clone())
+        self.mutate(|config| {
+            config.blacklist.remove(&name);
+            Ok(config.clone())
         })
     }
 
     pub fn add_whitelist(&self, name: &str) -> Result<ListConfig, ListError> {
         let name = ListConfig::normalize_name(name);
-        self.mutate(|p| {
-            p.whitelist.insert(name);
-            Ok(p.clone())
+        self.mutate(|config| {
+            config.whitelist.insert(name);
+            Ok(config.clone())
         })
     }
 
@@ -240,9 +243,9 @@ impl ListStore {
         if ListConfig::is_protected(&name) {
             return Err(ListError::Protected(name));
         }
-        self.mutate(|p| {
-            p.whitelist.remove(&name);
-            Ok(p.clone())
+        self.mutate(|config| {
+            config.whitelist.remove(&name);
+            Ok(config.clone())
         })
     }
 
@@ -256,9 +259,9 @@ impl ListStore {
             }
             next.insert(name);
         }
-        self.mutate(|p| {
-            p.blacklist = next;
-            Ok(p.clone())
+        self.mutate(|config| {
+            config.blacklist = next;
+            Ok(config.clone())
         })
     }
 
@@ -274,9 +277,9 @@ impl ListStore {
         for protected in always_protected() {
             next.insert((*protected).to_string());
         }
-        self.mutate(|p| {
-            p.whitelist = next;
-            Ok(p.clone())
+        self.mutate(|config| {
+            config.whitelist = next;
+            Ok(config.clone())
         })
     }
 
@@ -285,46 +288,50 @@ impl ListStore {
         if name.is_empty() {
             return Err(ListError::EmptyStrategyName);
         }
-        self.mutate(|p| {
+        self.mutate(|config| {
             let strategy = Strategy {
                 name: name.clone(),
-                mode: p.mode,
-                blacklist: p.blacklist.clone(),
-                whitelist: p.whitelist.clone(),
+                mode: config.mode,
+                blacklist: config.blacklist.clone(),
+                whitelist: config.whitelist.clone(),
             };
-            if let Some(existing) = p.strategies.iter_mut().find(|s| s.name == name) {
+            if let Some(existing) = config
+                .strategies
+                .iter_mut()
+                .find(|candidate| candidate.name == name)
+            {
                 *existing = strategy;
             } else {
-                p.strategies.push(strategy);
+                config.strategies.push(strategy);
             }
-            Ok(p.clone())
+            Ok(config.clone())
         })
     }
 
     pub fn apply_strategy(&self, name: &str) -> Result<ListConfig, ListError> {
         let name = name.trim().to_string();
-        self.mutate(|p| {
-            let strategy = p
+        self.mutate(|config| {
+            let strategy = config
                 .strategies
                 .iter()
-                .find(|s| s.name == name)
+                .find(|candidate| candidate.name == name)
                 .cloned()
                 .ok_or_else(|| ListError::StrategyNotFound(name.clone()))?;
-            p.mode = strategy.mode;
-            p.blacklist = strategy.blacklist;
-            p.whitelist = strategy.whitelist;
+            config.mode = strategy.mode;
+            config.blacklist = strategy.blacklist;
+            config.whitelist = strategy.whitelist;
             for protected in always_protected() {
-                p.whitelist.insert((*protected).to_string());
+                config.whitelist.insert((*protected).to_string());
             }
-            Ok(p.clone())
+            Ok(config.clone())
         })
     }
 
-    pub fn replace_config(&self, mut config: ListConfig) -> Result<ListConfig, ListError> {
-        config.sanitize();
-        self.mutate(|p| {
-            *p = config;
-            Ok(p.clone())
+    pub fn replace_config(&self, mut new_config: ListConfig) -> Result<ListConfig, ListError> {
+        new_config.sanitize();
+        self.mutate(|config| {
+            *config = new_config;
+            Ok(config.clone())
         })
     }
 }

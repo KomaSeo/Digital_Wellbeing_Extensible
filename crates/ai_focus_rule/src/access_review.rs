@@ -66,9 +66,9 @@ pub type ReviewerProvider =
 /// Claude reviewer using the API key and model from the AI focus settings.
 pub fn claude_reviewer_provider() -> ReviewerProvider {
     Arc::new(|config: &AiFocusConfig| {
-        let key = config.resolve_api_key().ok_or(JudgeError::NoApiKey)?;
+        let api_key = config.resolve_api_key().ok_or(JudgeError::NoApiKey)?;
         Ok(Arc::new(ClaudeAccessReviewer {
-            client: ClaudeClient::new(key, config.model.clone()),
+            client: ClaudeClient::new(api_key, config.model.clone()),
         }) as Arc<dyn AccessReviewer>)
     })
 }
@@ -79,12 +79,12 @@ pub struct ClaudeAccessReviewer {
 }
 
 impl AccessReviewer for ClaudeAccessReviewer {
-    fn review(&self, r: &AccessRequest) -> Result<AccessDecision, JudgeError> {
+    fn review(&self, request: &AccessRequest) -> Result<AccessDecision, JudgeError> {
         // `medium`: rare call that weighs a purpose against a task.
         self.client.structured(
             "access review",
             ACCESS_PROMPT,
-            vec![text_block(request_text(r))],
+            vec![text_block(request_text(request))],
             decision_schema(),
             "medium",
         )
@@ -107,23 +107,23 @@ fn decision_schema() -> Value {
     })
 }
 
-fn request_text(r: &AccessRequest) -> String {
-    let duration = match r.duration {
+fn request_text(request: &AccessRequest) -> String {
+    let duration = match request.duration {
         GrantDuration::Minutes { minutes } => format!("{minutes} minutes"),
         GrantDuration::Permanent => "permanent (until revoked)".into(),
     };
-    let recent: Vec<String> = r
+    let recent: Vec<String> = request
         .recent
         .iter()
         .take(10)
-        .map(|e| {
+        .map(|entry| {
             format!(
                 "- {} | {} | purpose \"{}\" | {:?} | {}",
-                e.at.format("%Y-%m-%d %H:%M UTC"),
-                e.target.label(),
-                e.purpose,
-                e.event,
-                e.message
+                entry.at.format("%Y-%m-%d %H:%M UTC"),
+                entry.target.label(),
+                entry.purpose,
+                entry.event,
+                entry.message
             )
         })
         .collect();
@@ -131,18 +131,18 @@ fn request_text(r: &AccessRequest) -> String {
         "Declared task:\n{task}\n\nRequested: {target}\nFor: {duration}\nPurpose: \"{purpose}\"\n\n\
          Earlier access events (newest first):\n{recent}\n\n\
          Recent foreground activity (oldest first):\n{history}",
-        task = r.task.trim(),
-        target = r.target.label(),
-        purpose = r.purpose.trim(),
+        task = request.task.trim(),
+        target = request.target.label(),
+        purpose = request.purpose.trim(),
         recent = if recent.is_empty() {
             "(none)".into()
         } else {
             recent.join("\n")
         },
-        history = if r.history.is_empty() {
+        history = if request.history.is_empty() {
             "(none)"
         } else {
-            r.history
+            request.history
         },
     )
 }
@@ -194,56 +194,59 @@ mod tests {
 
     #[test]
     fn rejected_grants_nothing() {
-        let c = AiFocusConfig::default();
+        let config = AiFocusConfig::default();
         let asked = GrantDuration::Minutes { minutes: 30 };
-        assert_eq!(granted_length(asked, &decision(false, 30), &c), None);
+        assert_eq!(granted_length(asked, &decision(false, 30), &config), None);
     }
 
     #[test]
     fn ai_may_shorten_but_not_lengthen_or_make_permanent() {
-        let c = AiFocusConfig::default();
+        let config = AiFocusConfig::default();
         let asked = GrantDuration::Minutes { minutes: 30 };
         assert_eq!(
-            granted_length(asked, &decision(true, 10), &c),
+            granted_length(asked, &decision(true, 10), &config),
             Some(Some(10))
         );
         assert_eq!(
-            granted_length(asked, &decision(true, 90), &c),
+            granted_length(asked, &decision(true, 90), &config),
             Some(Some(30))
         );
         assert_eq!(
-            granted_length(asked, &decision(true, 0), &c),
+            granted_length(asked, &decision(true, 0), &config),
             Some(Some(30))
         );
     }
 
     #[test]
     fn admin_cap_applies() {
-        let c = AiFocusConfig {
+        let config = AiFocusConfig {
             max_grant_minutes: 60,
             ..Default::default()
         };
         let asked = GrantDuration::Minutes { minutes: 600 };
         assert_eq!(
-            granted_length(asked, &decision(true, 0), &c),
+            granted_length(asked, &decision(true, 0), &config),
             Some(Some(60))
         );
     }
 
     #[test]
     fn permanent_needs_request_and_admin_permission() {
-        let mut c = AiFocusConfig::default();
+        let mut config = AiFocusConfig::default();
         let asked = GrantDuration::Permanent;
-        assert_eq!(granted_length(asked, &decision(true, 0), &c), Some(None));
+        assert_eq!(
+            granted_length(asked, &decision(true, 0), &config),
+            Some(None)
+        );
         // The AI downgraded it to a timed grant.
         assert_eq!(
-            granted_length(asked, &decision(true, 45), &c),
+            granted_length(asked, &decision(true, 45), &config),
             Some(Some(45))
         );
-        c.allow_permanent_grants = false;
+        config.allow_permanent_grants = false;
         assert_eq!(
-            granted_length(asked, &decision(true, 0), &c),
-            Some(Some(c.max_grant_minutes))
+            granted_length(asked, &decision(true, 0), &config),
+            Some(Some(config.max_grant_minutes))
         );
     }
 }

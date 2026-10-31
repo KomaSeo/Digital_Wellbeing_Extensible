@@ -31,28 +31,30 @@ pub struct UserSession {
 /// (another user switched in; its programs keep running).
 /// Session 0 (services) and the empty login-screen session are skipped.
 pub fn user_sessions() -> Vec<UserSession> {
-    let mut out = Vec::new();
+    let mut sessions = Vec::new();
     let mut list: *mut WTS_SESSION_INFOW = null_mut();
     let mut count = 0u32;
     // SAFETY: WTS allocates `list` (count entries); we free it with WTSFreeMemory.
     unsafe {
         if WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut list, &mut count) == 0 {
-            return out;
+            return sessions;
         }
-        for info in std::slice::from_raw_parts(list, count as usize) {
-            if info.SessionId == 0 || (info.State != WTSActive && info.State != WTSDisconnected) {
+        for session_info in std::slice::from_raw_parts(list, count as usize) {
+            if session_info.SessionId == 0
+                || (session_info.State != WTSActive && session_info.State != WTSDisconnected)
+            {
                 continue;
             }
-            if let Some(user) = machine::session::session_user(info.SessionId) {
-                out.push(UserSession {
-                    id: info.SessionId,
+            if let Some(user) = machine::session::session_user(session_info.SessionId) {
+                sessions.push(UserSession {
+                    id: session_info.SessionId,
                     user,
                 });
             }
         }
         WTSFreeMemory(list as *mut c_void);
     }
-    out
+    sessions
 }
 
 /// Responsibility: Own the handle of a process the service started: report whether it runs,
@@ -77,8 +79,8 @@ impl Child {
     pub fn exit_code(&self) -> Option<u32> {
         let mut code = 0u32;
         // SAFETY: valid handle owned by self; `code` is a valid out-pointer.
-        let ok = unsafe { GetExitCodeProcess(self.process, &mut code) } != 0;
-        (ok && !self.is_running()).then_some(code)
+        let queried = unsafe { GetExitCodeProcess(self.process, &mut code) } != 0;
+        (queried && !self.is_running()).then_some(code)
     }
 
     pub fn kill(&self) {
@@ -98,33 +100,33 @@ impl Drop for Child {
     }
 }
 
-/// Start `exe args` in `session` with a copy of *our* (SYSTEM) token.
+/// Start `executable arguments` in `session` with a copy of *our* (SYSTEM) token.
 ///
 /// The trick: duplicate the service's token, change only its session id
 /// (needs SeTcbPrivilege, which SYSTEM has), and start the process on that
 /// session's interactive desktop `winsta0\default`. The result runs as SYSTEM
 /// but lives in the user's session, so it can see and act on their desktop.
-pub fn spawn_in_session(session: u32, exe: &Path, args: &str) -> io::Result<Child> {
+pub fn spawn_in_session(session: u32, executable: &Path, arguments: &str) -> io::Result<Child> {
     let mut desktop = wide("winsta0\\default");
-    let mut command_line = wide(&format!("\"{}\" {args}", exe.display()));
+    let mut command_line = wide(&format!("\"{}\" {arguments}", executable.display()));
     // SAFETY: every handle opened here is closed before returning; pointers
     // passed to Win32 point at live, NUL-terminated buffers.
     unsafe {
-        let mut own: HANDLE = null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut own) == 0 {
+        let mut own_token: HANDLE = null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut own_token) == 0 {
             return Err(io::Error::last_os_error());
         }
         let mut token: HANDLE = null_mut();
-        let ok = DuplicateTokenEx(
-            own,
+        let duplicated = DuplicateTokenEx(
+            own_token,
             TOKEN_ALL_ACCESS,
             null_mut(),
             SecurityIdentification,
             TokenPrimary,
             &mut token,
         );
-        CloseHandle(own);
-        if ok == 0 {
+        CloseHandle(own_token);
+        if duplicated == 0 {
             return Err(io::Error::last_os_error());
         }
         let result = (|| {
@@ -140,7 +142,7 @@ pub fn spawn_in_session(session: u32, exe: &Path, args: &str) -> io::Result<Chil
             let mut startup: STARTUPINFOW = zeroed();
             startup.cb = size_of::<STARTUPINFOW>() as u32;
             startup.lpDesktop = desktop.as_mut_ptr();
-            let mut info: PROCESS_INFORMATION = zeroed();
+            let mut process_info: PROCESS_INFORMATION = zeroed();
             if CreateProcessAsUserW(
                 token,
                 std::ptr::null(),
@@ -152,15 +154,15 @@ pub fn spawn_in_session(session: u32, exe: &Path, args: &str) -> io::Result<Chil
                 null_mut(),
                 std::ptr::null(),
                 &startup,
-                &mut info,
+                &mut process_info,
             ) == 0
             {
                 return Err(io::Error::last_os_error());
             }
-            CloseHandle(info.hThread);
+            CloseHandle(process_info.hThread);
             Ok(Child {
-                process: info.hProcess,
-                pid: info.dwProcessId,
+                process: process_info.hProcess,
+                pid: process_info.dwProcessId,
             })
         })();
         CloseHandle(token);
@@ -168,6 +170,6 @@ pub fn spawn_in_session(session: u32, exe: &Path, args: &str) -> io::Result<Chil
     }
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
 }

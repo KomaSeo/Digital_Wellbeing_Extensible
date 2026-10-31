@@ -26,7 +26,11 @@ impl Draft {
         let deadlines = config
             .todos
             .iter()
-            .map(|t| t.deadline.map(|d| d.to_string()).unwrap_or_default())
+            .map(|todo| {
+                todo.deadline
+                    .map(|date| date.to_string())
+                    .unwrap_or_default()
+            })
             .collect();
         Self {
             config,
@@ -80,11 +84,14 @@ impl Panel for PlannerAdminUi {
     }
 
     fn ui(&self, ui: &mut egui::Ui) {
-        let mut s = self.ui.lock();
-        if s.state_read.is_none_or(|t| t.elapsed() > STATE_REFRESH) {
+        let mut ui_state = self.ui.lock();
+        if ui_state
+            .state_read
+            .is_none_or(|last_read| last_read.elapsed() > STATE_REFRESH)
+        {
             let _ = self.state.reload();
-            s.state = self.state.get();
-            s.state_read = Some(Instant::now());
+            ui_state.state = self.state.get();
+            ui_state.state_read = Some(Instant::now());
         }
         let UiState {
             draft,
@@ -92,7 +99,7 @@ impl Panel for PlannerAdminUi {
             message,
             state,
             ..
-        } = &mut *s;
+        } = &mut *ui_state;
         let draft = draft.get_or_insert_with(|| Draft::from(self.config.get()));
 
         ui.label(
@@ -126,8 +133,8 @@ impl Panel for PlannerAdminUi {
 
         // --- list -------------------------------------------------------------
         ui.heading("To-do list");
-        let mut remove = None;
-        for (i, (todo, deadline)) in draft
+        let mut row_to_remove = None;
+        for (row, (todo, deadline)) in draft
             .config
             .todos
             .iter_mut()
@@ -144,7 +151,7 @@ impl Panel for PlannerAdminUi {
                         .add(egui::TextEdit::singleline(&mut todo.title).desired_width(320.0))
                         .changed();
                     if ui.small_button("✕").clicked() {
-                        remove = Some(i);
+                        row_to_remove = Some(row);
                     }
                 });
                 ui.horizontal(|ui| {
@@ -185,16 +192,16 @@ impl Panel for PlannerAdminUi {
                     .changed();
             });
         }
-        if let Some(i) = remove {
-            draft.config.todos.remove(i);
-            draft.deadlines.remove(i);
+        if let Some(row) = row_to_remove {
+            draft.config.todos.remove(row);
+            draft.deadlines.remove(row);
             draft.dirty = true;
         }
         // --- proposed by the user --------------------------------------------
         let proposed: Vec<&TodoItem> = state
             .proposed
             .iter()
-            .filter(|t| !state.is_done(&t.id) && !draft.config.dismissed.contains(&t.id))
+            .filter(|todo| !state.is_done(&todo.id) && !draft.config.dismissed.contains(&todo.id))
             .collect();
         if !proposed.is_empty() {
             ui.label("Proposed by the user (approved by the AI against the life rules):");
@@ -226,12 +233,12 @@ impl Panel for PlannerAdminUi {
             let save = ui.add_enabled(draft.dirty, egui::Button::new("Save"));
             if save.clicked() {
                 let config = draft.config.clone();
-                *message = match self.config.update(|c| *c = config) {
+                *message = match self.config.update(|stored| *stored = config) {
                     Ok(()) => {
                         draft.dirty = false;
                         "Saved. The agent picks it up within a few seconds.".into()
                     }
-                    Err(err) => format!("save failed: {err}"),
+                    Err(error) => format!("save failed: {error}"),
                 };
             }
             if ui
@@ -249,13 +256,13 @@ impl Panel for PlannerAdminUi {
         ui.separator();
         ui.heading("Current assignment");
         match &state.assignment {
-            Some(a) => {
+            Some(assignment) => {
                 ui.label(format!(
                     "{}  (since {})",
-                    a.task,
-                    a.at.with_timezone(&Local).format("%m-%d %H:%M")
+                    assignment.task,
+                    assignment.at.with_timezone(&Local).format("%m-%d %H:%M")
                 ));
-                ui.small(&a.why);
+                ui.small(&assignment.why);
             }
             None => {
                 ui.label("None.");
@@ -265,16 +272,25 @@ impl Panel for PlannerAdminUi {
             if state.proposals.is_empty() {
                 ui.label("None yet.");
             }
-            for p in state.proposals.iter().rev() {
-                let (color, verdict) = if p.approved {
+            for proposal in state.proposals.iter().rev() {
+                let (color, verdict) = if proposal.approved {
                     (egui::Color32::from_rgb(80, 170, 90), "approved")
                 } else {
                     (egui::Color32::from_rgb(200, 80, 80), "rejected")
                 };
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(p.at.with_timezone(&Local).format("%m-%d %H:%M").to_string());
+                    ui.label(
+                        proposal
+                            .at
+                            .with_timezone(&Local)
+                            .format("%m-%d %H:%M")
+                            .to_string(),
+                    );
                     ui.colored_label(color, verdict);
-                    ui.label(format!("\"{}\" via {} → {}", p.item.title, p.via, p.reply));
+                    ui.label(format!(
+                        "\"{}\" via {} → {}",
+                        proposal.item.title, proposal.via, proposal.reply
+                    ));
                 });
             }
         });
@@ -286,20 +302,26 @@ impl Panel for PlannerAdminUi {
                 if state.requests.is_empty() {
                     ui.label("None yet.");
                 }
-                for r in state.requests.iter().rev() {
-                    let (color, verdict) = if r.approved {
+                for change in state.requests.iter().rev() {
+                    let (color, verdict) = if change.approved {
                         (egui::Color32::from_rgb(80, 170, 90), "approved")
                     } else {
                         (egui::Color32::from_rgb(200, 80, 80), "rejected")
                     };
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(r.at.with_timezone(&Local).format("%m-%d %H:%M").to_string());
+                        ui.label(
+                            change
+                                .at
+                                .with_timezone(&Local)
+                                .format("%m-%d %H:%M")
+                                .to_string(),
+                        );
                         ui.colored_label(color, verdict);
                         ui.label(format!(
                             "{} — \"{}\" → {}",
-                            request_label(&r.request),
-                            r.reason,
-                            r.reply
+                            request_label(&change.request),
+                            change.reason,
+                            change.reply
                         ));
                     });
                 }

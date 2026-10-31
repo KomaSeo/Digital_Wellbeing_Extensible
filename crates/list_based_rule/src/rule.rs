@@ -39,7 +39,7 @@ impl ListBasedRule {
     fn set_status(ui_state: &mut ListUiState, result: Result<(), String>) {
         match result {
             Ok(()) => ui_state.status.clear(),
-            Err(err) => ui_state.status = err,
+            Err(message) => ui_state.status = message,
         }
     }
 }
@@ -65,8 +65,8 @@ impl BlockRule for ListBasedRule {
         };
         processes
             .iter()
-            .filter(|p| config.should_block(&p.name))
-            .map(|p| BlockEvent::new(p, reason))
+            .filter(|process| config.should_block(&process.name))
+            .map(|process| BlockEvent::new(process, reason))
             .collect()
     }
 }
@@ -107,7 +107,7 @@ impl RuleUi for ListBasedRule {
                     .store
                     .add_blacklist(&name)
                     .map(|_| ())
-                    .map_err(|e| e.to_string());
+                    .map_err(|error| error.to_string());
                 Self::set_status(&mut state, result);
                 state.name_input.clear();
             }
@@ -117,7 +117,7 @@ impl RuleUi for ListBasedRule {
                     .store
                     .add_whitelist(&name)
                     .map(|_| ())
-                    .map_err(|e| e.to_string());
+                    .map_err(|error| error.to_string());
                 Self::set_status(&mut state, result);
                 state.name_input.clear();
             }
@@ -191,7 +191,7 @@ impl RuleUi for ListBasedRule {
                     .store
                     .save_strategy(&name)
                     .map(|_| ())
-                    .map_err(|e| e.to_string());
+                    .map_err(|error| error.to_string());
                 Self::set_status(&mut state, result);
             }
             if ui.button("Apply").clicked() && !state.strategy_input.trim().is_empty() {
@@ -200,20 +200,20 @@ impl RuleUi for ListBasedRule {
                     .store
                     .apply_strategy(&name)
                     .map(|_| ())
-                    .map_err(|e| e.to_string());
+                    .map_err(|error| error.to_string());
                 Self::set_status(&mut state, result);
             }
         });
-        for s in &config.strategies {
+        for strategy in &config.strategies {
             ui.horizontal(|ui| {
-                ui.label(&s.name);
+                ui.label(&strategy.name);
                 if ui.small_button("load").clicked() {
-                    state.strategy_input = s.name.clone();
+                    state.strategy_input = strategy.name.clone();
                     let result = self
                         .store
-                        .apply_strategy(&s.name)
+                        .apply_strategy(&strategy.name)
                         .map(|_| ())
-                        .map_err(|e| e.to_string());
+                        .map_err(|error| error.to_string());
                     Self::set_status(&mut state, result);
                 }
             });

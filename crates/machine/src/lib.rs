@@ -34,8 +34,10 @@ use std::path::PathBuf;
 /// running the agent by hand on Linux); on Windows only an administrator can set the
 /// environment of the SYSTEM service, so a user cannot move it.
 pub fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("DW_DATA_DIR").filter(|d| !d.is_empty()) {
-        return PathBuf::from(dir);
+    if let Some(override_directory) =
+        std::env::var_os("DW_DATA_DIR").filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(override_directory);
     }
     if cfg!(windows) {
         let base = std::env::var_os("ProgramData")
@@ -75,9 +77,9 @@ pub fn grants_path_for(user: &str) -> PathBuf {
     let safe: String = bare_user(user)
         .to_lowercase()
         .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || "-_.".contains(c) {
-                c
+        .map(|character| {
+            if character.is_alphanumeric() || "-_.".contains(character) {
+                character
             } else {
                 '_'
             }
@@ -146,12 +148,12 @@ impl MachineConfig {
     pub fn save(&self) -> std::io::Result<()> {
         fs::create_dir_all(data_dir())?;
         let path = machine_config_path();
-        let tmp = path.with_extension("json.tmp");
+        let temp_path = path.with_extension("json.tmp");
         fs::write(
-            &tmp,
+            &temp_path,
             serde_json::to_string_pretty(self).map_err(std::io::Error::other)?,
         )?;
-        fs::rename(&tmp, &path)
+        fs::rename(&temp_path, &path)
     }
 
     pub fn manages(&self, user: &str) -> bool {
@@ -159,7 +161,7 @@ impl MachineConfig {
             || self
                 .managed_users
                 .iter()
-                .any(|u| bare_user(u).eq_ignore_ascii_case(bare_user(user)))
+                .any(|managed| bare_user(managed).eq_ignore_ascii_case(bare_user(user)))
     }
 }
 
@@ -169,18 +171,18 @@ mod tests {
 
     #[test]
     fn empty_list_manages_everyone() {
-        let c = MachineConfig::default();
-        assert!(c.manages("anyone"));
-        let c = MachineConfig {
+        let config = MachineConfig::default();
+        assert!(config.manages("anyone"));
+        let config = MachineConfig {
             managed_users: vec!["Work".into()],
         };
-        assert!(c.manages("work"));
-        assert!(!c.manages("Admin"));
+        assert!(config.manages("work"));
+        assert!(!config.manages("Admin"));
         // `--manage PC\Work` must still match the bare name the session reports.
-        let c = MachineConfig {
+        let config = MachineConfig {
             managed_users: vec!["DESKTOP-1\\Work".into()],
         };
-        assert!(c.manages("work"));
+        assert!(config.manages("work"));
         assert!(
             grants_path_for("PC\\Work").ends_with("grants/work.json")
                 || grants_path_for("PC\\Work").ends_with("grants\\work.json")

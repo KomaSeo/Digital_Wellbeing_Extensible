@@ -40,7 +40,7 @@ pub fn check_lock_delays_edits(session: u32) {
     let discarded = call_value(session, "settings_get", json!({})).unwrap();
     assert!(discarded["pending"]
         .as_object()
-        .is_none_or(|p| p.is_empty()));
+        .is_none_or(|pending| pending.is_empty()));
     assert_eq!(discarded["files"]["planner"], in_force);
 }
 
@@ -55,11 +55,11 @@ pub fn wait_for<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> Opt
     None
 }
 
-/// A stand-in for the Claude Messages API on `addr` (e.g. `127.0.0.1:0`): windows whose title
+/// A stand-in for the Claude Messages API on `address` (e.g. `127.0.0.1:0`): windows whose title
 /// mentions cats are off task, everything else is on task, and every proposal is approved.
 /// Returns its base URL and a call counter.
-pub fn fake_claude(addr: &str) -> (String, Arc<AtomicUsize>) {
-    let listener = TcpListener::bind(addr).unwrap();
+pub fn fake_claude(address: &str) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind(address).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&calls);
@@ -73,8 +73,9 @@ pub fn fake_claude(addr: &str) -> (String, Arc<AtomicUsize>) {
                 if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
                     break;
                 }
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap_or(0);
+                if let Some(length_text) = line.to_ascii_lowercase().strip_prefix("content-length:")
+                {
+                    length = length_text.trim().parse().unwrap_or(0);
                 }
             }
             let mut body = vec![0; length];
@@ -106,11 +107,11 @@ fn answer(request: &Value) -> Value {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|b| b["text"].as_str())
+        .filter_map(|block| block["text"].as_str())
         .collect();
     if system.contains("focus checker") {
-        let verdict = |t: &str| {
-            if t.contains("cats") {
+        let verdict = |window_text: &str| {
+            if window_text.contains("cats") {
                 "off_task"
             } else {
                 "on_task"
@@ -118,18 +119,18 @@ fn answer(request: &Value) -> Value {
         };
         let front = text
             .lines()
-            .find(|l| l.starts_with("In front right now:"))
+            .find(|line| line.starts_with("In front right now:"))
             .unwrap_or_default();
         let others: Vec<Value> = text
             .lines()
-            .filter_map(|l| {
-                let id = l
+            .filter_map(|line| {
+                let id = line
                     .strip_prefix('[')?
                     .split(']')
                     .next()?
                     .parse::<u64>()
                     .ok()?;
-                Some(json!({ "id": id, "verdict": verdict(l), "reason": "test" }))
+                Some(json!({ "id": id, "verdict": verdict(line), "reason": "test" }))
             })
             .collect();
         json!({ "verdict": verdict(front), "reason": "test", "channel": "", "others": others })

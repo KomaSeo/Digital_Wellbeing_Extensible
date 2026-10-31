@@ -23,11 +23,11 @@ pub fn is_youtube(title: &str) -> bool {
 /// counters: `(3) Funny cats - YouTube - Google Chrome` -> `funny cats`. The home page
 /// (`YouTube`) gives `youtube`.
 pub fn page_name(title: &str) -> String {
-    let t = strip_browser_noise(title);
-    let page = t
+    let title_without_noise = strip_browser_noise(title);
+    let page = title_without_noise
         .strip_suffix(" - YouTube")
-        .or_else(|| t.strip_suffix(" - youtube"))
-        .unwrap_or(t);
+        .or_else(|| title_without_noise.strip_suffix(" - youtube"))
+        .unwrap_or(title_without_noise);
     clean(page)
 }
 
@@ -56,8 +56,8 @@ pub fn page_key(process_name: &str, title: &str) -> String {
     )
 }
 
-fn clean(s: &str) -> String {
-    s.split_whitespace()
+fn clean(text: &str) -> String {
+    text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .chars()

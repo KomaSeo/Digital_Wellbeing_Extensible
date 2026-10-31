@@ -153,8 +153,8 @@ Claude를 부른다 → 다시 잠금을 잡고 결과를 넣는다" 순서로 �
 
 ```rust
 fn foreground(&self) -> Option<Foreground>;                  // 지금 맨 앞 창을 알려 준다
-fn screenshot(&self, fg: &Foreground) -> Option<Screenshot>; // 그 창이 있는 모니터 화면을 캡처한다
-fn close_active_tab(&self, fg: &Foreground) -> bool;         // 그 창에 Ctrl+W를 보낸다
+fn screenshot(&self, foreground: &Foreground) -> Option<Screenshot>; // 그 창이 있는 모니터 화면을 캡처한다
+fn close_active_tab(&self, foreground: &Foreground) -> bool;         // 그 창에 Ctrl+W를 보낸다
 ```
 
 - `Foreground.window`에는 Windows의 창 핸들(HWND)이 들어 있습니다. 하지만 코드는 이 값을 `isize`(정수)로 저장합니다.
@@ -170,7 +170,7 @@ fn close_active_tab(&self, fg: &Foreground) -> bool;         // 그 창에 Ctrl+
 
 **`foreground()` — 맨 앞 창 알아내기**
 1. 코드는 `GetForegroundWindow()`로 사용자가 보고 있는 창을 얻습니다. 잠금 화면이나 UAC 화면이 떠 있으면 이 함수는 NULL을 돌려주고, 코드는 `None`을 돌려줍니다.
-2. 코드는 `GetWindowThreadProcessId(hwnd, &mut pid)`로 그 창을 소유한 프로그램의 PID를 얻습니다.
+2. 코드는 `GetWindowThreadProcessId(window_handle, &mut process_id)`로 그 창을 소유한 프로그램의 PID를 얻습니다.
 3. 코드는 `GetWindowTextW`로 창 제목을 읽습니다(최대 512자). 브라우저의 창 제목에는 **현재 탭의 제목**이 들어 있습니다.
    그래서 모니터는 브라우저 확장 프로그램 없이도 사용자가 어떤 사이트를 보는지 대략 알 수 있습니다.
 4. 코드는 `sysinfo` 라이브러리로 PID를 프로그램 이름으로 바꿉니다. 코드는 `System` 객체를 `Mutex` 안에 넣어 재사용하고,
@@ -681,7 +681,7 @@ YouTube 탭의 질문에 채널 안내가 들어가고 응답 형식에 `channel
    - 사용자가 채널 이름으로 접근을 요청해서 승인을 받으면, 그 채널의 차단은 풀립니다. 하지만 허용은 탭 제목의 단어로 창을 찾는데 탭 제목에는 채널 이름이 없으므로, 그 채널의 영상은 허용된 창으로 인식되지 않고 일반 창처럼 판정됩니다.
    - 다음 단계로, 주소창에서 주소(URL)를 읽고 YouTube oEmbed로 채널 이름을 알아내면 이 한계들이 대부분 사라집니다. 이 방법은 AI를 부르지 않으므로 비용도 들지 않습니다.
 8. **비공개 설정은 앱 단위로만 됩니다.** 은행 사이트처럼 "이 탭만 캡처하지 말라"는 기능은 아직 없습니다(TODO의 backlog 항목).
-   개발자는 `run_judge`에서 창 제목(`fg.title`)에 특정 단어가 있으면 캡처하지 않게 하는 방식으로 쉽게 이 기능을 추가할 수 있습니다.
+   개발자는 `run_judge`에서 창 제목(`foreground.title`)에 특정 단어가 있으면 캡처하지 않게 하는 방식으로 쉽게 이 기능을 추가할 수 있습니다.
 
 ---
 

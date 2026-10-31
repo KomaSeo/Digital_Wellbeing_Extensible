@@ -16,13 +16,13 @@ pub trait RuleUi: BlockRule {
 
 /// Add a system font with Korean glyphs as a fallback (egui's bundled fonts
 /// have none, so Hangul would render as boxes). No-op if none is found.
-pub fn install_system_fonts(ctx: &egui::Context) {
+pub fn install_system_fonts(context: &egui::Context) {
     const CANDIDATES: &[&str] = &[
         r"C:\Windows\Fonts\malgun.ttf",
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
         "/System/Library/Fonts/AppleSDGothicNeo.ttc",
     ];
-    let Some(bytes) = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) else {
+    let Some(bytes) = CANDIDATES.iter().find_map(|path| std::fs::read(path).ok()) else {
         return;
     };
     let mut fonts = egui::FontDefinitions::default();
@@ -37,7 +37,7 @@ pub fn install_system_fonts(ctx: &egui::Context) {
             .or_default()
             .push("system-cjk".into());
     }
-    ctx.set_fonts(fonts);
+    context.set_fonts(fonts);
 }
 
 /// Responsibility: Draw a tab that is not tied to a block rule.

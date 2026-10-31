@@ -71,32 +71,34 @@ impl ToolRouter {
 
     pub fn handle_value(&self, request: Value) -> Value {
         match serde_json::from_value::<RpcRequest>(request) {
-            Ok(req) => serde_json::to_value(self.handle(req)).unwrap_or_else(|e| {
-                json!({
-                    "id": null,
-                    "error": { "code": -32603, "message": e.to_string() }
+            Ok(rpc_request) => {
+                serde_json::to_value(self.handle(rpc_request)).unwrap_or_else(|error| {
+                    json!({
+                        "id": null,
+                        "error": { "code": -32603, "message": error.to_string() }
+                    })
                 })
-            }),
-            Err(err) => json!({
+            }
+            Err(error) => json!({
                 "id": null,
-                "error": { "code": -32700, "message": format!("parse error: {err}") }
+                "error": { "code": -32700, "message": format!("parse error: {error}") }
             }),
         }
     }
 
-    pub fn handle(&self, req: RpcRequest) -> RpcResponse {
-        match self.dispatch(&req.method, req.params) {
+    pub fn handle(&self, request: RpcRequest) -> RpcResponse {
+        match self.dispatch(&request.method, request.params) {
             Ok(result) => RpcResponse {
-                id: req.id,
+                id: request.id,
                 result: Some(result),
                 error: None,
             },
-            Err(err) => RpcResponse {
-                id: req.id,
+            Err(error) => RpcResponse {
+                id: request.id,
                 result: None,
                 error: Some(RpcErrorBody {
                     code: -32000,
-                    message: err.to_string(),
+                    message: error.to_string(),
                 }),
             },
         }
@@ -150,7 +152,7 @@ impl ToolRouter {
             "list_blocks" => {
                 let limit = params
                     .get("limit")
-                    .and_then(|v| v.as_u64())
+                    .and_then(|value| value.as_u64())
                     .unwrap_or(50) as usize;
                 let list = self.enforcer.recent_blocks(limit);
                 Ok(serde_json::to_value(list).map_err(to_tool)?)
@@ -180,31 +182,31 @@ impl ToolRouter {
     }
 }
 
-fn to_tool<E: std::fmt::Display>(err: E) -> ToolError {
-    ToolError::Message(err.to_string())
+fn to_tool<E: std::fmt::Display>(error: E) -> ToolError {
+    ToolError::Message(error.to_string())
 }
 
 fn require_name(params: &Value) -> Result<String, ToolError> {
     params
         .get("name")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .and_then(|value| value.as_str())
+        .map(|name| name.to_string())
         .ok_or_else(|| ToolError::Message("params.name (string) required".into()))
 }
 
 fn require_names(params: &Value) -> Result<Vec<String>, ToolError> {
-    let arr = params
+    let name_values = params
         .get("names")
-        .and_then(|v| v.as_array())
+        .and_then(|value| value.as_array())
         .ok_or_else(|| ToolError::Message("params.names (string array) required".into()))?;
-    let mut names = Vec::with_capacity(arr.len());
-    for item in arr {
-        let Some(s) = item.as_str() else {
+    let mut names = Vec::with_capacity(name_values.len());
+    for item in name_values {
+        let Some(name) = item.as_str() else {
             return Err(ToolError::Message(
                 "params.names must be an array of strings".into(),
             ));
         };
-        names.push(s.to_string());
+        names.push(name.to_string());
     }
     Ok(names)
 }
@@ -212,7 +214,7 @@ fn require_names(params: &Value) -> Result<Vec<String>, ToolError> {
 fn parse_mode(params: &Value) -> Result<ListMode, ToolError> {
     let raw = params
         .get("mode")
-        .and_then(|v| v.as_str())
+        .and_then(|value| value.as_str())
         .ok_or_else(|| ToolError::Message("params.mode required".into()))?;
     match raw.to_lowercase().as_str() {
         "blacklist" => Ok(ListMode::Blacklist),
@@ -241,30 +243,30 @@ pub fn spawn_tcp(router: ToolRouter, port: u16) -> std::io::Result<()> {
 }
 
 fn serve(router: ToolRouter, listener: TcpListener) {
-    let active = Arc::new(AtomicUsize::new(0));
+    let active_connections = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(stream) => stream,
-            Err(err) => {
-                tracing::warn!("accept error: {err}");
+            Err(error) => {
+                tracing::warn!("accept error: {error}");
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
         };
-        if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-            active.fetch_sub(1, Ordering::SeqCst);
+        if active_connections.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            active_connections.fetch_sub(1, Ordering::SeqCst);
             let _ = reply(&mut stream, &error_value(-32000, "server busy"));
             continue;
         }
-        let (router, active_conn) = (router.clone(), Arc::clone(&active));
+        let (router, thread_active_connections) = (router.clone(), Arc::clone(&active_connections));
         let spawned = thread::Builder::new().spawn(move || {
-            if let Err(err) = handle_stream(&router, &mut stream) {
-                tracing::debug!("client error: {err}");
+            if let Err(error) = handle_stream(&router, &mut stream) {
+                tracing::debug!("client error: {error}");
             }
-            active_conn.fetch_sub(1, Ordering::SeqCst);
+            thread_active_connections.fetch_sub(1, Ordering::SeqCst);
         });
         if spawned.is_err() {
-            active.fetch_sub(1, Ordering::SeqCst);
+            active_connections.fetch_sub(1, Ordering::SeqCst);
         }
     }
 }
@@ -274,29 +276,37 @@ fn serve(router: ToolRouter, listener: TcpListener) {
 fn handle_stream(router: &ToolRouter, stream: &mut TcpStream) -> std::io::Result<()> {
     let deadline = Instant::now() + REQUEST_DEADLINE;
     stream.set_write_timeout(Some(REQUEST_DEADLINE))?;
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 4096];
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        let time_left = deadline.saturating_duration_since(Instant::now());
+        if time_left.is_zero() {
             return reply(stream, &error_value(-32700, "request timed out"));
         }
-        stream.set_read_timeout(Some(left))?;
-        let n = match stream.read(&mut tmp) {
-            Ok(n) => n,
-            Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+        stream.set_read_timeout(Some(time_left))?;
+        let bytes_read = match stream.read(&mut chunk) {
+            Ok(count) => count,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 return reply(stream, &error_value(-32700, "request timed out"));
             }
-            Err(err) => return Err(err),
+            Err(error) => return Err(error),
         };
-        buf.extend_from_slice(&tmp[..n]);
-        match serde_json::Deserializer::from_slice(&buf).into_iter::<Value>().next() {
+        buffer.extend_from_slice(&chunk[..bytes_read]);
+        match serde_json::Deserializer::from_slice(&buffer)
+            .into_iter::<Value>()
+            .next()
+        {
             Some(Ok(value)) => return reply(stream, &router.handle_value(value)),
-            Some(Err(err)) if !err.is_eof() => {
-                return reply(stream, &error_value(-32700, &format!("parse error: {err}")));
+            Some(Err(error)) if !error.is_eof() => {
+                return reply(
+                    stream,
+                    &error_value(-32700, &format!("parse error: {error}")),
+                );
             }
-            _ if n == 0 => return reply(stream, &error_value(-32700, "incomplete request")),
-            _ if buf.len() > MAX_REQUEST_BYTES => {
+            _ if bytes_read == 0 => {
+                return reply(stream, &error_value(-32700, "incomplete request"))
+            }
+            _ if buffer.len() > MAX_REQUEST_BYTES => {
                 return reply(stream, &error_value(-32600, "request too large"));
             }
             _ => {}
@@ -331,29 +341,33 @@ mod tests {
     }
 
     fn send(port: u16, payload: &[u8], half_close: bool) -> Value {
-        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        s.write_all(payload).unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.write_all(payload).unwrap();
         if half_close {
-            s.shutdown(Shutdown::Write).unwrap();
+            stream.shutdown(Shutdown::Write).unwrap();
         }
         let mut line = String::new();
-        BufReader::new(s).read_line(&mut line).unwrap();
+        BufReader::new(stream).read_line(&mut line).unwrap();
         serde_json::from_str(&line).unwrap()
     }
 
     #[test]
     fn answers_like_the_powershell_client_expects() {
         let port = server();
-        let v = send(port, br#"{"id":1,"method":"ping","params":{}}"#, true);
-        assert_eq!(v["id"], 1);
-        assert!(v.get("error").is_none());
+        let response = send(port, br#"{"id":1,"method":"ping","params":{}}"#, true);
+        assert_eq!(response["id"], 1);
+        assert!(response.get("error").is_none());
     }
 
     #[test]
     fn two_requests_in_one_write_do_not_hang() {
         let port = server();
-        let v = send(port, br#"{"id":1,"method":"ping"}{"id":2,"method":"ping"}"#, false);
-        assert_eq!(v["id"], 1);
+        let response = send(
+            port,
+            br#"{"id":1,"method":"ping"}{"id":2,"method":"ping"}"#,
+            false,
+        );
+        assert_eq!(response["id"], 1);
     }
 
     #[test]

@@ -107,7 +107,7 @@ pub struct Grant {
 
 impl Grant {
     pub fn is_active(&self, now: DateTime<Utc>, config: &AiFocusConfig) -> bool {
-        !config.revoked_grants.contains(&self.id) && self.until.is_none_or(|u| now < u)
+        !config.revoked_grants.contains(&self.id) && self.until.is_none_or(|until| now < until)
     }
 }
 
@@ -168,9 +168,9 @@ impl GrantState {
         process_name: &str,
         title: &str,
     ) -> Option<&Grant> {
-        self.grants
-            .iter()
-            .find(|g| g.is_active(now, config) && g.target.matches(config, process_name, title))
+        self.grants.iter().find(|grant| {
+            grant.is_active(now, config) && grant.target.matches(config, process_name, title)
+        })
     }
 }
 
@@ -185,24 +185,24 @@ mod tests {
 
     #[test]
     fn app_target_matches_by_normalized_name() {
-        let t = GrantTarget::App {
+        let target = GrantTarget::App {
             process: "Spotify".into(),
         }
         .normalized();
-        assert!(t.matches(&config(), "spotify.exe", "whatever"));
-        assert!(t.matches_block_key("spotify.exe"));
-        assert!(!t.matches(&config(), "steam.exe", "Spotify"));
+        assert!(target.matches(&config(), "spotify.exe", "whatever"));
+        assert!(target.matches_block_key("spotify.exe"));
+        assert!(!target.matches(&config(), "steam.exe", "Spotify"));
     }
 
     #[test]
     fn site_target_matches_browser_titles_only() {
-        let t = GrantTarget::Site {
+        let target = GrantTarget::Site {
             keyword: "YouTube".into(),
         };
-        assert!(t.matches(&config(), "chrome.exe", "Rust 강의 - youtube"));
-        assert!(!t.matches(&config(), "notepad.exe", "youtube notes"));
-        assert!(t.matches_block_key("chrome.exe|Rust 강의 - YouTube"));
-        assert!(!t.matches_block_key("steam.exe"));
+        assert!(target.matches(&config(), "chrome.exe", "Rust 강의 - youtube"));
+        assert!(!target.matches(&config(), "notepad.exe", "youtube notes"));
+        assert!(target.matches_block_key("chrome.exe|Rust 강의 - YouTube"));
+        assert!(!target.matches_block_key("steam.exe"));
     }
 
     #[test]
@@ -218,33 +218,33 @@ mod tests {
             granted_at: now,
             task: "thesis".into(),
         };
-        let mut c = config();
-        assert!(grant.is_active(now, &c));
-        assert!(!grant.is_active(now + Duration::minutes(11), &c));
-        c.revoked_grants.insert("g1".into());
-        assert!(!grant.is_active(now, &c));
+        let mut settings = config();
+        assert!(grant.is_active(now, &settings));
+        assert!(!grant.is_active(now + Duration::minutes(11), &settings));
+        settings.revoked_grants.insert("g1".into());
+        assert!(!grant.is_active(now, &settings));
 
         let state = GrantState {
             grants: vec![grant],
             log: VecDeque::new(),
         };
         assert!(state.covering(now, &config(), "spotify.exe", "").is_some());
-        assert!(state.covering(now, &c, "spotify.exe", "").is_none());
+        assert!(state.covering(now, &settings, "spotify.exe", "").is_none());
     }
 
     #[test]
     fn json_shapes() {
-        let v = serde_json::to_value(GrantTarget::Site {
+        let json_value = serde_json::to_value(GrantTarget::Site {
             keyword: "docs.rs".into(),
         })
         .unwrap();
         assert_eq!(
-            v,
+            json_value,
             serde_json::json!({ "kind": "site", "keyword": "docs.rs" })
         );
-        let d: GrantDuration =
+        let duration: GrantDuration =
             serde_json::from_value(serde_json::json!({ "kind": "minutes", "minutes": 30 }))
                 .unwrap();
-        assert_eq!(d, GrantDuration::Minutes { minutes: 30 });
+        assert_eq!(duration, GrantDuration::Minutes { minutes: 30 });
     }
 }

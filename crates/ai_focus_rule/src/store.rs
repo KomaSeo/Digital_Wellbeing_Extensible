@@ -42,10 +42,10 @@ impl<T: Clone + Default + Serialize + DeserializeOwned> JsonStore<T> {
     pub fn open(path: PathBuf, writable: bool) -> io::Result<Self> {
         let value = match read(&path) {
             Ok(value) => value.unwrap_or_default(),
-            Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                 let aside = path.with_extension("json.corrupt");
                 warn!(
-                    "{} is unreadable ({err}); moved to {} and starting empty",
+                    "{} is unreadable ({error}); moved to {} and starting empty",
                     path.display(),
                     aside.display()
                 );
@@ -54,7 +54,7 @@ impl<T: Clone + Default + Serialize + DeserializeOwned> JsonStore<T> {
                 }
                 T::default()
             }
-            Err(err) => return Err(err),
+            Err(error) => return Err(error),
         };
         Ok(Self {
             path: Some(path),
@@ -81,12 +81,12 @@ impl<T: Clone + Default + Serialize + DeserializeOwned> JsonStore<T> {
         self.inner.read().clone()
     }
 
-    /// Apply `f` to a copy, save the copy, then make it current. If saving
+    /// Apply `change` to a copy, save the copy, then make it current. If saving
     /// fails, memory is unchanged, so memory and file never disagree.
-    pub fn update<R>(&self, f: impl FnOnce(&mut T) -> R) -> io::Result<R> {
+    pub fn update<R>(&self, change: impl FnOnce(&mut T) -> R) -> io::Result<R> {
         let _writer = self.writer.lock();
         let mut next = self.get();
-        let result = f(&mut next);
+        let result = change(&mut next);
         if let Some(path) = self.path.as_ref().filter(|_| self.writable) {
             write(path, &next)?;
         }
@@ -112,7 +112,7 @@ fn read<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     let raw = fs::read_to_string(path)?;
     serde_json::from_str(&raw)
         .map(Some)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// Temp file + rename, so a reader never sees a half-written file. The temp
@@ -124,22 +124,22 @@ fn write<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let raw = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
-    let tmp = path.with_extension(format!(
+    let temporary_path = path.with_extension(format!(
         "json.{}.{}.tmp",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     let written = (|| {
-        let mut file = fs::File::create(&tmp)?;
+        let mut file = fs::File::create(&temporary_path)?;
         file.write_all(raw.as_bytes())?;
         // On disk before the rename, so a crash cannot leave an empty file.
         file.sync_all()
     })();
-    match written.and_then(|_| fs::rename(&tmp, path)) {
+    match written.and_then(|_| fs::rename(&temporary_path, path)) {
         Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = fs::remove_file(&tmp);
-            Err(err)
+        Err(error) => {
+            let _ = fs::remove_file(&temporary_path);
+            Err(error)
         }
     }
 }
@@ -156,30 +156,31 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("dw_store_{name}_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        let directory =
+            std::env::temp_dir().join(format!("dw_store_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        directory
     }
 
     #[test]
     fn corrupt_file_is_moved_aside() {
-        let dir = temp_dir("corrupt");
-        let path = dir.join("state.json");
+        let directory = temp_dir("corrupt");
+        let path = directory.join("state.json");
         fs::write(&path, "{ not json").unwrap();
         let store = JsonStore::<Counter>::open(path.clone(), true).unwrap();
         assert_eq!(store.get(), Counter::default());
         assert!(path.with_extension("json.corrupt").exists());
-        store.update(|c| c.n = 1).unwrap();
+        store.update(|counter| counter.n = 1).unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains("\"n\": 1"));
-        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
     fn failed_save_leaves_memory_unchanged() {
-        let dir = temp_dir("fail");
+        let directory = temp_dir("fail");
         // A directory where the file should be: rename onto it fails.
-        let path = dir.join("state.json");
+        let path = directory.join("state.json");
         fs::create_dir_all(path.join("blocker")).unwrap();
         let store = JsonStore::<Counter> {
             path: Some(path),
@@ -187,24 +188,24 @@ mod tests {
             inner: Arc::new(RwLock::new(Counter::default())),
             writer: Arc::new(Mutex::new(())),
         };
-        assert!(store.update(|c| c.n = 7).is_err());
+        assert!(store.update(|counter| counter.n = 7).is_err());
         assert_eq!(store.get().n, 0);
-        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
     fn concurrent_writers_never_leave_a_bad_file() {
-        let dir = temp_dir("race");
-        let path = dir.join("state.json");
-        let a = JsonStore::<Counter>::open(path.clone(), true).unwrap();
+        let directory = temp_dir("race");
+        let path = directory.join("state.json");
+        let first_store = JsonStore::<Counter>::open(path.clone(), true).unwrap();
         // A second store on the same file, like a second agent process.
-        let b = JsonStore::<Counter>::open(path.clone(), true).unwrap();
-        let writers: Vec<_> = [a, b]
+        let second_store = JsonStore::<Counter>::open(path.clone(), true).unwrap();
+        let writers: Vec<_> = [first_store, second_store]
             .into_iter()
-            .map(|s| {
+            .map(|store| {
                 thread::spawn(move || {
                     for _ in 0..200 {
-                        s.update(|c| c.n += 1).unwrap();
+                        store.update(|counter| counter.n += 1).unwrap();
                     }
                 })
             })
@@ -214,9 +215,9 @@ mod tests {
                 serde_json::from_str::<Counter>(&raw).expect("file is always valid JSON");
             }
         }
-        for w in writers {
-            w.join().unwrap();
+        for writer in writers {
+            writer.join().unwrap();
         }
-        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
     }
 }

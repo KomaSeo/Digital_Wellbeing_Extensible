@@ -52,8 +52,8 @@ pub struct Screenshot {
 pub trait Desktop: Send + Sync {
     fn foreground(&self) -> Option<Foreground>;
 
-    /// Capture the monitor that shows `fg`.
-    fn screenshot(&self, fg: &Foreground) -> Option<Screenshot>;
+    /// Capture the monitor that shows `foreground`.
+    fn screenshot(&self, foreground: &Foreground) -> Option<Screenshot>;
 
     /// Process names owning visible, non-minimized top-level windows. A
     /// screenshot shows the whole monitor, so a private app does not have to be
@@ -61,7 +61,7 @@ pub trait Desktop: Send + Sync {
     fn visible_processes(&self) -> Vec<String>;
 
     /// Close the active tab of a browser window, if it is still in front.
-    fn close_active_tab(&self, fg: &Foreground) -> bool;
+    fn close_active_tab(&self, foreground: &Foreground) -> bool;
 
     /// Every open top-level window a user would call "a program" or "a browser window":
     /// visible (minimized included), titled, not a tool window, dialog or hidden Store app.
@@ -87,7 +87,7 @@ pub fn native() -> Box<dyn Desktop> {
     }
     #[cfg(target_os = "linux")]
     {
-        if std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) {
+        if std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty()) {
             return Box::new(x11::X11Desktop::new());
         }
         Box::new(Unsupported)
@@ -109,7 +109,7 @@ impl Desktop for Unsupported {
         None
     }
 
-    fn screenshot(&self, _fg: &Foreground) -> Option<Screenshot> {
+    fn screenshot(&self, _foreground: &Foreground) -> Option<Screenshot> {
         None
     }
 
@@ -117,7 +117,7 @@ impl Desktop for Unsupported {
         Vec::new()
     }
 
-    fn close_active_tab(&self, _fg: &Foreground) -> bool {
+    fn close_active_tab(&self, _foreground: &Foreground) -> bool {
         false
     }
 }

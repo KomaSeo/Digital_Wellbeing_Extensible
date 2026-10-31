@@ -174,7 +174,9 @@ pub struct PlannerState {
 
 impl PlannerState {
     pub fn is_done(&self, todo_id: &str) -> bool {
-        self.done.iter().any(|d| d.todo_id == todo_id)
+        self.done
+            .iter()
+            .any(|done_record| done_record.todo_id == todo_id)
     }
 }
 

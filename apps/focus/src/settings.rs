@@ -126,13 +126,16 @@ impl SettingsTab {
         let names: Vec<String> = loaded
             .rule_uis
             .iter()
-            .map(|r| r.name().to_string())
-            .chain(loaded.panels.iter().map(|p| p.name().to_string()))
+            .map(|rule_ui| rule_ui.name().to_string())
+            .chain(loaded.panels.iter().map(|panel| panel.name().to_string()))
             .collect();
         ui.horizontal(|ui| {
-            for (i, name) in names.iter().enumerate() {
-                if ui.selectable_label(loaded.selected == i, name).clicked() {
-                    loaded.selected = i;
+            for (index, name) in names.iter().enumerate() {
+                if ui
+                    .selectable_label(loaded.selected == index, name)
+                    .clicked()
+                {
+                    loaded.selected = index;
                 }
             }
         });
@@ -152,7 +155,7 @@ impl SettingsTab {
                 self.loaded = Some(loaded);
                 self.error.clear();
             }
-            Err(err) => self.error = err,
+            Err(error) => self.error = error,
         }
     }
 
@@ -166,10 +169,10 @@ impl SettingsTab {
         if pending.is_empty() {
             return false;
         }
-        let when = locked_until.map_or("in a few seconds".to_string(), |u| {
+        let when = locked_until.map_or("in a few seconds".to_string(), |until| {
             format!(
                 "when the lock ends ({})",
-                u.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                until.with_timezone(&Local).format("%Y-%m-%d %H:%M")
             )
         });
         ui.strong(format!("Saved changes that take effect {when}:"));
@@ -177,8 +180,8 @@ impl SettingsTab {
         for (name, edit) in &pending {
             let file = EDITABLE
                 .iter()
-                .find(|(n, _)| n == name)
-                .map_or(name.as_str(), |(_, f)| f);
+                .find(|(editable_name, _)| editable_name == name)
+                .map_or(name.as_str(), |(_, file_name)| file_name);
             ui.horizontal(|ui| {
                 ui.label(format!(
                     "{file} (saved {})",
@@ -187,7 +190,7 @@ impl SettingsTab {
                 if ui.small_button("Discard").clicked() {
                     match call_value(self.session, "settings_discard", json!({ "name": name })) {
                         Ok(_) => discarded = true,
-                        Err(err) => self.error = err,
+                        Err(error) => self.error = error,
                     }
                 }
             });
@@ -223,7 +226,7 @@ impl SettingsTab {
                     self.confirm = false;
                     self.error.clear();
                 }
-                Err(err) => self.error = err,
+                Err(error) => self.error = error,
             }
         }
     }
@@ -232,51 +235,53 @@ impl SettingsTab {
     fn load(&self) -> Result<Loaded, String> {
         let snapshot: SettingsSnapshot =
             serde_json::from_value(call_value(self.session, "settings_get", json!({}))?)
-                .map_err(|e| e.to_string())?;
-        let dir = mirror_dir();
-        let _ = fs::remove_dir_all(&dir);
+                .map_err(|error| error.to_string())?;
+        let mirror_directory = mirror_dir();
+        let _ = fs::remove_dir_all(&mirror_directory);
         let mut synced = HashMap::new();
         for (name, file) in EDITABLE {
             // A pending edit is what the user saw last: go on editing from it.
             let current = snapshot
                 .pending
                 .get(name)
-                .map(|p| &p.content)
+                .map(|pending_file| &pending_file.content)
                 .or_else(|| snapshot.files.get(name));
-            let bytes = match current.filter(|v| !v.is_null()) {
+            let bytes = match current.filter(|value| !value.is_null()) {
                 Some(value) => {
-                    let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-                    write(&dir.join(file), &bytes)?;
+                    let bytes =
+                        serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+                    write(&mirror_directory.join(file), &bytes)?;
                     Some(bytes)
                 }
                 None => None,
             };
             synced.insert(name, bytes);
         }
-        write_read_only(&dir, &snapshot)?;
+        write_read_only(&mirror_directory, &snapshot)?;
 
         let list_store = ListStore::with_persistence(Arc::new(FileListPersistence::new(
-            dir.join("policy.json"),
+            mirror_directory.join("policy.json"),
         )))
-        .map_err(|e| e.to_string())?;
-        let ai_store = AiFocusStore::open(dir.join("ai_focus.json")).map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
+        let ai_store = AiFocusStore::open(mirror_directory.join("ai_focus.json"))
+            .map_err(|error| error.to_string())?;
         let monitor = native_monitor(ai_store, JsonStore::in_memory(GrantState::default()), None);
         let ai_rule = AiFocusRuleHandle::settings_only(
             monitor,
-            dir.join("grants"),
-            dir.join("blocks"),
-            dir.join("usage"),
+            mirror_directory.join("grants"),
+            mirror_directory.join("blocks"),
+            mirror_directory.join("usage"),
         );
         let planner = PlannerAdminUi::new(
-            JsonStore::<PlannerConfig>::open(dir.join("planner.json"), true)
-                .map_err(|e| e.to_string())?,
-            JsonStore::<PlannerState>::open(dir.join("planner_state.json"), false)
-                .map_err(|e| e.to_string())?,
+            JsonStore::<PlannerConfig>::open(mirror_directory.join("planner.json"), true)
+                .map_err(|error| error.to_string())?,
+            JsonStore::<PlannerState>::open(mirror_directory.join("planner_state.json"), false)
+                .map_err(|error| error.to_string())?,
         );
         // Opening a store may write its file back with defaults filled in; that is the same
         // settings, not an edit to send (while locked it would show as a pending change).
         for (name, file) in EDITABLE {
-            if let Ok(bytes) = fs::read(dir.join(file)) {
+            if let Ok(bytes) = fs::read(mirror_directory.join(file)) {
                 synced.insert(name, Some(bytes));
             }
         }
@@ -288,7 +293,7 @@ impl SettingsTab {
             message: Mutex::new(String::new()),
         });
         let (session, thread_sync) = (self.session, Arc::clone(&sync));
-        thread::spawn(move || sync_loop(session, &dir, &thread_sync));
+        thread::spawn(move || sync_loop(session, &mirror_directory, &thread_sync));
         Ok(Loaded {
             rule_uis: vec![ListBasedRuleHandle::new(list_store).ui(), ai_rule.ui()],
             panels: vec![Arc::new(planner)],
@@ -300,11 +305,11 @@ impl SettingsTab {
 
 /// Every second: send edited files to the agent. Every few seconds: refresh the read-only
 /// views. Stops when the tab drops the panels.
-fn sync_loop(session: u32, dir: &Path, sync: &Sync) {
+fn sync_loop(session: u32, mirror_directory: &Path, sync: &Sync) {
     let mut tick = 0u32;
     while !sync.stop.load(Ordering::SeqCst) {
         for (name, file) in EDITABLE {
-            let Ok(bytes) = fs::read(dir.join(file)) else {
+            let Ok(bytes) = fs::read(mirror_directory.join(file)) else {
                 continue;
             };
             if sync.synced.lock().get(name).cloned().flatten().as_ref() == Some(&bytes) {
@@ -320,8 +325,9 @@ fn sync_loop(session: u32, dir: &Path, sync: &Sync) {
                 json!({ "name": name, "content": content }),
             );
             let at = Local::now().format("%H:%M:%S");
-            let outcome = result
-                .and_then(|v| serde_json::from_value::<PutOutcome>(v).map_err(|e| e.to_string()));
+            let outcome = result.and_then(|reply| {
+                serde_json::from_value::<PutOutcome>(reply).map_err(|error| error.to_string())
+            });
             *sync.message.lock() = match outcome {
                 Ok(outcome) => {
                     sync.synced.lock().insert(name, Some(bytes));
@@ -342,14 +348,14 @@ fn sync_loop(session: u32, dir: &Path, sync: &Sync) {
                         }
                     }
                 }
-                Err(err) => format!("{file} was not saved: {err}"),
+                Err(error) => format!("{file} was not saved: {error}"),
             };
         }
         if tick.is_multiple_of(3) {
             if let Ok(snapshot) = call_value(session, "settings_get", json!({}))
-                .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+                .and_then(|reply| serde_json::from_value(reply).map_err(|error| error.to_string()))
             {
-                let _ = write_read_only(dir, &snapshot);
+                let _ = write_read_only(mirror_directory, &snapshot);
                 *sync.pending.lock() = snapshot.pending;
             }
         }
@@ -359,11 +365,11 @@ fn sync_loop(session: u32, dir: &Path, sync: &Sync) {
 }
 
 /// The views the panels read but never write: planner state, grants, blocks.
-fn write_read_only(dir: &Path, snapshot: &SettingsSnapshot) -> Result<(), String> {
-    let json = |v: &Value| serde_json::to_vec_pretty(v).map_err(|e| e.to_string());
+fn write_read_only(mirror_directory: &Path, snapshot: &SettingsSnapshot) -> Result<(), String> {
+    let json = |value: &Value| serde_json::to_vec_pretty(value).map_err(|error| error.to_string());
     if !snapshot.planner_state.is_null() {
         write(
-            &dir.join("planner_state.json"),
+            &mirror_directory.join("planner_state.json"),
             &json(&snapshot.planner_state)?,
         )?;
     }
@@ -372,9 +378,9 @@ fn write_read_only(dir: &Path, snapshot: &SettingsSnapshot) -> Result<(), String
         ("blocks", &snapshot.blocks),
         ("usage", &snapshot.usage),
     ] {
-        let folder = dir.join(folder);
+        let folder = mirror_directory.join(folder);
         let _ = fs::remove_dir_all(&folder);
-        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
         for (user, value) in files {
             write(&folder.join(format!("{user}.json")), &json(value)?)?;
         }
@@ -383,12 +389,13 @@ fn write_read_only(dir: &Path, snapshot: &SettingsSnapshot) -> Result<(), String
 }
 
 fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    machine::settings::write_atomic(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
+    machine::settings::write_atomic(path, bytes)
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// `%LOCALAPPDATA%\DigitalWellbeing\...\settings_mirror`: this user's private copy.
 fn mirror_dir() -> PathBuf {
     directories::ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
-        .map(|d| d.data_local_dir().join("settings_mirror"))
+        .map(|project_dirs| project_dirs.data_local_dir().join("settings_mirror"))
         .unwrap_or_else(|| std::env::temp_dir().join("DigitalWellbeing_settings_mirror"))
 }

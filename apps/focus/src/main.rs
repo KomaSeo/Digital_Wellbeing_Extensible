@@ -55,9 +55,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         TITLE,
         options,
-        Box::new(|cc| {
-            rule_ui::install_system_fonts(&cc.egui_ctx);
-            Ok(Box::new(FocusApp::new(cc.egui_ctx.clone())))
+        Box::new(|creation_context| {
+            rule_ui::install_system_fonts(&creation_context.egui_ctx);
+            Ok(Box::new(FocusApp::new(creation_context.egui_ctx.clone())))
         }),
     )
 }
@@ -124,7 +124,7 @@ struct FocusApp {
     open_settings: Arc<AtomicBool>,
     settings: settings::SettingsTab,
     session: u32,
-    ctx: egui::Context,
+    context: egui::Context,
     shared: Arc<Mutex<Shared>>,
     /// A request is in flight (the AI may take tens of seconds).
     pending: Arc<AtomicBool>,
@@ -142,20 +142,20 @@ struct FocusApp {
 }
 
 impl FocusApp {
-    fn new(ctx: egui::Context) -> Self {
+    fn new(context: egui::Context) -> Self {
         let session = current_session_id();
         let shared = Arc::new(Mutex::new(Shared::default()));
         // Poll off the UI thread so a missing agent never freezes the window.
         let poll = Arc::clone(&shared);
-        let poll_ctx = ctx.clone();
+        let poll_context = context.clone();
         thread::spawn(move || loop {
             let result = call(session, "status", json!({}));
             poll.lock().status = Some(result);
-            poll_ctx.request_repaint();
+            poll_context.request_repaint();
             thread::sleep(POLL);
         });
         let open_settings = Arc::new(AtomicBool::new(false));
-        let (tray_ctx, tray_flag) = (ctx.clone(), Arc::clone(&open_settings));
+        let (tray_context, tray_flag) = (context.clone(), Arc::clone(&open_settings));
         tray::start(move |command| {
             if command == tray::TrayCommand::Settings {
                 tray_flag.store(true, Ordering::SeqCst);
@@ -163,15 +163,15 @@ impl FocusApp {
             // The window may be hidden, and a hidden window draws no frames that
             // could process a viewport command: show it directly, then sync egui.
             tray::show_window(TITLE);
-            tray_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            tray_ctx.request_repaint();
+            tray_context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            tray_context.request_repaint();
         });
         Self {
             tab: Tab::Todo,
             open_settings,
             settings: settings::SettingsTab::new(session),
             session,
-            ctx,
+            context,
             shared,
             pending: Arc::new(AtomicBool::new(false)),
             task_input: String::new(),
@@ -190,35 +190,35 @@ impl FocusApp {
         if self.pending.swap(true, Ordering::SeqCst) {
             return;
         }
-        let (session, shared, pending, ctx) = (
+        let (session, shared, pending, context) = (
             self.session,
             Arc::clone(&self.shared),
             Arc::clone(&self.pending),
-            self.ctx.clone(),
+            self.context.clone(),
         );
         thread::spawn(move || {
             let result = call(session, method, params);
             {
-                let mut s = shared.lock();
+                let mut shared_state = shared.lock();
                 match result {
                     Ok(status) => {
-                        s.message.clear();
+                        shared_state.message.clear();
                         if status.last_decision.is_some() {
-                            s.decision = status.last_decision.clone();
+                            shared_state.decision = status.last_decision.clone();
                         }
                         if status.last_access.is_some() {
-                            s.access = status.last_access.clone();
+                            shared_state.access = status.last_access.clone();
                         }
                         if status.last_proposal.is_some() {
-                            s.proposal = status.last_proposal.clone();
+                            shared_state.proposal = status.last_proposal.clone();
                         }
-                        s.status = Some(Ok(status));
+                        shared_state.status = Some(Ok(status));
                     }
-                    Err(err) => s.message = err,
+                    Err(error) => shared_state.message = error,
                 }
             }
             pending.store(false, Ordering::SeqCst);
-            ctx.request_repaint();
+            context.request_repaint();
         });
     }
 
@@ -271,8 +271,12 @@ impl FocusApp {
         });
         ui.horizontal(|ui| {
             ui.label("for");
-            for m in [15, 30, 60, 120] {
-                ui.radio_value(&mut self.access.minutes, Some(m), format!("{m} min"));
+            for minutes in [15, 30, 60, 120] {
+                ui.radio_value(
+                    &mut self.access.minutes,
+                    Some(minutes),
+                    format!("{minutes} min"),
+                );
             }
             ui.radio_value(&mut self.access.minutes, None, "permanently");
         });
@@ -323,18 +327,27 @@ impl FocusApp {
         if !status.grants.is_empty() {
             ui.label("Access you have now (still observed):");
         }
-        for g in &status.grants {
-            let until = g
+        for grant in &status.grants {
+            let until = grant
                 .until
-                .map(|u| u.with_timezone(&Local).format("until %H:%M").to_string())
+                .map(|expiry| {
+                    expiry
+                        .with_timezone(&Local)
+                        .format("until %H:%M")
+                        .to_string()
+                })
                 .unwrap_or_else(|| "permanent".into());
-            ui.label(format!("• {} ({until}) — {}", g.target.label(), g.purpose));
+            ui.label(format!(
+                "• {} ({until}) — {}",
+                grant.target.label(),
+                grant.purpose
+            ));
         }
         if let Some(revoked) = status
             .grant_log
             .iter()
-            .find(|e| e.event == GrantEvent::RevokedForMisuse)
-            .filter(|e| Utc::now() - e.at < chrono::Duration::minutes(30))
+            .find(|entry| entry.event == GrantEvent::RevokedForMisuse)
+            .filter(|entry| Utc::now() - entry.at < chrono::Duration::minutes(30))
         {
             ui.colored_label(
                 RED,
@@ -409,15 +422,15 @@ impl FocusApp {
                     self.proposal_title.clear();
                 }
             });
-            if let Some(p) = &self.shared.lock().proposal {
-                let (color, label) = if p.approved {
+            if let Some(proposal) = &self.shared.lock().proposal {
+                let (color, label) = if proposal.approved {
                     (GREEN, "added")
                 } else {
                     (RED, "rejected")
                 };
                 ui.horizontal_wrapped(|ui| {
                     ui.colored_label(color, label);
-                    ui.label(format!("\"{}\": {}", p.item.title, p.reply));
+                    ui.label(format!("\"{}\": {}", proposal.item.title, proposal.reply));
                 });
             }
         });
@@ -465,20 +478,24 @@ impl FocusApp {
         let others: Vec<_> = planner
             .open_todos
             .iter()
-            .filter(|t| assignment.todo_id.as_deref() != Some(t.id.as_str()))
+            .filter(|todo| assignment.todo_id.as_deref() != Some(todo.id.as_str()))
             .collect();
         match self.choice {
             ChangeChoice::OtherTodo => {
                 let selected = others
                     .iter()
-                    .find(|t| Some(&t.id) == self.other_todo.as_ref())
-                    .map(|t| t.title.clone())
+                    .find(|todo| Some(&todo.id) == self.other_todo.as_ref())
+                    .map(|todo| todo.title.clone())
                     .unwrap_or_else(|| "choose…".into());
                 egui::ComboBox::from_id_salt("other_todo")
                     .selected_text(selected)
                     .show_ui(ui, |ui| {
-                        for t in &others {
-                            ui.selectable_value(&mut self.other_todo, Some(t.id.clone()), &t.title);
+                        for todo in &others {
+                            ui.selectable_value(
+                                &mut self.other_todo,
+                                Some(todo.id.clone()),
+                                &todo.title,
+                            );
                         }
                     });
             }
@@ -503,10 +520,10 @@ impl FocusApp {
             ChangeChoice::OtherTodo => self
                 .other_todo
                 .clone()
-                .filter(|id| others.iter().any(|t| &t.id == id))
+                .filter(|id| others.iter().any(|todo| &todo.id == id))
                 .map(|todo_id| ChangeKind::SwitchTodo { todo_id }),
             ChangeChoice::Free => Some(self.free_task.trim().to_string())
-                .filter(|t| !t.is_empty())
+                .filter(|task| !task.is_empty())
                 .map(|task| ChangeKind::SwitchFree { task }),
         };
         let ready = idle && request.is_some() && self.reason.trim().chars().count() >= 4;
@@ -528,15 +545,15 @@ impl FocusApp {
                 ui.label("the AI is deciding…");
             }
         });
-        if let Some(d) = &self.shared.lock().decision {
-            let (color, label) = if d.approved {
+        if let Some(decision) = &self.shared.lock().decision {
+            let (color, label) = if decision.approved {
                 (GREEN, "approved")
             } else {
                 (RED, "rejected")
             };
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(color, label);
-                ui.label(&d.reply);
+                ui.label(&decision.reply);
             });
         }
 
@@ -549,12 +566,12 @@ fn open_todos_ui(ui: &mut egui::Ui, planner: &PlannerStatus) {
     ui.collapsing(
         format!("Open to-dos ({})", planner.open_todos.len()),
         |ui| {
-            for t in &planner.open_todos {
-                let deadline = t
+            for todo in &planner.open_todos {
+                let deadline = todo
                     .deadline
-                    .map(|d| format!(" · due {d}"))
+                    .map(|due_date| format!(" · due {due_date}"))
                     .unwrap_or_default();
-                ui.label(format!("P{} {}{deadline}", t.priority, t.title));
+                ui.label(format!("P{} {}{deadline}", todo.priority, todo.title));
             }
         },
     );
@@ -564,7 +581,7 @@ impl FocusApp {
     /// The To-do tab: what to do now, and how to change it.
     fn todo_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
         ui.heading("Focus session");
-        match status.planner.clone().filter(|p| p.active) {
+        match status.planner.clone().filter(|planner| planner.active) {
             Some(planner) => self.planner_ui(ui, status, &planner),
             None => self.free_mode_ui(ui, status),
         }
@@ -596,8 +613,8 @@ impl FocusApp {
         } else {
             ui.label("No focus session: the AI checks nothing (blocking rules still apply).");
         }
-        if let Some(err) = &status.last_error {
-            ui.colored_label(RED, format!("AI check failed: {err}"));
+        if let Some(error) = &status.last_error {
+            ui.colored_label(RED, format!("AI check failed: {error}"));
         }
         if let Some(cost) = status.ai_cost_today_usd {
             ui.small(if status.daily_budget_usd > 0.0 {
@@ -615,11 +632,11 @@ impl FocusApp {
         if status.blocked.is_empty() {
             ui.label("Nothing.");
         }
-        for b in &status.blocked {
+        for blocked_entry in &status.blocked {
             ui.horizontal_wrapped(|ui| {
-                ui.label(format!("{} — {}", b.key, b.reason));
+                ui.label(format!("{} — {}", blocked_entry.key, blocked_entry.reason));
                 if ui.small_button("Ask for access").clicked() {
-                    self.prefill_access(&b.key);
+                    self.prefill_access(&blocked_entry.key);
                 }
             });
         }
@@ -629,18 +646,27 @@ impl FocusApp {
 
         ui.separator();
         ui.heading("Recent AI checks");
-        for v in &status.verdicts {
-            let color = match v.verdict {
+        for verdict_record in &status.verdicts {
+            let color = match verdict_record.verdict {
                 Verdict::OnTask => GREEN,
                 Verdict::OffTask => RED,
                 Verdict::Unsure => egui::Color32::GRAY,
             };
             ui.horizontal_wrapped(|ui| {
-                ui.label(v.at.with_timezone(&Local).format("%H:%M").to_string());
-                ui.colored_label(color, format!("{:?}", v.verdict));
-                ui.label(format!("{} — {}", v.process_name, v.reason));
-                if !v.action.is_empty() {
-                    ui.strong(format!("[{}]", v.action));
+                ui.label(
+                    verdict_record
+                        .at
+                        .with_timezone(&Local)
+                        .format("%H:%M")
+                        .to_string(),
+                );
+                ui.colored_label(color, format!("{:?}", verdict_record.verdict));
+                ui.label(format!(
+                    "{} — {}",
+                    verdict_record.process_name, verdict_record.reason
+                ));
+                if !verdict_record.action.is_empty() {
+                    ui.strong(format!("[{}]", verdict_record.action));
                 }
             });
         }
@@ -648,32 +674,32 @@ impl FocusApp {
 }
 
 impl eframe::App for FocusApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         let (status, message) = {
-            let s = self.shared.lock();
-            (s.status.clone(), s.message.clone())
+            let shared_state = self.shared.lock();
+            (shared_state.status.clone(), shared_state.message.clone())
         };
-        if tray::AVAILABLE && ctx.input(|i| i.viewport().close_requested()) {
+        if tray::AVAILABLE && context.input(|input| input.viewport().close_requested()) {
             // Keep running in the tray; "Quit" in the tray menu ends the app.
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         if self.open_settings.swap(false, Ordering::SeqCst) {
             self.tab = Tab::Settings;
         }
-        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+        egui::TopBottomPanel::top("tabs").show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Todo, "To-do");
                 ui.selectable_value(&mut self.tab, Tab::Blocking, "Blocking");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
             });
         });
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(context, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let status = match status {
                     Some(Ok(status)) => status,
-                    Some(Err(err)) => {
-                        ui.colored_label(RED, err);
+                    Some(Err(error)) => {
+                        ui.colored_label(RED, error);
                         ui.label("Blocking rules are enforced by the service either way.");
                         return;
                     }

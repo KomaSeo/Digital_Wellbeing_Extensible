@@ -172,33 +172,33 @@ pub struct ClaudeAdvisor {
 }
 
 impl Advisor for ClaudeAdvisor {
-    fn pick(&self, r: &PickRequest) -> Result<Pick, JudgeError> {
+    fn pick(&self, request: &PickRequest) -> Result<Pick, JudgeError> {
         // `medium`: rare call, and weighing deadlines against priorities
         // benefits from some reasoning.
         self.client.structured(
             "planner pick",
             PICK_PROMPT,
-            vec![text_block(pick_text(r))],
+            vec![text_block(pick_text(request))],
             pick_schema(),
             "medium",
         )
     }
 
-    fn review(&self, r: &ReviewRequest) -> Result<Review, JudgeError> {
+    fn review(&self, request: &ReviewRequest) -> Result<Review, JudgeError> {
         self.client.structured(
             "planner review",
             REVIEW_PROMPT,
-            vec![text_block(review_text(r))],
+            vec![text_block(review_text(request))],
             review_schema(),
             "medium",
         )
     }
 
-    fn review_proposal(&self, r: &ProposalRequest) -> Result<Review, JudgeError> {
+    fn review_proposal(&self, request: &ProposalRequest) -> Result<Review, JudgeError> {
         self.client.structured(
             "proposal review",
             PROPOSAL_PROMPT,
-            vec![text_block(proposal_text(r))],
+            vec![text_block(proposal_text(request))],
             review_schema(),
             "medium",
         )
@@ -243,32 +243,38 @@ pub(crate) fn rules_text(rules: &str) -> String {
     }
 }
 
-fn or_none(s: &str) -> &str {
-    if s.trim().is_empty() {
+fn or_none(text: &str) -> &str {
+    if text.trim().is_empty() {
         "(none)"
     } else {
-        s
+        text
     }
 }
 
-fn pick_text(r: &PickRequest) -> String {
-    let done: Vec<String> = r
+fn pick_text(request: &PickRequest) -> String {
+    let done: Vec<String> = request
         .recently_done
         .iter()
-        .map(|d| format!("- {} (done {})", d.title, d.at.format("%Y-%m-%d %H:%M UTC")))
+        .map(|done_record| {
+            format!(
+                "- {} (done {})",
+                done_record.title,
+                done_record.at.format("%Y-%m-%d %H:%M UTC")
+            )
+        })
         .collect();
     format!(
         "Now: {now}\n\n{rules}Open to-dos:\n{todos}\n\nRecently finished:\n{done}\n\n\
          Previous assignment: {prev}\n\nRecent foreground activity (oldest first):\n{history}",
-        now = r.now_local,
-        rules = rules_text(r.life_rules),
-        todos = todos_json(r.open),
+        now = request.now_local,
+        rules = rules_text(request.life_rules),
+        todos = todos_json(request.open),
         done = or_none(&done.join("\n")),
-        prev = r
+        prev = request
             .previous
-            .map(|a| format!("{} (to-do id {:?})", a.task, a.todo_id))
+            .map(|assignment| format!("{} (to-do id {:?})", assignment.task, assignment.todo_id))
             .unwrap_or_else(|| "(none)".into()),
-        history = or_none(r.history),
+        history = or_none(request.history),
     )
 }
 
@@ -286,18 +292,22 @@ fn describe(request: &ChangeKind, target_title: Option<&str>) -> String {
     }
 }
 
-fn review_text(r: &ReviewRequest) -> String {
-    let past: Vec<String> = r
+fn review_text(request: &ReviewRequest) -> String {
+    let past: Vec<String> = request
         .recent_requests
         .iter()
         .take(10)
-        .map(|c| {
+        .map(|change| {
             format!(
                 "- {} | {} | reason: \"{}\" | {}",
-                c.at.format("%Y-%m-%d %H:%M UTC"),
-                describe(&c.request, None),
-                c.reason,
-                if c.approved { "approved" } else { "rejected" }
+                change.at.format("%Y-%m-%d %H:%M UTC"),
+                describe(&change.request, None),
+                change.reason,
+                if change.approved {
+                    "approved"
+                } else {
+                    "rejected"
+                }
             )
         })
         .collect();
@@ -306,31 +316,39 @@ fn review_text(r: &ReviewRequest) -> String {
          The user asks to: {ask}\nTheir reason: \"{reason}\"\n\n\
          Open to-dos:\n{todos}\n\nEarlier change requests (newest first):\n{past}\n\n\
          Recent foreground activity (oldest first):\n{history}",
-        now = r.now_local,
-        rules = rules_text(r.life_rules),
-        current = r
+        now = request.now_local,
+        rules = rules_text(request.life_rules),
+        current = request
             .current
-            .map(|a| format!("{} (since {})", a.task, a.at.format("%H:%M UTC")))
+            .map(|assignment| format!(
+                "{} (since {})",
+                assignment.task,
+                assignment.at.format("%H:%M UTC")
+            ))
             .unwrap_or_else(|| "(none)".into()),
-        ask = describe(r.request, r.target_title),
-        reason = r.reason,
-        todos = todos_json(r.open),
+        ask = describe(request.request, request.target_title),
+        reason = request.reason,
+        todos = todos_json(request.open),
         past = or_none(&past.join("\n")),
-        history = or_none(r.history),
+        history = or_none(request.history),
     )
 }
 
-pub(crate) fn proposal_text(r: &ProposalRequest) -> String {
-    let past: Vec<String> = r
+pub(crate) fn proposal_text(request: &ProposalRequest) -> String {
+    let past: Vec<String> = request
         .recent_proposals
         .iter()
         .take(10)
-        .map(|p| {
+        .map(|proposal| {
             format!(
                 "- {} | \"{}\" | {}",
-                p.at.format("%Y-%m-%d %H:%M UTC"),
-                p.item.title,
-                if p.approved { "approved" } else { "rejected" }
+                proposal.at.format("%Y-%m-%d %H:%M UTC"),
+                proposal.item.title,
+                if proposal.approved {
+                    "approved"
+                } else {
+                    "rejected"
+                }
             )
         })
         .collect();
@@ -338,11 +356,11 @@ pub(crate) fn proposal_text(r: &ProposalRequest) -> String {
         "Now: {now}\n\n{rules}Proposed to-do:\n{item}\n\nOpen to-dos:\n{todos}\n\n\
          Earlier proposals (newest first):\n{past}\n\n\
          Recent foreground activity (oldest first):\n{history}",
-        now = r.now_local,
-        rules = rules_text(r.life_rules),
-        item = serde_json::to_string_pretty(r.item).unwrap_or_default(),
-        todos = todos_json(r.open),
+        now = request.now_local,
+        rules = rules_text(request.life_rules),
+        item = serde_json::to_string_pretty(request.item).unwrap_or_default(),
+        todos = todos_json(request.open),
         past = or_none(&past.join("\n")),
-        history = or_none(r.history),
+        history = or_none(request.history),
     )
 }

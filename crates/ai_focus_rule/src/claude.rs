@@ -15,7 +15,7 @@ const API_BASE: &str = "https://api.anthropic.com";
 fn api_base() -> String {
     std::env::var("DW_CLAUDE_API_URL")
         .ok()
-        .filter(|u| !u.is_empty())
+        .filter(|url| !url.is_empty())
         .unwrap_or_else(|| API_BASE.to_string())
         .trim_end_matches('/')
         .to_string()
@@ -33,10 +33,10 @@ pub struct ClaudeClient {
 impl ClaudeClient {
     pub fn new(api_key: String, model: String) -> Self {
         // A proxy from the environment is used, except for a local stand-in API.
-        let base = api_base();
+        let base_url = api_base();
         let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
             .iter()
-            .any(|prefix| base.starts_with(prefix));
+            .any(|prefix| base_url.starts_with(prefix));
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(90))
             .try_proxy_from_env(!local)
@@ -60,11 +60,11 @@ impl ClaudeClient {
             .call()
         {
             Ok(_) => Ok(()),
-            Err(ureq::Error::Status(status, resp)) => Err(JudgeError::Api {
+            Err(ureq::Error::Status(status, response)) => Err(JudgeError::Api {
                 status,
-                body: resp.into_string().unwrap_or_default(),
+                body: response.into_string().unwrap_or_default(),
             }),
-            Err(err) => Err(JudgeError::Transport(err.to_string())),
+            Err(error) => Err(JudgeError::Transport(error.to_string())),
         }
     }
 
@@ -107,14 +107,14 @@ impl ClaudeClient {
             call = call.set("anthropic-beta", FALLBACK_BETA);
         }
         let response: Value = match call.send_json(self.body(system, content, schema, effort)) {
-            Ok(resp) => resp
+            Ok(http_response) => http_response
                 .into_json()
-                .map_err(|e| JudgeError::BadResponse(e.to_string()))?,
-            Err(ureq::Error::Status(status, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
+                .map_err(|error| JudgeError::BadResponse(error.to_string()))?,
+            Err(ureq::Error::Status(status, error_response)) => {
+                let body = error_response.into_string().unwrap_or_default();
                 return Err(JudgeError::Api { status, body });
             }
-            Err(err) => return Err(JudgeError::Transport(err.to_string())),
+            Err(error) => return Err(JudgeError::Transport(error.to_string())),
         };
         // Before parsing: a refused or cut-off reply is billed too.
         crate::usage::record(purpose, &self.model, &response);
@@ -166,15 +166,15 @@ pub fn parse_structured<T: DeserializeOwned>(response: &Value) -> Result<T, Judg
         .unwrap_or(&[]);
     let after_fallback = blocks
         .iter()
-        .rposition(|b| b["type"] == "fallback")
-        .map_or(0, |i| i + 1);
+        .rposition(|block| block["type"] == "fallback")
+        .map_or(0, |fallback_index| fallback_index + 1);
     let text = blocks[after_fallback..]
         .iter()
         .rev()
-        .find(|b| b["type"] == "text")
-        .and_then(|b| b["text"].as_str())
+        .find(|block| block["type"] == "text")
+        .and_then(|block| block["text"].as_str())
         .ok_or_else(|| JudgeError::BadResponse(format!("no text block: {response}")))?;
-    serde_json::from_str(text).map_err(|e| JudgeError::BadResponse(format!("{e}: {text}")))
+    serde_json::from_str(text).map_err(|error| JudgeError::BadResponse(format!("{error}: {text}")))
 }
 
 #[cfg(test)]
@@ -222,9 +222,12 @@ mod network_tests {
     #[test]
     #[ignore]
     fn a_bogus_key_is_rejected_by_the_api() {
-        let err = ClaudeClient::new("sk-ant-bogus".into(), "claude-opus-5-5".into())
+        let error = ClaudeClient::new("sk-ant-bogus".into(), "claude-opus-5-5".into())
             .check()
             .unwrap_err();
-        assert!(matches!(err, JudgeError::Api { status: 401, .. }), "{err}");
+        assert!(
+            matches!(error, JudgeError::Api { status: 401, .. }),
+            "{error}"
+        );
     }
 }

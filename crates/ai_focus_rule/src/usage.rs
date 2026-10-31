@@ -55,12 +55,12 @@ impl TokenUsage {
     /// `response["usage"]`; `None` when the reply has none.
     pub fn from_response(response: &Value) -> Option<Self> {
         let usage = response.get("usage")?;
-        let n = |key: &str| usage[key].as_u64().unwrap_or(0);
+        let token_count = |key: &str| usage[key].as_u64().unwrap_or(0);
         Some(Self {
-            input: n("input_tokens"),
-            output: n("output_tokens"),
-            cache_read: n("cache_read_input_tokens"),
-            cache_write: n("cache_creation_input_tokens"),
+            input: token_count("input_tokens"),
+            output: token_count("output_tokens"),
+            cache_read: token_count("cache_read_input_tokens"),
+            cache_write: token_count("cache_creation_input_tokens"),
         })
     }
 
@@ -141,12 +141,12 @@ impl UsageLog {
 
     /// Totals of the month that contains `date`.
     pub fn month(&self, date: NaiveDate) -> Totals {
-        let key = date.format("%Y-%m").to_string();
+        let month_key = date.format("%Y-%m").to_string();
         let mut totals = Totals::default();
         for (_, day) in self
             .days
             .iter()
-            .filter(|(d, _)| d.format("%Y-%m").to_string() == key)
+            .filter(|(day_date, _)| day_date.format("%Y-%m").to_string() == month_key)
         {
             totals.merge(&day.total);
         }
@@ -170,11 +170,11 @@ impl UsageRecorder {
     pub fn record(&self, purpose: &str, model: &str, usage: &TokenUsage) {
         let cost = usage.cost_usd(model);
         let today = Local::now().date_naive();
-        if let Err(err) = self
+        if let Err(error) = self
             .store
             .update(|log| log.add(today, purpose, usage, cost))
         {
-            warn!("could not save token usage: {err}");
+            warn!("could not save token usage: {error}");
         }
     }
 
@@ -192,15 +192,18 @@ impl UsageRecorder {
         let own_file = self
             .store
             .path()
-            .and_then(|p| p.file_name().map(|n| n.to_owned()));
+            .and_then(|own_path| own_path.file_name().map(|file_name| file_name.to_owned()));
         let others: f64 = std::fs::read_dir(folder)
             .into_iter()
             .flatten()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "json"))
-            .filter(|p| p.file_name().map(|n| n.to_owned()) != own_file)
-            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .filter(|path| path.file_name().map(|file_name| file_name.to_owned()) != own_file)
+            .filter_map(|path| std::fs::read_to_string(path).ok())
             .filter_map(|raw| serde_json::from_str::<UsageLog>(&raw).ok())
             .map(|log| log.day(today).total.cost_usd)
             .sum();
@@ -234,7 +237,7 @@ pub fn record(purpose: &str, model: &str, response: &Value) {
         return;
     };
     let model = response["model"].as_str().unwrap_or(model);
-    if let Some(recorder) = RECORDER.read().ok().and_then(|r| r.clone()) {
+    if let Some(recorder) = RECORDER.read().ok().and_then(|slot| slot.clone()) {
         recorder.record(purpose, model, &usage);
     }
 }
@@ -291,16 +294,19 @@ mod tests {
         config.daily_budget_usd = 10.0;
         assert!(recorder.over_budget(&config).is_none());
         config.daily_budget_usd = 8.0;
-        assert_eq!(recorder.over_budget(&config).map(|(_, l)| l), Some(8.0));
+        assert_eq!(
+            recorder.over_budget(&config).map(|(_, limit)| limit),
+            Some(8.0)
+        );
     }
 
     #[test]
     fn old_days_are_dropped() {
         let mut log = UsageLog::default();
         let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        for i in 0..70 {
+        for day_offset in 0..70 {
             log.add(
-                start + chrono::Duration::days(i),
+                start + chrono::Duration::days(day_offset),
                 "focus check",
                 &TokenUsage::default(),
                 0.0,

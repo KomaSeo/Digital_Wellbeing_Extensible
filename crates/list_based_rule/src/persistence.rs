@@ -30,9 +30,9 @@ impl FileListPersistence {
 
     /// App config directory + `policy.json` (legacy filename kept for existing installs).
     pub fn default_config_path() -> Result<PathBuf, ListError> {
-        let dirs = ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
+        let project_directories = ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
             .ok_or(ListError::NoAppData)?;
-        Ok(dirs.config_dir().join("policy.json"))
+        Ok(project_directories.config_dir().join("policy.json"))
     }
 
     /// File persistence at [`Self::default_config_path`].
@@ -51,12 +51,12 @@ impl ListPersistence for FileListPersistence {
             let raw = fs::read_to_string(&self.path)?;
             match serde_json::from_str(&raw) {
                 Ok(config) => Ok(config),
-                Err(err) => {
+                Err(error) => {
                     // A damaged file (e.g. empty after a power cut) must not stop
                     // the app or the agent from starting: keep it aside, use defaults.
                     let aside = self.path.with_extension("json.corrupt");
                     tracing::warn!(
-                        "{} is unreadable ({err}); moved to {} and starting from defaults",
+                        "{} is unreadable ({error}); moved to {} and starting from defaults",
                         self.path.display(),
                         aside.display()
                     );
@@ -78,14 +78,14 @@ impl ListPersistence for FileListPersistence {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = self.path.with_extension("json.tmp");
+        let temp_path = self.path.with_extension("json.tmp");
         {
-            let mut file = fs::File::create(&tmp)?;
+            let mut file = fs::File::create(&temp_path)?;
             file.write_all(raw.as_bytes())?;
             // On disk before the rename, so a crash cannot leave an empty file.
             file.sync_all()?;
         }
-        fs::rename(&tmp, &self.path)?;
+        fs::rename(&temp_path, &self.path)?;
         Ok(())
     }
 }

@@ -64,7 +64,7 @@ const MAX_REQUEST: usize = 512 * 1024;
 pub fn port_for_session(session: u32) -> u16 {
     let base = std::env::var("DW_PORT_BASE")
         .ok()
-        .and_then(|b| b.parse::<u16>().ok())
+        .and_then(|base_text| base_text.parse::<u16>().ok())
         .unwrap_or(BASE_PORT);
     base.saturating_add((session % 1000) as u16)
 }
@@ -122,7 +122,9 @@ pub struct AgentApi {
 
 impl AgentApi {
     fn planner_active(&self) -> bool {
-        self.planner.as_ref().is_some_and(|p| p.is_active())
+        self.planner
+            .as_ref()
+            .is_some_and(|planner| planner.is_active())
     }
 }
 
@@ -135,9 +137,9 @@ fn status(api: &AgentApi) -> Status {
         .blocked_processes
         .iter()
         .chain(state.blocked_tabs.iter())
-        .map(|(key, b)| BlockedItem {
+        .map(|(key, block)| BlockedItem {
             key: key.clone(),
-            reason: b.reason.clone(),
+            reason: block.reason.clone(),
         })
         .collect();
     Status {
@@ -148,19 +150,19 @@ fn status(api: &AgentApi) -> Status {
         check_interval_secs: config.check_interval_secs,
         verdicts: state.verdicts.iter().rev().take(30).cloned().collect(),
         blocked,
-        planner: api.planner.as_ref().map(|p| p.status()),
+        planner: api.planner.as_ref().map(|planner| planner.status()),
         last_decision: None,
         grants: grants
             .grants
             .into_iter()
-            .filter(|g| g.is_active(Utc::now(), &config))
+            .filter(|grant| grant.is_active(Utc::now(), &config))
             .collect(),
         grant_log: grants.log.into_iter().rev().take(10).collect(),
         last_access: None,
         last_proposal: None,
         settings_locked_until: crate::settings::read_lock(&crate::settings::lock_path())
             .locked_until(Utc::now()),
-        ai_cost_today_usd: monitor.usage().map(|u| u.today_cost()),
+        ai_cost_today_usd: monitor.usage().map(|usage| usage.today_cost()),
         daily_budget_usd: config.daily_budget_usd,
     }
 }
@@ -171,15 +173,16 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     let mut last_decision = None;
     let mut last_access = None;
     let mut last_proposal = None;
-    let data = crate::data_dir();
+    let data_directory = crate::data_dir();
     match method {
         "settings_get" => {
-            let snapshot = crate::settings::snapshot(&data, Utc::now())?;
-            return serde_json::to_value(snapshot).map_err(|e| e.to_string());
+            let snapshot = crate::settings::snapshot(&data_directory, Utc::now())?;
+            return serde_json::to_value(snapshot).map_err(|error| error.to_string());
         }
         "settings_put" => {
             let name = params["name"].as_str().ok_or("params.name required")?;
-            let outcome = crate::settings::put(&data, Utc::now(), name, &params["content"])?;
+            let outcome =
+                crate::settings::put(&data_directory, Utc::now(), name, &params["content"])?;
             match &outcome {
                 crate::settings::PutOutcome::Applied => {
                     tracing::info!("settings '{name}' changed through the agent")
@@ -188,24 +191,24 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                     "settings '{name}' saved through the agent; in force from {applies_at}"
                 ),
             }
-            return serde_json::to_value(outcome).map_err(|e| e.to_string());
+            return serde_json::to_value(outcome).map_err(|error| error.to_string());
         }
         "settings_discard" => {
             let name = params["name"].as_str();
-            crate::settings::discard_pending(&data, name)?;
+            crate::settings::discard_pending(&data_directory, name)?;
             tracing::info!("pending settings discarded: {}", name.unwrap_or("all"));
             return Ok(json!({ "ok": true }));
         }
         "settings_lock" => {
             let hours = params["hours"]
                 .as_u64()
-                .and_then(|h| u32::try_from(h).ok())
+                .and_then(|requested_hours| u32::try_from(requested_hours).ok())
                 .ok_or("params.hours required")?;
             let lock =
                 crate::settings::extend_lock(&crate::settings::lock_path(), Utc::now(), hours)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|error| error.to_string())?;
             tracing::info!("settings locked until {:?}", lock.until);
-            return serde_json::to_value(lock).map_err(|e| e.to_string());
+            return serde_json::to_value(lock).map_err(|error| error.to_string());
         }
         _ => {}
     }
@@ -219,16 +222,16 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .get("task")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|t| !t.is_empty())
+                .filter(|task_text| !task_text.is_empty())
                 .ok_or("params.task required")?
                 .to_string();
             api.monitor
                 .store()
-                .update(|c| {
-                    c.task = task;
-                    c.session_active = true;
+                .update(|config| {
+                    config.task = task;
+                    config.session_active = true;
                 })
-                .map_err(|e| e.to_string())?;
+                .map_err(|error| error.to_string())?;
         }
         "stop_session" => {
             if api.planner_active() {
@@ -236,43 +239,45 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             }
             api.monitor
                 .store()
-                .update(|c| c.session_active = false)
-                .map_err(|e| e.to_string())?;
+                .update(|config| config.session_active = false)
+                .map_err(|error| error.to_string())?;
         }
         "assign" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
-            planner.assign(Utc::now()).map_err(|e| e.to_string())?;
+            planner
+                .assign(Utc::now())
+                .map_err(|error| error.to_string())?;
         }
         "request_change" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
             let request: ChangeKind = serde_json::from_value(params["request"].clone())
-                .map_err(|e| format!("params.request: {e}"))?;
+                .map_err(|error| format!("params.request: {error}"))?;
             let reason = params["reason"].as_str().unwrap_or_default();
             let record = planner
                 .request_change(Utc::now(), request, reason)
-                .map_err(|e| e.to_string())?;
+                .map_err(|error| error.to_string())?;
             last_decision = Some(record);
         }
         "request_access" => {
             let target: GrantTarget = serde_json::from_value(params["target"].clone())
-                .map_err(|e| format!("params.target: {e}"))?;
+                .map_err(|error| format!("params.target: {error}"))?;
             let duration: GrantDuration = serde_json::from_value(params["duration"].clone())
-                .map_err(|e| format!("params.duration: {e}"))?;
+                .map_err(|error| format!("params.duration: {error}"))?;
             let purpose = params["purpose"].as_str().unwrap_or_default();
             let entry = api
                 .monitor
                 .request_access(Utc::now(), target, duration, purpose)
-                .map_err(|e| e.to_string())?;
+                .map_err(|error| error.to_string())?;
             last_access = Some(entry);
         }
         "propose_todo" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
             let input: ProposalInput = serde_json::from_value(params["todo"].clone())
-                .map_err(|e| format!("params.todo: {e}"))?;
+                .map_err(|error| format!("params.todo: {error}"))?;
             let via = params["via"].as_str().unwrap_or("focus app");
             let record = planner
                 .propose(Utc::now(), input, via)
-                .map_err(|e| e.to_string())?;
+                .map_err(|error| error.to_string())?;
             last_proposal = Some(record);
         }
         other => return Err(format!("unknown method '{other}'")),
@@ -281,7 +286,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     status.last_decision = last_decision;
     status.last_access = last_access;
     status.last_proposal = last_proposal;
-    serde_json::to_value(status).map_err(|e| e.to_string())
+    serde_json::to_value(status).map_err(|error| error.to_string())
 }
 
 /// Serve forever on the port of `session` (blocking; run in a thread).
@@ -291,31 +296,31 @@ pub fn serve(api: Arc<AgentApi>, session: u32) -> std::io::Result<()> {
     let listener = loop {
         match TcpListener::bind(("127.0.0.1", port)) {
             Ok(listener) => break listener,
-            Err(err) => {
-                tracing::warn!("user api cannot bind 127.0.0.1:{port} ({err}); retrying");
+            Err(error) => {
+                tracing::warn!("user api cannot bind 127.0.0.1:{port} ({error}); retrying");
                 thread::sleep(Duration::from_secs(5));
             }
         }
     };
     tracing::info!("user api listening on 127.0.0.1:{port}");
-    let active = Arc::new(AtomicUsize::new(0));
+    let active_connections = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
-        if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-            active.fetch_sub(1, Ordering::SeqCst);
+        if active_connections.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            active_connections.fetch_sub(1, Ordering::SeqCst);
             let _ = stream.set_write_timeout(Some(REQUEST_DEADLINE));
             let _ = reply(&mut stream, &json!({ "error": "agent busy" }));
             continue;
         }
-        let (api, active_conn) = (Arc::clone(&api), Arc::clone(&active));
+        let (api, thread_active_connections) = (Arc::clone(&api), Arc::clone(&active_connections));
         let spawned = thread::Builder::new().spawn(move || {
-            if let Err(err) = handle(&api, stream) {
-                tracing::debug!("user api client error: {err}");
+            if let Err(error) = handle(&api, stream) {
+                tracing::debug!("user api client error: {error}");
             }
-            active_conn.fetch_sub(1, Ordering::SeqCst);
+            thread_active_connections.fetch_sub(1, Ordering::SeqCst);
         });
         if spawned.is_err() {
-            active.fetch_sub(1, Ordering::SeqCst);
+            active_connections.fetch_sub(1, Ordering::SeqCst);
         }
     }
     Ok(())
@@ -332,16 +337,16 @@ fn handle(api: &AgentApi, mut stream: TcpStream) -> std::io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let response = match read_line(&mut stream) {
         Ok(line) => match serde_json::from_str::<Value>(&line) {
-            Ok(req) => {
-                let method = req["method"].as_str().unwrap_or_default();
-                match dispatch(api, method, &req["params"]) {
+            Ok(request) => {
+                let method = request["method"].as_str().unwrap_or_default();
+                match dispatch(api, method, &request["params"]) {
                     Ok(result) => json!({ "result": result }),
                     Err(message) => json!({ "error": message }),
                 }
             }
-            Err(err) => json!({ "error": format!("parse error: {err}") }),
+            Err(error) => json!({ "error": format!("parse error: {error}") }),
         },
-        Err(err) => json!({ "error": err }),
+        Err(error) => json!({ "error": error }),
     };
     reply(&mut stream, &response)
 }
@@ -351,32 +356,35 @@ fn handle(api: &AgentApi, mut stream: TcpStream) -> std::io::Result<()> {
 /// the connection for minutes).
 fn read_line(stream: &mut TcpStream) -> Result<String, String> {
     let deadline = Instant::now() + REQUEST_DEADLINE;
-    let mut buf = Vec::new();
+    let mut buffer = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        let time_left = deadline.saturating_duration_since(Instant::now());
+        if time_left.is_zero() {
             return Err("request timed out".into());
         }
         stream
-            .set_read_timeout(Some(left))
-            .map_err(|e| e.to_string())?;
-        let n = stream
+            .set_read_timeout(Some(time_left))
+            .map_err(|error| error.to_string())?;
+        let bytes_read = stream
             .read(&mut chunk)
             .map_err(|_| "request timed out".to_string())?;
-        if n == 0 {
+        if bytes_read == 0 {
             break;
         }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.contains(&b'\n') {
+        buffer.extend_from_slice(&chunk[..bytes_read]);
+        if buffer.contains(&b'\n') {
             break;
         }
-        if buf.len() > MAX_REQUEST {
+        if buffer.len() > MAX_REQUEST {
             return Err("request too large".into());
         }
     }
-    let end = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
-    String::from_utf8(buf[..end].to_vec()).map_err(|_| "request is not UTF-8".into())
+    let end = buffer
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .unwrap_or(buffer.len());
+    String::from_utf8(buffer[..end].to_vec()).map_err(|_| "request is not UTF-8".into())
 }
 
 fn reply(stream: &mut TcpStream, value: &Value) -> std::io::Result<()> {
@@ -387,38 +395,38 @@ fn reply(stream: &mut TcpStream, value: &Value) -> std::io::Result<()> {
 
 /// Client side, used by the Focus app.
 pub fn call(session: u32, method: &str, params: Value) -> Result<Status, String> {
-    serde_json::from_value(call_value(session, method, params)?).map_err(|e| e.to_string())
+    serde_json::from_value(call_value(session, method, params)?).map_err(|error| error.to_string())
 }
 
 /// Like [`call`] for methods whose result is not a [`Status`] (`settings_*`).
 pub fn call_value(session: u32, method: &str, params: Value) -> Result<Value, String> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port_for_session(session)));
+    let address = SocketAddr::from(([127, 0, 0, 1], port_for_session(session)));
     let mut stream =
-        TcpStream::connect_timeout(&addr, Duration::from_millis(500)).map_err(|err| {
+        TcpStream::connect_timeout(&address, Duration::from_millis(500)).map_err(|error| {
             format!(
-                "agent not running for this session (session {session}, port {}: {err}). \
+                "agent not running for this session (session {session}, port {}: {error}). \
                  Is the service installed and this account managed? An administrator can \
                  read C:\\ProgramData\\DigitalWellbeing\\logs\\service.log and \
                  agent-session{session}.log.",
-                addr.port()
+                address.port()
             )
         })?;
     stream
         // assign / request_change wait for the AI; an approved "done" makes two
         // calls of up to 90 s each, so allow more than that.
         .set_read_timeout(Some(Duration::from_secs(300)))
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
     let request = json!({ "method": method, "params": params });
     stream
         .write_all(format!("{request}\n").as_bytes())
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
     let mut line = String::new();
     BufReader::new(stream)
         .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
-    let mut response: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-    if let Some(err) = response.get("error").and_then(Value::as_str) {
-        return Err(err.to_string());
+        .map_err(|error| error.to_string())?;
+    let mut response: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+    if let Some(error) = response.get("error").and_then(Value::as_str) {
+        return Err(error.to_string());
     }
     Ok(response["result"].take())
 }
@@ -444,16 +452,16 @@ mod tests {
         thread::spawn(move || serve(api, session));
         thread::sleep(Duration::from_millis(200));
 
-        let s = call(session, "start_session", json!({ "task": "논문 쓰기" })).unwrap();
-        assert!(s.session_active);
-        assert_eq!(s.task, "논문 쓰기");
+        let status = call(session, "start_session", json!({ "task": "논문 쓰기" })).unwrap();
+        assert!(status.session_active);
+        assert_eq!(status.task, "논문 쓰기");
         assert!(call(session, "start_session", json!({ "task": " " })).is_err());
-        let s = call(session, "stop_session", json!({})).unwrap();
-        assert!(!s.session_active);
+        let status = call(session, "stop_session", json!({})).unwrap();
+        assert!(!status.session_active);
         assert!(call(session, "set_blacklist", json!({})).is_err());
         assert!(call(session, "assign", json!({})).is_err());
         // No focus session running: access requests are refused before any AI call.
-        let err = call(
+        let error = call(
             session,
             "request_access",
             json!({
@@ -463,9 +471,9 @@ mod tests {
             }),
         )
         .unwrap_err();
-        assert!(err.contains("focus session"));
-        let s = call(session, "status", json!({})).unwrap();
-        assert!(s.grants.is_empty());
+        assert!(error.contains("focus session"));
+        let status = call(session, "status", json!({})).unwrap();
+        assert!(status.grants.is_empty());
     }
 
     #[test]
@@ -482,11 +490,11 @@ mod tests {
         let session = 901;
         thread::spawn(move || serve(api, session));
         thread::sleep(Duration::from_millis(200));
-        let mut s = TcpStream::connect(("127.0.0.1", port_for_session(session))).unwrap();
-        s.write_all(b"{\"method\":").unwrap(); // and then nothing
+        let mut stream = TcpStream::connect(("127.0.0.1", port_for_session(session))).unwrap();
+        stream.write_all(b"{\"method\":").unwrap(); // and then nothing
         let started = Instant::now();
         let mut line = String::new();
-        BufReader::new(s).read_line(&mut line).unwrap();
+        BufReader::new(stream).read_line(&mut line).unwrap();
         assert!(line.contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(8));
     }
@@ -513,8 +521,8 @@ mod tests {
             monitor,
             planner: Some(planner),
         };
-        let err = dispatch(&api, "start_session", &json!({ "task": "유튜브" })).unwrap_err();
-        assert!(err.contains("planner"));
+        let error = dispatch(&api, "start_session", &json!({ "task": "유튜브" })).unwrap_err();
+        assert!(error.contains("planner"));
         assert!(dispatch(&api, "stop_session", &json!({})).is_err());
         let status = dispatch(&api, "status", &json!({})).unwrap();
         assert_eq!(status["planner"]["active"], true);
@@ -526,13 +534,13 @@ mod tests {
         );
         // A proposal reaches the planner (and fails here at the AI call);
         // malformed params are refused before that.
-        let err = dispatch(
+        let error = dispatch(
             &api,
             "propose_todo",
             &json!({ "todo": { "title": "장보기" }, "via": "claude desktop" }),
         )
         .unwrap_err();
-        assert!(err.starts_with("AI:"), "{err}");
+        assert!(error.starts_with("AI:"), "{error}");
         assert!(dispatch(&api, "propose_todo", &json!({ "todo": 5 }))
             .unwrap_err()
             .starts_with("params.todo"));

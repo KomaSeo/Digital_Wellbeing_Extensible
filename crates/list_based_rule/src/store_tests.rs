@@ -17,40 +17,40 @@ fn set_lists_replace_entirely() {
     store
         .set_blacklist(&["Steam".into(), "discord.EXE".into(), "explorer.exe".into()])
         .unwrap();
-    let p = store.get();
-    assert!(p.blacklist.contains("steam.exe"));
-    assert!(p.blacklist.contains("discord.exe"));
-    assert!(!p.blacklist.contains("explorer.exe"));
+    let config = store.get();
+    assert!(config.blacklist.contains("steam.exe"));
+    assert!(config.blacklist.contains("discord.exe"));
+    assert!(!config.blacklist.contains("explorer.exe"));
 
     store
         .set_whitelist(&["code.exe".into(), "notepad.exe".into()])
         .unwrap();
-    let p = store.get();
-    assert!(p.whitelist.contains("code.exe"));
-    assert!(p.whitelist.contains("notepad.exe"));
-    assert!(p.whitelist.contains("csrss.exe"));
+    let config = store.get();
+    assert!(config.whitelist.contains("code.exe"));
+    assert!(config.whitelist.contains("notepad.exe"));
+    assert!(config.whitelist.contains("csrss.exe"));
 }
 
 #[test]
 fn mutations_roundtrip_through_memory_persistence() {
     let persistence = Arc::new(MemoryListPersistence::new());
-    let store = ListStore::with_persistence(Arc::clone(&persistence) as Arc<dyn ListPersistence>)
-        .unwrap();
+    let store =
+        ListStore::with_persistence(Arc::clone(&persistence) as Arc<dyn ListPersistence>).unwrap();
 
     store.add_blacklist("steam.exe").unwrap();
     store.set_mode(ListMode::Whitelist).unwrap();
 
     let reloaded = ListStore::with_persistence(persistence).unwrap();
-    let p = reloaded.get();
-    assert!(p.blacklist.contains("steam.exe"));
-    assert_eq!(p.mode, ListMode::Whitelist);
+    let config = reloaded.get();
+    assert!(config.blacklist.contains("steam.exe"));
+    assert_eq!(config.mode, ListMode::Whitelist);
 }
 
 #[test]
 fn protected_names_rejected_on_add_blacklist() {
     let store = memory_store();
-    let err = store.add_blacklist("explorer.exe").unwrap_err();
-    assert!(matches!(err, ListError::Protected(_)));
+    let error = store.add_blacklist("explorer.exe").unwrap_err();
+    assert!(matches!(error, ListError::Protected(_)));
 }
 
 #[test]
@@ -106,13 +106,16 @@ fn failed_save_leaves_memory_unchanged() {
 
 #[test]
 fn corrupt_file_is_moved_aside_and_defaults_are_used() {
-    let dir = std::env::temp_dir().join(format!("dw_list_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("policy.json");
+    let temp_directory = std::env::temp_dir().join(format!("dw_list_{}", std::process::id()));
+    std::fs::create_dir_all(&temp_directory).unwrap();
+    let path = temp_directory.join("policy.json");
     std::fs::write(&path, "").unwrap();
-    let store = ListStore::with_persistence(Arc::new(FileListPersistence::new(path.clone()))).unwrap();
+    let store =
+        ListStore::with_persistence(Arc::new(FileListPersistence::new(path.clone()))).unwrap();
     assert_eq!(store.get().mode, ListMode::Blacklist);
     assert!(path.with_extension("json.corrupt").exists());
-    assert!(std::fs::read_to_string(&path).unwrap().contains("blacklist"));
-    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("blacklist"));
+    std::fs::remove_dir_all(&temp_directory).unwrap();
 }

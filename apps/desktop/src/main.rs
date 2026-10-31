@@ -27,7 +27,7 @@ fn main() -> eframe::Result<()> {
     // window then only says so. `--standalone` forces single-account mode.
     // Decided by the registered service, not by a file (a file is left behind
     // by uninstall, and anyone may create one).
-    if !std::env::args().any(|a| a == "--standalone") && service_installed() {
+    if !std::env::args().any(|argument| argument == "--standalone") && service_installed() {
         return eframe::run_native(
             "Digital Wellbeing",
             eframe::NativeOptions {
@@ -36,8 +36,8 @@ fn main() -> eframe::Result<()> {
                     .with_title("Digital Wellbeing"),
                 ..Default::default()
             },
-            Box::new(|cc| {
-                rule_ui::install_system_fonts(&cc.egui_ctx);
+            Box::new(|creation_context| {
+                rule_ui::install_system_fonts(&creation_context.egui_ctx);
                 Ok(Box::new(InstalledNotice))
             }),
         );
@@ -54,8 +54,8 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Digital Wellbeing",
         options,
-        Box::new(move |cc| {
-            rule_ui::install_system_fonts(&cc.egui_ctx);
+        Box::new(move |creation_context| {
+            rule_ui::install_system_fonts(&creation_context.egui_ctx);
             Ok(Box::new(App::new(router, rule_uis, panels, status)))
         }),
     )
@@ -91,8 +91,8 @@ fn start_standalone() -> Started {
     // Only this user's session: other users' programs and Windows services
     // (session 0) are none of this window's business.
     let session = current_session_id();
-    enforcer.set_process_filter(Arc::new(move |pid| {
-        process_session_id(pid) == Some(session)
+    enforcer.set_process_filter(Arc::new(move |process_id| {
+        process_session_id(process_id) == Some(session)
     }));
 
     let rule_uis: Vec<Arc<dyn RuleUi>> = vec![list_rule.ui(), ai_rule.ui()];
@@ -102,7 +102,7 @@ fn start_standalone() -> Started {
     // The API port doubles as a single-instance lock: a second window would
     // enforce the same policy twice.
     let status = match spawn_tcp(router.clone(), DEFAULT_PORT) {
-        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             return (
                 router,
                 rule_uis,
@@ -111,7 +111,7 @@ fn start_standalone() -> Started {
                     .into(),
             );
         }
-        Err(err) => format!("Function call API unavailable: {err}"),
+        Err(error) => format!("Function call API unavailable: {error}"),
         Ok(()) => format!("Function call API: 127.0.0.1:{DEFAULT_PORT}"),
     };
     let _ai_monitor_handle = ai_rule.monitor().start_background();
@@ -123,8 +123,8 @@ fn start_standalone() -> Started {
 struct InstalledNotice;
 
 impl eframe::App for InstalledNotice {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(context, |ui| {
             ui.heading("Digital Wellbeing is installed for this PC");
             ui.label(
                 "The service enforces the rules in the managed accounts. Open the Digital \
@@ -143,7 +143,7 @@ fn service_installed() -> bool {
     use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
     ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .and_then(|m| m.open_service("DigitalWellbeing", ServiceAccess::QUERY_STATUS))
+        .and_then(|manager| manager.open_service("DigitalWellbeing", ServiceAccess::QUERY_STATUS))
         .is_ok()
 }
 
@@ -204,7 +204,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         if self.last_refresh.elapsed() >= REFRESH {
             self.last_refresh = Instant::now();
             self.blocks = self
@@ -216,18 +216,18 @@ impl eframe::App for App {
                 .enforcer()
                 .list_processes()
                 .into_iter()
-                .map(|p| ProcessSnapshot {
-                    pid: p.pid,
-                    name: p.name,
-                    exe: p.exe,
+                .map(|process| ProcessSnapshot {
+                    pid: process.pid,
+                    name: process.name,
+                    exe: process.exe,
                 })
                 .collect();
         }
-        ctx.request_repaint_after(REFRESH);
+        context.request_repaint_after(REFRESH);
         let snapshots = &self.snapshots;
         let blocks = &self.blocks;
 
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+        egui::TopBottomPanel::top("top").show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Digital Wellbeing");
                 ui.separator();
@@ -260,15 +260,15 @@ impl eframe::App for App {
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(context, |ui| {
             let tab = self.tab.clone();
             match tab {
                 MainTab::Monitor => {
-                    ui.columns(2, |cols| {
-                        cols[0].heading("Running processes");
-                        cols[0].text_edit_singleline(&mut self.process_filter);
+                    ui.columns(2, |columns| {
+                        columns[0].heading("Running processes");
+                        columns[0].text_edit_singleline(&mut self.process_filter);
                         egui::ScrollArea::vertical().id_salt("monitor_procs").show(
-                            &mut cols[0],
+                            &mut columns[0],
                             |ui| {
                                 let filter = self.process_filter.to_lowercase();
                                 for process in snapshots {
@@ -282,25 +282,31 @@ impl eframe::App for App {
                             },
                         );
 
-                        cols[1].heading("Recent blocks");
+                        columns[1].heading("Recent blocks");
                         egui::ScrollArea::vertical().id_salt("monitor_blocks").show(
-                            &mut cols[1],
+                            &mut columns[1],
                             |ui| {
-                                if let Some(arr) = blocks.as_array() {
-                                    for item in arr {
+                                if let Some(block_entries) = blocks.as_array() {
+                                    for item in block_entries {
                                         let name = item
                                             .get("process_name")
-                                            .and_then(|v| v.as_str())
+                                            .and_then(|value| value.as_str())
                                             .unwrap_or("?");
-                                        let pid =
-                                            item.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
-                                        let at =
-                                            item.get("at").and_then(|v| v.as_str()).unwrap_or("");
+                                        let process_id = item
+                                            .get("pid")
+                                            .and_then(|value| value.as_u64())
+                                            .unwrap_or(0);
+                                        let at = item
+                                            .get("at")
+                                            .and_then(|value| value.as_str())
+                                            .unwrap_or("");
                                         let reason = item
                                             .get("reason")
-                                            .and_then(|v| v.as_str())
+                                            .and_then(|value| value.as_str())
                                             .unwrap_or("");
-                                        ui.label(format!("{at}  {name} ({pid})  [{reason}]"));
+                                        ui.label(format!(
+                                            "{at}  {name} ({process_id})  [{reason}]"
+                                        ));
                                     }
                                 }
                             },
@@ -308,7 +314,7 @@ impl eframe::App for App {
                     });
                 }
                 MainTab::Rule(rule_id) => {
-                    let selected = self.rule_uis.iter().find(|r| r.id() == rule_id);
+                    let selected = self.rule_uis.iter().find(|rule_ui| rule_ui.id() == rule_id);
                     if let Some(rule) = selected {
                         egui::ScrollArea::vertical()
                             .id_salt("rule_settings_scroll")
@@ -320,7 +326,7 @@ impl eframe::App for App {
                     }
                 }
                 MainTab::Panel(panel_id) => {
-                    if let Some(panel) = self.panels.iter().find(|p| p.id() == panel_id) {
+                    if let Some(panel) = self.panels.iter().find(|panel| panel.id() == panel_id) {
                         egui::ScrollArea::vertical()
                             .id_salt("panel_scroll")
                             .show(ui, |ui| panel.ui(ui));

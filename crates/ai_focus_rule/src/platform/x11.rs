@@ -24,12 +24,12 @@ const XK_W: u32 = 0x0077;
 
 /// Responsibility: Hold the X connection (opened on first use, reopened after an error).
 pub struct X11Desktop {
-    conn: Mutex<Option<Conn>>,
+    display: Mutex<Option<X11Display>>,
 }
 
 /// Responsibility: Keep one X connection with its root window and the atoms it needs.
-struct Conn {
-    x: RustConnection,
+struct X11Display {
+    connection: RustConnection,
     root: Window,
     atoms: Atoms,
 }
@@ -51,22 +51,22 @@ type XResult<T> = Result<T, Box<dyn std::error::Error>>;
 impl X11Desktop {
     pub fn new() -> Self {
         Self {
-            conn: Mutex::new(None),
+            display: Mutex::new(None),
         }
     }
 
-    /// Run `f` on the connection; on any X error drop the connection so the next call
+    /// Run `operation` on the connection; on any X error drop the connection so the next call
     /// reconnects (the X server may have restarted).
-    fn with<T>(&self, f: impl FnOnce(&Conn) -> XResult<T>) -> Option<T> {
-        let mut slot = self.conn.lock();
+    fn with<T>(&self, operation: impl FnOnce(&X11Display) -> XResult<T>) -> Option<T> {
+        let mut slot = self.display.lock();
         if slot.is_none() {
-            *slot = Conn::open().ok();
+            *slot = X11Display::open().ok();
         }
-        let result = f(slot.as_ref()?);
+        let result = operation(slot.as_ref()?);
         match result {
             Ok(value) => Some(value),
-            Err(err) => {
-                tracing::debug!("x11: {err}");
+            Err(error) => {
+                tracing::debug!("x11: {error}");
                 *slot = None;
                 None
             }
@@ -74,12 +74,15 @@ impl X11Desktop {
     }
 }
 
-impl Conn {
+impl X11Display {
     fn open() -> XResult<Self> {
-        let (x, screen) = x11rb::connect(None)?;
-        let root = x.setup().roots[screen].root;
+        let (connection, screen_index) = x11rb::connect(None)?;
+        let root = connection.setup().roots[screen_index].root;
         let atom = |name: &str| -> XResult<Atom> {
-            Ok(x.intern_atom(false, name.as_bytes())?.reply()?.atom)
+            Ok(connection
+                .intern_atom(false, name.as_bytes())?
+                .reply()?
+                .atom)
         };
         let atoms = Atoms {
             net_active_window: atom("_NET_ACTIVE_WINDOW")?,
@@ -92,20 +95,27 @@ impl Conn {
             wm_state: atom("WM_STATE")?,
             wm_change_state: atom("WM_CHANGE_STATE")?,
         };
-        Ok(Self { x, root, atoms })
+        Ok(Self {
+            connection,
+            root,
+            atoms,
+        })
     }
 
-    fn u32s(&self, window: Window, property: Atom) -> XResult<Vec<u32>> {
+    fn u32_property_values(&self, window: Window, property: Atom) -> XResult<Vec<u32>> {
         let reply = self
-            .x
+            .connection
             .get_property(false, window, property, AtomEnum::ANY, 0, 1024)?
             .reply()?;
-        Ok(reply.value32().map(|v| v.collect()).unwrap_or_default())
+        Ok(reply
+            .value32()
+            .map(|values| values.collect())
+            .unwrap_or_default())
     }
 
     fn title(&self, window: Window) -> XResult<String> {
         let utf8 = self
-            .x
+            .connection
             .get_property(
                 false,
                 window,
@@ -119,7 +129,7 @@ impl Conn {
             return Ok(String::from_utf8_lossy(&utf8.value).into_owned());
         }
         let plain = self
-            .x
+            .connection
             .get_property(false, window, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 1024)?
             .reply()?;
         Ok(String::from_utf8_lossy(&plain.value).into_owned())
@@ -127,34 +137,41 @@ impl Conn {
 
     /// `/proc/<pid>/exe` file name, else `comm`, else the `WM_CLASS` class.
     fn process(&self, window: Window) -> XResult<(u32, String)> {
-        let pid = self
-            .u32s(window, self.atoms.net_wm_pid)?
+        let process_id = self
+            .u32_property_values(window, self.atoms.net_wm_pid)?
             .first()
             .copied()
             .unwrap_or(0);
-        if pid != 0 {
-            let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+        if process_id != 0 {
+            let executable_name = std::fs::read_link(format!("/proc/{process_id}/exe"))
                 .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
-            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .and_then(|executable_path| {
+                    executable_path
+                        .file_name()
+                        .map(|file_name| file_name.to_string_lossy().into_owned())
+                });
+            let command_name = std::fs::read_to_string(format!("/proc/{process_id}/comm"))
                 .ok()
-                .map(|c| c.trim().to_string());
-            if let Some(name) = exe.or(comm).filter(|n| !n.is_empty()) {
-                return Ok((pid, name));
+                .map(|contents| contents.trim().to_string());
+            if let Some(name) = executable_name
+                .or(command_name)
+                .filter(|name| !name.is_empty())
+            {
+                return Ok((process_id, name));
             }
         }
         let class = self
-            .x
+            .connection
             .get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 256)?
             .reply()?;
         // WM_CLASS is "instance\0class\0": the class names the program.
         let name = class
             .value
-            .split(|b| *b == 0)
+            .split(|byte| *byte == 0)
             .rfind(|part| !part.is_empty())
-            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .map(|class_name| String::from_utf8_lossy(class_name).into_owned())
             .unwrap_or_default();
-        Ok((pid, name))
+        Ok((process_id, name))
     }
 
     /// The window itself if it has a title, else its first titled child (a window
@@ -163,7 +180,7 @@ impl Conn {
         if !self.title(window)?.trim().is_empty() {
             return Ok(Some(window));
         }
-        for child in self.x.query_tree(window)?.reply()?.children {
+        for child in self.connection.query_tree(window)?.reply()?.children {
             if !self.title(child)?.trim().is_empty() {
                 return Ok(Some(child));
             }
@@ -173,7 +190,7 @@ impl Conn {
 
     fn foreground(&self) -> XResult<Option<Window>> {
         let active = self
-            .u32s(self.root, self.atoms.net_active_window)?
+            .u32_property_values(self.root, self.atoms.net_active_window)?
             .first()
             .copied()
             .unwrap_or(0);
@@ -181,83 +198,91 @@ impl Conn {
             return self.titled(active);
         }
         // No window manager: walk up from the focused window to a titled one.
-        let mut window = self.x.get_input_focus()?.reply()?.focus;
+        let mut window = self.connection.get_input_focus()?.reply()?.focus;
         while window > 1 && window != self.root {
             if !self.title(window)?.trim().is_empty() {
                 return Ok(Some(window));
             }
-            window = self.x.query_tree(window)?.reply()?.parent;
+            window = self.connection.query_tree(window)?.reply()?.parent;
         }
         Ok(None)
     }
 
     fn minimized(&self, window: Window) -> XResult<bool> {
-        if self.u32s(window, self.atoms.wm_state)?.first() == Some(&ICONIC_STATE) {
+        if self
+            .u32_property_values(window, self.atoms.wm_state)?
+            .first()
+            == Some(&ICONIC_STATE)
+        {
             return Ok(true);
         }
         Ok(self
-            .u32s(window, self.atoms.net_wm_state)?
+            .u32_property_values(window, self.atoms.net_wm_state)?
             .contains(&self.atoms.net_wm_state_hidden))
     }
 
     /// Managed windows (`_NET_CLIENT_LIST`), or without a window manager the mapped
     /// top-level windows.
     fn open_windows(&self) -> XResult<Vec<Window>> {
-        let managed = self.u32s(self.root, self.atoms.net_client_list)?;
+        let managed = self.u32_property_values(self.root, self.atoms.net_client_list)?;
         if !managed.is_empty() {
             return Ok(managed);
         }
-        let mut out = Vec::new();
-        for child in self.x.query_tree(self.root)?.reply()?.children {
-            let attributes = self.x.get_window_attributes(child)?.reply()?;
+        let mut windows = Vec::new();
+        for child in self.connection.query_tree(self.root)?.reply()?.children {
+            let attributes = self.connection.get_window_attributes(child)?.reply()?;
             if attributes.map_state == MapState::VIEWABLE && !attributes.override_redirect {
                 if let Some(window) = self.titled(child)? {
-                    out.push(window);
+                    windows.push(window);
                 }
             }
         }
-        Ok(out)
+        Ok(windows)
     }
 
     fn describe(&self, window: Window) -> XResult<Foreground> {
-        let (pid, process_name) = self.process(window)?;
+        let (process_id, process_name) = self.process(window)?;
         Ok(Foreground {
             window: window as isize,
-            pid,
+            pid: process_id,
             process_name,
             title: self.title(window)?,
         })
     }
 
     fn keycode(&self, keysym: u32) -> XResult<Option<u8>> {
-        let setup = self.x.setup();
-        let (min, max) = (setup.min_keycode, setup.max_keycode);
-        let map = self.x.get_keyboard_mapping(min, max - min + 1)?.reply()?;
-        let per = map.keysyms_per_keycode.max(1) as usize;
-        Ok(map
+        let setup = self.connection.setup();
+        let (min_keycode, max_keycode) = (setup.min_keycode, setup.max_keycode);
+        let keyboard_mapping = self
+            .connection
+            .get_keyboard_mapping(min_keycode, max_keycode - min_keycode + 1)?
+            .reply()?;
+        let keysyms_per_keycode = keyboard_mapping.keysyms_per_keycode.max(1) as usize;
+        Ok(keyboard_mapping
             .keysyms
-            .chunks(per)
-            .position(|syms| syms.contains(&keysym))
-            .map(|i| min + i as u8))
+            .chunks(keysyms_per_keycode)
+            .position(|keycode_keysyms| keycode_keysyms.contains(&keysym))
+            .map(|keycode_offset| min_keycode + keycode_offset as u8))
     }
 }
 
 impl Desktop for X11Desktop {
     fn foreground(&self) -> Option<Foreground> {
-        self.with(|c| match c.foreground()? {
-            Some(window) => c.describe(window).map(Some),
+        self.with(|display| match display.foreground()? {
+            Some(window) => display.describe(window).map(Some),
             None => Ok(None),
         })
         .flatten()
     }
 
-    fn screenshot(&self, _fg: &Foreground) -> Option<Screenshot> {
-        self.with(|c| {
-            let geometry = c.x.get_geometry(c.root)?.reply()?;
-            let image =
-                c.x.get_image(
+    fn screenshot(&self, _foreground: &Foreground) -> Option<Screenshot> {
+        self.with(|display| {
+            let geometry = display.connection.get_geometry(display.root)?.reply()?;
+            let image = display
+                .connection
+                .get_image(
                     ImageFormat::Z_PIXMAP,
-                    c.root,
+                    display.root,
                     0,
                     0,
                     geometry.width,
@@ -271,8 +296,8 @@ impl Desktop for X11Desktop {
             }
             // 24/32-bit TrueColor: BGRX in memory.
             let mut rgba = Vec::with_capacity(pixels * 4);
-            for px in image.data.chunks_exact(4).take(pixels) {
-                rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+            for pixel in image.data.chunks_exact(4).take(pixels) {
+                rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
             }
             Ok(Screenshot {
                 width: geometry.width as u32,
@@ -285,80 +310,86 @@ impl Desktop for X11Desktop {
     fn visible_processes(&self) -> Vec<String> {
         self.open_windows()
             .into_iter()
-            .filter(|w| !w.minimized)
-            .map(|w| w.process_name)
+            .filter(|window| !window.minimized)
+            .map(|window| window.process_name)
             .collect()
     }
 
-    fn close_active_tab(&self, fg: &Foreground) -> bool {
-        self.with(|c| {
+    fn close_active_tab(&self, foreground: &Foreground) -> bool {
+        self.with(|display| {
             // Same window and same tab, checked right before the keys go out.
-            let now = c.foreground()?;
-            if now != Some(fg.window as Window) || c.title(fg.window as Window)? != fg.title {
+            let current_foreground = display.foreground()?;
+            if current_foreground != Some(foreground.window as Window)
+                || display.title(foreground.window as Window)? != foreground.title
+            {
                 return Ok(false);
             }
             // Keys the user holds would combine with ours (Shift+Ctrl+W closes the
             // window): try again on a later sample.
-            let pointer = c.x.query_pointer(c.root)?.reply()?;
+            let pointer = display.connection.query_pointer(display.root)?.reply()?;
             let held =
                 KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4;
             if u16::from(pointer.mask) & u16::from(held) != 0 {
                 return Ok(false);
             }
-            let (Some(ctrl), Some(w)) = (c.keycode(XK_CONTROL_L)?, c.keycode(XK_W)?) else {
+            let (Some(control_keycode), Some(w_keycode)) =
+                (display.keycode(XK_CONTROL_L)?, display.keycode(XK_W)?)
+            else {
                 return Ok(false);
             };
             for (kind, key) in [
-                (KEY_PRESS, ctrl),
-                (KEY_PRESS, w),
-                (KEY_RELEASE, w),
-                (KEY_RELEASE, ctrl),
+                (KEY_PRESS, control_keycode),
+                (KEY_PRESS, w_keycode),
+                (KEY_RELEASE, w_keycode),
+                (KEY_RELEASE, control_keycode),
             ] {
-                c.x.xtest_fake_input(kind, key, 0, c.root, 0, 0, 0)?;
+                display
+                    .connection
+                    .xtest_fake_input(kind, key, 0, display.root, 0, 0, 0)?;
             }
-            c.x.flush()?;
+            display.connection.flush()?;
             Ok(true)
         })
         .unwrap_or(false)
     }
 
     fn open_windows(&self) -> Vec<OpenWindow> {
-        self.with(|c| {
-            let mut out = Vec::new();
-            for window in c.open_windows()? {
-                let fg = c.describe(window)?;
-                if fg.title.trim().is_empty() {
+        self.with(|display| {
+            let mut windows = Vec::new();
+            for window in display.open_windows()? {
+                let described = display.describe(window)?;
+                if described.title.trim().is_empty() {
                     continue;
                 }
-                out.push(OpenWindow {
-                    window: fg.window,
-                    pid: fg.pid,
-                    process_name: fg.process_name,
-                    title: fg.title,
-                    minimized: c.minimized(window)?,
+                windows.push(OpenWindow {
+                    window: described.window,
+                    pid: described.pid,
+                    process_name: described.process_name,
+                    title: described.title,
+                    minimized: display.minimized(window)?,
                 });
             }
-            Ok(out)
+            Ok(windows)
         })
         .unwrap_or_default()
     }
 
     fn minimize(&self, window: isize) -> bool {
-        self.with(|c| {
+        self.with(|display| {
             // ICCCM: ask the window manager to iconify the window.
             let event = ClientMessageEvent::new(
                 32,
                 window as Window,
-                c.atoms.wm_change_state,
+                display.atoms.wm_change_state,
                 [ICONIC_STATE, 0, 0, 0, 0],
             );
-            c.x.send_event(
+            display.connection.send_event(
                 false,
-                c.root,
+                display.root,
                 EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
                 event,
             )?;
-            c.x.flush()?;
+            display.connection.flush()?;
             Ok(true)
         })
         .unwrap_or(false)
@@ -382,87 +413,103 @@ mod tests {
             return;
         }
         // A test window, owned by this process, playing "a browser tab".
-        let (x, screen) = x11rb::connect(None).unwrap();
-        let root = x.setup().roots[screen].root;
-        let win = x.generate_id().unwrap();
-        x.create_window(
-            0,
-            win,
-            root,
-            0,
-            0,
-            320,
-            200,
-            0,
-            WindowClass::INPUT_OUTPUT,
-            0,
-            &CreateWindowAux::new().event_mask(EventMask::KEY_PRESS),
-        )
-        .unwrap();
-        x.change_property8(
-            PropMode::REPLACE,
-            win,
-            AtomEnum::WM_NAME,
-            AtomEnum::STRING,
-            b"Funny cats - YouTube",
-        )
-        .unwrap();
-        let pid_atom = x
+        let (connection, screen_index) = x11rb::connect(None).unwrap();
+        let root = connection.setup().roots[screen_index].root;
+        let window = connection.generate_id().unwrap();
+        connection
+            .create_window(
+                0,
+                window,
+                root,
+                0,
+                0,
+                320,
+                200,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new().event_mask(EventMask::KEY_PRESS),
+            )
+            .unwrap();
+        connection
+            .change_property8(
+                PropMode::REPLACE,
+                window,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                b"Funny cats - YouTube",
+            )
+            .unwrap();
+        let pid_atom = connection
             .intern_atom(false, b"_NET_WM_PID")
             .unwrap()
             .reply()
             .unwrap()
             .atom;
-        x.change_property32(
-            PropMode::REPLACE,
-            win,
-            pid_atom,
-            AtomEnum::CARDINAL,
-            &[std::process::id()],
-        )
-        .unwrap();
-        x.map_window(win).unwrap();
-        x.sync().unwrap();
-        x.set_input_focus(InputFocus::PARENT, win, 0u32).unwrap();
+        connection
+            .change_property32(
+                PropMode::REPLACE,
+                window,
+                pid_atom,
+                AtomEnum::CARDINAL,
+                &[std::process::id()],
+            )
+            .unwrap();
+        connection.map_window(window).unwrap();
+        connection.sync().unwrap();
+        connection
+            .set_input_focus(InputFocus::PARENT, window, 0u32)
+            .unwrap();
         // Act as the window manager, to see the minimize request.
-        x.change_window_attributes(
-            root,
-            &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
-                .event_mask(EventMask::SUBSTRUCTURE_REDIRECT),
-        )
-        .unwrap();
-        x.sync().unwrap();
+        connection
+            .change_window_attributes(
+                root,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::SUBSTRUCTURE_REDIRECT),
+            )
+            .unwrap();
+        connection.sync().unwrap();
 
         let desktop = X11Desktop::new();
-        let fg = desktop.foreground().expect("a focused window");
-        assert_eq!(fg.window, win as isize);
-        assert_eq!(fg.title, "Funny cats - YouTube");
-        assert_eq!(fg.pid, std::process::id());
-        let exe = std::env::current_exe().unwrap();
-        assert_eq!(fg.process_name, exe.file_name().unwrap().to_string_lossy());
+        let foreground = desktop.foreground().expect("a focused window");
+        assert_eq!(foreground.window, window as isize);
+        assert_eq!(foreground.title, "Funny cats - YouTube");
+        assert_eq!(foreground.pid, std::process::id());
+        let executable = std::env::current_exe().unwrap();
+        assert_eq!(
+            foreground.process_name,
+            executable.file_name().unwrap().to_string_lossy()
+        );
 
         let open = desktop.open_windows();
         assert!(
             open.iter()
-                .any(|w| w.window == win as isize && !w.minimized),
+                .any(|open_window| open_window.window == window as isize && !open_window.minimized),
             "{open:?}"
         );
-        assert!(desktop.visible_processes().contains(&fg.process_name));
-        let shot = desktop.screenshot(&fg).expect("a screenshot");
-        assert!(shot.width > 0 && shot.rgba.len() == (shot.width * shot.height * 4) as usize);
+        assert!(desktop
+            .visible_processes()
+            .contains(&foreground.process_name));
+        let screenshot = desktop.screenshot(&foreground).expect("a screenshot");
+        assert!(
+            screenshot.width > 0
+                && screenshot.rgba.len() == (screenshot.width * screenshot.height * 4) as usize
+        );
 
         // Ctrl+W reaches the window; a minimize request reaches the "window manager".
-        assert!(desktop.close_active_tab(&fg));
-        assert!(desktop.minimize(win as isize));
+        assert!(desktop.close_active_tab(&foreground));
+        assert!(desktop.minimize(window as isize));
         let (mut key_with_ctrl, mut iconify) = (false, false);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline && !(key_with_ctrl && iconify) {
-            match x.poll_for_event().unwrap() {
-                Some(Event::KeyPress(e)) => {
-                    key_with_ctrl |= u16::from(e.state) & u16::from(KeyButMask::CONTROL) != 0
+            match connection.poll_for_event().unwrap() {
+                Some(Event::KeyPress(event)) => {
+                    key_with_ctrl |= u16::from(event.state) & u16::from(KeyButMask::CONTROL) != 0
                 }
-                Some(Event::ClientMessage(e)) if e.response_type & 0x7f == CLIENT_MESSAGE_EVENT => {
-                    iconify |= e.window == win && e.data.as_data32()[0] == ICONIC_STATE
+                Some(Event::ClientMessage(event))
+                    if event.response_type & 0x7f == CLIENT_MESSAGE_EVENT =>
+                {
+                    iconify |= event.window == window && event.data.as_data32()[0] == ICONIC_STATE
                 }
                 Some(_) => {}
                 None => std::thread::sleep(std::time::Duration::from_millis(20)),
@@ -472,15 +519,16 @@ mod tests {
         assert!(iconify, "the minimize request did not arrive");
 
         // Another title in the same window: Ctrl+W is not sent (the user switched tabs).
-        x.change_property8(
-            PropMode::REPLACE,
-            win,
-            AtomEnum::WM_NAME,
-            AtomEnum::STRING,
-            b"Rust docs",
-        )
-        .unwrap();
-        x.sync().unwrap();
-        assert!(!desktop.close_active_tab(&fg));
+        connection
+            .change_property8(
+                PropMode::REPLACE,
+                window,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                b"Rust docs",
+            )
+            .unwrap();
+        connection.sync().unwrap();
+        assert!(!desktop.close_active_tab(&foreground));
     }
 }
