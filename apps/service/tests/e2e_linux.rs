@@ -10,15 +10,17 @@
 //! 2. a window without a verdict is judged at once: the off-task tab in front gets Ctrl+W,
 //!    and the on-task window behind it is judged by title too;
 //! 3. the verdicts, the block and the token usage show in the status;
-//! 4. settings_get / settings_put work while unlocked, a to-do proposal goes through the AI,
-//!    and settings_lock makes the agent refuse settings_get.
+//! 4. settings_get / settings_put work while unlocked; with the stand-in, a to-do proposal
+//!    goes through; with the real AI, the planner picks what to do now from a list that
+//!    mixes work, rest and play (urgent work first; rest or play on a rest day);
+//! 5. settings_lock makes the agent refuse settings_get.
 #![cfg(target_os = "linux")]
 
 mod common;
 
 use common::{fake_claude, wait_for};
 use machine::user_api::{call, call_value, Status};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::process::{Child, Command};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -192,7 +194,7 @@ fn end_to_end(real_key: Option<String>) {
         assert!(calls.load(Ordering::SeqCst) >= 1);
     }
 
-    // 4. Settings while unlocked, a proposal, then the lock.
+    // 4. Settings while unlocked, then (stand-in) a proposal or (real AI) what to do now.
     let settings = call_value(session, "settings_get", json!({})).unwrap();
     assert_eq!(settings["files"]["ai_focus"]["api_key"], api_key.as_str());
     call_value(
@@ -203,20 +205,68 @@ fn end_to_end(real_key: Option<String>) {
     .unwrap();
     let settings = call_value(session, "settings_get", json!({})).unwrap();
     assert_eq!(settings["files"]["planner"]["life_rules"], "No games.");
-    let proposed = call(
-        session,
-        "propose_todo",
-        json!({ "todo": { "title": "Buy groceries" }, "via": "e2e" }),
-    )
-    .unwrap();
-    let proposal = proposed.last_proposal.expect("the proposal was reviewed");
-    println!(
-        "proposal approved: {} ({})",
-        proposal.approved, proposal.reply
-    );
-    // Buying groceries breaks no rule; the real AI could still be strict, so only the
-    // stand-in's answer is fixed.
-    assert!(proposal.approved || real);
+    if real {
+        // Rest and play are to-dos like any other: the AI must pick them when the rules
+        // call for them, and pick urgent work over them when something is due.
+        let urgent = assign(
+            session,
+            &[
+                todo(
+                    "a-thesis",
+                    "Submit thesis chapter 3 to my advisor",
+                    "Final edits in Google Docs, then send it by Gmail.",
+                    Some(0),
+                    5,
+                ),
+                todo("a-game", "Play Stardew Valley", "Leisure.", None, 2),
+                todo(
+                    "a-walk",
+                    "Take a 20-minute walk",
+                    "Rest, away from the screen.",
+                    None,
+                    2,
+                ),
+            ],
+            "Rest and play are fine once nothing is due today.",
+        );
+        assert_eq!(
+            urgent, "a-thesis",
+            "work due today comes before rest and play"
+        );
+        let rest = assign(
+            session,
+            &[
+                todo(
+                    "b-parser",
+                    "Refactor the parser module",
+                    "No deadline.",
+                    None,
+                    3,
+                ),
+                todo("b-game", "Play Stardew Valley", "Leisure.", None, 2),
+                todo(
+                    "b-walk",
+                    "Take a 20-minute walk",
+                    "Rest, away from the screen.",
+                    None,
+                    2,
+                ),
+            ],
+            "Today is a rest day: assign only rest or play.",
+        );
+        assert!(
+            rest == "b-game" || rest == "b-walk",
+            "a rest day gets rest or play, not {rest}"
+        );
+    } else {
+        let proposed = call(
+            session,
+            "propose_todo",
+            json!({ "todo": { "title": "Buy groceries" }, "via": "e2e" }),
+        )
+        .unwrap();
+        assert!(proposed.last_proposal.as_ref().is_some_and(|p| p.approved));
+    }
     call_value(session, "settings_lock", json!({ "hours": 1 })).unwrap();
     let refused = call_value(session, "settings_get", json!({})).unwrap_err();
     assert!(refused.contains("locked"), "{refused}");
@@ -226,6 +276,46 @@ fn end_to_end(real_key: Option<String>) {
         .is_some());
 
     let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A to-do due in `due_in_days` (None: no deadline).
+fn todo(id: &str, title: &str, notes: &str, due_in_days: Option<i64>, priority: u8) -> Value {
+    let deadline = due_in_days
+        .map(|d| (chrono::Local::now().date_naive() + chrono::Duration::days(d)).to_string());
+    json!({ "id": id, "title": title, "notes": notes, "deadline": deadline, "priority": priority })
+}
+
+/// Turn the planner on with `todos` and `life_rules`, ask the AI what to do now, print its
+/// choice and return the chosen to-do's id.
+fn assign(session: u32, todos: &[Value], life_rules: &str) -> String {
+    call_value(
+        session,
+        "settings_put",
+        json!({ "name": "planner", "content": { "enabled": true, "todos": todos, "life_rules": life_rules } }),
+    )
+    .unwrap();
+    // The agent reloads changed settings every few seconds.
+    let first = todos[0]["id"].as_str().unwrap().to_string();
+    wait_for(Duration::from_secs(15), || {
+        let s: Status = call(session, "status", json!({})).ok()?;
+        let p = s.planner?;
+        (p.active && p.open_todos.iter().any(|t| t.id == first)).then_some(())
+    })
+    .expect("the agent picked up the planner settings");
+    let status = call(session, "assign", json!({})).unwrap();
+    let a = status
+        .planner
+        .and_then(|p| p.assignment)
+        .expect("an assignment");
+    println!(
+        "rules: {life_rules}\n  -> {:?}: {}\n     why: {}",
+        a.todo_id, a.task, a.why
+    );
+    assert!(
+        status.session_active,
+        "the assignment starts a focus session"
+    );
+    a.todo_id.expect("the AI picked a to-do from the list")
 }
 
 /// A mapped, titled window owned by this process, listening for key presses.
