@@ -119,7 +119,9 @@ impl Panel for PlannerAdminUi {
         ui.heading("Life rules");
         ui.label(
             "Standing rules the AI follows when it picks a task, reviews a change and \
-             reviews a to-do the user proposes. They can be changed only here; while the settings are locked, a change takes effect when the lock ends.",
+             reviews a to-do the user proposes. They can be changed only here (or scheduled from \
+             Claude Desktop); once the settings are protected, a change takes effect only after \
+             you confirm it three times, two days apart.",
         );
         draft.dirty |= ui
             .add(
@@ -129,6 +131,62 @@ impl Panel for PlannerAdminUi {
                     .hint_text("e.g. No games or videos before 18:00 on weekdays. A 30-minute break after two hours of work is fine."),
             )
             .changed();
+        ui.separator();
+
+        // --- the AI's instructions ----------------------------------------------
+        egui::CollapsingHeader::new("AI instructions")
+            .id_salt("planner_instructions")
+            .show(ui, |ui| {
+                ui.label(
+                    "What the planner's AI is told to do. An empty box means the built-in \
+                     instruction. Like every setting, a change is scheduled and needs three \
+                     confirmations once the settings are protected.",
+                );
+                let instructions = &mut draft.config.instructions;
+                for (label, own, built_in) in [
+                    (
+                        "Picking the task and its time",
+                        &mut instructions.pick,
+                        crate::advisor::PICK_PROMPT,
+                    ),
+                    (
+                        "Reviewing a change request",
+                        &mut instructions.change_review,
+                        crate::advisor::REVIEW_PROMPT,
+                    ),
+                    (
+                        "Reviewing a proposed to-do",
+                        &mut instructions.proposal_review,
+                        crate::advisor::PROPOSAL_PROMPT,
+                    ),
+                ] {
+                    ui.strong(label);
+                    ui.horizontal(|ui| {
+                        if own.trim().is_empty() {
+                            ui.small("built-in");
+                            if ui
+                                .small_button("Edit a copy of the built-in text")
+                                .clicked()
+                            {
+                                *own = built_in.to_string();
+                                draft.dirty = true;
+                            }
+                        } else if ui.small_button("Back to the built-in text").clicked() {
+                            own.clear();
+                            draft.dirty = true;
+                        }
+                    });
+                    if !own.trim().is_empty() {
+                        draft.dirty |= ui
+                            .add(
+                                egui::TextEdit::multiline(own)
+                                    .desired_rows(6)
+                                    .desired_width(f32::INFINITY),
+                            )
+                            .changed();
+                    }
+                }
+            });
         ui.separator();
 
         // --- list -------------------------------------------------------------

@@ -1,48 +1,58 @@
 //! Responsibility: Show the admin settings in the Focus app, send the user's edits to the
-//! agent, show and discard the edits that wait for the lock to end, and let the user lock the
-//! settings for a while.
+//! agent, ask the user about scheduled updates ("is this update really right?"), and turn
+//! the protection of the settings on.
 //!
 //! This tab is where the settings of a machine install are edited, from any managed
-//! (standard) account, locked or not. It asks the agent for the settings (`settings_get`),
-//! writes them into a private copy ("mirror") under `%LOCALAPPDATA%`, and opens the usual
-//! stores and panels on that copy. A background thread sends every file the panels save back
-//! to the agent (`settings_put`), which writes the real file as SYSTEM, and refreshes the
-//! read-only views (planner state, grants, blocks).
+//! (standard) account. It asks the agent for the settings (`settings_get`), writes them into
+//! a private copy ("mirror") under `%LOCALAPPDATA%`, and opens the usual stores and panels on
+//! that copy. A background thread sends every file the panels save back to the agent
+//! (`settings_put`), which writes the real file as SYSTEM, and refreshes the read-only views
+//! (planner state, grants, blocks).
 //!
-//! While the settings are locked the agent keeps a saved file as a pending edit and puts it
-//! in force only when the lock ends. The mirror then shows the pending version, so editing
-//! goes on from it; "Discard" drops it (`settings_discard`). Locking (`settings_lock`) only
-//! ever extends. Rules: `machine::settings`; guide: `docs/multi_account.md` 6.4.
+//! During setup an edit takes effect at once. Once the settings are protected
+//! (`settings_protect`, one way) the agent keeps every edit as a scheduled update; this tab
+//! lists them, asks about each one when its question is due (`settings_answer`: three "yes"
+//! answers two days apart put it in force, one "no" rejects it), and can withdraw one
+//! (`settings_withdraw`). The mirror shows a scheduled update's version, so editing goes on
+//! from it. Rules: `machine::settings`; guide: `docs/multi_account.md` 6.4.
 
 use ai_focus_rule::grants::GrantState;
 use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
 use chrono::{DateTime, Local, Utc};
 use list_based_rule::{FileListPersistence, ListBasedRuleHandle, ListStore};
-use machine::settings::{PendingFile, PutOutcome, SettingsSnapshot, EDITABLE};
+use machine::settings::{
+    AnswerOutcome, PutOutcome, Reservation, SettingsSnapshot, APPROVALS_NEEDED, EDITABLE,
+};
 use machine::user_api::call_value;
 use parking_lot::Mutex;
 use rule_ui::{Panel, RuleUi};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use task_planner::{JsonStore, PlannerAdminUi, PlannerConfig, PlannerState};
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
 const RED: egui::Color32 = egui::Color32::from_rgb(200, 80, 80);
+/// How often the list of scheduled updates is fetched while this tab is shown.
+const RESERVATIONS_REFRESH: Duration = Duration::from_secs(3);
 
-/// Responsibility: Hold the Settings tab: the loaded panels, the sync thread, the lock form.
+/// Responsibility: Hold the Settings tab: the loaded panels, the sync thread, the scheduled
+/// updates last fetched, and the protection form.
 pub struct SettingsTab {
     session: u32,
     loaded: Option<Loaded>,
     error: String,
-    lock_days: u32,
-    lock_hours: u32,
-    confirm: bool,
+    confirm_protect: bool,
+    /// The last `settings_get` answer, for the scheduled-updates list and its questions.
+    latest: Option<SettingsSnapshot>,
+    fetched_at: Option<Instant>,
+    /// What the last answer did, shown under the list.
+    answer_message: String,
 }
 
 /// Responsibility: Keep the panels opened on the mirror and the thread that syncs it.
@@ -64,8 +74,6 @@ struct Sync {
     stop: AtomicBool,
     /// Last bytes of each editable file the agent has accepted (or sent us).
     synced: Mutex<HashMap<&'static str, Option<Vec<u8>>>>,
-    /// Edits the agent keeps until the lock ends (refreshed every few seconds).
-    pending: Mutex<BTreeMap<String, PendingFile>>,
     message: Mutex<String>,
 }
 
@@ -75,31 +83,30 @@ impl SettingsTab {
             session,
             loaded: None,
             error: String::new(),
-            lock_days: 7,
-            lock_hours: 0,
-            confirm: false,
+            confirm_protect: false,
+            latest: None,
+            fetched_at: None,
+            answer_message: String::new(),
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, locked_until: Option<DateTime<Utc>>) {
-        match locked_until {
-            Some(until) => {
-                let until = until.with_timezone(&Local).format("%Y-%m-%d %H:%M");
-                ui.colored_label(RED, format!("The admin settings are locked until {until}."));
-                ui.label(format!(
-                    "You can still edit them, but what you save takes effect only when the \
-                     lock ends ({until}). Until then the current settings stay in force."
-                ));
-            }
-            None => {
-                ui.colored_label(
-                    YELLOW,
-                    "The admin settings are unlocked: anyone using this PC can change them \
-                     here, and changes take effect at once.",
-                );
+    pub fn ui(&mut self, ui: &mut egui::Ui, protected: bool) {
+        if protected {
+            ui.label(format!(
+                "The settings are protected. Every change you save is scheduled: two days \
+                 later you are asked whether it is really right, and it takes effect only \
+                 after {APPROVALS_NEEDED} \"yes\" answers in a row, two days apart. One \"no\" \
+                 rejects it."
+            ));
+        } else {
+            self.protect_ui(ui);
+        }
+        if self.reservations_ui(ui) {
+            // A scheduled update was answered or withdrawn: reopen on what is now true.
+            if self.loaded.is_some() {
+                self.open();
             }
         }
-        self.lock_ui(ui, locked_until);
 
         ui.separator();
         if self.loaded.is_none() {
@@ -109,11 +116,6 @@ impl SettingsTab {
             if !self.error.is_empty() {
                 ui.colored_label(RED, &self.error);
             }
-            return;
-        }
-        if self.pending_ui(ui, locked_until) {
-            // A pending edit was dropped: reopen on the settings in force.
-            self.open();
             return;
         }
         let Some(loaded) = &mut self.loaded else {
@@ -159,76 +161,168 @@ impl SettingsTab {
         }
     }
 
-    /// The saved edits that wait for the lock to end, each with a Discard button. Returns
-    /// whether one was discarded.
-    fn pending_ui(&mut self, ui: &mut egui::Ui, locked_until: Option<DateTime<Utc>>) -> bool {
-        let Some(loaded) = &self.loaded else {
-            return false;
-        };
-        let pending = loaded.sync.pending.lock().clone();
-        if pending.is_empty() {
-            return false;
-        }
-        let when = locked_until.map_or("in a few seconds".to_string(), |until| {
-            format!(
-                "when the lock ends ({})",
-                until.with_timezone(&Local).format("%Y-%m-%d %H:%M")
-            )
-        });
-        ui.strong(format!("Saved changes that take effect {when}:"));
-        let mut discarded = false;
-        for (name, edit) in &pending {
-            let file = EDITABLE
-                .iter()
-                .find(|(editable_name, _)| editable_name == name)
-                .map_or(name.as_str(), |(_, file_name)| file_name);
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{file} (saved {})",
-                    edit.saved_at.with_timezone(&Local).format("%m-%d %H:%M")
-                ));
-                if ui.small_button("Discard").clicked() {
-                    match call_value(self.session, "settings_discard", json!({ "name": name })) {
-                        Ok(_) => discarded = true,
-                        Err(error) => self.error = error,
-                    }
-                }
-            });
-        }
-        ui.small("The tabs below show your saved changes, not the settings in force.");
-        ui.separator();
-        discarded
-    }
-
-    fn lock_ui(&mut self, ui: &mut egui::Ui, locked_until: Option<DateTime<Utc>>) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(if locked_until.is_some() {
-                "Lock for longer:"
-            } else {
-                "Lock them for"
-            });
-            ui.add(egui::DragValue::new(&mut self.lock_days).range(0..=366));
-            ui.label("days");
-            ui.add(egui::DragValue::new(&mut self.lock_hours).range(0..=23));
-            ui.label("hours");
-        });
-        let hours = self.lock_days * 24 + self.lock_hours;
+    /// Setup: changes take effect at once until the user protects the settings.
+    fn protect_ui(&mut self, ui: &mut egui::Ui) {
+        ui.colored_label(
+            YELLOW,
+            "Setup: changes take effect at once, and anyone using this PC can make them.",
+        );
+        ui.label(format!(
+            "When everything is set, protect the settings. From then on every change is \
+             scheduled and takes effect only after you confirm it {APPROVALS_NEEDED} times, \
+             two days apart."
+        ));
         ui.checkbox(
-            &mut self.confirm,
-            "I understand that nobody can unlock them early.",
+            &mut self.confirm_protect,
+            "I understand that nothing in the program turns the protection off.",
         );
         if ui
-            .add_enabled(hours > 0 && self.confirm, egui::Button::new("Lock"))
+            .add_enabled(
+                self.confirm_protect,
+                egui::Button::new("Protect the settings"),
+            )
             .clicked()
         {
-            match call_value(self.session, "settings_lock", json!({ "hours": hours })) {
+            match call_value(self.session, "settings_protect", json!({})) {
                 Ok(_) => {
-                    self.confirm = false;
+                    self.confirm_protect = false;
                     self.error.clear();
                 }
                 Err(error) => self.error = error,
             }
         }
+    }
+
+    /// The scheduled updates, with the question for each one that is due, and a Withdraw
+    /// button. Returns whether one was answered or withdrawn.
+    fn reservations_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        if self
+            .fetched_at
+            .is_none_or(|fetched_at| fetched_at.elapsed() >= RESERVATIONS_REFRESH)
+        {
+            self.fetched_at = Some(Instant::now());
+            match call_value(self.session, "settings_get", json!({}))
+                .and_then(|reply| serde_json::from_value(reply).map_err(|error| error.to_string()))
+            {
+                Ok(snapshot) => self.latest = Some(snapshot),
+                Err(error) => self.error = error,
+            }
+        }
+        let Some(snapshot) = self.latest.clone() else {
+            return false;
+        };
+        let now = Utc::now();
+        let mut changed = false;
+        if !snapshot.reservations.scheduled.is_empty() {
+            ui.separator();
+            ui.heading("Scheduled updates");
+        }
+        for reservation in &snapshot.reservations.scheduled {
+            let file = file_name(&reservation.name);
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(file);
+                    ui.label(format!(
+                        "scheduled {} via {} — {}/{APPROVALS_NEEDED} confirmed",
+                        local(reservation.scheduled_at),
+                        reservation.via,
+                        reservation.approvals.len()
+                    ));
+                });
+                let in_force = snapshot
+                    .files
+                    .get(&reservation.name)
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                egui::CollapsingHeader::new("What changes")
+                    // Read before answering.
+                    .default_open(reservation.question_due(now))
+                    .id_salt(("changes", &reservation.id))
+                    .show(ui, |ui| changes_ui(ui, &in_force, &reservation.content));
+                if reservation.question_due(now) {
+                    changed |= self.question_ui(ui, reservation);
+                } else {
+                    ui.label(format!(
+                        "Next question: {}",
+                        local(reservation.next_question_at())
+                    ));
+                }
+                if ui.small_button("Withdraw this update").clicked() {
+                    match call_value(
+                        self.session,
+                        "settings_withdraw",
+                        json!({ "id": reservation.id }),
+                    ) {
+                        Ok(_) => {
+                            self.answer_message = format!("The update of {file} was withdrawn.");
+                            changed = true;
+                        }
+                        Err(error) => self.error = error,
+                    }
+                }
+            });
+        }
+        if !self.answer_message.is_empty() {
+            ui.label(&self.answer_message);
+        }
+        if changed {
+            self.fetched_at = None;
+        }
+        changed
+    }
+
+    /// "Is this update really right?" with Yes and No. Returns whether it was answered.
+    fn question_ui(&mut self, ui: &mut egui::Ui, reservation: &Reservation) -> bool {
+        let file = file_name(&reservation.name);
+        ui.colored_label(
+            RED,
+            format!(
+                "Is this update of {file} really right? (question {} of {APPROVALS_NEEDED})",
+                reservation.approvals.len() + 1
+            ),
+        );
+        ui.small("Read what changes above. Answer as you would on a calm day.");
+        let mut answer = None;
+        ui.horizontal(|ui| {
+            if ui.button("Yes, I still want it").clicked() {
+                answer = Some(true);
+            }
+            if ui.button("No, reject it").clicked() {
+                answer = Some(false);
+            }
+        });
+        let Some(approve) = answer else {
+            return false;
+        };
+        let reply = call_value(
+            self.session,
+            "settings_answer",
+            json!({ "id": reservation.id, "approve": approve }),
+        )
+        .and_then(|reply| {
+            serde_json::from_value::<AnswerOutcome>(reply).map_err(|error| error.to_string())
+        });
+        match reply {
+            Ok(AnswerOutcome::Approved {
+                approvals,
+                next_question_at,
+            }) => {
+                self.answer_message = format!(
+                    "{file}: {approvals}/{APPROVALS_NEEDED} confirmed. Next question: {}.",
+                    local(next_question_at)
+                )
+            }
+            Ok(AnswerOutcome::Applied) => {
+                self.answer_message =
+                    format!("{file}: confirmed {APPROVALS_NEEDED} times; in force now.")
+            }
+            Ok(AnswerOutcome::Rejected) => {
+                self.answer_message = format!("{file}: the update was rejected.")
+            }
+            Err(error) => self.error = error,
+        }
+        true
     }
 
     /// Ask the agent for the settings, write the mirror, open the panels on it.
@@ -240,11 +334,13 @@ impl SettingsTab {
         let _ = fs::remove_dir_all(&mirror_directory);
         let mut synced = HashMap::new();
         for (name, file) in EDITABLE {
-            // A pending edit is what the user saw last: go on editing from it.
+            // A scheduled update is what the user saved last: go on editing from it.
             let current = snapshot
-                .pending
-                .get(name)
-                .map(|pending_file| &pending_file.content)
+                .reservations
+                .scheduled
+                .iter()
+                .find(|reservation| reservation.name == name)
+                .map(|reservation| &reservation.content)
                 .or_else(|| snapshot.files.get(name));
             let bytes = match current.filter(|value| !value.is_null()) {
                 Some(value) => {
@@ -279,7 +375,7 @@ impl SettingsTab {
                 .map_err(|error| error.to_string())?,
         );
         // Opening a store may write its file back with defaults filled in; that is the same
-        // settings, not an edit to send (while locked it would show as a pending change).
+        // settings, not an edit to send (once protected it would become a scheduled update).
         for (name, file) in EDITABLE {
             if let Ok(bytes) = fs::read(mirror_directory.join(file)) {
                 synced.insert(name, Some(bytes));
@@ -289,7 +385,6 @@ impl SettingsTab {
         let sync = Arc::new(Sync {
             stop: AtomicBool::new(false),
             synced: Mutex::new(synced),
-            pending: Mutex::new(snapshot.pending.clone()),
             message: Mutex::new(String::new()),
         });
         let (session, thread_sync) = (self.session, Arc::clone(&sync));
@@ -333,19 +428,13 @@ fn sync_loop(session: u32, mirror_directory: &Path, sync: &Sync) {
                     sync.synced.lock().insert(name, Some(bytes));
                     match outcome {
                         PutOutcome::Applied => format!("Saved {file} at {at}; in force now."),
-                        PutOutcome::Pending { applies_at } => {
-                            sync.pending.lock().insert(
-                                name.to_string(),
-                                PendingFile {
-                                    content,
-                                    saved_at: Utc::now(),
-                                },
-                            );
-                            format!(
-                                "Saved {file} at {at}; takes effect when the lock ends ({}).",
-                                applies_at.with_timezone(&Local).format("%Y-%m-%d %H:%M")
-                            )
-                        }
+                        PutOutcome::Scheduled {
+                            first_question_at, ..
+                        } => format!(
+                            "Saved {file} at {at}; scheduled. You will be asked about it from {} \
+                             on; it takes effect after {APPROVALS_NEEDED} \"yes\" answers.",
+                            local(first_question_at)
+                        ),
                     }
                 }
                 Err(error) => format!("{file} was not saved: {error}"),
@@ -356,7 +445,6 @@ fn sync_loop(session: u32, mirror_directory: &Path, sync: &Sync) {
                 .and_then(|reply| serde_json::from_value(reply).map_err(|error| error.to_string()))
             {
                 let _ = write_read_only(mirror_directory, &snapshot);
-                *sync.pending.lock() = snapshot.pending;
             }
         }
         tick = tick.wrapping_add(1);
@@ -398,4 +486,98 @@ fn mirror_dir() -> PathBuf {
     directories::ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
         .map(|project_dirs| project_dirs.data_local_dir().join("settings_mirror"))
         .unwrap_or_else(|| std::env::temp_dir().join("DigitalWellbeing_settings_mirror"))
+}
+
+fn file_name(name: &str) -> &str {
+    EDITABLE
+        .iter()
+        .find(|(editable_name, _)| *editable_name == name)
+        .map_or(name, |(_, file)| file)
+}
+
+fn local(time: DateTime<Utc>) -> String {
+    time.with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+/// What a scheduled update changes, setting by setting: `path: old → new`.
+fn changes_ui(ui: &mut egui::Ui, in_force: &Value, update: &Value) {
+    let mut changes = Vec::new();
+    collect_changes("", in_force, update, &mut changes);
+    if changes.is_empty() {
+        ui.label("Nothing differs from the settings in force.");
+    }
+    for (path, before, after) in changes {
+        ui.label(egui::RichText::new(path).strong());
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(RED, format!("now: {before}"));
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(
+                egui::Color32::from_rgb(80, 170, 90),
+                format!("after: {after}"),
+            );
+        });
+    }
+}
+
+/// Settings that differ between `before` and `after`, descending into objects; other values
+/// are compared whole and shown as compact JSON (long texts shortened).
+fn collect_changes(
+    path: &str,
+    before: &Value,
+    after: &Value,
+    changes: &mut Vec<(String, String, String)>,
+) {
+    if before == after {
+        return;
+    }
+    let no_fields = serde_json::Map::new();
+    let fields = |value: &Value| match value {
+        Value::Object(fields) => Some(fields.clone()),
+        // A setting that does not exist yet compares like an empty one, field by field.
+        Value::Null => Some(no_fields.clone()),
+        _ => None,
+    };
+    let either_is_object = before.is_object() || after.is_object();
+    if let (true, Some(before_fields), Some(after_fields)) =
+        (either_is_object, fields(before), fields(after))
+    {
+        let mut keys: Vec<&String> = before_fields.keys().chain(after_fields.keys()).collect();
+        keys.sort();
+        keys.dedup();
+        for key in keys {
+            let child = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            collect_changes(
+                &child,
+                before_fields.get(key).unwrap_or(&Value::Null),
+                after_fields.get(key).unwrap_or(&Value::Null),
+                changes,
+            );
+        }
+        return;
+    }
+    let shown = |value: &Value| {
+        let text = match value {
+            Value::String(text) => text.clone(),
+            Value::Null => "(none)".into(),
+            other => other.to_string(),
+        };
+        if text.chars().count() > 400 {
+            format!("{}…", text.chars().take(400).collect::<String>())
+        } else {
+            text
+        }
+    };
+    let label = if path.is_empty() {
+        "(whole file)".to_string()
+    } else {
+        path.to_string()
+    };
+    changes.push((label, shown(before), shown(after)));
 }

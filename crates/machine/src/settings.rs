@@ -1,121 +1,161 @@
-//! Responsibility: Let users edit the settings through their agent at any time, apply an edit
-//! at once while the settings are unlocked and only when the lock ends while they are locked,
-//! and let anyone lock them for a while.
+//! Responsibility: Let users edit the settings through their agent; once the settings are
+//! protected, keep every edit as a scheduled update that takes effect only after the user
+//! confirmed it three times, two days apart; and turn the protection on (one way).
 //!
-//! The settings (`policy.json`, `ai_focus.json`, `planner.json`) sit in the data folder, which
-//! only SYSTEM and Administrators can write; the user works in a standard account. The program
-//! does not tell accounts apart: what decides is the lock alone. The agent (SYSTEM) reads them
-//! for any local user who asks ([`snapshot`]) and saves what the user sends ([`put`]); the
-//! Focus app's Settings tab is built on this.
+//! The settings (`policy.json`, `ai_focus.json`, `planner.json` — the last one also holds the
+//! planner's AI instructions and the life rules) sit in the data folder, which only SYSTEM and
+//! Administrators can write; the user works in a standard account. The program does not tell
+//! accounts apart. The agent (SYSTEM) reads them for any local user who asks ([`snapshot`])
+//! and saves what the user sends ([`put`]); the Focus app's Settings tab and the Claude
+//! Desktop connector are built on this.
 //!
-//! - **unlocked** (no lock, or the lock has run out): a saved file takes effect at once;
-//! - **locked** ([`SettingsLock`], `settings_lock.json`): a saved file is checked and kept as a
-//!   pending change (`settings_pending.json`); the settings in force stay as they are until
-//!   the lock ends, and then every agent's reload loop applies the pending changes
-//!   ([`apply_pending`]). So a change made in a weak moment gives nothing now: it waits out
-//!   the lock, and it can be discarded before then ([`discard_pending`]).
+//! - **setup** (right after installing, `settings_protection.json` missing): a saved file
+//!   takes effect at once, so the user can set everything up;
+//! - **protected** ([`protect`], one way; nothing in the program turns it off): a saved file
+//!   is checked and kept as a scheduled update ([`Reservation`], `settings_reservations.json`).
+//!   Two days after it was scheduled the Focus app asks "is this update really right?"; each
+//!   "yes" ([`answer`]) brings the next question two days after the answer, and the third
+//!   "yes" in a row puts the update in force. One "no" rejects it. A question waits until it
+//!   is answered. Saving the same file again replaces the scheduled update and starts over.
 //!
-//! Anyone may lock or extend a lock ([`extend_lock`]); nothing in the program shortens one.
-//! (Windows cannot stop an administrator account from deleting the file or the service; the
-//! user does not work in one.)
-//!
-//! Standard users cannot change the system clock, so the lock cannot be outwaited by setting
-//! the clock forward.
+//! So a change made in an irrational moment cannot take effect before the user has stood by
+//! it on three different days. (Windows cannot stop an administrator account from deleting
+//! these files or the service; the user does not work in one. Standard users cannot change
+//! the system clock, so the waiting cannot be skipped by setting the clock forward.)
 
-use crate::data_dir;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// The admin settings a standard user may edit while unlocked (name -> file in the data
-/// folder). `machine.json` (which accounts are managed) is not among them.
+/// The admin settings a user may edit (name -> file in the data folder). `machine.json`
+/// (which accounts are managed) is not among them.
 pub const EDITABLE: [(&str, &str); 3] = [
     ("policy", "policy.json"),
     ("ai_focus", "ai_focus.json"),
     ("planner", "planner.json"),
 ];
 
-/// Longest lock one request may add: a typo should not lock the settings for decades.
-pub const MAX_LOCK_HOURS: u32 = 24 * 366;
+/// "Yes" answers in a row that put a scheduled update in force.
+pub const APPROVALS_NEEDED: usize = 3;
 
-pub fn lock_path() -> PathBuf {
-    data_dir().join("settings_lock.json")
+const PROTECTION_FILE: &str = "settings_protection.json";
+const RESERVATIONS_FILE: &str = "settings_reservations.json";
+/// Written by versions that had a settings lock: its presence means the settings were
+/// protected; pending edits of that time become scheduled updates.
+const OLD_LOCK_FILE: &str = "settings_lock.json";
+const OLD_PENDING_FILE: &str = "settings_pending.json";
+const HISTORY_CAPACITY: usize = 50;
+
+/// Time between scheduling and the first question, and between an answer and the next
+/// question: two days. `DW_SETTINGS_CONFIRM_INTERVAL_SECONDS` shortens it for tests; only an
+/// administrator can set the service's environment.
+pub fn question_interval() -> Duration {
+    std::env::var("DW_SETTINGS_CONFIRM_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|seconds| seconds.parse::<i64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::seconds)
+        .unwrap_or_else(|| Duration::days(2))
 }
 
-const PENDING_FILE: &str = "settings_pending.json";
-
-/// Responsibility: Record until when the admin settings are locked for standard users.
+/// Responsibility: Record when the settings were protected.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SettingsLock {
-    pub until: Option<DateTime<Utc>>,
-    /// When the lock was last set or extended.
-    pub set_at: Option<DateTime<Utc>>,
+pub struct Protection {
+    pub protected_since: Option<DateTime<Utc>>,
 }
 
-impl SettingsLock {
-    pub fn locked(&self, now: DateTime<Utc>) -> bool {
-        self.until.is_some_and(|until| now < until)
-    }
-
-    /// `until` while locked, `None` once it has run out.
-    pub fn locked_until(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        self.until.filter(|_| self.locked(now))
-    }
-}
-
-/// Missing file = unlocked. Only SYSTEM and Administrators can write the file, so an
-/// unreadable one comes from them (or a power cut); it reads as unlocked too.
-pub fn read_lock(path: &Path) -> SettingsLock {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
-}
-
-/// Lock for `hours` from now, or keep the current lock if it already lasts longer.
-pub fn extend_lock(path: &Path, now: DateTime<Utc>, hours: u32) -> io::Result<SettingsLock> {
-    if hours == 0 || hours > MAX_LOCK_HOURS {
-        return Err(io::Error::other(format!(
-            "lock for 1 to {MAX_LOCK_HOURS} hours"
-        )));
-    }
-    let current = read_lock(path);
-    let wanted = now + Duration::hours(hours as i64);
-    let lock = SettingsLock {
-        until: Some(
-            current
-                .locked_until(now)
-                .map_or(wanted, |current_until| current_until.max(wanted)),
-        ),
-        set_at: Some(now),
-    };
-    write_atomic(
-        path,
-        &serde_json::to_vec_pretty(&lock).map_err(io::Error::other)?,
-    )?;
-    Ok(lock)
-}
-
-/// Responsibility: Hold one saved edit that waits for the lock to end.
+/// Responsibility: Hold one scheduled update of a settings file and the answers it got.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PendingFile {
+pub struct Reservation {
+    pub id: String,
+    /// One of the [`EDITABLE`] names.
+    pub name: String,
+    /// The whole new file.
     pub content: Value,
-    pub saved_at: DateTime<Utc>,
+    pub scheduled_at: DateTime<Utc>,
+    /// Who scheduled it, as the caller said ("settings tab", "claude desktop").
+    pub via: String,
+    /// When the user answered "yes", oldest first.
+    #[serde(default)]
+    pub approvals: Vec<DateTime<Utc>>,
+}
+
+impl Reservation {
+    /// When the next "is this update really right?" question is due.
+    pub fn next_question_at(&self) -> DateTime<Utc> {
+        self.approvals.last().copied().unwrap_or(self.scheduled_at) + question_interval()
+    }
+
+    pub fn question_due(&self, now: DateTime<Utc>) -> bool {
+        now >= self.next_question_at()
+    }
+}
+
+/// Responsibility: Say how a scheduled update ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReservationOutcome {
+    /// Confirmed three times: in force.
+    Applied,
+    /// The user answered "no".
+    Rejected,
+    /// The user withdrew it before it was answered three times.
+    Withdrawn,
+    /// The same file was saved again; the newer update replaced this one.
+    Replaced,
+}
+
+/// Responsibility: Remember how a past scheduled update ended.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReservationRecord {
+    pub id: String,
+    pub name: String,
+    pub via: String,
+    pub scheduled_at: DateTime<Utc>,
+    pub outcome: ReservationOutcome,
+    pub at: DateTime<Utc>,
+}
+
+/// Responsibility: Hold the scheduled updates and how earlier ones ended.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Reservations {
+    pub scheduled: Vec<Reservation>,
+    /// Newest last.
+    pub history: VecDeque<ReservationRecord>,
 }
 
 /// Responsibility: Say what became of a saved edit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum PutOutcome {
-    /// Unlocked: the file in force was replaced.
+    /// Setup (not yet protected): the file in force was replaced.
     Applied,
-    /// Locked: kept as a pending change, applied when the lock ends.
-    Pending { applies_at: DateTime<Utc> },
+    /// Protected: kept as a scheduled update; the first question is due then.
+    Scheduled {
+        id: String,
+        first_question_at: DateTime<Utc>,
+    },
+}
+
+/// Responsibility: Say what an answer did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum AnswerOutcome {
+    /// "Yes", and more questions follow; the next one is due then.
+    Approved {
+        approvals: usize,
+        next_question_at: DateTime<Utc>,
+    },
+    /// The third "yes": the update is in force.
+    Applied,
+    /// "No": the update is dropped.
+    Rejected,
 }
 
 /// Responsibility: Carry the admin settings and what the admin panels show next to them.
@@ -124,10 +164,9 @@ pub enum PutOutcome {
 pub struct SettingsSnapshot {
     /// Editable files in force by name (see [`EDITABLE`]); a missing file is `null`.
     pub files: BTreeMap<String, Value>,
-    /// Saved edits waiting for the lock to end, by the same names.
-    pub pending: BTreeMap<String, PendingFile>,
-    /// When the pending edits take effect; `None` while unlocked.
-    pub locked_until: Option<DateTime<Utc>>,
+    /// Setup is over: edits are scheduled and need three confirmations.
+    pub protected: bool,
+    pub reservations: Reservations,
     /// Read-only views: `planner_state.json` and every user's grants and blocks files.
     pub planner_state: Value,
     pub grants: BTreeMap<String, Value>,
@@ -136,16 +175,40 @@ pub struct SettingsSnapshot {
     pub usage: BTreeMap<String, Value>,
 }
 
-/// Read everything the admin panels need from `data_directory`, locked or not.
-pub fn snapshot(data_directory: &Path, now: DateTime<Utc>) -> Result<SettingsSnapshot, String> {
+/// Setup is over (or an older version had locked the settings).
+pub fn is_protected(data_directory: &Path) -> bool {
+    data_directory.join(PROTECTION_FILE).exists() || data_directory.join(OLD_LOCK_FILE).exists()
+}
+
+/// End the setup: from now on every edit is scheduled. Nothing in the program undoes this.
+pub fn protect(data_directory: &Path, now: DateTime<Utc>) -> Result<Protection, String> {
+    let path = data_directory.join(PROTECTION_FILE);
+    let current: Protection = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    if current.protected_since.is_some() {
+        return Ok(current);
+    }
+    let protection = Protection {
+        protected_since: Some(now),
+    };
+    let bytes = serde_json::to_vec_pretty(&protection).map_err(|error| error.to_string())?;
+    write_atomic(&path, &bytes)
+        .map_err(|error| format!("could not save {PROTECTION_FILE}: {error}"))?;
+    Ok(protection)
+}
+
+/// Read everything the admin panels need from `data_directory`.
+pub fn snapshot(data_directory: &Path) -> Result<SettingsSnapshot, String> {
     let files = EDITABLE
         .iter()
         .map(|(name, file)| (name.to_string(), read_json(&data_directory.join(file))))
         .collect();
     Ok(SettingsSnapshot {
         files,
-        pending: read_pending(data_directory),
-        locked_until: locked_until(data_directory, now),
+        protected: is_protected(data_directory),
+        reservations: read_reservations(data_directory),
         planner_state: read_json(&data_directory.join("planner_state.json")),
         grants: read_folder(&data_directory.join("grants")),
         blocks: read_folder(&data_directory.join("blocks")),
@@ -153,75 +216,153 @@ pub fn snapshot(data_directory: &Path, now: DateTime<Utc>) -> Result<SettingsSna
     })
 }
 
-/// Save `content` as the editable file `name`: in force at once while unlocked, as a pending
-/// change while locked. Refused when `content` does not parse as that file's settings.
+/// The scheduled updates whose question is due now.
+pub fn questions_due(data_directory: &Path, now: DateTime<Utc>) -> usize {
+    read_reservations(data_directory)
+        .scheduled
+        .iter()
+        .filter(|reservation| reservation.question_due(now))
+        .count()
+}
+
+/// Save `content` as the editable file `name`: in force at once during setup, as a scheduled
+/// update once protected (replacing an earlier scheduled update of the same file, whose
+/// answers are lost). Refused when `content` does not parse as that file's settings.
 pub fn put(
     data_directory: &Path,
     now: DateTime<Utc>,
     name: &str,
     content: &Value,
+    via: &str,
 ) -> Result<PutOutcome, String> {
     let file = file_of(name)?;
     validate(name, content)?;
-    let mut pending = read_pending(data_directory);
-    if let Some(until) = locked_until(data_directory, now) {
-        pending.insert(
-            name.to_string(),
-            PendingFile {
-                content: content.clone(),
-                saved_at: now,
-            },
+    if !is_protected(data_directory) {
+        write_setting(data_directory, file, content)?;
+        return Ok(PutOutcome::Applied);
+    }
+    let mut reservations = read_reservations(data_directory);
+    if let Some(index) = reservations
+        .scheduled
+        .iter()
+        .position(|reservation| reservation.name == name)
+    {
+        let replaced = reservations.scheduled.remove(index);
+        record(
+            &mut reservations,
+            &replaced,
+            ReservationOutcome::Replaced,
+            now,
         );
-        write_pending(data_directory, &pending)?;
-        return Ok(PutOutcome::Pending { applies_at: until });
     }
-    write_setting(data_directory, file, content)?;
-    // A pending edit is older than this one; applying it later would undo this.
-    if pending.remove(name).is_some() {
-        write_pending(data_directory, &pending)?;
-    }
-    Ok(PutOutcome::Applied)
+    let reservation = Reservation {
+        id: format!("u{}", now.timestamp_millis()),
+        name: name.to_string(),
+        content: content.clone(),
+        scheduled_at: now,
+        via: via.trim().chars().take(40).collect(),
+        approvals: Vec::new(),
+    };
+    let outcome = PutOutcome::Scheduled {
+        id: reservation.id.clone(),
+        first_question_at: reservation.next_question_at(),
+    };
+    reservations.scheduled.push(reservation);
+    write_reservations(data_directory, &reservations)?;
+    Ok(outcome)
 }
 
-/// Drop the pending edit of `name`, or every pending edit (`None`). Allowed while locked:
-/// dropping an edit that never took effect gains nothing.
-pub fn discard_pending(data_directory: &Path, name: Option<&str>) -> Result<(), String> {
-    let mut pending = read_pending(data_directory);
-    match name {
-        Some(name) => {
-            file_of(name)?;
-            pending.remove(name);
-        }
-        None => pending.clear(),
+/// The user's answer to "is this update really right?". Refused before the question is due.
+pub fn answer(
+    data_directory: &Path,
+    now: DateTime<Utc>,
+    id: &str,
+    approve: bool,
+) -> Result<AnswerOutcome, String> {
+    let mut reservations = read_reservations(data_directory);
+    let index = reservations
+        .scheduled
+        .iter()
+        .position(|reservation| reservation.id == id)
+        .ok_or_else(|| format!("no scheduled update '{id}'"))?;
+    let due_at = reservations.scheduled[index].next_question_at();
+    if now < due_at {
+        return Err(format!(
+            "the next question about this update is due at {}",
+            due_at.to_rfc3339()
+        ));
     }
-    write_pending(data_directory, &pending)
+    if !approve {
+        let rejected = reservations.scheduled.remove(index);
+        record(
+            &mut reservations,
+            &rejected,
+            ReservationOutcome::Rejected,
+            now,
+        );
+        write_reservations(data_directory, &reservations)?;
+        return Ok(AnswerOutcome::Rejected);
+    }
+    reservations.scheduled[index].approvals.push(now);
+    if reservations.scheduled[index].approvals.len() < APPROVALS_NEEDED {
+        let reservation = &reservations.scheduled[index];
+        let outcome = AnswerOutcome::Approved {
+            approvals: reservation.approvals.len(),
+            next_question_at: reservation.next_question_at(),
+        };
+        write_reservations(data_directory, &reservations)?;
+        return Ok(outcome);
+    }
+    let applied = reservations.scheduled.remove(index);
+    // Checked again: the program that reads the file may have changed since it was saved.
+    validate(&applied.name, &applied.content)?;
+    write_setting(data_directory, file_of(&applied.name)?, &applied.content)?;
+    record(
+        &mut reservations,
+        &applied,
+        ReservationOutcome::Applied,
+        now,
+    );
+    write_reservations(data_directory, &reservations)?;
+    Ok(AnswerOutcome::Applied)
 }
 
-/// Once the lock has ended, put every pending edit in force and return their names. Called
-/// every few seconds by each agent; two agents applying the same edit write the same bytes.
-pub fn apply_pending(data_directory: &Path, now: DateTime<Utc>) -> Vec<String> {
-    let pending = read_pending(data_directory);
-    if pending.is_empty() || locked_until(data_directory, now).is_some() {
-        return Vec::new();
+/// Drop a scheduled update before it takes effect. Withdrawing gains nothing, so it needs
+/// no confirmation.
+pub fn withdraw(data_directory: &Path, now: DateTime<Utc>, id: &str) -> Result<(), String> {
+    let mut reservations = read_reservations(data_directory);
+    let index = reservations
+        .scheduled
+        .iter()
+        .position(|reservation| reservation.id == id)
+        .ok_or_else(|| format!("no scheduled update '{id}'"))?;
+    let withdrawn = reservations.scheduled.remove(index);
+    record(
+        &mut reservations,
+        &withdrawn,
+        ReservationOutcome::Withdrawn,
+        now,
+    );
+    write_reservations(data_directory, &reservations)
+}
+
+fn record(
+    reservations: &mut Reservations,
+    reservation: &Reservation,
+    outcome: ReservationOutcome,
+    now: DateTime<Utc>,
+) {
+    if reservations.history.len() >= HISTORY_CAPACITY {
+        reservations.history.pop_front();
     }
-    let mut applied = Vec::new();
-    for (name, edit) in &pending {
-        let written = file_of(name).and_then(|file| {
-            validate(name, &edit.content)?;
-            write_setting(data_directory, file, &edit.content)
-        });
-        match written {
-            Ok(()) => applied.push(name.clone()),
-            Err(error) => tracing::warn!("pending settings '{name}' dropped: {error}"),
-        }
-    }
-    // Remove what was handled, unless it was saved again meanwhile.
-    let mut left = read_pending(data_directory);
-    left.retain(|name, edit| pending.get(name) != Some(edit));
-    if let Err(error) = write_pending(data_directory, &left) {
-        tracing::warn!("{error}");
-    }
-    applied
+    reservations.history.push_back(ReservationRecord {
+        id: reservation.id.clone(),
+        name: reservation.name.clone(),
+        via: reservation.via.clone(),
+        scheduled_at: reservation.scheduled_at,
+        outcome,
+        at: now,
+    });
 }
 
 fn file_of(name: &str) -> Result<&'static str, String> {
@@ -238,32 +379,54 @@ fn write_setting(data_directory: &Path, file: &str, content: &Value) -> Result<(
         .map_err(|error| format!("could not save {file}: {error}"))
 }
 
-fn locked_until(data_directory: &Path, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    read_lock(&data_directory.join("settings_lock.json")).locked_until(now)
-}
-
-fn read_pending(data_directory: &Path) -> BTreeMap<String, PendingFile> {
-    fs::read_to_string(data_directory.join(PENDING_FILE))
+/// The scheduled updates; edits an older version kept "until the lock ends" join them as
+/// updates scheduled when they were saved.
+fn read_reservations(data_directory: &Path) -> Reservations {
+    let mut reservations: Reservations = fs::read_to_string(data_directory.join(RESERVATIONS_FILE))
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let old_pending: BTreeMap<String, OldPendingFile> =
+        fs::read_to_string(data_directory.join(OLD_PENDING_FILE))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+    if !old_pending.is_empty() {
+        for (name, pending) in old_pending {
+            if reservations
+                .scheduled
+                .iter()
+                .any(|reservation| reservation.name == name)
+            {
+                continue;
+            }
+            reservations.scheduled.push(Reservation {
+                id: format!("u{}{}", pending.saved_at.timestamp_millis(), name.len()),
+                name,
+                content: pending.content,
+                scheduled_at: pending.saved_at,
+                via: "settings tab (older version)".into(),
+                approvals: Vec::new(),
+            });
+        }
+        if write_reservations(data_directory, &reservations).is_ok() {
+            let _ = fs::remove_file(data_directory.join(OLD_PENDING_FILE));
+        }
+    }
+    reservations
 }
 
-fn write_pending(
-    data_directory: &Path,
-    pending: &BTreeMap<String, PendingFile>,
-) -> Result<(), String> {
-    let path = data_directory.join(PENDING_FILE);
-    if pending.is_empty() {
-        return match fs::remove_file(&path) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                Err(format!("could not update {PENDING_FILE}: {error}"))
-            }
-            _ => Ok(()),
-        };
-    }
-    let bytes = serde_json::to_vec_pretty(pending).map_err(|error| error.to_string())?;
-    write_atomic(&path, &bytes).map_err(|error| format!("could not save {PENDING_FILE}: {error}"))
+/// Responsibility: Read an edit an older version kept until its settings lock ended.
+#[derive(Deserialize)]
+struct OldPendingFile {
+    content: Value,
+    saved_at: DateTime<Utc>,
+}
+
+fn write_reservations(data_directory: &Path, reservations: &Reservations) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(reservations).map_err(|error| error.to_string())?;
+    write_atomic(&data_directory.join(RESERVATIONS_FILE), &bytes)
+        .map_err(|error| format!("could not save {RESERVATIONS_FILE}: {error}"))
 }
 
 /// The content must load as the program that reads the file expects it.
@@ -324,6 +487,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     fn temp_dir(name: &str) -> PathBuf {
         let data_directory =
@@ -333,165 +497,213 @@ mod tests {
         data_directory
     }
 
+    fn life_rules(data_directory: &Path) -> Value {
+        snapshot(data_directory).unwrap().files["planner"]["life_rules"].clone()
+    }
+
     #[test]
-    fn unlocked_settings_can_be_read_and_written() {
-        let data_directory = temp_dir("rw");
+    fn during_setup_edits_take_effect_at_once() {
+        let data_directory = temp_dir("setup");
         let now = Utc::now();
-        put(
+        let outcome = put(
             &data_directory,
             now,
             "planner",
             &json!({ "enabled": true, "todos": [] }),
+            "settings tab",
         )
         .unwrap();
+        assert_eq!(outcome, PutOutcome::Applied);
         fs::create_dir_all(data_directory.join("blocks")).unwrap();
         fs::write(
             data_directory.join("blocks").join("work.json"),
             r#"{"processes":{}}"#,
         )
         .unwrap();
-        let settings_snapshot = snapshot(&data_directory, now).unwrap();
+        let settings_snapshot = snapshot(&data_directory).unwrap();
         assert_eq!(settings_snapshot.files["planner"]["enabled"], true);
         assert!(settings_snapshot.files["policy"].is_null());
         assert!(settings_snapshot.blocks.contains_key("work"));
-        assert!(settings_snapshot.pending.is_empty() && settings_snapshot.locked_until.is_none());
+        assert!(!settings_snapshot.protected);
         // Content that would not load is refused, and so are other files.
         assert!(put(
             &data_directory,
             now,
             "planner",
-            &json!({ "enabled": "yes" })
+            &json!({ "enabled": "yes" }),
+            ""
         )
         .is_err());
-        assert!(put(&data_directory, now, "machine", &json!({})).is_err());
+        assert!(put(&data_directory, now, "machine", &json!({}), "").is_err());
     }
 
     #[test]
-    fn a_lock_can_only_grow() {
-        let data_directory = temp_dir("lock");
-        let path = data_directory.join("settings_lock.json");
-        let now = Utc::now();
-        let lock = extend_lock(&path, now, 48).unwrap();
-        assert!(lock.locked(now));
-        // A shorter request keeps the longer lock.
-        let lock = extend_lock(&path, now, 1).unwrap();
-        assert_eq!(lock.until, Some(now + Duration::hours(48)));
-        assert!(extend_lock(&path, now, 0).is_err());
-        assert!(extend_lock(&path, now, MAX_LOCK_HOURS + 1).is_err());
-        assert!(!read_lock(&path).locked(now + Duration::hours(49)));
-    }
-
-    #[test]
-    fn edits_saved_while_locked_wait_for_the_lock_to_end() {
-        let data_directory = temp_dir("pending");
-        let now = Utc::now();
+    fn a_protected_edit_takes_effect_after_three_yes_answers_two_days_apart() {
+        let data_directory = temp_dir("three_yes");
+        let start = Utc::now();
         put(
             &data_directory,
-            now,
+            start,
             "planner",
             &json!({ "life_rules": "no games" }),
+            "",
         )
         .unwrap();
-        let until = extend_lock(&data_directory.join("settings_lock.json"), now, 24)
-            .unwrap()
-            .until
-            .unwrap();
+        protect(&data_directory, start).unwrap();
+        assert!(is_protected(&data_directory));
 
-        // Locked: readable, and an edit is kept aside, not put in force.
         let outcome = put(
             &data_directory,
-            now,
+            start,
             "planner",
             &json!({ "life_rules": "games ok" }),
+            "claude desktop",
         )
         .unwrap();
-        assert_eq!(outcome, PutOutcome::Pending { applies_at: until });
-        let settings_snapshot = snapshot(&data_directory, now).unwrap();
-        assert_eq!(settings_snapshot.files["planner"]["life_rules"], "no games");
-        assert_eq!(
-            settings_snapshot.pending["planner"].content["life_rules"],
-            "games ok"
-        );
-        assert_eq!(settings_snapshot.locked_until, Some(until));
-        // A bad edit is refused at once, locked or not.
-        assert!(put(
-            &data_directory,
-            now,
-            "planner",
-            &json!({ "enabled": "yes" })
-        )
-        .is_err());
-        // Nothing is applied before the lock ends.
-        assert!(apply_pending(&data_directory, now + Duration::hours(23)).is_empty());
-        assert_eq!(
-            snapshot(&data_directory, now).unwrap().files["planner"]["life_rules"],
-            "no games"
-        );
+        let PutOutcome::Scheduled {
+            id,
+            first_question_at,
+        } = outcome
+        else {
+            panic!("not scheduled: {outcome:?}");
+        };
+        assert_eq!(first_question_at, start + Duration::days(2));
+        assert_eq!(life_rules(&data_directory), "no games");
 
-        // Once it has ended, the edit takes effect and is no longer pending.
-        let later = until + Duration::seconds(1);
+        // Not before the question is due.
+        assert!(answer(&data_directory, start + Duration::days(1), &id, true).is_err());
+        assert_eq!(questions_due(&data_directory, start + Duration::days(1)), 0);
+
+        // The first question waits until it is answered, here a day late.
+        let first_answer = start + Duration::days(3);
+        assert_eq!(questions_due(&data_directory, first_answer), 1);
         assert_eq!(
-            apply_pending(&data_directory, later),
-            vec!["planner".to_string()]
+            answer(&data_directory, first_answer, &id, true).unwrap(),
+            AnswerOutcome::Approved {
+                approvals: 1,
+                next_question_at: first_answer + Duration::days(2),
+            }
         );
-        let settings_snapshot = snapshot(&data_directory, later).unwrap();
-        assert_eq!(settings_snapshot.files["planner"]["life_rules"], "games ok");
-        assert!(settings_snapshot.pending.is_empty());
-        assert!(!data_directory.join(PENDING_FILE).exists());
+        // The next question is two days after the answer, not after the schedule.
+        assert!(answer(&data_directory, start + Duration::days(4), &id, true).is_err());
+        let second_answer = first_answer + Duration::days(2);
+        answer(&data_directory, second_answer, &id, true).unwrap();
+        assert_eq!(life_rules(&data_directory), "no games");
+
+        let third_answer = second_answer + Duration::days(2);
+        assert_eq!(
+            answer(&data_directory, third_answer, &id, true).unwrap(),
+            AnswerOutcome::Applied
+        );
+        assert_eq!(life_rules(&data_directory), "games ok");
+        let settings_snapshot = snapshot(&data_directory).unwrap();
+        assert!(settings_snapshot.reservations.scheduled.is_empty());
+        assert_eq!(
+            settings_snapshot
+                .reservations
+                .history
+                .back()
+                .unwrap()
+                .outcome,
+            ReservationOutcome::Applied
+        );
     }
 
     #[test]
-    fn pending_edits_can_be_discarded_and_are_replaced_by_newer_ones() {
-        let data_directory = temp_dir("discard");
-        let now = Utc::now();
-        extend_lock(&data_directory.join("settings_lock.json"), now, 1).unwrap();
+    fn one_no_rejects_and_saving_again_starts_over() {
+        let data_directory = temp_dir("no");
+        let start = Utc::now();
         put(
             &data_directory,
-            now,
+            start,
             "planner",
-            &json!({ "life_rules": "a" }),
+            &json!({ "life_rules": "no games" }),
+            "",
         )
         .unwrap();
-        put(
-            &data_directory,
-            now,
-            "planner",
-            &json!({ "life_rules": "b" }),
-        )
-        .unwrap();
-        put(&data_directory, now, "policy", &json!({})).unwrap();
-        let settings_snapshot = snapshot(&data_directory, now).unwrap();
+        protect(&data_directory, start).unwrap();
+        // Protecting twice keeps the first time.
         assert_eq!(
-            settings_snapshot.pending["planner"].content["life_rules"],
-            "b"
+            protect(&data_directory, start + Duration::days(9))
+                .unwrap()
+                .protected_since,
+            Some(start)
         );
-        discard_pending(&data_directory, Some("planner")).unwrap();
-        let names: Vec<String> = snapshot(&data_directory, now)
-            .unwrap()
-            .pending
-            .into_keys()
-            .collect();
-        assert_eq!(names, ["policy"]);
-        assert!(discard_pending(&data_directory, Some("machine")).is_err());
-        discard_pending(&data_directory, None).unwrap();
-        assert!(snapshot(&data_directory, now).unwrap().pending.is_empty());
 
-        // Unlocked, a save takes effect at once and drops an older pending edit.
-        let later = now + Duration::hours(2);
-        let old = json!({ "planner": { "content": { "life_rules": "old" }, "saved_at": now } });
-        fs::write(data_directory.join(PENDING_FILE), old.to_string()).unwrap();
-        let outcome = put(
+        let schedule = |at, rules: &str| match put(
             &data_directory,
-            later,
+            at,
             "planner",
-            &json!({ "life_rules": "new" }),
+            &json!({ "life_rules": rules }),
+            "settings tab",
+        )
+        .unwrap()
+        {
+            PutOutcome::Scheduled { id, .. } => id,
+            other => panic!("not scheduled: {other:?}"),
+        };
+        let first = schedule(start, "a");
+        answer(&data_directory, start + Duration::days(2), &first, true).unwrap();
+        // Saving the same file again replaces the update; its answers are lost.
+        let second = schedule(start + Duration::days(2) + Duration::seconds(1), "b");
+        let settings_snapshot = snapshot(&data_directory).unwrap();
+        assert_eq!(settings_snapshot.reservations.scheduled.len(), 1);
+        assert!(settings_snapshot.reservations.scheduled[0]
+            .approvals
+            .is_empty());
+        assert!(answer(&data_directory, start + Duration::days(5), &first, true).is_err());
+
+        let first_question = start + Duration::days(4) + Duration::seconds(1);
+        answer(&data_directory, first_question, &second, true).unwrap();
+        assert_eq!(
+            answer(
+                &data_directory,
+                first_question + Duration::days(2),
+                &second,
+                false
+            )
+            .unwrap(),
+            AnswerOutcome::Rejected
+        );
+        assert_eq!(life_rules(&data_directory), "no games");
+        let history = snapshot(&data_directory).unwrap().reservations.history;
+        let outcomes: Vec<_> = history.iter().map(|record| record.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [ReservationOutcome::Replaced, ReservationOutcome::Rejected]
+        );
+
+        // Withdrawing needs no answer.
+        let third = schedule(start + Duration::days(10), "c");
+        withdraw(&data_directory, start + Duration::days(10), &third).unwrap();
+        assert!(snapshot(&data_directory)
+            .unwrap()
+            .reservations
+            .scheduled
+            .is_empty());
+        assert!(withdraw(&data_directory, start, "nope").is_err());
+    }
+
+    #[test]
+    fn an_older_lock_means_protected_and_its_pending_edits_become_scheduled() {
+        let data_directory = temp_dir("migrate");
+        let saved_at = Utc::now() - Duration::days(1);
+        fs::write(
+            data_directory.join(OLD_LOCK_FILE),
+            json!({ "until": saved_at }).to_string(),
         )
         .unwrap();
-        assert_eq!(outcome, PutOutcome::Applied);
-        assert!(apply_pending(&data_directory, later).is_empty());
-        assert_eq!(
-            snapshot(&data_directory, later).unwrap().files["planner"]["life_rules"],
-            "new"
-        );
+        fs::write(
+            data_directory.join(OLD_PENDING_FILE),
+            json!({ "planner": { "content": { "life_rules": "x" }, "saved_at": saved_at } })
+                .to_string(),
+        )
+        .unwrap();
+        let settings_snapshot = snapshot(&data_directory).unwrap();
+        assert!(settings_snapshot.protected);
+        let scheduled = &settings_snapshot.reservations.scheduled;
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].scheduled_at, saved_at);
+        assert!(!data_directory.join(OLD_PENDING_FILE).exists());
     }
 }

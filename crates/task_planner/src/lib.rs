@@ -21,12 +21,13 @@ mod planner;
 pub use admin_ui::PlannerAdminUi;
 pub use advisor::{
     claude_advisor_provider, Advisor, AdvisorProvider, ClaudeAdvisor, Pick, PickRequest,
-    ProposalRequest, Review, ReviewRequest,
+    ProposalRequest, Review, ReviewRequest, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT,
 };
 pub use ai_focus_rule::store::JsonStore;
 pub use model::{
     Assignment, AssignmentSource, ChangeKind, ChangeRecord, DoneRecord, PlannerConfig,
-    PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TodoItem, WhenTimeIsUp,
+    PlannerInstructions, PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TodoItem,
+    WhenTimeIsUp,
 };
 pub use planner::{PlannerError, TaskPlanner};
 

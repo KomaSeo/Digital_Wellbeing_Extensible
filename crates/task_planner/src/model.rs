@@ -48,8 +48,8 @@ impl TodoItem {
 /// Responsibility: Hold the admin's planner settings and to-do list (planner.json).
 ///
 /// Part of the settings (`planner.json`): edited in the Focus app's Settings tab (while the
-/// settings are locked, an edit takes effect only when the lock ends), never by a planner
-/// request.
+/// settings are protected, an edit takes effect only after three confirmations two days
+/// apart), never by a planner request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlannerConfig {
@@ -66,6 +66,46 @@ pub struct PlannerConfig {
     /// agent's `planner_state.json`; the admin removes one by naming it here,
     /// so neither program writes the other's file.
     pub dismissed: BTreeSet<String>,
+    /// The instructions the planner's AI follows; empty texts mean the built-in ones.
+    pub instructions: PlannerInstructions,
+}
+
+/// Responsibility: Hold the owner's own versions of the planner's three AI instructions.
+///
+/// Like every setting they change only through the Settings tab (or a scheduled update from
+/// Claude Desktop) and, once the settings are protected, only after three confirmations.
+/// An empty text means the built-in instruction ([`crate::advisor::PICK_PROMPT`] and so on).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlannerInstructions {
+    /// Which to-do to work on now, and for how long.
+    pub pick: String,
+    /// Whether a change request (done, switch, end, notify only) is approved.
+    pub change_review: String,
+    /// Whether a proposed to-do may join the list.
+    pub proposal_review: String,
+}
+
+impl PlannerInstructions {
+    pub fn pick_or_default(&self) -> &str {
+        or_default(&self.pick, crate::advisor::PICK_PROMPT)
+    }
+
+    pub fn change_review_or_default(&self) -> &str {
+        or_default(&self.change_review, crate::advisor::REVIEW_PROMPT)
+    }
+
+    pub fn proposal_review_or_default(&self) -> &str {
+        or_default(&self.proposal_review, crate::advisor::PROPOSAL_PROMPT)
+    }
+}
+
+fn or_default<'a>(own: &'a str, built_in: &'a str) -> &'a str {
+    if own.trim().is_empty() {
+        built_in
+    } else {
+        own
+    }
 }
 
 /// Responsibility: Say who chose the current task: the AI, or an approved change request.

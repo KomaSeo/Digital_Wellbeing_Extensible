@@ -10,14 +10,15 @@
 //! 2. a window without a verdict is judged at once: the off-task tab in front gets Ctrl+W,
 //!    and the on-task window behind it is judged by title too;
 //! 3. the verdicts, the block and the token usage show in the status;
-//! 4. settings_get / settings_put work while unlocked; with the stand-in, a to-do proposal
+//! 4. settings_get / settings_put work during setup; with the stand-in, a to-do proposal
 //!    goes through; with the real AI, the planner picks what to do now from a list that
 //!    mixes work, rest and play (urgent work first; rest or play on a rest day) and how
 //!    long each runs, decides on a request to keep the task past its planned end, and
 //!    rejects a proposal and a change request whose text orders it to approve (prompt
 //!    injection) something the life rules forbid;
-//! 5. after settings_lock, a saved edit waits for the lock to end instead of taking effect,
-//!    and can be discarded; when a lock ends, the agent puts the waiting edit in force.
+//! 5. once the settings are protected, an edit is scheduled: it takes effect after three
+//!    "yes" answers (questions two seconds apart in this test, two days in real use), and
+//!    one "no" rejects another.
 #![cfg(target_os = "linux")]
 
 mod common;
@@ -116,6 +117,7 @@ fn end_to_end(real_key: Option<String>) {
             .arg("agent")
             .env("DW_DATA_DIR", &data)
             .env("DW_PORT_BASE", port_base.to_string())
+            .env("DW_SETTINGS_CONFIRM_INTERVAL_SECONDS", "2")
             .env("DISPLAY", &display)
             .env("RUST_LOG", "debug,ureq=info,rustls=info")
             .spawn()
@@ -216,7 +218,7 @@ fn end_to_end(real_key: Option<String>) {
         assert!(calls.load(Ordering::SeqCst) >= 1);
     }
 
-    // 4. Settings while unlocked, then (stand-in) a proposal or (real AI) what to do now.
+    // 4. Settings during setup, then (stand-in) a proposal or (real AI) what to do now.
     let settings = call_value(session, "settings_get", json!({})).unwrap();
     assert_eq!(settings["files"]["ai_focus"]["api_key"], api_key.as_str());
     call_value(
@@ -309,33 +311,69 @@ fn end_to_end(real_key: Option<String>) {
             .as_ref()
             .is_some_and(|proposal| proposal.approved));
     }
-    // A short lock (written directly; the API only locks for whole hours): the edit saved
-    // meanwhile takes effect once the lock ends, through the agent's reload loop.
-    let until = chrono::Utc::now() + chrono::Duration::seconds(5);
-    std::fs::write(
-        data.join("settings_lock.json"),
-        json!({ "until": until, "set_at": chrono::Utc::now() }).to_string(),
+    // 5. Protected settings: with the questions two seconds apart instead of two days
+    // (DW_SETTINGS_CONFIRM_INTERVAL_SECONDS), an edit takes effect after three "yes"
+    // answers, and one "no" rejects another.
+    call_value(session, "settings_protect", json!({})).unwrap();
+    let schedule = |life_rules: &str| {
+        let outcome = call_value(
+            session,
+            "settings_put",
+            json!({ "name": "planner", "content": { "enabled": false, "todos": [], "life_rules": life_rules }, "via": "e2e" }),
+        )
+        .unwrap();
+        assert_eq!(outcome["outcome"], "scheduled", "{outcome}");
+        outcome["id"].as_str().unwrap().to_string()
+    };
+    let life_rules_in_force = || {
+        call_value(session, "settings_get", json!({})).unwrap()["files"]["planner"]["life_rules"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let wait_for_question = || {
+        wait_for(Duration::from_secs(10), || {
+            let status: Status = call(session, "status", json!({})).ok()?;
+            (status.settings_questions_due > 0).then_some(())
+        })
+        .expect("the question became due")
+    };
+    let accepted = schedule("Confirmed three times.");
+    for round in 1..=3 {
+        assert_ne!(
+            life_rules_in_force(),
+            "Confirmed three times.",
+            "before answer {round}"
+        );
+        wait_for_question();
+        let outcome = call_value(
+            session,
+            "settings_answer",
+            json!({ "id": accepted, "approve": true }),
+        )
+        .unwrap();
+        let expected = if round < 3 { "approved" } else { "applied" };
+        assert_eq!(outcome["outcome"], expected, "{outcome}");
+    }
+    assert_eq!(life_rules_in_force(), "Confirmed three times.");
+
+    let rejected = schedule("Rejected once.");
+    wait_for_question();
+    call_value(
+        session,
+        "settings_answer",
+        json!({ "id": rejected, "approve": true }),
     )
     .unwrap();
-    let edit = json!({ "enabled": false, "todos": [], "life_rules": "After the lock." });
+    wait_for_question();
     let outcome = call_value(
         session,
-        "settings_put",
-        json!({ "name": "planner", "content": edit }),
+        "settings_answer",
+        json!({ "id": rejected, "approve": false }),
     )
     .unwrap();
-    assert_eq!(outcome["outcome"], "pending", "{outcome}");
-    let applied = wait_for(Duration::from_secs(20), || {
-        let settings = call_value(session, "settings_get", json!({})).ok()?;
-        (settings["files"]["planner"]["life_rules"] == "After the lock.").then_some(settings)
-    })
-    .expect("the pending edit took effect when the lock ended");
-    assert!(applied["pending"]
-        .as_object()
-        .is_none_or(|pending| pending.is_empty()));
-    assert!(chrono::Utc::now() >= until);
-
-    common::check_lock_delays_edits(session);
+    assert_eq!(outcome["outcome"], "rejected", "{outcome}");
+    assert_eq!(life_rules_in_force(), "Confirmed three times.");
 
     let _ = std::fs::remove_dir_all(&data);
 }

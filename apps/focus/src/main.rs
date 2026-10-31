@@ -143,6 +143,8 @@ struct FocusApp {
     access: AccessForm,
     /// Title of a to-do the user is about to propose.
     proposal_title: String,
+    /// Settings questions due at the last status; more than before brings the window up.
+    questions_due: usize,
 }
 
 impl FocusApp {
@@ -186,6 +188,7 @@ impl FocusApp {
             reason: String::new(),
             access: AccessForm::default(),
             proposal_title: String::new(),
+            questions_due: 0,
         }
     }
 
@@ -634,6 +637,18 @@ fn open_todos_ui(ui: &mut egui::Ui, planner: &PlannerStatus) {
 impl FocusApp {
     /// The To-do tab: what to do now, and how to change it.
     fn todo_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
+        if status.settings_questions_due > 0 {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    RED,
+                    "A scheduled settings update is waiting for your answer: is it really right?",
+                );
+                if ui.link("Answer in the Settings tab").clicked() {
+                    self.tab = Tab::Settings;
+                }
+            });
+            ui.separator();
+        }
         ui.heading("Focus session");
         match status.planner.clone().filter(|planner| planner.active) {
             Some(planner) => self.planner_ui(ui, status, &planner),
@@ -741,6 +756,16 @@ impl eframe::App for FocusApp {
         if self.open_settings.swap(false, Ordering::SeqCst) {
             self.tab = Tab::Settings;
         }
+        // A new "is this update really right?" question: show the window (also from the
+        // tray) on the Settings tab, once.
+        if let Some(Ok(current_status)) = &status {
+            if current_status.settings_questions_due > self.questions_due {
+                context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                self.tab = Tab::Settings;
+            }
+            self.questions_due = current_status.settings_questions_due;
+        }
         egui::TopBottomPanel::top("tabs").show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Todo, "To-do");
@@ -769,7 +794,7 @@ impl eframe::App for FocusApp {
                 match self.tab {
                     Tab::Todo => self.todo_tab(ui, &status),
                     Tab::Blocking => self.blocking_tab(ui, &status),
-                    Tab::Settings => self.settings.ui(ui, status.settings_locked_until),
+                    Tab::Settings => self.settings.ui(ui, status.settings_protected),
                 }
             });
         });

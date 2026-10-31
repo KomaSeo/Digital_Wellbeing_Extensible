@@ -4,14 +4,17 @@
 //! Claude Desktop starts this program in the user's own account and talks to it over
 //! stdin/stdout (MCP stdio transport: one JSON-RPC 2.0 message per line). Every tool is a
 //! call to [`machine::user_api`], the same API the Focus app uses, so the assistant gains no
-//! power the user does not already have: it cannot unblock anything, change rules, or edit
-//! the admin's list. A proposed to-do joins the list only if the agent's own AI approves it
-//! against the admin's life rules, with a prompt neither the user nor the assistant can change.
+//! power the user does not already have. A proposed to-do joins the list only if the agent's
+//! own AI approves it against the owner's life rules. The assistant may also schedule an
+//! update of the settings (life rules, the planner's AI instructions, any other setting) once
+//! they are protected; such an update takes effect only after the user answered "is this
+//! update really right?" with yes three times, two days apart, in the Focus app. No tool
+//! answers that question.
 //!
 //! Setup and tool reference (Korean): `docs/claude_desktop.md`.
 
 use machine::session::current_session_id;
-use machine::user_api::{call, Status};
+use machine::user_api::{call_value, Status};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -21,17 +24,24 @@ const DEFAULT_PROTOCOL: &str = "2025-06-18";
 const INSTRUCTIONS: &str = "\
 Tools for the user's Digital Wellbeing app on this PC. The app assigns the user's work \
 from a to-do list and blocks apps and websites the assigned task does not need. These \
-tools can show the list and the current task, propose a to-do, and ask to change the \
-current task. The app's own AI decides every proposal and change request against rules \
-the account owner set; nothing here can unblock an app or change those rules. When a \
-proposal or request is rejected, tell the user the reason; do not retry it in other words.";
+tools can show the list and the current task, propose a to-do, ask to change the \
+current task, and schedule an update of the settings. The app's own AI decides every \
+proposal and change request against rules the account owner set. When a proposal or \
+request is rejected, tell the user the reason; do not retry it in other words. A \
+scheduled settings update takes effect only after the user confirms it in the app three \
+times, two days apart; tell the user that, and never press them to confirm.";
 
 /// Responsibility: Reach the agent (the real one in production, a fake in tests).
-type Agent<'a> = &'a dyn Fn(&str, Value) -> Result<Status, String>;
+type Agent<'a> = &'a dyn Fn(&str, Value) -> Result<Value, String>;
+
+/// Call an agent method whose answer is the [`Status`].
+fn status_from(agent: Agent, method: &str, params: Value) -> Result<Status, String> {
+    serde_json::from_value(agent(method, params)?).map_err(|error| error.to_string())
+}
 
 fn main() {
     let session = current_session_id();
-    let agent = move |method: &str, params: Value| call(session, method, params);
+    let agent = move |method: &str, params: Value| call_value(session, method, params);
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -142,6 +152,23 @@ fn tools() -> Value {
                 },
                 "required": ["change", "reason"]
             }
+        },
+        {
+            "name": "get_settings",
+            "description": "Read the app's settings: whether they are protected, the files in force (policy: block lists; ai_focus: focus checks, without the API key; planner: to-dos, life_rules, and instructions for the planner's AI, where an empty text means the built-in one), the built-in instructions, and the scheduled updates with their confirmations.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "schedule_settings_update",
+            "description": "Schedule an update of one settings file: send the whole new file (start from get_settings). Accepted only once the settings are protected. The update takes effect only after the user answers \"is this update really right?\" with yes in the app three times, two days apart (the first question comes two days from now); one no rejects it. Scheduling the same file again replaces the earlier update and starts over.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "enum": ["policy", "ai_focus", "planner"] },
+                    "content": { "type": "object", "description": "The whole new file" }
+                },
+                "required": ["name", "content"]
+            }
         }
     ])
 }
@@ -149,7 +176,9 @@ fn tools() -> Value {
 /// Run one tool; `Err` carries a message for the assistant (a tool error, not a protocol one).
 fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, String> {
     match name {
-        "get_status" => agent("status", json!({})).map(|status| pretty(&summary(&status))),
+        "get_status" => {
+            status_from(agent, "status", json!({})).map(|status| pretty(&summary(&status)))
+        }
         "propose_todo" => {
             let mut todo = json!({ "title": arguments["title"].as_str().unwrap_or_default() });
             for key in ["notes", "deadline", "priority", "estimate_minutes"] {
@@ -157,7 +186,8 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
                     todo[key] = value.clone();
                 }
             }
-            let status = agent(
+            let status = status_from(
+                agent,
                 "propose_todo",
                 json!({ "todo": todo, "via": "claude desktop" }),
             )?;
@@ -168,9 +198,8 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
                 "todo": { "id": proposal.item.id, "title": proposal.item.title },
             })))
         }
-        "get_my_task" => {
-            agent("assign", json!({})).map(|status| pretty(&summary(&status)["assignment"]))
-        }
+        "get_my_task" => status_from(agent, "assign", json!({}))
+            .map(|status| pretty(&summary(&status)["assignment"])),
         "request_change" => {
             let request = match arguments["change"].as_str().unwrap_or_default() {
                 "done" => json!({ "kind": "done" }),
@@ -192,7 +221,8 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
                 other => return Err(format!("unknown change '{other}'")),
             };
             let reason = arguments["reason"].as_str().unwrap_or_default();
-            let status = agent(
+            let status = status_from(
+                agent,
                 "request_change",
                 json!({ "request": request, "reason": reason }),
             )?;
@@ -204,6 +234,65 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
                 "approved": decision.approved,
                 "reply": decision.reply,
                 "assignment": summary(&status)["assignment"],
+            })))
+        }
+        "get_settings" => {
+            let mut settings = agent("settings_get", json!({}))?;
+            // The key stays with the app; schedule_settings_update keeps it.
+            if let Some(ai_focus) = settings["files"]["ai_focus"].as_object_mut() {
+                ai_focus.remove("api_key");
+            }
+            let scheduled: Vec<Value> = settings["reservations"]["scheduled"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|reservation| {
+                    json!({
+                        "id": reservation["id"],
+                        "name": reservation["name"],
+                        "via": reservation["via"],
+                        "scheduled_at": reservation["scheduled_at"],
+                        "confirmations": reservation["approvals"].as_array().map_or(0, Vec::len),
+                    })
+                })
+                .collect();
+            Ok(pretty(&json!({
+                "protected": settings["protected"],
+                "files": settings["files"],
+                "built_in_instructions": {
+                    "pick": task_planner::PICK_PROMPT,
+                    "change_review": task_planner::REVIEW_PROMPT,
+                    "proposal_review": task_planner::PROPOSAL_PROMPT,
+                },
+                "scheduled_updates": scheduled,
+                "recent_outcomes": settings["reservations"]["history"],
+            })))
+        }
+        "schedule_settings_update" => {
+            let name = arguments["name"].as_str().ok_or("name is required")?;
+            let mut content = arguments["content"].clone();
+            if !content.is_object() {
+                return Err("content must be the whole settings file (an object)".into());
+            }
+            let current = agent("settings_get", json!({}))?;
+            if current["protected"] != json!(true) {
+                return Err(
+                    "the settings are not protected yet (setup): the user changes them \
+                            in the app's Settings tab; Claude Desktop can schedule updates once \
+                            they are protected"
+                        .into(),
+                );
+            }
+            if name == "ai_focus" && content.get("api_key").is_none() {
+                content["api_key"] = current["files"]["ai_focus"]["api_key"].clone();
+            }
+            let outcome = agent(
+                "settings_put",
+                json!({ "name": name, "content": content, "via": "claude desktop" }),
+            )?;
+            Ok(pretty(&json!({
+                "scheduled": outcome,
+                "note": "It takes effect only after the user confirms it in the app three times, two days apart.",
             })))
         }
         other => Err(format!("unknown tool '{other}'")),
@@ -279,7 +368,7 @@ mod tests {
 
     #[test]
     fn initialize_and_list_tools() {
-        let agent = |_: &str, _: Value| Ok(empty_status());
+        let agent = |_: &str, _: Value| Ok(serde_json::to_value(empty_status()).unwrap());
         let initialize_reply = handle(
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
                      "params": { "protocolVersion": "2025-03-26" } }),
@@ -311,7 +400,9 @@ mod tests {
                 "get_status",
                 "propose_todo",
                 "get_my_task",
-                "request_change"
+                "request_change",
+                "get_settings",
+                "schedule_settings_update"
             ]
         );
     }
@@ -321,7 +412,7 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         let agent = |method: &str, params: Value| {
             seen.borrow_mut().push((method.to_string(), params));
-            Err::<Status, _>("agent not running".to_string())
+            Err::<Value, _>("agent not running".to_string())
         };
         let reply = handle(
             &json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
@@ -363,8 +454,65 @@ mod tests {
     }
 
     #[test]
+    fn settings_updates_are_scheduled_only_once_protected_and_keep_the_key() {
+        let protected = RefCell::new(false);
+        let seen = RefCell::new(Vec::new());
+        let agent = |method: &str, params: Value| {
+            seen.borrow_mut().push((method.to_string(), params));
+            match method {
+                "settings_get" => Ok(json!({
+                    "protected": *protected.borrow(),
+                    "files": { "ai_focus": { "api_key": "secret", "model": "m" } },
+                    "reservations": { "scheduled": [], "history": [] },
+                })),
+                _ => Ok(json!({ "outcome": "scheduled", "id": "u1" })),
+            }
+        };
+        let schedule = |content: Value| {
+            handle(
+                &json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {
+                    "name": "schedule_settings_update",
+                    "arguments": { "name": "ai_focus", "content": content }
+                }}),
+                &agent,
+            )
+            .unwrap()
+        };
+        // Setup: refused, nothing is written.
+        assert_eq!(
+            schedule(json!({ "model": "other" }))["result"]["isError"],
+            true
+        );
+        assert!(seen
+            .borrow()
+            .iter()
+            .all(|(method, _)| method == "settings_get"));
+
+        *protected.borrow_mut() = true;
+        assert_ne!(
+            schedule(json!({ "model": "other" }))["result"]["isError"],
+            true
+        );
+        let (method, params) = seen.borrow().last().unwrap().clone();
+        assert_eq!(method, "settings_put");
+        assert_eq!(params["via"], "claude desktop");
+        assert_eq!(params["content"]["api_key"], "secret");
+
+        // The key is never shown to the assistant.
+        let read = handle(
+            &json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                     "params": { "name": "get_settings", "arguments": {} } }),
+            &agent,
+        )
+        .unwrap();
+        let text = read["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("built_in_instructions"));
+    }
+
+    #[test]
     fn unknown_methods_are_protocol_errors() {
-        let agent = |_: &str, _: Value| Ok(empty_status());
+        let agent = |_: &str, _: Value| Ok(serde_json::to_value(empty_status()).unwrap());
         let reply = handle(
             &json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/list" }),
             &agent,

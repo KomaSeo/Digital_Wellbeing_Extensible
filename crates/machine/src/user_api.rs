@@ -19,13 +19,14 @@
 //! | `request_access` | `{ "target": GrantTarget, "duration": GrantDuration, "purpose": "…" }` | [`Status`], `last_access` set |
 //! | `propose_todo`   | `{ "todo": ProposalInput, "via": "…" }`  | [`Status`], `last_proposal` set |
 //! | `settings_get`   | `{}`                                     | [`crate::settings::SettingsSnapshot`] |
-//! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…} }` | [`crate::settings::PutOutcome`] (in force now, or pending until the lock ends) |
-//! | `settings_discard` | `{ "name": "…" }` or `{}` (all)        | `{ "ok": true }` |
-//! | `settings_lock`  | `{ "hours": n }` (only extends)           | [`crate::settings::SettingsLock`] |
+//! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…}, "via": "…" }` | [`crate::settings::PutOutcome`] (in force now during setup, else scheduled) |
+//! | `settings_answer` | `{ "id": "…", "approve": true\|false }` (once the question is due) | [`crate::settings::AnswerOutcome`] |
+//! | `settings_withdraw` | `{ "id": "…" }`                        | `{ "ok": true }` |
+//! | `settings_protect` | `{}` (one way)                         | [`crate::settings::Protection`] |
 //!
-//! The `settings_*` methods let a standard user edit the admin settings: while they are
-//! unlocked an edit takes effect at once, while they are locked it waits for the lock to
-//! end; see [`crate::settings`].
+//! The `settings_*` methods let a standard user edit the admin settings: during setup an
+//! edit takes effect at once; once protected it is scheduled and takes effect only after
+//! three "yes" answers two days apart; see [`crate::settings`].
 //!
 //! `propose_todo` asks the AI to add a to-do to the planner's list; it judges
 //! the proposal against the admin's life rules (see `task_planner`).
@@ -102,9 +103,12 @@ pub struct Status {
     /// Set only in the reply to `propose_todo`.
     #[serde(default)]
     pub last_proposal: Option<ProposalRecord>,
-    /// Settings edits wait until then (they are locked); `None` = unlocked.
+    /// Setup is over: settings edits are scheduled and need three confirmations.
     #[serde(default)]
-    pub settings_locked_until: Option<DateTime<Utc>>,
+    pub settings_protected: bool,
+    /// Scheduled settings updates whose "is this update really right?" question is due.
+    #[serde(default)]
+    pub settings_questions_due: usize,
     /// Estimated cost of today's Claude calls on this PC, and the admin's daily
     /// budget for focus checks (`0` = none).
     #[serde(default)]
@@ -160,8 +164,8 @@ fn status(api: &AgentApi) -> Status {
         grant_log: grants.log.into_iter().rev().take(10).collect(),
         last_access: None,
         last_proposal: None,
-        settings_locked_until: crate::settings::read_lock(&crate::settings::lock_path())
-            .locked_until(Utc::now()),
+        settings_protected: crate::settings::is_protected(&crate::data_dir()),
+        settings_questions_due: crate::settings::questions_due(&crate::data_dir(), Utc::now()),
         ai_cost_today_usd: monitor.usage().map(|usage| usage.today_cost()),
         daily_budget_usd: config.daily_budget_usd,
     }
@@ -176,39 +180,46 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     let data_directory = crate::data_dir();
     match method {
         "settings_get" => {
-            let snapshot = crate::settings::snapshot(&data_directory, Utc::now())?;
+            let snapshot = crate::settings::snapshot(&data_directory)?;
             return serde_json::to_value(snapshot).map_err(|error| error.to_string());
         }
         "settings_put" => {
             let name = params["name"].as_str().ok_or("params.name required")?;
+            let via = params["via"].as_str().unwrap_or("settings tab");
             let outcome =
-                crate::settings::put(&data_directory, Utc::now(), name, &params["content"])?;
+                crate::settings::put(&data_directory, Utc::now(), name, &params["content"], via)?;
             match &outcome {
                 crate::settings::PutOutcome::Applied => {
-                    tracing::info!("settings '{name}' changed through the agent")
+                    tracing::info!("settings '{name}' changed through the agent (setup)")
                 }
-                crate::settings::PutOutcome::Pending { applies_at } => tracing::info!(
-                    "settings '{name}' saved through the agent; in force from {applies_at}"
+                crate::settings::PutOutcome::Scheduled {
+                    id,
+                    first_question_at,
+                } => tracing::info!(
+                    "settings '{name}' update {id} scheduled via {via}; first question at {first_question_at}"
                 ),
             }
             return serde_json::to_value(outcome).map_err(|error| error.to_string());
         }
-        "settings_discard" => {
-            let name = params["name"].as_str();
-            crate::settings::discard_pending(&data_directory, name)?;
-            tracing::info!("pending settings discarded: {}", name.unwrap_or("all"));
+        "settings_answer" => {
+            let id = params["id"].as_str().ok_or("params.id required")?;
+            let approve = params["approve"]
+                .as_bool()
+                .ok_or("params.approve (true or false) required")?;
+            let outcome = crate::settings::answer(&data_directory, Utc::now(), id, approve)?;
+            tracing::info!("settings update {id}: answered {approve}: {outcome:?}");
+            return serde_json::to_value(outcome).map_err(|error| error.to_string());
+        }
+        "settings_withdraw" => {
+            let id = params["id"].as_str().ok_or("params.id required")?;
+            crate::settings::withdraw(&data_directory, Utc::now(), id)?;
+            tracing::info!("settings update {id} withdrawn");
             return Ok(json!({ "ok": true }));
         }
-        "settings_lock" => {
-            let hours = params["hours"]
-                .as_u64()
-                .and_then(|requested_hours| u32::try_from(requested_hours).ok())
-                .ok_or("params.hours required")?;
-            let lock =
-                crate::settings::extend_lock(&crate::settings::lock_path(), Utc::now(), hours)
-                    .map_err(|error| error.to_string())?;
-            tracing::info!("settings locked until {:?}", lock.until);
-            return serde_json::to_value(lock).map_err(|error| error.to_string());
+        "settings_protect" => {
+            let protection = crate::settings::protect(&data_directory, Utc::now())?;
+            tracing::info!("settings protected since {:?}", protection.protected_since);
+            return serde_json::to_value(protection).map_err(|error| error.to_string());
         }
         _ => {}
     }

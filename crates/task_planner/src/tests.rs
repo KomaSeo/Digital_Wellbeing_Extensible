@@ -15,12 +15,15 @@ struct FakeAdvisor {
     reviews: AtomicUsize,
     /// Life rules the last question carried.
     saw_rules: parking_lot::Mutex<String>,
+    /// System instruction the last question carried.
+    saw_instructions: parking_lot::Mutex<String>,
 }
 
 impl Advisor for FakeAdvisor {
     fn pick(&self, request: &PickRequest) -> Result<Pick, JudgeError> {
         self.picks.fetch_add(1, Ordering::SeqCst);
         *self.saw_rules.lock() = request.life_rules.to_string();
+        *self.saw_instructions.lock() = request.instructions.to_string();
         let todo_id = if self.bogus_pick.load(Ordering::SeqCst) {
             "nope".into()
         } else {
@@ -48,6 +51,7 @@ impl Advisor for FakeAdvisor {
     fn review(&self, request: &ReviewRequest) -> Result<Review, JudgeError> {
         self.reviews.fetch_add(1, Ordering::SeqCst);
         *self.saw_rules.lock() = request.life_rules.to_string();
+        *self.saw_instructions.lock() = request.instructions.to_string();
         let approved = self.approve.load(Ordering::SeqCst);
         Ok(Review {
             approved,
@@ -83,6 +87,7 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
         picks: AtomicUsize::new(0),
         reviews: AtomicUsize::new(0),
         saw_rules: parking_lot::Mutex::new(String::new()),
+        saw_instructions: parking_lot::Mutex::new(String::new()),
     });
     let provided = Arc::clone(&advisor);
     let planner = TaskPlanner::new(
@@ -376,6 +381,7 @@ fn the_admin_can_remove_a_proposed_todo() {
 fn the_proposal_question_carries_the_rules_and_the_item() {
     let item = TodoItem::new("Watch a movie");
     let text = crate::advisor::proposal_text(&ProposalRequest {
+        instructions: crate::advisor::PROPOSAL_PROMPT,
         now_local: "2026-10-30 Friday 14:05",
         life_rules: "No movies before 18:00.",
         item: &item,
@@ -503,4 +509,36 @@ fn an_approved_switch_runs_for_the_time_the_review_gave_it() {
         assignment.until,
         Some(start + chrono::Duration::minutes(30))
     );
+}
+
+#[test]
+fn the_owners_instructions_replace_the_built_in_ones() {
+    let fixture = harness(true, &["a", "b"]);
+    fixture.planner.assign(Utc::now()).unwrap();
+    assert_eq!(
+        *fixture.advisor.saw_instructions.lock(),
+        crate::advisor::PICK_PROMPT
+    );
+    fixture
+        .planner
+        .config_store()
+        .update(|config| {
+            config.instructions.pick = "Always pick the shortest to-do.".into();
+            config.instructions.change_review = "Approve only with a doctor's note.".into();
+        })
+        .unwrap();
+    fixture
+        .planner
+        .request_change(Utc::now(), ChangeKind::End, "dinner time now")
+        .unwrap();
+    assert_eq!(
+        *fixture.advisor.saw_instructions.lock(),
+        "Approve only with a doctor's note."
+    );
+    // A blank text falls back to the built-in instruction.
+    let blank = PlannerInstructions {
+        pick: "   ".into(),
+        ..Default::default()
+    };
+    assert_eq!(blank.pick_or_default(), crate::advisor::PICK_PROMPT);
 }

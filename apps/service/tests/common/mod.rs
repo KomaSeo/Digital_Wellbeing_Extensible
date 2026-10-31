@@ -10,38 +10,52 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Lock the settings, then check that an edit saved while locked waits instead of taking
-/// effect, and that it can be discarded.
-pub fn check_lock_delays_edits(session: u32) {
+/// Protect the settings (if not yet), then check that an edit is scheduled instead of taking
+/// effect, that its question cannot be answered before it is due, and that it can be
+/// withdrawn. Works with the default two-day interval.
+pub fn check_protected_edits_are_scheduled(session: u32) {
     use machine::user_api::{call, call_value};
-    call_value(session, "settings_lock", json!({ "hours": 1 })).unwrap();
-    assert!(call(session, "status", json!({}))
-        .unwrap()
-        .settings_locked_until
-        .is_some());
-    let before = call_value(session, "settings_get", json!({})).expect("readable while locked");
+    call_value(session, "settings_protect", json!({})).unwrap();
+    assert!(
+        call(session, "status", json!({}))
+            .unwrap()
+            .settings_protected
+    );
+    let before = call_value(session, "settings_get", json!({})).unwrap();
     let in_force = before["files"]["planner"].clone();
     let edit = json!({ "enabled": false, "todos": [], "life_rules": "Games all day." });
     let outcome = call_value(
         session,
         "settings_put",
-        json!({ "name": "planner", "content": edit }),
+        json!({ "name": "planner", "content": edit, "via": "e2e" }),
     )
     .unwrap();
-    assert_eq!(outcome["outcome"], "pending", "{outcome}");
+    assert_eq!(outcome["outcome"], "scheduled", "{outcome}");
+    let id = outcome["id"].as_str().unwrap().to_string();
     let after = call_value(session, "settings_get", json!({})).unwrap();
     assert_eq!(
         after["files"]["planner"], in_force,
-        "the edit took effect while locked"
+        "a protected edit took effect at once"
     );
-    assert_eq!(after["pending"]["planner"]["content"], edit);
-    assert!(after["locked_until"].is_string());
-    call_value(session, "settings_discard", json!({ "name": "planner" })).unwrap();
-    let discarded = call_value(session, "settings_get", json!({})).unwrap();
-    assert!(discarded["pending"]
-        .as_object()
-        .is_none_or(|pending| pending.is_empty()));
-    assert_eq!(discarded["files"]["planner"], in_force);
+    let scheduled = &after["reservations"]["scheduled"];
+    assert!(scheduled
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reservation| reservation["id"] == id.as_str() && reservation["content"] == edit));
+    let early = call_value(
+        session,
+        "settings_answer",
+        json!({ "id": id, "approve": true }),
+    )
+    .unwrap_err();
+    assert!(early.contains("due"), "{early}");
+    call_value(session, "settings_withdraw", json!({ "id": id })).unwrap();
+    let withdrawn = call_value(session, "settings_get", json!({})).unwrap();
+    assert!(withdrawn["reservations"]["scheduled"]
+        .as_array()
+        .is_none_or(|scheduled| scheduled.is_empty()));
+    assert_eq!(withdrawn["files"]["planner"], in_force);
 }
 
 pub fn wait_for<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {

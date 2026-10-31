@@ -180,11 +180,12 @@ impl TaskPlanner {
         let recent: Vec<ProposalRecord> = state.proposals.iter().rev().cloned().collect();
         let history = self.focus.state().history_text();
         let now_local = local_now_text();
-        let life_rules = self.config.get().life_rules;
+        let config = self.config.get();
         let advisor = (self.advisor)(&self.focus.store().get())?;
         let review = advisor.review_proposal(&ProposalRequest {
+            instructions: config.instructions.proposal_review_or_default(),
+            life_rules: &config.life_rules,
             now_local: &now_local,
-            life_rules: &life_rules,
             item: &item,
             open: &open,
             recent_proposals: &recent,
@@ -318,10 +319,11 @@ impl TaskPlanner {
         let history = self.focus.state().history_text();
         let now_local = local_now_text();
         let advisor = (self.advisor)(&self.focus.store().get())?;
-        let life_rules = self.config.get().life_rules;
+        let config = self.config.get();
         let review = advisor.review(&ReviewRequest {
+            instructions: config.instructions.change_review_or_default(),
             now_local: &now_local,
-            life_rules: &life_rules,
+            life_rules: &config.life_rules,
             current: state.assignment.as_ref(),
             request: &request,
             target_title: target_title.as_deref(),
@@ -473,10 +475,11 @@ impl TaskPlanner {
         let history = self.focus.state().history_text();
         let now_local = local_now_text();
         let advisor = (self.advisor)(&self.focus.store().get())?;
-        let life_rules = self.config.get().life_rules;
+        let config = self.config.get();
         let pick = advisor.pick(&PickRequest {
+            instructions: config.instructions.pick_or_default(),
             now_local: &now_local,
-            life_rules: &life_rules,
+            life_rules: &config.life_rules,
             open: &open,
             recently_done: &recently_done,
             previous: state.assignment.as_ref(),

@@ -11,8 +11,9 @@
 //! 3. a focus session starts; the off-task window is enforced (Ctrl+W when it is in front,
 //!    minimized when it is behind), and both windows are judged by title;
 //! 4. the verdicts, the block and the token usage show in the status;
-//! 5. a to-do proposal goes through the AI; after `settings_lock`, a saved edit waits for the
-//!    lock to end instead of taking effect, and can be discarded.
+//! 5. a to-do proposal goes through the AI; after `settings_protect`, a saved edit is
+//!    scheduled instead of taking effect, cannot be confirmed before its question is due,
+//!    and can be withdrawn.
 #![cfg(windows)]
 
 mod common;
@@ -164,7 +165,7 @@ fn installed_agent_end_to_end() {
         .as_ref()
         .is_some_and(|proposal| proposal.approved));
     call(session, "stop_session", json!({})).unwrap();
-    common::check_lock_delays_edits(session);
+    common::check_protected_edits_are_scheduled(session);
 }
 
 /// Set by the message pump when a window gets Ctrl+W; read by the wait probe.
