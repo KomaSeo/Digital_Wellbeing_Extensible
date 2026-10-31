@@ -30,8 +30,10 @@ pub fn check_protected_edits_are_scheduled(session: u32) {
         json!({ "name": "planner", "content": edit, "via": "e2e" }),
     )
     .unwrap();
-    assert_eq!(outcome["outcome"], "scheduled", "{outcome}");
-    let id = outcome["id"].as_str().unwrap().to_string();
+    let id = outcome["scheduled"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("not scheduled: {outcome}"))
+        .to_string();
     let after = call_value(session, "settings_get", json!({})).unwrap();
     assert_eq!(
         after["files"]["planner"], in_force,
@@ -42,7 +44,8 @@ pub fn check_protected_edits_are_scheduled(session: u32) {
         .as_array()
         .unwrap()
         .iter()
-        .any(|reservation| reservation["id"] == id.as_str() && reservation["content"] == edit));
+        .any(|reservation| reservation["id"] == id.as_str()
+            && reservation["edits"].to_string().contains("Games all day.")));
     let early = call_value(
         session,
         "settings_answer",

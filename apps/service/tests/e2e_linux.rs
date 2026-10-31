@@ -322,8 +322,10 @@ fn end_to_end(real_key: Option<String>) {
             json!({ "name": "planner", "content": { "enabled": false, "todos": [], "life_rules": life_rules }, "via": "e2e" }),
         )
         .unwrap();
-        assert_eq!(outcome["outcome"], "scheduled", "{outcome}");
-        outcome["id"].as_str().unwrap().to_string()
+        outcome["scheduled"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("not scheduled: {outcome}"))
+            .to_string()
     };
     let life_rules_in_force = || {
         call_value(session, "settings_get", json!({})).unwrap()["files"]["planner"]["life_rules"]

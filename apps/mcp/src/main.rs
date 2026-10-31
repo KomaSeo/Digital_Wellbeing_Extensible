@@ -160,7 +160,7 @@ fn tools() -> Value {
         },
         {
             "name": "schedule_settings_update",
-            "description": "Schedule an update of one settings file: send the whole new file (start from get_settings). Accepted only once the settings are protected. The update takes effect only after the user answers \"is this update really right?\" with yes in the app three times, two days apart (the first question comes two days from now); one no rejects it. Scheduling a file that already has a scheduled update replaces that update (possibly one the user made in the app) and its confirmations start over: start from that update's content in get_settings, and tell the user.",
+            "description": "Schedule an update of one settings file: send the whole new file (start from get_settings). Accepted only once the settings are protected. The update takes effect only after the user answers \"is this update really right?\" with yes in the app three times, two days apart (the first question comes two days from now); one no rejects it. Edits that make the rules stricter (blocking more, allowing less, checking more closely) take effect at once; the others become the scheduled update. Start from files_with_scheduled_updates in get_settings: leaving out a change that is already scheduled withdraws it, and changing it replaces the scheduled update and its confirmations start over; tell the user.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -174,6 +174,17 @@ fn tools() -> Value {
 }
 
 /// Run one tool; `Err` carries a message for the assistant (a tool error, not a protocol one).
+/// A scheduled update's edits as lines, leaving out any edit of the API key.
+fn changes_without_key(edits: &Value) -> Vec<String> {
+    let edits: Vec<machine::setting_edits::Edit> =
+        serde_json::from_value(edits.clone()).unwrap_or_default();
+    edits
+        .iter()
+        .filter(|edit| edit.path().first().map(String::as_str) != Some("api_key"))
+        .map(machine::setting_edits::Edit::describe)
+        .collect()
+}
+
 fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, String> {
     match name {
         "get_status" => {
@@ -247,23 +258,42 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
                 .into_iter()
                 .flatten()
                 .map(|reservation| {
-                    let mut content = reservation["content"].clone();
-                    if let Some(fields) = content.as_object_mut() {
-                        fields.remove("api_key");
-                    }
                     json!({
                         "id": reservation["id"],
                         "name": reservation["name"],
                         "via": reservation["via"],
+                        "origin": reservation["origin"],
                         "scheduled_at": reservation["scheduled_at"],
                         "confirmations": reservation["approvals"].as_array().map_or(0, Vec::len),
-                        "content": content,
+                        "changes": changes_without_key(&reservation["edits"]),
                     })
                 })
                 .collect();
+            // What the Settings tab shows: the files in force with their scheduled settings
+            // updates applied. Scheduling a file is a change from this.
+            let mut with_scheduled = settings["files"].clone();
+            for reservation in settings["reservations"]["scheduled"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if reservation["origin"] != "settings" {
+                    continue;
+                }
+                let Some(name) = reservation["name"].as_str() else {
+                    continue;
+                };
+                let edits: Vec<machine::setting_edits::Edit> =
+                    serde_json::from_value(reservation["edits"].clone()).unwrap_or_default();
+                machine::setting_edits::apply(&mut with_scheduled[name], &edits);
+            }
+            if let Some(ai_focus) = with_scheduled["ai_focus"].as_object_mut() {
+                ai_focus.remove("api_key");
+            }
             Ok(pretty(&json!({
                 "protected": settings["protected"],
                 "files": settings["files"],
+                "files_with_scheduled_updates": with_scheduled,
                 "built_in_instructions": {
                     "pick": task_planner::PICK_PROMPT,
                     "change_review": task_planner::REVIEW_PROMPT,

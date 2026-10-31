@@ -19,7 +19,7 @@
 //! | `request_access` | `{ "target": GrantTarget, "duration": GrantDuration, "purpose": "…" }` | [`Status`], `last_access` set |
 //! | `propose_todo`   | `{ "todo": ProposalInput, "via": "…" }`  | [`Status`], `last_proposal` set |
 //! | `settings_get`   | `{}`                                     | [`crate::settings::SettingsSnapshot`] |
-//! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…}, "via": "…" }` | [`crate::settings::PutOutcome`] (in force now during setup, else scheduled) |
+//! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…}, "via": "…" }` | [`crate::settings::PutOutcome`] (what is in force now, what was scheduled) |
 //! | `settings_answer` | `{ "id": "…", "approve": true\|false }` (once the question is due) | [`crate::settings::AnswerOutcome`] |
 //! | `settings_withdraw` | `{ "id": "…" }`                        | `{ "ok": true }` |
 //! | `settings_protect` | `{}` (one way)                         | [`crate::settings::Protection`] |
@@ -188,16 +188,19 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let via = params["via"].as_str().unwrap_or("settings tab");
             let outcome =
                 crate::settings::put(&data_directory, Utc::now(), name, &params["content"], via)?;
-            match &outcome {
-                crate::settings::PutOutcome::Applied => {
-                    tracing::info!("settings '{name}' changed through the agent (setup)")
-                }
-                crate::settings::PutOutcome::Scheduled {
-                    id,
-                    first_question_at,
-                } => tracing::info!(
-                    "settings '{name}' update {id} scheduled via {via}; first question at {first_question_at}"
-                ),
+            if !outcome.applied.is_empty() {
+                tracing::info!(
+                    "settings '{name}' via {via}: in force now: {}",
+                    outcome.applied.join("; ")
+                );
+            }
+            if let Some(scheduled) = &outcome.scheduled {
+                tracing::info!(
+                    "settings '{name}' via {via}: update {} scheduled ({}); first question at {}",
+                    scheduled.id,
+                    scheduled.edits.join("; "),
+                    scheduled.first_question_at
+                );
             }
             return serde_json::to_value(outcome).map_err(|error| error.to_string());
         }

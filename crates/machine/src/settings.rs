@@ -12,17 +12,22 @@
 //! - **setup** (right after installing, `settings_protection.json` missing): a saved file
 //!   takes effect at once, so the user can set everything up;
 //! - **protected** ([`protect`], one way; nothing in the program turns it off): a saved file
-//!   is checked and kept as a scheduled update ([`Reservation`], `settings_reservations.json`).
-//!   Two days after it was scheduled the Focus app asks "is this update really right?"; each
-//!   "yes" ([`answer`]) brings the next question two days after the answer, and the third
-//!   "yes" in a row puts the update in force. One "no" rejects it. A question waits until it
-//!   is answered. Saving the same file again replaces the scheduled update and starts over.
+//!   is split into edits ([`crate::setting_edits`]). Edits that make the rules stricter (block
+//!   more, allow less, check more closely) take effect at once. The others are kept as a
+//!   scheduled update ([`Reservation`], `settings_reservations.json`). Two days after it was
+//!   scheduled the Focus app asks "is this update really right?"; each "yes" ([`answer`])
+//!   brings the next question two days after the answer, and the third "yes" in a row puts
+//!   it in force. One "no" rejects it. A question waits until it is answered. Saving the same
+//!   file again with other looser edits replaces the scheduled update and starts over.
+//! - A to-do change the AI rejected can be scheduled the same way ([`schedule`]), with
+//!   questions two hours apart.
 //!
 //! So a change made in an irrational moment cannot take effect before the user has stood by
 //! it on three different days. (Windows cannot stop an administrator account from deleting
 //! these files or the service; the user does not work in one. Standard users cannot change
 //! the system clock, so the waiting cannot be skipped by setting the clock forward.)
 
+use crate::setting_edits::{self, Direction, Edit};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -50,16 +55,25 @@ const OLD_LOCK_FILE: &str = "settings_lock.json";
 const OLD_PENDING_FILE: &str = "settings_pending.json";
 const HISTORY_CAPACITY: usize = 50;
 
-/// Time between scheduling and the first question, and between an answer and the next
-/// question: two days. `DW_SETTINGS_CONFIRM_INTERVAL_SECONDS` shortens it for tests; only an
+/// Time between scheduling a settings update and its first question, and between an answer
+/// and the next question.
+pub const SETTINGS_QUESTION_INTERVAL_SECONDS: i64 = 2 * 24 * 3600;
+/// The same for a to-do change the AI rejected and the user scheduled anyway.
+pub const TODO_QUESTION_INTERVAL_SECONDS: i64 = 2 * 3600;
+
+/// `DW_SETTINGS_CONFIRM_INTERVAL_SECONDS` replaces every interval, for tests; only an
 /// administrator can set the service's environment.
-pub fn question_interval() -> Duration {
+fn question_interval(interval_seconds: i64) -> Duration {
     std::env::var("DW_SETTINGS_CONFIRM_INTERVAL_SECONDS")
         .ok()
         .and_then(|seconds| seconds.parse::<i64>().ok())
         .filter(|seconds| *seconds > 0)
         .map(Duration::seconds)
-        .unwrap_or_else(|| Duration::days(2))
+        .unwrap_or_else(|| Duration::seconds(interval_seconds))
+}
+
+fn settings_interval() -> i64 {
+    SETTINGS_QUESTION_INTERVAL_SECONDS
 }
 
 /// Responsibility: Record when the settings were protected.
@@ -69,26 +83,57 @@ pub struct Protection {
     pub protected_since: Option<DateTime<Utc>>,
 }
 
+/// Responsibility: Say where a scheduled update came from, which decides how it is replaced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReservationOrigin {
+    /// The looser edits of a saved settings file; saving the file again replaces it.
+    #[default]
+    Settings,
+    /// One to-do change the AI rejected (or could not review) and the user scheduled anyway.
+    TodoChange,
+}
+
 /// Responsibility: Hold one scheduled update of a settings file and the answers it got.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Reservation {
     pub id: String,
     /// One of the [`EDITABLE`] names.
     pub name: String,
-    /// The whole new file.
-    pub content: Value,
+    /// What changes, field by field; applied to the file as it is when the update takes
+    /// effect.
+    #[serde(default)]
+    pub edits: Vec<Edit>,
     pub scheduled_at: DateTime<Utc>,
     /// Who scheduled it, as the caller said ("settings tab", "claude desktop").
     pub via: String,
     /// When the user answered "yes", oldest first.
     #[serde(default)]
     pub approvals: Vec<DateTime<Utc>>,
+    #[serde(default)]
+    pub origin: ReservationOrigin,
+    /// Seconds between questions: two days for settings, two hours for a to-do change.
+    #[serde(default = "settings_interval")]
+    pub interval_seconds: i64,
+    /// What the user wrote about it (a to-do change's request and reason).
+    #[serde(default)]
+    pub note: String,
+    /// The whole new file, as versions before field-level edits kept it; turned into
+    /// `edits` when read.
+    #[serde(default, skip_serializing)]
+    content: Option<Value>,
 }
 
 impl Reservation {
     /// When the next "is this update really right?" question is due.
     pub fn next_question_at(&self) -> DateTime<Utc> {
-        self.approvals.last().copied().unwrap_or(self.scheduled_at) + question_interval()
+        self.approvals.last().copied().unwrap_or(self.scheduled_at)
+            + question_interval(self.interval_seconds)
+    }
+
+    /// One line per edit, for the Settings tab.
+    pub fn describe(&self) -> Vec<String> {
+        self.edits.iter().map(Edit::describe).collect()
     }
 
     pub fn question_due(&self, now: DateTime<Utc>) -> bool {
@@ -130,17 +175,23 @@ pub struct Reservations {
     pub history: VecDeque<ReservationRecord>,
 }
 
-/// Responsibility: Say what became of a saved edit.
+/// Responsibility: Say what became of a saved file: which edits are in force now, and which
+/// were scheduled.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PutOutcome {
+    /// Edits in force now: every edit during setup, the stricter ones once protected.
+    pub applied: Vec<String>,
+    /// The looser edits, kept as a scheduled update; `None` when there were none.
+    pub scheduled: Option<ScheduledUpdate>,
+}
+
+/// Responsibility: Name a scheduled update and when it is first asked about.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum PutOutcome {
-    /// Setup (not yet protected): the file in force was replaced.
-    Applied,
-    /// Protected: kept as a scheduled update; the first question is due then.
-    Scheduled {
-        id: String,
-        first_question_at: DateTime<Utc>,
-    },
+pub struct ScheduledUpdate {
+    pub id: String,
+    pub first_question_at: DateTime<Utc>,
+    pub edits: Vec<String>,
 }
 
 /// Responsibility: Say what an answer did.
@@ -225,9 +276,11 @@ pub fn questions_due(data_directory: &Path, now: DateTime<Utc>) -> usize {
         .count()
 }
 
-/// Save `content` as the editable file `name`: in force at once during setup, as a scheduled
-/// update once protected (replacing an earlier scheduled update of the same file, whose
-/// answers are lost). Refused when `content` does not parse as that file's settings.
+/// Save `content` as the editable file `name`. During setup it takes effect at once. Once
+/// protected, the edits that make the rules stricter take effect at once and the looser ones
+/// become a scheduled update (replacing the earlier scheduled update of this file, whose
+/// answers are lost, unless it holds exactly the same edits). Refused when `content` does not
+/// parse as that file's settings.
 pub fn put(
     data_directory: &Path,
     now: DateTime<Utc>,
@@ -237,39 +290,147 @@ pub fn put(
 ) -> Result<PutOutcome, String> {
     let file = file_of(name)?;
     validate(name, content)?;
+    let in_force = read_json(&data_directory.join(file));
+    let edits = setting_edits::diff(&in_force, content);
     if !is_protected(data_directory) {
         write_setting(data_directory, file, content)?;
-        return Ok(PutOutcome::Applied);
+        return Ok(PutOutcome {
+            applied: edits.iter().map(Edit::describe).collect(),
+            scheduled: None,
+        });
+    }
+    let (stricter, looser): (Vec<Edit>, Vec<Edit>) = edits
+        .into_iter()
+        .partition(|edit| setting_edits::direction(name, edit, &in_force) != Direction::Looser);
+    if !stricter.is_empty() {
+        apply_now(data_directory, name, &stricter)?;
     }
     let mut reservations = read_reservations(data_directory);
-    if let Some(index) = reservations
+    let existing = reservations.scheduled.iter().position(|reservation| {
+        reservation.name == name && reservation.origin == ReservationOrigin::Settings
+    });
+    let mut outcome = PutOutcome {
+        applied: stricter.iter().map(Edit::describe).collect(),
+        scheduled: None,
+    };
+    match existing {
+        // Saved again with the same looser edits (e.g. only a stricter one was added):
+        // the scheduled update and its answers stay.
+        Some(index) if reservations.scheduled[index].edits == looser => {
+            let reservation = &reservations.scheduled[index];
+            outcome.scheduled = Some(ScheduledUpdate {
+                id: reservation.id.clone(),
+                first_question_at: reservation.next_question_at(),
+                edits: reservation.describe(),
+            });
+            return Ok(outcome);
+        }
+        Some(index) => {
+            let replaced = reservations.scheduled.remove(index);
+            let outcome_of_old = if looser.is_empty() {
+                ReservationOutcome::Withdrawn
+            } else {
+                ReservationOutcome::Replaced
+            };
+            record(&mut reservations, &replaced, outcome_of_old, now);
+        }
+        None => {}
+    }
+    if !looser.is_empty() {
+        let reservation = new_reservation(
+            now,
+            name,
+            looser,
+            via,
+            ReservationOrigin::Settings,
+            SETTINGS_QUESTION_INTERVAL_SECONDS,
+            "",
+        );
+        outcome.scheduled = Some(ScheduledUpdate {
+            id: reservation.id.clone(),
+            first_question_at: reservation.next_question_at(),
+            edits: reservation.describe(),
+        });
+        reservations.scheduled.push(reservation);
+    }
+    write_reservations(data_directory, &reservations)?;
+    Ok(outcome)
+}
+
+/// Put `edits` of the settings file `name` in force now, on top of the file as it is.
+/// Refused when the result does not parse as that file's settings.
+pub fn apply_now(data_directory: &Path, name: &str, edits: &[Edit]) -> Result<(), String> {
+    let file = file_of(name)?;
+    let mut updated = read_json(&data_directory.join(file));
+    setting_edits::apply(&mut updated, edits);
+    validate(name, &updated)?;
+    write_setting(data_directory, file, &updated)
+}
+
+/// Schedule `edits` of `name` as their own update (a to-do change the AI did not approve),
+/// asked about every `interval_seconds`. Returns the update.
+pub fn schedule(
+    data_directory: &Path,
+    now: DateTime<Utc>,
+    name: &str,
+    edits: Vec<Edit>,
+    via: &str,
+    interval_seconds: i64,
+    note: &str,
+) -> Result<ScheduledUpdate, String> {
+    let file = file_of(name)?;
+    let mut preview = read_json(&data_directory.join(file));
+    setting_edits::apply(&mut preview, &edits);
+    validate(name, &preview)?;
+    let mut reservations = read_reservations(data_directory);
+    let mut reservation = new_reservation(
+        now,
+        name,
+        edits,
+        via,
+        ReservationOrigin::TodoChange,
+        interval_seconds,
+        note,
+    );
+    // Two in the same millisecond would share an id.
+    while reservations
         .scheduled
         .iter()
-        .position(|reservation| reservation.name == name)
+        .any(|existing| existing.id == reservation.id)
     {
-        let replaced = reservations.scheduled.remove(index);
-        record(
-            &mut reservations,
-            &replaced,
-            ReservationOutcome::Replaced,
-            now,
-        );
+        reservation.id.push('x');
     }
-    let reservation = Reservation {
-        id: format!("u{}", now.timestamp_millis()),
-        name: name.to_string(),
-        content: content.clone(),
-        scheduled_at: now,
-        via: via.trim().chars().take(40).collect(),
-        approvals: Vec::new(),
-    };
-    let outcome = PutOutcome::Scheduled {
+    let scheduled = ScheduledUpdate {
         id: reservation.id.clone(),
         first_question_at: reservation.next_question_at(),
+        edits: reservation.describe(),
     };
     reservations.scheduled.push(reservation);
     write_reservations(data_directory, &reservations)?;
-    Ok(outcome)
+    Ok(scheduled)
+}
+
+fn new_reservation(
+    now: DateTime<Utc>,
+    name: &str,
+    edits: Vec<Edit>,
+    via: &str,
+    origin: ReservationOrigin,
+    interval_seconds: i64,
+    note: &str,
+) -> Reservation {
+    Reservation {
+        id: format!("u{}", now.timestamp_millis()),
+        name: name.to_string(),
+        edits,
+        scheduled_at: now,
+        via: via.trim().chars().take(40).collect(),
+        approvals: Vec::new(),
+        origin,
+        interval_seconds,
+        note: note.trim().chars().take(500).collect(),
+        content: None,
+    }
 }
 
 /// The user's answer to "is this update really right?". Refused before the question is due.
@@ -314,9 +475,8 @@ pub fn answer(
         return Ok(outcome);
     }
     let applied = reservations.scheduled.remove(index);
-    // Checked again: the program that reads the file may have changed since it was saved.
-    validate(&applied.name, &applied.content)?;
-    write_setting(data_directory, file_of(&applied.name)?, &applied.content)?;
+    // Applied to the file as it is now; checked again, since it may have changed meanwhile.
+    apply_now(data_directory, &applied.name, &applied.edits)?;
     record(
         &mut reservations,
         &applied,
@@ -400,18 +560,36 @@ fn read_reservations(data_directory: &Path) -> Reservations {
             {
                 continue;
             }
-            reservations.scheduled.push(Reservation {
-                id: format!("u{}{}", pending.saved_at.timestamp_millis(), name.len()),
-                name,
-                content: pending.content,
-                scheduled_at: pending.saved_at,
-                via: "settings tab (older version)".into(),
-                approvals: Vec::new(),
-            });
+            let mut reservation = new_reservation(
+                pending.saved_at,
+                &name,
+                Vec::new(),
+                "settings tab (older version)",
+                ReservationOrigin::Settings,
+                SETTINGS_QUESTION_INTERVAL_SECONDS,
+                "",
+            );
+            reservation.id = format!("u{}{}", pending.saved_at.timestamp_millis(), name.len());
+            reservation.content = Some(pending.content);
+            reservations.scheduled.push(reservation);
         }
         if write_reservations(data_directory, &reservations).is_ok() {
             let _ = fs::remove_file(data_directory.join(OLD_PENDING_FILE));
         }
+    }
+    // Whole-file updates of earlier versions become the edits against the file in force.
+    let mut converted = false;
+    for reservation in &mut reservations.scheduled {
+        if let Some(content) = reservation.content.take() {
+            if let Ok(file) = file_of(&reservation.name) {
+                reservation.edits =
+                    setting_edits::diff(&read_json(&data_directory.join(file)), &content);
+                converted = true;
+            }
+        }
+    }
+    if converted {
+        let _ = write_reservations(data_directory, &reservations);
     }
     reservations
 }
@@ -497,8 +675,17 @@ mod tests {
         data_directory
     }
 
-    fn life_rules(data_directory: &Path) -> Value {
-        snapshot(data_directory).unwrap().files["planner"]["life_rules"].clone()
+    fn in_force(data_directory: &Path, name: &str) -> Value {
+        snapshot(data_directory).unwrap().files[name].clone()
+    }
+
+    /// Save `content`; return the id of the scheduled update it made.
+    fn schedule_file(data_directory: &Path, at: DateTime<Utc>, content: Value) -> String {
+        put(data_directory, at, "planner", &content, "settings tab")
+            .unwrap()
+            .scheduled
+            .expect("a scheduled update")
+            .id
     }
 
     #[test]
@@ -513,7 +700,8 @@ mod tests {
             "settings tab",
         )
         .unwrap();
-        assert_eq!(outcome, PutOutcome::Applied);
+        assert!(outcome.scheduled.is_none());
+        assert!(!outcome.applied.is_empty());
         fs::create_dir_all(data_directory.join("blocks")).unwrap();
         fs::write(
             data_directory.join("blocks").join("work.json"),
@@ -538,6 +726,72 @@ mod tests {
     }
 
     #[test]
+    fn once_protected_stricter_edits_apply_at_once_and_looser_ones_are_scheduled() {
+        let data_directory = temp_dir("split");
+        let start = Utc::now();
+        let ai_focus = json!({ "always_allow": ["a.exe"], "strikes_to_block": 2, "model": "m" });
+        put(&data_directory, start, "ai_focus", &ai_focus, "").unwrap();
+        protect(&data_directory, start).unwrap();
+
+        // Stricter (fewer strikes, a.exe no longer allowed) and looser (another model).
+        let saved = json!({ "always_allow": [], "strikes_to_block": 1, "model": "cheap" });
+        let outcome = put(&data_directory, start, "ai_focus", &saved, "settings tab").unwrap();
+        assert_eq!(outcome.applied.len(), 2, "{outcome:?}");
+        let scheduled = outcome.scheduled.expect("the model change is scheduled");
+        assert_eq!(scheduled.edits, ["model = cheap"]);
+        let now_in_force = in_force(&data_directory, "ai_focus");
+        assert_eq!(now_in_force["strikes_to_block"], 1);
+        assert_eq!(now_in_force["always_allow"], json!([]));
+        assert_eq!(now_in_force["model"], "m");
+
+        // Saving again with the same looser edit and one more stricter one keeps the
+        // scheduled update and its answers.
+        answer(
+            &data_directory,
+            start + Duration::days(2),
+            &scheduled.id,
+            true,
+        )
+        .unwrap();
+        let resaved = json!({ "always_allow": [], "strikes_to_block": 1, "model": "cheap", "send_screenshot": true });
+        let outcome = put(
+            &data_directory,
+            start + Duration::days(2),
+            "ai_focus",
+            &resaved,
+            "",
+        )
+        .unwrap();
+        assert_eq!(outcome.scheduled.unwrap().id, scheduled.id);
+        let kept = &snapshot(&data_directory).unwrap().reservations.scheduled[0];
+        assert_eq!(kept.approvals.len(), 1);
+        assert_eq!(
+            in_force(&data_directory, "ai_focus")["send_screenshot"],
+            true
+        );
+
+        // The scheduled edit lands on the file as it is then, keeping the stricter edits.
+        answer(
+            &data_directory,
+            start + Duration::days(4),
+            &scheduled.id,
+            true,
+        )
+        .unwrap();
+        answer(
+            &data_directory,
+            start + Duration::days(6),
+            &scheduled.id,
+            true,
+        )
+        .unwrap();
+        let final_file = in_force(&data_directory, "ai_focus");
+        assert_eq!(final_file["model"], "cheap");
+        assert_eq!(final_file["send_screenshot"], true);
+        assert_eq!(final_file["strikes_to_block"], 1);
+    }
+
+    #[test]
     fn a_protected_edit_takes_effect_after_three_yes_answers_two_days_apart() {
         let data_directory = temp_dir("three_yes");
         let start = Utc::now();
@@ -551,7 +805,6 @@ mod tests {
         .unwrap();
         protect(&data_directory, start).unwrap();
         assert!(is_protected(&data_directory));
-
         let outcome = put(
             &data_directory,
             start,
@@ -560,20 +813,18 @@ mod tests {
             "claude desktop",
         )
         .unwrap();
-        let PutOutcome::Scheduled {
-            id,
-            first_question_at,
-        } = outcome
-        else {
-            panic!("not scheduled: {outcome:?}");
-        };
-        assert_eq!(first_question_at, start + Duration::days(2));
-        assert_eq!(life_rules(&data_directory), "no games");
+        let scheduled = outcome.scheduled.expect("life rules are scheduled");
+        assert!(outcome.applied.is_empty());
+        assert_eq!(scheduled.first_question_at, start + Duration::days(2));
+        let id = scheduled.id;
+        assert_eq!(
+            in_force(&data_directory, "planner")["life_rules"],
+            "no games"
+        );
 
         // Not before the question is due.
         assert!(answer(&data_directory, start + Duration::days(1), &id, true).is_err());
         assert_eq!(questions_due(&data_directory, start + Duration::days(1)), 0);
-
         // The first question waits until it is answered, here a day late.
         let first_answer = start + Duration::days(3);
         assert_eq!(questions_due(&data_directory, first_answer), 1);
@@ -588,14 +839,24 @@ mod tests {
         assert!(answer(&data_directory, start + Duration::days(4), &id, true).is_err());
         let second_answer = first_answer + Duration::days(2);
         answer(&data_directory, second_answer, &id, true).unwrap();
-        assert_eq!(life_rules(&data_directory), "no games");
-
-        let third_answer = second_answer + Duration::days(2);
         assert_eq!(
-            answer(&data_directory, third_answer, &id, true).unwrap(),
+            in_force(&data_directory, "planner")["life_rules"],
+            "no games"
+        );
+        assert_eq!(
+            answer(
+                &data_directory,
+                second_answer + Duration::days(2),
+                &id,
+                true
+            )
+            .unwrap(),
             AnswerOutcome::Applied
         );
-        assert_eq!(life_rules(&data_directory), "games ok");
+        assert_eq!(
+            in_force(&data_directory, "planner")["life_rules"],
+            "games ok"
+        );
         let settings_snapshot = snapshot(&data_directory).unwrap();
         assert!(settings_snapshot.reservations.scheduled.is_empty());
         assert_eq!(
@@ -610,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn one_no_rejects_and_saving_again_starts_over() {
+    fn one_no_rejects_and_other_looser_edits_start_over() {
         let data_directory = temp_dir("no");
         let start = Utc::now();
         put(
@@ -622,30 +883,17 @@ mod tests {
         )
         .unwrap();
         protect(&data_directory, start).unwrap();
-        // Protecting twice keeps the first time.
         assert_eq!(
             protect(&data_directory, start + Duration::days(9))
                 .unwrap()
                 .protected_since,
             Some(start)
         );
-
-        let schedule = |at, rules: &str| match put(
-            &data_directory,
-            at,
-            "planner",
-            &json!({ "life_rules": rules }),
-            "settings tab",
-        )
-        .unwrap()
-        {
-            PutOutcome::Scheduled { id, .. } => id,
-            other => panic!("not scheduled: {other:?}"),
-        };
-        let first = schedule(start, "a");
+        let first = schedule_file(&data_directory, start, json!({ "life_rules": "a" }));
         answer(&data_directory, start + Duration::days(2), &first, true).unwrap();
-        // Saving the same file again replaces the update; its answers are lost.
-        let second = schedule(start + Duration::days(2) + Duration::seconds(1), "b");
+        // Other looser edits replace the update; its answers are lost.
+        let later = start + Duration::days(2) + Duration::seconds(1);
+        let second = schedule_file(&data_directory, later, json!({ "life_rules": "b" }));
         let settings_snapshot = snapshot(&data_directory).unwrap();
         assert_eq!(settings_snapshot.reservations.scheduled.len(), 1);
         assert!(settings_snapshot.reservations.scheduled[0]
@@ -653,7 +901,7 @@ mod tests {
             .is_empty());
         assert!(answer(&data_directory, start + Duration::days(5), &first, true).is_err());
 
-        let first_question = start + Duration::days(4) + Duration::seconds(1);
+        let first_question = later + Duration::days(2);
         answer(&data_directory, first_question, &second, true).unwrap();
         assert_eq!(
             answer(
@@ -665,29 +913,121 @@ mod tests {
             .unwrap(),
             AnswerOutcome::Rejected
         );
-        assert_eq!(life_rules(&data_directory), "no games");
-        let history = snapshot(&data_directory).unwrap().reservations.history;
-        let outcomes: Vec<_> = history.iter().map(|record| record.outcome).collect();
+        assert_eq!(
+            in_force(&data_directory, "planner")["life_rules"],
+            "no games"
+        );
+        let outcomes: Vec<_> = snapshot(&data_directory)
+            .unwrap()
+            .reservations
+            .history
+            .iter()
+            .map(|record| record.outcome)
+            .collect();
         assert_eq!(
             outcomes,
             [ReservationOutcome::Replaced, ReservationOutcome::Rejected]
         );
 
-        // Withdrawing needs no answer.
-        let third = schedule(start + Duration::days(10), "c");
-        withdraw(&data_directory, start + Duration::days(10), &third).unwrap();
+        // Saving the file back without the looser edit withdraws the update; withdrawing
+        // needs no answer either.
+        let third = schedule_file(
+            &data_directory,
+            start + Duration::days(10),
+            json!({ "life_rules": "c" }),
+        );
+        put(
+            &data_directory,
+            start + Duration::days(10),
+            "planner",
+            &json!({ "life_rules": "no games" }),
+            "",
+        )
+        .unwrap();
         assert!(snapshot(&data_directory)
             .unwrap()
             .reservations
             .scheduled
             .is_empty());
-        assert!(withdraw(&data_directory, start, "nope").is_err());
+        assert!(withdraw(&data_directory, start, &third).is_err());
+        let fourth = schedule_file(
+            &data_directory,
+            start + Duration::days(11),
+            json!({ "life_rules": "d" }),
+        );
+        withdraw(&data_directory, start + Duration::days(11), &fourth).unwrap();
+        assert!(snapshot(&data_directory)
+            .unwrap()
+            .reservations
+            .scheduled
+            .is_empty());
+    }
+
+    #[test]
+    fn a_scheduled_todo_change_is_asked_about_every_two_hours() {
+        let data_directory = temp_dir("todo_change");
+        let start = Utc::now();
+        put(
+            &data_directory,
+            start,
+            "planner",
+            &json!({ "todos": [] }),
+            "",
+        )
+        .unwrap();
+        protect(&data_directory, start).unwrap();
+        let todo = json!({ "id": "t1", "title": "Read a novel" });
+        let edits = vec![Edit::PutListItem {
+            path: vec!["todos".into()],
+            id: "t1".into(),
+            item: Some(todo.clone()),
+        }];
+        let scheduled = schedule(
+            &data_directory,
+            start,
+            "planner",
+            edits,
+            "to-do tab",
+            TODO_QUESTION_INTERVAL_SECONDS,
+            "add: the AI said no",
+        )
+        .unwrap();
+        assert_eq!(scheduled.first_question_at, start + Duration::hours(2));
+        // A settings save of the same file does not replace it.
+        schedule_file(
+            &data_directory,
+            start,
+            json!({ "todos": [], "life_rules": "x" }),
+        );
+        assert_eq!(
+            snapshot(&data_directory)
+                .unwrap()
+                .reservations
+                .scheduled
+                .len(),
+            2
+        );
+        for hours in [2, 4, 6] {
+            answer(
+                &data_directory,
+                start + Duration::hours(hours),
+                &scheduled.id,
+                true,
+            )
+            .unwrap();
+        }
+        assert_eq!(in_force(&data_directory, "planner")["todos"], json!([todo]));
     }
 
     #[test]
     fn an_older_lock_means_protected_and_its_pending_edits_become_scheduled() {
         let data_directory = temp_dir("migrate");
         let saved_at = Utc::now() - Duration::days(1);
+        fs::write(
+            data_directory.join("planner.json"),
+            json!({ "life_rules": "old" }).to_string(),
+        )
+        .unwrap();
         fs::write(
             data_directory.join(OLD_LOCK_FILE),
             json!({ "until": saved_at }).to_string(),
@@ -704,6 +1044,12 @@ mod tests {
         let scheduled = &settings_snapshot.reservations.scheduled;
         assert_eq!(scheduled.len(), 1);
         assert_eq!(scheduled[0].scheduled_at, saved_at);
+        assert_eq!(scheduled[0].describe(), ["life_rules = x"]);
         assert!(!data_directory.join(OLD_PENDING_FILE).exists());
+        // Read again: the edits were saved.
+        assert_eq!(
+            snapshot(&data_directory).unwrap().reservations.scheduled[0].describe(),
+            ["life_rules = x"]
+        );
     }
 }

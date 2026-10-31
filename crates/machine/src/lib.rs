@@ -22,6 +22,7 @@
 //! ```
 
 pub mod session;
+pub mod setting_edits;
 pub mod settings;
 pub mod user_api;
 

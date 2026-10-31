@@ -230,16 +230,15 @@ impl SettingsTab {
                         reservation.approvals.len()
                     ));
                 });
-                let in_force = snapshot
-                    .files
-                    .get(&reservation.name)
-                    .cloned()
-                    .unwrap_or(Value::Null);
                 egui::CollapsingHeader::new("What changes")
                     // Read before answering.
                     .default_open(reservation.question_due(now))
                     .id_salt(("changes", &reservation.id))
-                    .show(ui, |ui| changes_ui(ui, &in_force, &reservation.content));
+                    .show(ui, |ui| {
+                        for line in reservation.describe() {
+                            ui.label(line);
+                        }
+                    });
                 if reservation.question_due(now) {
                     changed |= self.question_ui(ui, reservation);
                 } else {
@@ -335,14 +334,19 @@ impl SettingsTab {
         let mut synced = HashMap::new();
         for (name, file) in EDITABLE {
             // A scheduled update is what the user saved last: go on editing from it.
-            let current = snapshot
+            let mut current = snapshot.files.get(name).cloned().unwrap_or(Value::Null);
+            for reservation in snapshot
                 .reservations
                 .scheduled
                 .iter()
-                .find(|reservation| reservation.name == name)
-                .map(|reservation| &reservation.content)
-                .or_else(|| snapshot.files.get(name));
-            let bytes = match current.filter(|value| !value.is_null()) {
+                .filter(|reservation| {
+                    reservation.name == name
+                        && reservation.origin == machine::settings::ReservationOrigin::Settings
+                })
+            {
+                machine::setting_edits::apply(&mut current, &reservation.edits);
+            }
+            let bytes = match Some(&current).filter(|value| !value.is_null()) {
                 Some(value) => {
                     let bytes =
                         serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
@@ -426,14 +430,18 @@ fn sync_loop(session: u32, mirror_directory: &Path, sync: &Sync) {
             *sync.message.lock() = match outcome {
                 Ok(outcome) => {
                     sync.synced.lock().insert(name, Some(bytes));
-                    match outcome {
-                        PutOutcome::Applied => format!("Saved {file} at {at}; in force now."),
-                        PutOutcome::Scheduled {
-                            first_question_at, ..
-                        } => format!(
-                            "Saved {file} at {at}; scheduled. You will be asked about it from {} \
-                             on; it takes effect after {APPROVALS_NEEDED} \"yes\" answers.",
-                            local(first_question_at)
+                    match outcome.scheduled {
+                        None => format!("Saved {file} at {at}; in force now."),
+                        Some(scheduled) => format!(
+                            "Saved {file} at {at}. {}Scheduled: {}. You will be asked about it \
+                             from {} on; it takes effect after {APPROVALS_NEEDED} \"yes\" answers.",
+                            if outcome.applied.is_empty() {
+                                String::new()
+                            } else {
+                                format!("In force now: {}. ", outcome.applied.join("; "))
+                            },
+                            scheduled.edits.join("; "),
+                            local(scheduled.first_question_at)
                         ),
                     }
                 }
@@ -499,85 +507,4 @@ fn local(time: DateTime<Utc>) -> String {
     time.with_timezone(&Local)
         .format("%Y-%m-%d %H:%M")
         .to_string()
-}
-
-/// What a scheduled update changes, setting by setting: `path: old → new`.
-fn changes_ui(ui: &mut egui::Ui, in_force: &Value, update: &Value) {
-    let mut changes = Vec::new();
-    collect_changes("", in_force, update, &mut changes);
-    if changes.is_empty() {
-        ui.label("Nothing differs from the settings in force.");
-    }
-    for (path, before, after) in changes {
-        ui.label(egui::RichText::new(path).strong());
-        ui.horizontal_wrapped(|ui| {
-            ui.colored_label(RED, format!("now: {before}"));
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.colored_label(
-                egui::Color32::from_rgb(80, 170, 90),
-                format!("after: {after}"),
-            );
-        });
-    }
-}
-
-/// Settings that differ between `before` and `after`, descending into objects; other values
-/// are compared whole and shown as compact JSON (long texts shortened).
-fn collect_changes(
-    path: &str,
-    before: &Value,
-    after: &Value,
-    changes: &mut Vec<(String, String, String)>,
-) {
-    if before == after {
-        return;
-    }
-    let no_fields = serde_json::Map::new();
-    let fields = |value: &Value| match value {
-        Value::Object(fields) => Some(fields.clone()),
-        // A setting that does not exist yet compares like an empty one, field by field.
-        Value::Null => Some(no_fields.clone()),
-        _ => None,
-    };
-    let either_is_object = before.is_object() || after.is_object();
-    if let (true, Some(before_fields), Some(after_fields)) =
-        (either_is_object, fields(before), fields(after))
-    {
-        let mut keys: Vec<&String> = before_fields.keys().chain(after_fields.keys()).collect();
-        keys.sort();
-        keys.dedup();
-        for key in keys {
-            let child = if path.is_empty() {
-                key.clone()
-            } else {
-                format!("{path}.{key}")
-            };
-            collect_changes(
-                &child,
-                before_fields.get(key).unwrap_or(&Value::Null),
-                after_fields.get(key).unwrap_or(&Value::Null),
-                changes,
-            );
-        }
-        return;
-    }
-    let shown = |value: &Value| {
-        let text = match value {
-            Value::String(text) => text.clone(),
-            Value::Null => "(none)".into(),
-            other => other.to_string(),
-        };
-        if text.chars().count() > 400 {
-            format!("{}…", text.chars().take(400).collect::<String>())
-        } else {
-            text
-        }
-    };
-    let label = if path.is_empty() {
-        "(whole file)".to_string()
-    } else {
-        path.to_string()
-    };
-    changes.push((label, shown(before), shown(after)));
 }
