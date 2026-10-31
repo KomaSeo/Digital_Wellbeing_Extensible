@@ -1,6 +1,7 @@
 # Responsibility: Check every push on real machines: the whole test suite on Linux under a
 # virtual X server (including the end-to-end agent test), and on Windows the test suite plus
-# a real install, upgrade and uninstall of the service.
+# a real install, upgrade and uninstall of the service with an end-to-end test of the agent it
+# starts, driven through the agent's user API.
 #
 # The Windows job is the only place where the installer's Win32 work (service registration,
 # data-folder ACLs, copying the executables) runs before a user installs it.
@@ -47,7 +48,7 @@ jobs:
       - name: Build
         run: cargo build --release --workspace --locked
 
-      - name: Install, upgrade and uninstall the service
+      - name: Install and upgrade the service
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -88,13 +89,38 @@ jobs:
           if (-not (Select-String -Path "$data\logs\service.log" -Pattern "service running" -Quiet)) {
             throw "the service did not log that it runs"
           }
-          # Hosted runners may have no logged-on user; report what the supervisor did.
-          if (Select-String -Path "$data\logs\service.log" -Pattern "started agent" -Quiet) {
-            Get-ChildItem "$data\logs\agent-session*.log" | ForEach-Object { "== $($_.Name)"; Get-Content $_.FullName -Tail 15 }
-          } else {
-            Write-Host "no user session on this runner: agent start-up in a session is not covered here"
+          if (-not (Select-String -Path "$data\logs\service.log" -Pattern "started agent" -Quiet)) {
+            throw "the service started no agent: this runner has no logged-on user session"
           }
 
+      # The agent the service started in this job's session, driven through its user API the
+      # way the Focus app does. The service's environment points every agent at the test's
+      # stand-in for the Claude API, so no key and no cost.
+      - name: End to end through the installed agent's API
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $addr = "127.0.0.1:18765"
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\DigitalWellbeing" `
+            -Name Environment -PropertyType MultiString -Value @("DW_CLAUDE_API_URL=http://$addr") -Force | Out-Null
+          Restart-Service DigitalWellbeing
+          $env:DW_E2E_CLAUDE_ADDR = $addr
+          cargo test --release --locked -p digital-wellbeing-service --test e2e_windows -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "end-to-end test failed" }
+
+      - name: Service and agent logs
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem "C:\ProgramData\DigitalWellbeing\logs\*.log" -ErrorAction SilentlyContinue |
+            ForEach-Object { "== $($_.Name)"; Get-Content $_.FullName -Tail 40 }
+
+      - name: Uninstall the service
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "target\release\digital-wellbeing-service.exe"
           Write-Host "== uninstall"
           & $exe uninstall
           if ($LASTEXITCODE -ne 0) { throw "uninstall failed ($LASTEXITCODE)" }

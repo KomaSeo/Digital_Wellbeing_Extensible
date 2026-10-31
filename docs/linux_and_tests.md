@@ -79,13 +79,29 @@ GitHub Actions는 모든 push마다 두 작업을 돌립니다.
 | 작업 | 하는 일 |
 |---|---|
 | **linux** (ubuntu-latest) | Xvfb를 설치하고 `xvfb-run -a cargo test --workspace`를 실행합니다. 위의 X11 테스트와 끝에서 끝까지 테스트가 여기서 돕니다. |
-| **windows** (windows-latest) | release 설정으로 테스트하고 빌드한 뒤, 실제로 서비스를 설치·업데이트·제거합니다. |
+| **windows** (windows-latest) | release 설정으로 테스트하고 빌드한 뒤, 실제로 서비스를 설치·업데이트하고, 서비스가 띄운 agent를 사용자 API로 시험하고, 서비스를 제거합니다. |
 
 windows 작업의 설치 시험은 다음을 확인합니다.
 1. `install --manage-all`이 성공하고, 서비스가 Running이고 자동 시작이며, 실행 파일 세 개가 Program Files에 복사된다.
 2. 예전 버전이 남긴 것처럼 데이터 폴더에 파일을 만든 뒤 다시 설치(업데이트)해도, 데이터 폴더 안의 **모든 파일**에 SYSTEM과 Administrators 권한이 있고 읽을 수 있다. rc.5까지 있던 "권한 목록이 빈 파일" 버그는 이 검사에 걸립니다.
 3. 데이터 폴더에 일반 사용자(Users, Everyone, Authenticated Users) 권한이 없다.
-4. 업데이트 뒤 서비스가 로그에 "service running"을 남긴다.
-5. `uninstall` 뒤 서비스가 돌지 않는다.
+4. 업데이트 뒤 서비스가 로그에 "service running"과 "started agent"를 남긴다. 즉 서비스가 로그인한 사용자의 세션에 agent를 띄웠다.
+5. 마지막 단계에서 `uninstall` 뒤 서비스가 돌지 않는다. 이 단계는 앞 단계가 실패해도 실행됩니다.
 
-GitHub의 Windows 빌드 서버에는 로그인한 사용자가 없을 수 있습니다. 그래서 "서비스가 사용자 세션에 agent를 띄운다"는 부분은 이 검사가 보장하지 못합니다. 서버에 사용자 세션이 있으면, 검사는 agent 로그를 출력합니다.
+GitHub의 Windows 빌드 서버에는 작업을 실행하는 사용자(runneradmin)가 로그인한 세션이 있습니다. 그래서 서비스는 설치되자마자 그 세션에 agent를 띄웁니다.
+
+**설치된 agent의 끝에서 끝까지 테스트** (`apps/service/tests/e2e_windows.rs`): 이 테스트는 설치된 서비스가 띄운 진짜 agent를, Focus 앱과 같은 사용자 API로 시험합니다.
+1. CI는 서비스의 환경 변수(레지스트리의 서비스 키 아래 `Environment` 값)에 `DW_CLAUDE_API_URL=http://127.0.0.1:18765`를 넣고 서비스를 다시 시작합니다. 서비스가 띄우는 agent는 서비스의 환경 변수를 물려받으므로, agent는 Claude 대신 테스트의 가짜 Claude 서버를 부릅니다. 그래서 API 키와 비용이 들지 않습니다.
+2. 테스트는 그 주소에 가짜 Claude 서버를 띄우고, 자기 세션의 agent가 사용자 API에 답할 때까지 기다립니다.
+3. 테스트는 `settings_put`으로 AI 집중 설정을 바꿉니다. 테스트 프로세스 자신을 브라우저로 등록하므로, 테스트가 만든 창은 브라우저 탭처럼 다뤄집니다.
+4. 테스트는 진짜 Windows 창 두 개를 만듭니다. 뒤에는 "Rust docs - Google Chrome", 앞에는 "Funny cats - YouTube"입니다. 그리고 집중 세션을 시작합니다.
+5. 테스트는 다음을 확인합니다.
+   - 딴짓 창이 앞에 있으면 Ctrl+W를 받고, 뒤에 있으면 최소화된다. Windows는 프로그램이 마음대로 창을 앞으로 가져오는 것을 막을 때가 있으므로, 테스트는 둘 중 어느 쪽이든 받아들이고 어느 쪽이었는지 출력합니다.
+   - 할 일에 맞는 창은 최소화되지 않는다.
+   - 두 창 모두 제목으로 판정받고, 상태에 딴짓 창의 차단과 오늘의 예상 비용이 나온다.
+   - 할 일 제안이 되고, 설정을 잠그면 agent가 설정 읽기를 거부한다.
+
+환경 변수 `DW_E2E_CLAUDE_ADDR`가 없으면 이 테스트는 건너뜁니다. 그래서 개발자 PC의 `cargo test`는 설치된 서비스를 건드리지 않습니다.
+같은 일을 개발자 PC에서 하려면, 관리자 PowerShell에서 서비스를 설치하고 CI의 "End to end through the installed agent's API" 단계를 그대로 실행하면 됩니다. 이 테스트는 마지막에 설정을 1시간 잠그므로, 쓰고 있는 PC에서는 실행하지 마십시오.
+
+실패하면 CI는 서비스와 agent의 로그를 출력합니다("Service and agent logs" 단계).

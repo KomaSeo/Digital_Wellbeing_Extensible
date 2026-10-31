@@ -11,13 +11,13 @@
 //!    and settings_lock makes the agent refuse settings_get.
 #![cfg(target_os = "linux")]
 
+mod common;
+
+use common::{fake_claude, wait_for};
 use machine::user_api::{call, call_value, Status};
-use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use serde_json::json;
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
@@ -62,7 +62,7 @@ fn agent_end_to_end_on_x11() {
     )
     .unwrap();
 
-    let (claude_url, claude_calls) = fake_claude();
+    let (claude_url, claude_calls) = fake_claude("127.0.0.1:0");
     let port_base = 20000 + (std::process::id() % 20000) as u16;
     // SAFETY (set_var): set before any other thread of this test reads the environment.
     std::env::set_var("DW_PORT_BASE", port_base.to_string());
@@ -209,98 +209,4 @@ fn window(x: &impl Connection, root: u32, title: &str) -> u32 {
     x.map_window(win).unwrap();
     x.sync().unwrap();
     win
-}
-
-fn wait_for<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
-    let deadline = Instant::now() + limit;
-    while Instant::now() < deadline {
-        if let Some(value) = probe() {
-            return Some(value);
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
-    None
-}
-
-/// A stand-in for the Claude Messages API: windows whose title mentions cats are off task,
-/// everything else is on task, and every proposal is approved. Returns its base URL and a
-/// call counter.
-fn fake_claude() -> (String, Arc<AtomicUsize>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let calls = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&calls);
-    thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            counter.fetch_add(1, Ordering::SeqCst);
-            let mut reader = BufReader::new(stream);
-            let mut length = 0usize;
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                    break;
-                }
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap_or(0);
-                }
-            }
-            let mut body = vec![0; length];
-            let _ = reader.read_exact(&mut body);
-            let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            let answer = answer(&request);
-            let reply = json!({
-                "model": "claude-opus-5-5",
-                "stop_reason": "end_turn",
-                "content": [{ "type": "text", "text": answer.to_string() }],
-                "usage": { "input_tokens": 1200, "output_tokens": 60 },
-            })
-            .to_string();
-            let mut stream = reader.into_inner();
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                reply.len(),
-                reply
-            );
-        }
-    });
-    (url, calls)
-}
-
-fn answer(request: &Value) -> Value {
-    let system = request["system"].as_str().unwrap_or_default();
-    let text: String = request["messages"][0]["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|b| b["text"].as_str())
-        .collect();
-    if system.contains("focus checker") {
-        let verdict = |t: &str| {
-            if t.contains("cats") {
-                "off_task"
-            } else {
-                "on_task"
-            }
-        };
-        let front = text
-            .lines()
-            .find(|l| l.starts_with("In front right now:"))
-            .unwrap_or_default();
-        let others: Vec<Value> = text
-            .lines()
-            .filter_map(|l| {
-                let id = l
-                    .strip_prefix('[')?
-                    .split(']')
-                    .next()?
-                    .parse::<u64>()
-                    .ok()?;
-                Some(json!({ "id": id, "verdict": verdict(l), "reason": "test" }))
-            })
-            .collect();
-        json!({ "verdict": verdict(front), "reason": "test", "channel": "", "others": others })
-    } else {
-        json!({ "approved": true, "reply": "ok" })
-    }
 }

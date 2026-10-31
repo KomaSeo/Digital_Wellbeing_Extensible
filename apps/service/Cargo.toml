@@ -32,3 +32,13 @@ serde_json = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = { version = "0.13" }
+
+# The Windows end-to-end test makes real windows and watches their keyboard input.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
