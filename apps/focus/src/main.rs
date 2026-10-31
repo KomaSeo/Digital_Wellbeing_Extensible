@@ -106,10 +106,13 @@ enum ChangeChoice {
     End,
 }
 
-/// Responsibility: Name the Focus window's two tabs.
+/// Responsibility: Name the Focus window's tabs: what to do (the focus session, the
+/// planner's assignment, change requests, proposals), what is blocked (blocks, access
+/// requests, the AI's checks), and the settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    Focus,
+    Todo,
+    Blocking,
     Settings,
 }
 
@@ -164,7 +167,7 @@ impl FocusApp {
             tray_ctx.request_repaint();
         });
         Self {
-            tab: Tab::Focus,
+            tab: Tab::Todo,
             open_settings,
             settings: settings::SettingsTab::new(session),
             session,
@@ -557,6 +560,93 @@ fn open_todos_ui(ui: &mut egui::Ui, planner: &PlannerStatus) {
     );
 }
 
+impl FocusApp {
+    /// The To-do tab: what to do now, and how to change it.
+    fn todo_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
+        ui.heading("Focus session");
+        match status.planner.clone().filter(|p| p.active) {
+            Some(planner) => self.planner_ui(ui, status, &planner),
+            None => self.free_mode_ui(ui, status),
+        }
+        if status.planner.is_some() {
+            self.propose_ui(ui);
+        }
+        if !status.blocked.is_empty() {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(format!("{} blocked.", status.blocked.len()));
+                if ui.link("See the Blocking tab").clicked() {
+                    self.tab = Tab::Blocking;
+                }
+            });
+        }
+    }
+
+    /// The Blocking tab: what the AI checks, what is blocked, and asking for access.
+    fn blocking_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
+        ui.heading("AI checks");
+        if status.session_active {
+            match status.last_check {
+                Some(at) => ui.label(format!(
+                    "Last AI check {} (new apps and sites are checked at once)",
+                    at.with_timezone(&Local).format("%H:%M:%S"),
+                )),
+                None => ui.label("First AI check in a moment…"),
+            };
+        } else {
+            ui.label("No focus session: the AI checks nothing (blocking rules still apply).");
+        }
+        if let Some(err) = &status.last_error {
+            ui.colored_label(RED, format!("AI check failed: {err}"));
+        }
+        if let Some(cost) = status.ai_cost_today_usd {
+            ui.small(if status.daily_budget_usd > 0.0 {
+                format!(
+                    "AI cost today (estimate): ${cost:.2} of ${:.2}",
+                    status.daily_budget_usd
+                )
+            } else {
+                format!("AI cost today (estimate): ${cost:.2}")
+            });
+        }
+
+        ui.separator();
+        ui.heading("Blocked now");
+        if status.blocked.is_empty() {
+            ui.label("Nothing.");
+        }
+        for b in &status.blocked {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("{} — {}", b.key, b.reason));
+                if ui.small_button("Ask for access").clicked() {
+                    self.prefill_access(&b.key);
+                }
+            });
+        }
+
+        ui.separator();
+        self.access_ui(ui, status);
+
+        ui.separator();
+        ui.heading("Recent AI checks");
+        for v in &status.verdicts {
+            let color = match v.verdict {
+                Verdict::OnTask => GREEN,
+                Verdict::OffTask => RED,
+                Verdict::Unsure => egui::Color32::GRAY,
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(v.at.with_timezone(&Local).format("%H:%M").to_string());
+                ui.colored_label(color, format!("{:?}", v.verdict));
+                ui.label(format!("{} — {}", v.process_name, v.reason));
+                if !v.action.is_empty() {
+                    ui.strong(format!("[{}]", v.action));
+                }
+            });
+        }
+    }
+}
+
 impl eframe::App for FocusApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let (status, message) = {
@@ -573,25 +663,13 @@ impl eframe::App for FocusApp {
         }
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Focus, "Focus");
+                ui.selectable_value(&mut self.tab, Tab::Todo, "To-do");
+                ui.selectable_value(&mut self.tab, Tab::Blocking, "Blocking");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
             });
         });
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                if self.tab == Tab::Settings {
-                    match &status {
-                        Some(Ok(status)) => self.settings.ui(ui, status.settings_locked_until),
-                        Some(Err(err)) => {
-                            ui.colored_label(RED, err);
-                        }
-                        None => {
-                            ui.label("connecting…");
-                        }
-                    }
-                    return;
-                }
-                ui.heading("Focus session");
                 let status = match status {
                     Some(Ok(status)) => status,
                     Some(Err(err)) => {
@@ -604,74 +682,14 @@ impl eframe::App for FocusApp {
                         return;
                     }
                 };
-
-                match status.planner.clone().filter(|p| p.active) {
-                    Some(planner) => self.planner_ui(ui, &status, &planner),
-                    None => self.free_mode_ui(ui, &status),
-                }
-                if status.planner.is_some() {
-                    self.propose_ui(ui);
-                }
-                if !message.is_empty() {
+                // A refused or failed request from either tab.
+                if !message.is_empty() && self.tab != Tab::Settings {
                     ui.colored_label(RED, &message);
                 }
-
-                if status.session_active {
-                    match status.last_check {
-                        Some(at) => ui.label(format!(
-                            "Last AI check {} (new apps and sites are checked at once)",
-                            at.with_timezone(&Local).format("%H:%M:%S"),
-                        )),
-                        None => ui.label("First AI check in a moment…"),
-                    };
-                }
-                if let Some(err) = &status.last_error {
-                    ui.colored_label(RED, format!("AI check failed: {err}"));
-                }
-                if let Some(cost) = status.ai_cost_today_usd {
-                    ui.small(if status.daily_budget_usd > 0.0 {
-                        format!(
-                            "AI cost today (estimate): ${cost:.2} of ${:.2}",
-                            status.daily_budget_usd
-                        )
-                    } else {
-                        format!("AI cost today (estimate): ${cost:.2}")
-                    });
-                }
-
-                ui.separator();
-                ui.heading("Blocked now");
-                if status.blocked.is_empty() {
-                    ui.label("Nothing.");
-                }
-                for b in &status.blocked {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(format!("{} — {}", b.key, b.reason));
-                        if ui.small_button("Ask for access").clicked() {
-                            self.prefill_access(&b.key);
-                        }
-                    });
-                }
-
-                ui.separator();
-                self.access_ui(ui, &status);
-
-                ui.separator();
-                ui.heading("Recent AI checks");
-                for v in &status.verdicts {
-                    let color = match v.verdict {
-                        Verdict::OnTask => GREEN,
-                        Verdict::OffTask => RED,
-                        Verdict::Unsure => egui::Color32::GRAY,
-                    };
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(v.at.with_timezone(&Local).format("%H:%M").to_string());
-                        ui.colored_label(color, format!("{:?}", v.verdict));
-                        ui.label(format!("{} — {}", v.process_name, v.reason));
-                        if !v.action.is_empty() {
-                            ui.strong(format!("[{}]", v.action));
-                        }
-                    });
+                match self.tab {
+                    Tab::Todo => self.todo_tab(ui, &status),
+                    Tab::Blocking => self.blocking_tab(ui, &status),
+                    Tab::Settings => self.settings.ui(ui, status.settings_locked_until),
                 }
             });
         });

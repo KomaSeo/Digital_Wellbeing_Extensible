@@ -47,7 +47,7 @@ Settings 탭에서 블랙리스트(List-based rule)에 넣은 프로그램은 �
 
 웹사이트를 탭 제목으로 알아보는 이유는, 브라우저 확장 프로그램이 없으면 모니터가 주소(URL)를 알 수 없기 때문입니다.
 
-Focus 앱의 "Blocked now" 목록에는 차단된 항목마다 "Ask for access" 버튼이 있습니다. 사용자가 이 버튼을 누르면, Focus 앱이 요청 칸을 미리 채웁니다.
+Focus 앱의 Blocking 탭에 있는 "Blocked now" 목록에는 차단된 항목마다 "Ask for access" 버튼이 있습니다. 사용자가 이 버튼을 누르면, Focus 앱이 요청 칸을 미리 채웁니다.
 차단된 탭의 키가 `chrome.exe|naver`라면, Focus 앱은 `naver`를 사이트 키워드로 넣습니다.
 YouTube에서는 모니터가 채널마다 차단합니다([`ai_focus_rule.md`](ai_focus_rule.md) 5.7절). 차단된 탭의 키가 `chrome.exe|youtube channel: 고양이 tv`라면, Focus 앱은 채널 이름이 아니라 `youtube`를 사이트 키워드로 넣습니다.
 탭 제목에는 채널 이름이 없으므로, 채널 이름을 키워드로 쓰면 모니터가 그 허용에 맞는 탭을 찾지 못하기 때문입니다. 대신 사용자가 적은 목적이 허용의 범위를 정합니다. 예를 들어 사용자가 "Rust 강의 시청"을 목적으로 YouTube 허용을 받았는데 고양이 영상을 보면, 모니터는 그 사용을 목적과 다르다고 판정하고 허용을 취소합니다.
@@ -181,7 +181,7 @@ The user was granted this app/site for this purpose: "Rust async 강의 시청"
 
 **사용자** (Focus 앱)
 1. 사용자는 먼저 집중 세션을 시작합니다.
-2. 필요한 앱이나 사이트가 차단되면, 사용자는 "Blocked now" 목록에서 "Ask for access"를 누릅니다. 또는 사용자가 "Need an app or website?" 칸에 직접 적습니다.
+2. 필요한 앱이나 사이트가 차단되면, 사용자는 Blocking 탭의 "Blocked now" 목록에서 "Ask for access"를 누릅니다. 또는 사용자가 "Need an app or website?" 칸에 직접 적습니다.
 3. 사용자는 Website나 App을 고르고, 대상, 기간, 목적을 적은 뒤 "Ask"를 누릅니다.
    목적은 구체적으로 적습니다. 예: `Rust async 강의 영상 시청 (3장 예제 코드 작성에 필요)`
 4. AI가 답하면, Focus 앱은 granted(허용) 또는 refused(거절)와 AI의 답을 보여 줍니다.

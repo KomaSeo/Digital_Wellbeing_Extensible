@@ -102,7 +102,7 @@
 | `digital-wellbeing-service.exe install` | 관리자가 처음에 한 번 실행합니다. | 프로그램을 설치합니다(4장). |
 | `digital-wellbeing-service.exe run` | Windows가 부팅할 때 실행합니다. | 서비스로 돌면서 agent를 띄우고, agent가 꺼지면 다시 띄웁니다. |
 | `digital-wellbeing-service.exe agent` | 서비스가 SYSTEM 권한으로 실행합니다. | 사용자의 세션 안에서 프로그램을 차단하고 AI 검사를 합니다. |
-| `digital-wellbeing-focus.exe` | 사용자가 로그인하면 자동으로 실행됩니다. | 사용자가 할 일을 적고 상태를 보는 창입니다. 사용자는 **Settings** 탭에서 설정이 잠겨 있지 않을 때 모든 설정을 고치고, 설정을 잠급니다(6.4절). |
+| `digital-wellbeing-focus.exe` | 사용자가 로그인하면 자동으로 실행됩니다. | 사용자가 할 일을 정하고 상태를 보는 창입니다. 창에는 탭이 세 개 있습니다. **To-do** 탭은 집중 세션, 플래너가 정한 지금 할 일, 변경 요청, 할 일 제안을 보여 줍니다. **Blocking** 탭은 AI 검사 상태와 비용, 지금 걸린 차단, 접근 요청, 최근 판정을 보여 줍니다. 사용자는 **Settings** 탭에서 설정이 잠겨 있지 않을 때 모든 설정을 고치고, 설정을 잠급니다(6.4절). |
 | `digital-wellbeing-mcp.exe` | 사용자가 설정하면 Claude Desktop이 실행합니다. | Claude Desktop이 할 일을 관리하게 하는 도구 모음입니다([`claude_desktop.md`](claude_desktop.md)). |
 
 **머신 설치는 `digital-wellbeing.exe`를 설치하지 않습니다.** `digital-wellbeing.exe`는 예전 버전에서 관리자가 설정을 고치던 창입니다.
@@ -275,7 +275,7 @@ PowerShell이 스크립트 실행을 막으면, 개발자는 한 번만 `Set-Exe
 2. Focus 창에 빨간 글씨로 "agent not running…"이 **보이지 않는가?**
 3. 작업 관리자 → 세부 정보 탭에서, `digital-wellbeing-service.exe`가 **사용자 이름 SYSTEM**으로 **두 개** 있는가? 하나는 서비스이고, 하나는 agent입니다.
    사용자가 agent에서 "작업 끝내기"를 누르면, Windows가 "액세스 거부"라고 답하는가?
-4. 사용자가 할 일을 적고 **Start focus**를 누르면, 1분 안에 "Recent AI checks"에 판정이 나오는가?
+4. 사용자가 To-do 탭에서 할 일을 적고 **Start focus**를 누르면, 1분 안에 Blocking 탭의 "Recent AI checks"에 판정이 나오는가?
    - 오류가 보이면, 사용자는 오류 메시지를 읽습니다. 키가 없거나 잘못되었다면, 사용자는 설정이 잠겨 있지 않을 때 4.3절 3번을 다시 합니다.
    - AI가 이상한 판정을 내리면, 관리자는 관리자 계정에서 `logs\agent-session<번호>.log`를 엽니다.
 5. 사용자가 Settings 탭의 List-based rule 화면에서 블랙리스트에 `notepad.exe`를 넣은 뒤 메모장을 켜면, 1초 안에 메모장이 꺼지는가?
