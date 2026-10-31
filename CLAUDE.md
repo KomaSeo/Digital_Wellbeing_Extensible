@@ -14,3 +14,10 @@
 
 - User-facing docs (`docs/`, `installer/RELEASE_NOTES.md`) are in Korean, in complete sentences with explicit
   subjects and objects. Define every term before using it.
+
+## Releases
+
+- The owner is the only user. After finishing a requested change (tests pass, pushed), release it without asking:
+  bump the rc number in `installer/RELEASE_VERSION`, add the change to the top section of
+  `installer/RELEASE_NOTES.md`, commit "Release <version>" and push; `.github/workflows/release.yml` publishes it.
+  Then check that the release run succeeded. Several changes in one session may share one release.
