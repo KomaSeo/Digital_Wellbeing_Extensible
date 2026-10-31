@@ -13,8 +13,8 @@ use crate::advisor::{
 };
 use crate::model::{
     Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, DayPlan, DoneRecord,
-    PlannerConfig, PlannerState, PlannerStatus, ProposalInput, TaskNotes, TodoChange,
-    TodoChangeRecord, TodoItem, TodoListWrite, WhenTimeIsUp,
+    Evidence, PlannerConfig, PlannerState, PlannerStatus, PolishItem, ProposalInput, TaskNotes,
+    TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WhenTimeIsUp,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -111,7 +111,7 @@ impl TaskPlanner {
 
     /// The admin's to-dos plus approved proposals the admin has not removed,
     /// minus finished ones.
-    fn open_todos(&self) -> Vec<TodoItem> {
+    pub(crate) fn open_todos(&self) -> Vec<TodoItem> {
         let state = self.state.get();
         let config = self.config.get();
         config
@@ -125,7 +125,30 @@ impl TaskPlanner {
                     .cloned(),
             )
             .filter(|todo| !state.is_done(&todo.id))
+            .chain(
+                state
+                    .polish
+                    .iter()
+                    .map(|(todo_id, polish)| polish_todo(todo_id, polish)),
+            )
             .collect()
+    }
+
+    /// Minutes spent on the to-do `todo_id` so far, the running assignment included.
+    fn minutes_spent_on(&self, todo_id: &str, now: DateTime<Utc>) -> i64 {
+        let state = self.state.get();
+        let finished: i64 = state
+            .assignment_log
+            .iter()
+            .filter(|span| span.todo_id.as_deref() == Some(todo_id))
+            .map(|span| (span.ended - span.started).num_minutes().max(0))
+            .sum();
+        let running = state
+            .assignment
+            .as_ref()
+            .filter(|assignment| assignment.todo_id.as_deref() == Some(todo_id))
+            .map_or(0, |assignment| (now - assignment.at).num_minutes().max(0));
+        finished + running
     }
 
     /// Enabled and something left to do: the user cannot type a task freely.
@@ -473,12 +496,14 @@ impl TaskPlanner {
         now: DateTime<Utc>,
         request: ChangeKind,
         reason: &str,
+        evidence: Evidence,
     ) -> Result<ChangeRecord, PlannerError> {
         let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
         if !self.is_active() {
             return Err(PlannerError::NotActive);
         }
         let reason = reason.trim();
+        let evidence_text: String = evidence.text.trim().chars().take(MAX_NOTES_CHARS).collect();
         if reason.chars().count() < MIN_REASON_CHARS {
             return Err(PlannerError::ReasonTooShort);
         }
@@ -496,8 +521,10 @@ impl TaskPlanner {
                     approved: true,
                     reply: "A new task will be picked when the time is up.".into(),
                     minutes: 0,
+                    outcome: String::new(),
                 },
                 &self.open_todos(),
+                (String::new(), false),
             );
         }
         let open = self.open_todos();
@@ -520,6 +547,10 @@ impl TaskPlanner {
         let now_local = local_now_text();
         let advisor = (self.advisor)(&self.focus.store().get())?;
         let config = self.config.get();
+        let current_todo = state
+            .assignment
+            .as_ref()
+            .and_then(|assignment| assignment.todo_id.clone());
         let review = advisor.review(&ReviewRequest {
             instructions: config.instructions.change_review_or_default(),
             now_local: &now_local,
@@ -536,8 +567,34 @@ impl TaskPlanner {
                 .as_ref()
                 .and_then(|assignment| assignment.todo_id.as_ref())
                 .and_then(|todo_id| state.task_notes.get(todo_id)),
+            evidence: &evidence_text,
+            screenshot: evidence.screenshot_jpeg.as_deref(),
+            planned_minutes: state.assignment.as_ref().and_then(|assignment| {
+                assignment
+                    .until
+                    .map(|until| (until - assignment.at).num_minutes())
+            }),
+            elapsed_minutes: state
+                .assignment
+                .as_ref()
+                .map_or(0, |assignment| (now - assignment.at).num_minutes().max(0)),
+            spent_on_todo_minutes: current_todo
+                .as_deref()
+                .map_or(0, |todo_id| self.minutes_spent_on(todo_id, now)),
+            estimate_minutes: current_todo
+                .as_deref()
+                .and_then(|todo_id| open.iter().find(|todo| todo.id == todo_id))
+                .and_then(|todo| todo.estimate_minutes),
         })?;
-        self.record_and_apply(now, request, reason, review, &open)
+        let screenshot_attached = evidence.screenshot_jpeg.is_some();
+        self.record_and_apply(
+            now,
+            request,
+            reason,
+            review,
+            &open,
+            (evidence_text, screenshot_attached),
+        )
     }
 
     /// Log the decision on a change request and apply it when approved.
@@ -548,9 +605,13 @@ impl TaskPlanner {
         reason: &str,
         review: Review,
         open: &[TodoItem],
+        (evidence, screenshot_attached): (String, bool),
     ) -> Result<ChangeRecord, PlannerError> {
         let state = self.state.get();
         let record = ChangeRecord {
+            evidence,
+            screenshot_attached,
+            outcome: review.outcome.clone(),
             at: now,
             request: request.clone(),
             from_task: state
@@ -605,8 +666,39 @@ impl TaskPlanner {
                         title: todo.title.clone(),
                         at: now,
                     };
-                    self.state
-                        .update(|planner_state| planner_state.done.push(record))?;
+                    // Open-ended work finished early keeps the planned time that is left,
+                    // to be spent improving it later.
+                    let polish_left = if review.outcome == "open_ended" && !is_polish(&todo.id) {
+                        let planned = current.as_ref().and_then(|assignment| {
+                            assignment
+                                .until
+                                .map(|until| (until - assignment.at).num_minutes())
+                        });
+                        let needed = todo
+                            .estimate_minutes
+                            .map(i64::from)
+                            .or(planned)
+                            .unwrap_or(0);
+                        needed - self.minutes_spent_on(&todo.id, now)
+                    } else {
+                        0
+                    };
+                    let finished = todo.clone();
+                    self.state.update(|planner_state| {
+                        planner_state.done.push(record);
+                        if let Some(base_id) = finished.id.strip_prefix(POLISH_PREFIX) {
+                            planner_state.polish.remove(base_id);
+                        } else if polish_left >= MIN_POLISH_MINUTES {
+                            planner_state.polish.insert(
+                                finished.id.clone(),
+                                PolishItem {
+                                    todo: finished.clone(),
+                                    minutes_left: polish_left,
+                                    since: now,
+                                },
+                            );
+                        }
+                    })?;
                 }
                 // Next one, or stop when the list is empty. If picking fails
                 // (AI or network error), do not stay on the finished to-do:
@@ -745,9 +837,23 @@ impl TaskPlanner {
     }
 }
 
-/// Log how long the current assignment ran, as it ends at `ended`.
+/// Log how long the current assignment ran, as it ends at `ended`; time spent improving a
+/// finished to-do comes off its time left.
 fn close_span(planner_state: &mut PlannerState, ended: DateTime<Utc>) {
     if let Some(current) = &planner_state.assignment {
+        if let Some(base_id) = current
+            .todo_id
+            .as_deref()
+            .and_then(|todo_id| todo_id.strip_prefix(POLISH_PREFIX))
+        {
+            let spent = (ended - current.at).num_minutes().max(0);
+            if let Some(polish) = planner_state.polish.get_mut(base_id) {
+                polish.minutes_left -= spent;
+                if polish.minutes_left < MIN_POLISH_MINUTES {
+                    planner_state.polish.remove(base_id);
+                }
+            }
+        }
         if planner_state.assignment_log.len() >= ASSIGNMENT_LOG_CAPACITY {
             planner_state.assignment_log.pop_front();
         }
@@ -757,6 +863,33 @@ fn close_span(planner_state: &mut PlannerState, ended: DateTime<Utc>) {
             started: current.at,
             ended: ended.max(current.at),
         });
+    }
+}
+
+/// Ids of "Improve: …" to-dos start with this, followed by the finished to-do's id.
+const POLISH_PREFIX: &str = "polish:";
+/// Less time left than this is not worth an "Improve: …" to-do.
+const MIN_POLISH_MINUTES: i64 = 10;
+
+fn is_polish(todo_id: &str) -> bool {
+    todo_id.starts_with(POLISH_PREFIX)
+}
+
+/// The "Improve: …" to-do for a finished to-do with time left.
+fn polish_todo(todo_id: &str, polish: &PolishItem) -> TodoItem {
+    TodoItem {
+        id: format!("{POLISH_PREFIX}{todo_id}"),
+        title: format!("Improve: {}", polish.todo.title),
+        notes: format!(
+            "Finished earlier than planned; up to {} more minutes to make it better. {}",
+            polish.minutes_left, polish.todo.notes
+        )
+        .trim()
+        .to_string(),
+        deadline: None,
+        priority: polish.todo.priority,
+        estimate_minutes: u32::try_from(polish.minutes_left).ok(),
+        proposed: polish.todo.proposed,
     }
 }
 

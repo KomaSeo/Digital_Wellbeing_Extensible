@@ -21,6 +21,8 @@ use task_planner::{
 };
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
+/// Seconds between sending "I finished it" and the proof screenshot, to switch windows.
+const PROOF_SCREENSHOT_DELAY_SECONDS: u64 = 5;
 
 /// Responsibility: Keep what the user types into the To-do tab's forms.
 #[derive(Default)]
@@ -369,6 +371,22 @@ impl FocusApp {
                                 .hint_text("what you want to do instead"),
                         );
                     }
+                    ChangeChoice::Done => {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.evidence)
+                                .desired_rows(2)
+                                .desired_width(f32::INFINITY)
+                                .hint_text(
+                                    "proof of the result — needed when the result is a fact \
+                                     (a mail or message sent, an order placed)",
+                                ),
+                        );
+                        ui.checkbox(
+                            &mut self.proof_screenshot,
+                            "attach a screenshot as proof (taken 5 seconds after sending: switch \
+                             to the window that shows the result)",
+                        );
+                    }
                     _ => {}
                 }
                 ui.add(
@@ -407,10 +425,18 @@ impl FocusApp {
                         .clicked()
                     {
                         if let Some(request) = request {
-                            self.send(
-                                "request_change",
-                                json!({ "request": request, "reason": self.reason }),
-                            );
+                            let done = matches!(request, ChangeKind::Done);
+                            let mut params = json!({ "request": request, "reason": self.reason });
+                            if done {
+                                params["evidence"] = json!(self.evidence);
+                                if self.proof_screenshot {
+                                    params["proof_screenshot_after_secs"] =
+                                        json!(PROOF_SCREENSHOT_DELAY_SECONDS);
+                                }
+                                self.evidence.clear();
+                                self.proof_screenshot = false;
+                            }
+                            self.send("request_change", params);
                             self.reason.clear();
                         }
                     }
@@ -526,7 +552,13 @@ impl FocusApp {
                     self.other_todo = Some(todo.id.clone());
                     self.reason = "I want to switch because: ".into();
                 }
-                if ui.button("Edit").clicked() {
+                // An "Improve: …" to-do is made by the app from a to-do finished early; it
+                // goes away when it is done or its time is used up.
+                let improvement = todo.id.starts_with("polish:");
+                if improvement {
+                    ui.weak("improvement time kept from an early finish");
+                }
+                if !improvement && ui.button("Edit").clicked() {
                     self.todo_ui.form = TodoForm {
                         title: todo.title.clone(),
                         notes: todo.notes.clone(),
@@ -541,7 +573,7 @@ impl FocusApp {
                     self.todo_ui.editing = Some(todo.id.clone());
                     self.todo_ui.form_open = true;
                 }
-                if ui.button("Remove").clicked() {
+                if !improvement && ui.button("Remove").clicked() {
                     self.todo_ui.removing = Some(todo.id.clone());
                     self.todo_ui.remove_reason.clear();
                 }

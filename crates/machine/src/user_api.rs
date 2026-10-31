@@ -52,8 +52,8 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use task_planner::{
-    ChangeKind, ChangeRecord, PlannerStatus, ProposalInput, ProposalRecord, TaskNotes, TaskPlanner,
-    TodoChange, TodoChangeRecord, TodoListWrite,
+    ChangeKind, ChangeRecord, Evidence, PlannerStatus, ProposalInput, ProposalRecord, TaskNotes,
+    TaskPlanner, TodoChange, TodoChangeRecord, TodoListWrite,
 };
 
 /// Re-exported so clients need not depend on the rule crates.
@@ -301,8 +301,25 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let request: ChangeKind = serde_json::from_value(params["request"].clone())
                 .map_err(|error| format!("params.request: {error}"))?;
             let reason = params["reason"].as_str().unwrap_or_default();
+            // A proof screenshot is taken a few seconds later, so the user can switch to the
+            // window that shows the result.
+            let screenshot_jpeg = match params["proof_screenshot_after_secs"].as_u64() {
+                Some(delay_seconds @ 1..=30) => {
+                    thread::sleep(Duration::from_secs(delay_seconds));
+                    Some(
+                        api.monitor
+                            .capture_proof()
+                            .ok_or("could not take the proof screenshot")?,
+                    )
+                }
+                _ => None,
+            };
+            let evidence = Evidence {
+                text: params["evidence"].as_str().unwrap_or_default().to_string(),
+                screenshot_jpeg,
+            };
             let record = planner
-                .request_change(Utc::now(), request, reason)
+                .request_change(Utc::now(), request, reason, evidence)
                 .map_err(|error| error.to_string())?;
             last_decision = Some(record);
         }

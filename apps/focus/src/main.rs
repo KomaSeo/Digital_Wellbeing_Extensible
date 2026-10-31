@@ -143,6 +143,10 @@ struct FocusApp {
     other_todo: Option<String>,
     free_task: String,
     reason: String,
+    /// Proof that a finished to-do is really done, sent with "I finished it".
+    evidence: String,
+    /// Take a screenshot as proof a few seconds after sending "I finished it".
+    proof_screenshot: bool,
     access: AccessForm,
     todo_ui: todo::TodoUiState,
     /// Settings questions due at the last status; more than before brings the window up.
@@ -188,6 +192,8 @@ impl FocusApp {
             other_todo: None,
             free_task: String::new(),
             reason: String::new(),
+            evidence: String::new(),
+            proof_screenshot: false,
             access: AccessForm::default(),
             todo_ui: todo::TodoUiState::default(),
             questions_due: 0,

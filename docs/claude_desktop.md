@@ -94,6 +94,7 @@ Claude가 느슨한 변경을 보내면, 사용자는 이틀 뒤부터 Focus 앱
 | "'영어 단어 외우기'는 학원에서 이미 끝냈으니 목록에서 빼 줘." | `get_status`로 할 일의 `id`를 본 뒤 `change_todo` (`todo_id`, `remove: true`, `reason`) |
 | "할 일 하나 줘" | `get_my_task` |
 | "3장 초안 10쪽 다 썼어. 끝났다고 해 줘." | `request_change` (`change: "done"`, `reason`) |
+| "집주인한테 계약서 메일 보냈어. 14시 2분에 landlord@example.com으로, 제목은 '서명한 계약서'야. 끝났다고 해 줘." | `request_change` (`change: "done"`, `reason`, `evidence`). 결과가 분명한 일은 agent의 AI가 증거를 요구합니다. Claude Desktop으로는 화면 캡처를 붙일 수 없으므로, AI가 화면 캡처를 요구하면 사용자는 Focus 앱의 To-do 탭에서 캡처를 붙여 다시 요청합니다([`task_planner.md`](task_planner.md) 4.9절). |
 | "이 증명 거의 다 됐어. 시간 끝나도 새 할 일 주지 말고 계속하게 해 줘." | `request_change` (`change: "notify_when_time_is_up"`, `reason`). agent의 AI가 심사합니다. |
 | "자료가 아직 안 와서 막혔어. 다른 할 일로 바꿔 줘." | `get_status`로 목록을 본 뒤 `request_change` (`change: "switch_todo"`, `todo_id`, `reason`) |
 | "지금 생활 규칙이랑 할 일 고르는 지시문 보여 줘." | `get_settings` |
@@ -114,7 +115,7 @@ Claude Docs에 적어 둔 할 일을 옮기고 싶다면, Claude에게 "문서�
 | `propose_todo` | `title`(필수), `notes`, `deadline`(`YYYY-MM-DD`), `priority`(1~5), `estimate_minutes`, `reason`(선택) | agent의 `todo_change`를 할 일 추가(`kind: "add"`)로, `via: "claude desktop"`과 함께 부릅니다. 승인 여부(`approved`), AI의 답(`reply`), AI가 답하지 못했는지(`ai_could_not_review`), AI가 빈 칸을 채운 할 일(`todo`)을 돌려줍니다. 도구 설명은 Claude에게 "사용자가 말하지 않은 칸은 비워 두라. 앱의 AI가 채운다"고 안내합니다. |
 | `change_todo` | `todo_id`(필수), `reason`(필수), `remove`, `title`, `notes`, `deadline`, `priority`, `estimate_minutes` | `remove`가 `true`이면 그 할 일을 지우는 요청(`kind: "remove"`)을, 아니면 준 칸만 바꾸는 요청(`kind: "edit"`)을 agent의 `todo_change`로 보냅니다. `propose_todo`와 같은 모양의 답을 돌려줍니다. 지우기라면 `todo`는 지울 할 일입니다. |
 | `get_my_task` | 없음 | agent의 `assign`을 부르고, 할당된 할 일을 돌려줍니다. |
-| `request_change` | `change`(`done`, `switch_todo`, `switch_free`, `end`, `notify_when_time_is_up`, `reassign_when_time_is_up`), `todo_id`, `task`, `reason`(필수) | agent의 `request_change`를 부르고, 승인 여부, AI의 답, 바뀐 할당을 돌려줍니다. |
+| `request_change` | `change`(`done`, `switch_todo`, `switch_free`, `end`, `notify_when_time_is_up`, `reassign_when_time_is_up`), `todo_id`, `task`, `reason`(필수), `evidence`(`done`의 증거 글) | agent의 `request_change`를 부르고, 승인 여부, AI의 답, 바뀐 할당을 돌려줍니다. |
 | `get_settings` | 없음 | agent의 `settings_get`을 부르고 다음을 돌려줍니다. 설정이 보호되어 있는지(`protected`), 지금 적용된 설정 파일(`files`: `policy`는 차단 목록, `ai_focus`는 AI 집중 설정, `planner`는 할 일 목록·생활 규칙·지시문), 기본 지시문 네 개(`built_in_instructions`: 할 일 고르기, 변경 요청 심사, 할 일 변경 심사, 하루 계획), 예약된 업데이트를 더한 설정 파일(`files_with_scheduled_updates`: Settings 탭이 보여 주는 것과 같은 내용입니다. 할 일 변경의 예약된 업데이트는 더하지 않습니다), 예약된 업데이트(`scheduled_updates`: 번호, 파일 이름, 예약한 곳, 출처 `origin`(`settings` 또는 `todo_change`), 예약한 시각, 받은 "예" 답의 수 `confirmations`, 바뀌는 설정을 한 줄에 하나씩 적은 `changes`), 최근 업데이트의 결과(`recent_outcomes`). `ai_focus`의 API 키(`api_key`)는 어디에서도 빼고 돌려줍니다. |
 | `schedule_settings_update` | `name`(`policy`, `ai_focus`, `planner` 중 하나, 필수), `content`(새 설정 파일 전체, 필수) | 먼저 `settings_get`으로 설정이 보호되어 있는지 확인하고, 설정 단계이면 아무것도 보내지 않고 오류를 돌려줍니다. 보호되어 있으면 agent의 `settings_put`을 `via: "claude desktop"`으로 부릅니다. agent는 Settings 탭의 저장과 똑같이, 엄격한 변경은 바로 적용하고 느슨한 변경은 예약합니다. 도구는 agent의 답(`applied`: 바로 적용된 변경, `scheduled`: 예약된 업데이트의 번호와 첫 질문 시각과 변경, 없으면 `null`)과 "사용자가 앱에서 세 번 확인해야 적용된다"는 안내를 돌려줍니다. `ai_focus`의 `content`에 `api_key`가 없으면, 지금 적용된 키를 그대로 넣어 보냅니다. 그래서 Claude는 키를 보지 않고도 `ai_focus.json`을 고칠 수 있습니다. |
 

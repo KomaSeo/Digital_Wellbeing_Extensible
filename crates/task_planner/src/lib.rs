@@ -27,9 +27,9 @@ pub use advisor::{
 pub use ai_focus_rule::store::JsonStore;
 pub use model::{
     Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, DayPlan, DayPlanItem,
-    DoneRecord, PlannerConfig, PlannerInstructions, PlannerState, PlannerStatus, ProposalInput,
-    ProposalRecord, TaskNotes, TaskStep, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite,
-    WhenTimeIsUp,
+    DoneRecord, Evidence, PlannerConfig, PlannerInstructions, PlannerState, PlannerStatus,
+    PolishItem, ProposalInput, ProposalRecord, TaskNotes, TaskStep, TodoChange, TodoChangeRecord,
+    TodoItem, TodoListWrite, WhenTimeIsUp,
 };
 pub use planner::{PlannerError, TaskPlanner};
 

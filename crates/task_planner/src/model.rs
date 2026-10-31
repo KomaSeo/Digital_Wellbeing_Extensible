@@ -195,6 +195,36 @@ pub struct ChangeRecord {
     pub approved: bool,
     /// The AI's answer to the user.
     pub reply: String,
+    /// What the user offered as proof that the to-do is finished ("done").
+    #[serde(default)]
+    pub evidence: String,
+    #[serde(default)]
+    pub screenshot_attached: bool,
+    /// For "done": "decisive" (a clear result such as a sent mail), "open_ended" (work that
+    /// can always be better) or empty, as the AI judged it.
+    #[serde(default)]
+    pub outcome: String,
+}
+
+/// Responsibility: Carry the proof the user offers with "I finished it": what they write,
+/// and a screenshot the agent took for them. Not stored (the screenshot is not kept).
+#[derive(Debug, Clone, Default)]
+pub struct Evidence {
+    pub text: String,
+    pub screenshot_jpeg: Option<Vec<u8>>,
+}
+
+/// Responsibility: Keep the time left to improve open-ended work the user finished early.
+///
+/// It shows up as an "Improve: …" to-do (id `polish:<id>`) that the AI picks in spare time;
+/// time spent on it is taken off, and it goes away when the time is used up or "done" is
+/// approved for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolishItem {
+    /// The finished to-do as it was.
+    pub todo: TodoItem,
+    pub minutes_left: i64,
+    pub since: DateTime<Utc>,
 }
 
 /// Responsibility: Say what the user asks to change in the to-do list.
@@ -359,6 +389,9 @@ pub struct PlannerState {
     /// The last day plan the user asked for.
     #[serde(default)]
     pub day_plan: Option<DayPlan>,
+    /// Open-ended to-dos finished early, by to-do id, with the time left to improve them.
+    #[serde(default)]
+    pub polish: BTreeMap<String, PolishItem>,
 }
 
 impl PlannerState {

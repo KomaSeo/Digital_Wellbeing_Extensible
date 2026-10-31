@@ -19,6 +19,12 @@ struct FakeAdvisor {
     saw_rules: parking_lot::Mutex<String>,
     /// System instruction the last question carried.
     saw_instructions: parking_lot::Mutex<String>,
+    /// What the next done review says about the result: decisive, open_ended or not_applicable.
+    outcome: parking_lot::Mutex<String>,
+    /// Proof text and whether a screenshot came with the last review.
+    saw_evidence: parking_lot::Mutex<(String, bool)>,
+    /// Planned, elapsed and spent minutes the last review carried.
+    saw_minutes: parking_lot::Mutex<(Option<i64>, i64, i64)>,
 }
 
 impl Advisor for FakeAdvisor {
@@ -86,11 +92,18 @@ impl Advisor for FakeAdvisor {
         self.reviews.fetch_add(1, Ordering::SeqCst);
         *self.saw_rules.lock() = request.life_rules.to_string();
         *self.saw_instructions.lock() = request.instructions.to_string();
+        *self.saw_evidence.lock() = (request.evidence.to_string(), request.screenshot.is_some());
+        *self.saw_minutes.lock() = (
+            request.planned_minutes,
+            request.elapsed_minutes,
+            request.spent_on_todo_minutes,
+        );
         let approved = self.approve.load(Ordering::SeqCst);
         Ok(Review {
             approved,
             reply: if approved { "ok" } else { "no" }.into(),
             minutes: 30,
+            outcome: self.outcome.lock().clone(),
         })
     }
 }
@@ -123,6 +136,9 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
         reviews: AtomicUsize::new(0),
         saw_rules: parking_lot::Mutex::new(String::new()),
         saw_instructions: parking_lot::Mutex::new(String::new()),
+        outcome: parking_lot::Mutex::new("not_applicable".into()),
+        saw_evidence: parking_lot::Mutex::new((String::new(), false)),
+        saw_minutes: parking_lot::Mutex::new((None, 0, 0)),
     });
     let provided = Arc::clone(&advisor);
     let planner = TaskPlanner::new(
@@ -186,7 +202,12 @@ fn life_rules_reach_every_question() {
     fixture.advisor.saw_rules.lock().clear();
     fixture
         .planner
-        .request_change(Utc::now(), ChangeKind::End, "dinner time now")
+        .request_change(
+            Utc::now(),
+            ChangeKind::End,
+            "dinner time now",
+            Evidence::default(),
+        )
         .unwrap();
     assert_eq!(*fixture.advisor.saw_rules.lock(), "No games before 18:00.");
     assert!(crate::advisor::rules_text("").is_empty());
@@ -207,9 +228,10 @@ fn bogus_pick_is_refused() {
 fn short_reason_is_refused_without_asking_the_ai() {
     let fixture = harness(true, &["a"]);
     fixture.planner.assign(Utc::now()).unwrap();
-    let result = fixture
-        .planner
-        .request_change(Utc::now(), ChangeKind::End, " 응 ");
+    let result =
+        fixture
+            .planner
+            .request_change(Utc::now(), ChangeKind::End, " 응 ", Evidence::default());
     assert!(matches!(result, Err(PlannerError::ReasonTooShort)));
     assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
 }
@@ -227,6 +249,7 @@ fn rejected_request_is_logged_and_changes_nothing() {
                 task: "유튜브".into(),
             },
             "그냥 지루해서",
+            Evidence::default(),
         )
         .unwrap();
     assert!(!record.approved);
@@ -242,14 +265,24 @@ fn approved_done_moves_to_next_and_ends_after_the_last() {
     fixture.planner.assign(Utc::now()).unwrap();
     fixture
         .planner
-        .request_change(Utc::now(), ChangeKind::Done, "3장 초안 제출함")
+        .request_change(
+            Utc::now(),
+            ChangeKind::Done,
+            "3장 초안 제출함",
+            Evidence::default(),
+        )
         .unwrap();
     assert_eq!(fixture.focus.store().get().task, "work on b");
     assert_eq!(fixture.planner.status().open_todos.len(), 1);
 
     fixture
         .planner
-        .request_change(Utc::now(), ChangeKind::Done, "4장도 끝냄")
+        .request_change(
+            Utc::now(),
+            ChangeKind::Done,
+            "4장도 끝냄",
+            Evidence::default(),
+        )
         .unwrap();
     assert!(!fixture.planner.is_active());
     assert!(fixture.planner.status().assignment.is_none());
@@ -268,6 +301,7 @@ fn approved_switches_set_the_task() {
                 todo_id: "b".into(),
             },
             "a는 교수님 답장 대기 중",
+            Evidence::default(),
         )
         .unwrap();
     assert_eq!(fixture.focus.store().get().task, "title b");
@@ -280,6 +314,7 @@ fn approved_switches_set_the_task() {
                 task: "은행 업무".into(),
             },
             "오늘 마감인 서류 제출",
+            Evidence::default(),
         )
         .unwrap();
     let status = fixture.planner.status();
@@ -297,6 +332,7 @@ fn switch_to_unknown_todo_is_refused() {
             todo_id: "zzz".into(),
         },
         "this one instead",
+        Evidence::default(),
     );
     assert!(matches!(result, Err(PlannerError::UnknownTodo(_))));
 }
@@ -322,7 +358,12 @@ fn approved_done_with_a_failing_pick_ends_the_session() {
     fixture.advisor.bogus_pick.store(true, Ordering::SeqCst);
     let record = fixture
         .planner
-        .request_change(Utc::now(), ChangeKind::Done, "3장 초안 제출함")
+        .request_change(
+            Utc::now(),
+            ChangeKind::Done,
+            "3장 초안 제출함",
+            Evidence::default(),
+        )
         .unwrap();
     assert!(record.approved);
     assert!(fixture.planner.status().assignment.is_none());
@@ -612,7 +653,12 @@ fn notify_only_needs_the_ai_and_keeps_the_task_past_its_end() {
     fixture.advisor.approve.store(false, Ordering::SeqCst);
     let record = fixture
         .planner
-        .request_change(start, notify_only.clone(), "almost done with the proof")
+        .request_change(
+            start,
+            notify_only.clone(),
+            "almost done with the proof",
+            Evidence::default(),
+        )
         .unwrap();
     assert!(!record.approved);
     assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 1);
@@ -624,7 +670,12 @@ fn notify_only_needs_the_ai_and_keeps_the_task_past_its_end() {
     assert!(
         fixture
             .planner
-            .request_change(start, notify_only, "almost done with the proof")
+            .request_change(
+                start,
+                notify_only,
+                "almost done with the proof",
+                Evidence::default()
+            )
             .unwrap()
             .approved
     );
@@ -647,6 +698,7 @@ fn notify_only_needs_the_ai_and_keeps_the_task_past_its_end() {
                 action: WhenTimeIsUp::Reassign,
             },
             "back to the plan",
+            Evidence::default(),
         )
         .unwrap();
     assert!(record.approved);
@@ -671,6 +723,7 @@ fn an_approved_switch_runs_for_the_time_the_review_gave_it() {
                 todo_id: "b".into(),
             },
             "waiting for the advisor's reply on a",
+            Evidence::default(),
         )
         .unwrap();
     let assignment = fixture.planner.status().assignment.unwrap();
@@ -699,7 +752,12 @@ fn the_owners_instructions_replace_the_built_in_ones() {
         .unwrap();
     fixture
         .planner
-        .request_change(Utc::now(), ChangeKind::End, "dinner time now")
+        .request_change(
+            Utc::now(),
+            ChangeKind::End,
+            "dinner time now",
+            Evidence::default(),
+        )
         .unwrap();
     assert_eq!(
         *fixture.advisor.saw_instructions.lock(),
@@ -727,6 +785,7 @@ fn time_spent_per_todo_is_counted_from_the_assignments() {
                 todo_id: "b".into(),
             },
             "blocked on data for a",
+            Evidence::default(),
         )
         .unwrap();
     let status = fixture.planner.status();
@@ -773,6 +832,12 @@ fn notes_are_saved_for_open_todos_and_reach_the_done_review() {
         recent_requests: &[],
         history: "",
         notes: state.task_notes.get("a"),
+        evidence: "",
+        screenshot: None,
+        planned_minutes: None,
+        elapsed_minutes: 0,
+        spent_on_todo_minutes: 0,
+        estimate_minutes: None,
     });
     assert!(
         text.contains("outline done") && text.contains("- [x] write intro"),
@@ -799,4 +864,146 @@ fn a_day_plan_keeps_only_open_todos_and_sensible_lengths() {
         fixture.planner.status().day_plan.unwrap().summary,
         "a good day"
     );
+}
+
+#[test]
+fn open_ended_work_finished_early_keeps_the_time_left_for_improving_it() {
+    let fixture = harness(true, &["a", "b"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.todos[0].estimate_minutes = Some(240))
+        .unwrap();
+    let start = Utc::now() - chrono::Duration::minutes(90);
+    fixture.planner.assign(start).unwrap();
+    *fixture.advisor.outcome.lock() = "open_ended".into();
+    // 30 minutes on a report the AI judged needs 240.
+    let finished_at = start + chrono::Duration::minutes(30);
+    let record = fixture
+        .planner
+        .request_change(
+            finished_at,
+            ChangeKind::Done,
+            "the report is written",
+            Evidence {
+                text: "sent the draft to my advisor".into(),
+                screenshot_jpeg: Some(vec![1, 2, 3]),
+            },
+        )
+        .unwrap();
+    assert!(record.approved);
+    assert_eq!(record.outcome, "open_ended");
+    assert_eq!(record.evidence, "sent the draft to my advisor");
+    assert!(record.screenshot_attached);
+    assert_eq!(
+        *fixture.advisor.saw_evidence.lock(),
+        ("sent the draft to my advisor".to_string(), true)
+    );
+    let (planned, elapsed, spent) = *fixture.advisor.saw_minutes.lock();
+    assert_eq!((planned, elapsed, spent), (Some(45), 30, 30));
+    let polish = &fixture.planner.state_store_for_tests().get().polish["a"];
+    assert_eq!(polish.minutes_left, 210);
+    let open = fixture.planner.open_todos();
+    let improve = open
+        .iter()
+        .find(|todo| todo.id == "polish:a")
+        .expect("an Improve to-do is open");
+    assert_eq!(improve.title, "Improve: title a");
+    assert_eq!(improve.estimate_minutes, Some(210));
+
+    // 60 minutes improving it come off the time left.
+    *fixture.advisor.outcome.lock() = "not_applicable".into();
+    let improving_from = finished_at + chrono::Duration::minutes(5);
+    fixture
+        .planner
+        .request_change(
+            improving_from,
+            ChangeKind::SwitchTodo {
+                todo_id: "polish:a".into(),
+            },
+            "time to improve the report",
+            Evidence::default(),
+        )
+        .unwrap();
+    fixture
+        .planner
+        .request_change(
+            improving_from + chrono::Duration::minutes(60),
+            ChangeKind::SwitchTodo {
+                todo_id: "b".into(),
+            },
+            "b is due soon after all",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.planner.state_store_for_tests().get().polish["a"].minutes_left,
+        150
+    );
+
+    // Finishing the improvement removes it.
+    fixture
+        .planner
+        .request_change(
+            Utc::now(),
+            ChangeKind::SwitchTodo {
+                todo_id: "polish:a".into(),
+            },
+            "back to the report",
+            Evidence::default(),
+        )
+        .unwrap();
+    fixture
+        .planner
+        .request_change(
+            Utc::now(),
+            ChangeKind::Done,
+            "the report is polished",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert!(fixture
+        .planner
+        .state_store_for_tests()
+        .get()
+        .polish
+        .is_empty());
+    assert!(!fixture
+        .planner
+        .open_todos()
+        .iter()
+        .any(|todo| todo.id.starts_with("polish:")));
+}
+
+#[test]
+fn decisive_or_nearly_full_work_leaves_no_improve_todo() {
+    for (outcome, estimate) in [("decisive", 240), ("open_ended", 35)] {
+        let fixture = harness(true, &["a", "b"]);
+        fixture
+            .planner
+            .config_store()
+            .update(|config| config.todos[0].estimate_minutes = Some(estimate))
+            .unwrap();
+        let start = Utc::now() - chrono::Duration::minutes(30);
+        fixture.planner.assign(start).unwrap();
+        *fixture.advisor.outcome.lock() = outcome.into();
+        fixture
+            .planner
+            .request_change(
+                start + chrono::Duration::minutes(30),
+                ChangeKind::Done,
+                "mail sent to the client",
+                Evidence::default(),
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .planner
+                .state_store_for_tests()
+                .get()
+                .polish
+                .is_empty(),
+            "{outcome} {estimate}"
+        );
+    }
 }

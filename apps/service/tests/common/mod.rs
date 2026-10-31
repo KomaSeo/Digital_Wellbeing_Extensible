@@ -152,6 +152,14 @@ fn answer(request: &Value) -> Value {
             })
             .collect();
         json!({ "verdict": verdict(front), "reason": "test", "channel": "", "others": others })
+    } else if system.contains("You assign the user's next piece of work") {
+        // The first open to-do, as the list shows it: `"id": "..."`.
+        let first_id = text
+            .split("\"id\": \"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_default();
+        json!({ "todo_id": first_id, "task": "work on it", "why": "first", "minutes": 30 })
     } else if system.contains("rest of their day") {
         json!({ "items": [], "summary": "a calm day" })
     } else {
@@ -162,6 +170,7 @@ fn answer(request: &Value) -> Value {
             "approved": approved,
             "reply": if approved { "ok" } else { "no" },
             "minutes": 30,
+            "outcome": "not_applicable",
             "todo": {
                 "title": "", "notes": "filled by the stand-in", "deadline": "",
                 "priority": 2, "estimate_minutes": 25

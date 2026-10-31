@@ -1127,6 +1127,24 @@ impl FocusMonitor {
         }
     }
 
+    /// A screenshot of the foreground window offered as proof that a to-do is finished, or
+    /// `None` when nothing is in front or a private app is on screen.
+    pub fn capture_proof(&self) -> Option<Vec<u8>> {
+        let config = self.store.get();
+        let foreground = self.desktop.foreground()?;
+        let private_on_screen = config.is_private(&foreground.process_name)
+            || (!config.private_apps.is_empty()
+                && self
+                    .desktop
+                    .visible_processes()
+                    .iter()
+                    .any(|name| config.is_private(name)));
+        if private_on_screen {
+            return None;
+        }
+        self.desktop.screenshot(&foreground).and_then(encode_jpeg)
+    }
+
     fn run_judge(
         &self,
         config: &AiFocusConfig,

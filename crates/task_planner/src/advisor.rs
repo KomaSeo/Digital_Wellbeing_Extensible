@@ -11,7 +11,7 @@ use crate::model::{
     Assignment, ChangeKind, ChangeRecord, DayPlan, DoneRecord, TaskNotes, TodoChange,
     TodoChangeRecord, TodoItem, WhenTimeIsUp,
 };
-use ai_focus_rule::claude::{text_block, ClaudeClient};
+use ai_focus_rule::claude::{jpeg_block, text_block, ClaudeClient};
 use ai_focus_rule::{AiFocusConfig, JudgeError};
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,11 @@ assignment and a log of recent foreground windows.
 Pick exactly one open to-do to work on now. Weigh deadlines first (overdue, \
 then due today or tomorrow), then priority, then fit with the time of day. \
 Prefer continuing the previous assignment if it is still open and nothing more \
-urgent appeared; constant switching wastes the user's time. To-dos marked \
+urgent appeared; constant switching wastes the user's time. To-dos whose id \
+starts with \"polish:\" are work the user finished early that can still be \
+improved; their estimate is the time left for that. When nothing is overdue or \
+due today, prefer them over rest and leisure (unless the life rules call for a \
+break now). To-dos marked \
 \"proposed\": true were added by the user and approved by an AI review against the \
 life rules; weigh them like any other.
 
@@ -129,6 +133,21 @@ costly to resume) and the life rules allow it; reject it when it would skip a \
 break the life rules require, delay something more urgent, or the task is \
 leisure.
 
+Finishing a to-do, especially before its planned time is up: first decide what \
+kind of result it has, and set `outcome`.
+- \"decisive\": a clear result that either happened or did not (a mail or message \
+sent, something ordered, paid, booked, submitted, uploaded). Approve only with \
+proof: the user's written evidence and/or the attached screenshot must show the \
+result (recipient and subject of the sent mail, the order confirmation, the \
+submission page). Without convincing proof, reject and say exactly what proof \
+would do.
+- \"open_ended\": work that can always be done better (writing a report, \
+practising a talk, studying for an exam, coding). Do not demand proof and do not \
+reject only because it was quick: approve when it is plausibly in a usable state. \
+The app keeps the planned time that is left and later asks the user to spend it \
+improving the work, so a rushed finish gains nothing.
+- \"not_applicable\": any other request.
+
 Reject vague or avoidant reasons (bored, not in the mood, just for a minute), \
 reasons the activity log contradicts, and requests that repeat ones already \
 rejected without new information.
@@ -163,6 +182,9 @@ pub struct Review {
     /// For an approved switch: how long the new task runs. 0 otherwise (and for proposals).
     #[serde(default)]
     pub minutes: u32,
+    /// For "done": "decisive", "open_ended" or "not_applicable".
+    #[serde(default)]
+    pub outcome: String,
 }
 
 /// Responsibility: Carry what the AI sees when picking a to-do.
@@ -196,6 +218,15 @@ pub struct ReviewRequest<'a> {
     pub history: &'a str,
     /// The user's notes and steps for the current to-do (weighed for "done").
     pub notes: Option<&'a TaskNotes>,
+    /// For "done": the proof the user wrote, and a screenshot the agent took for them.
+    pub evidence: &'a str,
+    pub screenshot: Option<&'a [u8]>,
+    /// For "done": the minutes planned for this assignment and spent so far on it, the
+    /// minutes spent on this to-do in total, and its estimate.
+    pub planned_minutes: Option<i64>,
+    pub elapsed_minutes: i64,
+    pub spent_on_todo_minutes: i64,
+    pub estimate_minutes: Option<u32>,
 }
 
 /// Responsibility: Carry what the AI sees when reviewing a change to the to-do list.
@@ -275,10 +306,18 @@ impl Advisor for ClaudeAdvisor {
     }
 
     fn review(&self, request: &ReviewRequest) -> Result<Review, JudgeError> {
+        let mut content = vec![text_block(review_text(request))];
+        if let Some(jpeg) = request.screenshot {
+            content.push(text_block(
+                "The screenshot the user attached as proof (taken by the app a few seconds \
+                 after they sent the request):",
+            ));
+            content.push(jpeg_block(jpeg));
+        }
         self.client.structured(
             "planner review",
             request.instructions,
-            vec![text_block(review_text(request))],
+            content,
             change_review_schema(),
             "medium",
         )
@@ -379,9 +418,14 @@ fn change_review_schema() -> Value {
             "minutes": {
                 "type": "integer",
                 "description": "for an approved switch: how long the new task runs (15 to 240); otherwise 0"
+            },
+            "outcome": {
+                "type": "string",
+                "enum": ["decisive", "open_ended", "not_applicable"],
+                "description": "for done: whether the to-do has a clear, provable result or can always be done better"
             }
         },
-        "required": ["approved", "reply", "minutes"],
+        "required": ["approved", "reply", "minutes", "outcome"],
         "additionalProperties": false
     })
 }
@@ -497,7 +541,7 @@ pub(crate) fn review_text(request: &ReviewRequest) -> String {
         })
         .collect();
     format!(
-        "Now: {now}\n\n{rules}Current assignment: {current}\n{notes}\n\
+        "Now: {now}\n\n{rules}Current assignment: {current}\n{timing}{notes}{evidence}\n\
          The user asks to: {ask}\nTheir reason: \"{reason}\"\n\n\
          Open to-dos:\n{todos}\n\nEarlier change requests (newest first):\n{past}\n\n\
          Recent foreground activity (oldest first):\n{history}",
@@ -507,6 +551,31 @@ pub(crate) fn review_text(request: &ReviewRequest) -> String {
             .current
             .map(|assignment| assignment_text(assignment, Utc::now()))
             .unwrap_or_else(|| "(none)".into()),
+        timing = match request.planned_minutes {
+            Some(planned) => format!(
+                "Planned for this assignment: {planned} min; spent so far: {} min; spent on \
+                 this to-do in total: {} min; its estimate: {}.\n",
+                request.elapsed_minutes,
+                request.spent_on_todo_minutes,
+                request
+                    .estimate_minutes
+                    .map_or("none".to_string(), |minutes| format!("{minutes} min"))
+            ),
+            None => String::new(),
+        },
+        evidence = if request.evidence.trim().is_empty() && request.screenshot.is_none() {
+            String::new()
+        } else {
+            format!(
+                "Proof the user offers: \"{}\"{}\n",
+                request.evidence.trim(),
+                if request.screenshot.is_some() {
+                    " (and a screenshot, below)"
+                } else {
+                    ""
+                }
+            )
+        },
         notes = request
             .notes
             .filter(|notes| !notes.text.trim().is_empty() || !notes.steps.is_empty())

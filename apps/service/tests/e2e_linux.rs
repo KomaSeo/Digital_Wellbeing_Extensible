@@ -301,7 +301,32 @@ fn end_to_end(real_key: Option<String>) {
             "a rest day gets rest or play, not {rest}"
         );
         injection_attempts_are_rejected(session);
+        early_finish_is_judged_by_its_kind(session);
     } else {
+        // "I finished it" with a proof screenshot taken a second later.
+        assign(
+            session,
+            &[todo("p-mail", "Mail the signed form", "", Some(0), 3)],
+            "",
+        );
+        let status = call(
+            session,
+            "request_change",
+            json!({
+                "request": { "kind": "done" },
+                "reason": "sent it",
+                "evidence": "sent to the office at 10:02",
+                "proof_screenshot_after_secs": 1,
+            }),
+        )
+        .unwrap();
+        let decision = status.last_decision.expect("the AI decided");
+        assert!(decision.approved);
+        assert_eq!(decision.evidence, "sent to the office at 10:02");
+        assert!(
+            decision.screenshot_attached,
+            "the proof screenshot was taken"
+        );
         let proposed = call(
             session,
             "propose_todo",
@@ -509,10 +534,83 @@ fn injection_attempts_are_rejected(session: u32) {
     );
     assert!(!decision.approved, "a forbidden switch was approved");
     let assignment = status.planner.and_then(|planner| planner.assignment);
-    assert!(assignment.is_some_and(|assignment| !assignment.task.contains("YouTube")));
+    // Still on a to-do from the list (the task text itself may say "no YouTube").
+    assert!(assignment.is_some_and(|assignment| assignment.todo_id.is_some()));
 }
 
 /// A to-do due in `due_in_days` (None: no deadline).
+/// Real AI: a finished to-do with a provable result needs proof; work that can always be
+/// improved is accepted, and the planned time left comes back as an "Improve: …" to-do.
+fn early_finish_is_judged_by_its_kind(session: u32) {
+    let mut mail = todo(
+        "c-mail",
+        "Email the signed lease to the landlord",
+        "Scan the signed lease and send it to the landlord by Gmail.",
+        Some(0),
+        5,
+    );
+    mail["estimate_minutes"] = json!(30);
+    assign(session, &[mail], "");
+    let finish = |reason: &str, evidence: &str| {
+        let status = call(
+            session,
+            "request_change",
+            json!({ "request": { "kind": "done" }, "reason": reason, "evidence": evidence }),
+        )
+        .unwrap();
+        let decision = status.last_decision.clone().expect("the AI decided");
+        println!(
+            "done ({evidence:?}): approved {} as {} ({})",
+            decision.approved, decision.outcome, decision.reply
+        );
+        (decision, status)
+    };
+    let (without_proof, _) = finish("I sent it, it is done.", "");
+    assert!(!without_proof.approved, "a sent mail needs proof");
+    assert_eq!(without_proof.outcome, "decisive");
+    let (with_proof, _) = finish(
+        "I sent it, it is done.",
+        "Gmail Sent folder, 14:02 today: to landlord.kim@example.com, subject \"Signed lease \
+         - unit 302\", attachment lease_signed.pdf (2 pages).",
+    );
+    // Written proof alone may not convince it (it often asks for a screenshot, which this
+    // test cannot fake), so only the kind of result is checked here.
+    assert_eq!(with_proof.outcome, "decisive");
+
+    let mut report = todo(
+        "d-report",
+        "Write the quarterly sales report",
+        "A 10-page report for the team meeting next week.",
+        Some(5),
+        3,
+    );
+    report["estimate_minutes"] = json!(240);
+    assign(session, &[report], "");
+    let (rushed, status) = finish(
+        "I wrote a first full draft of all sections; it is good enough to share.",
+        "",
+    );
+    // With no time logged on it, the AI may well find a "full draft" implausible and say no;
+    // the time kept for improving is covered by the planner's unit tests.
+    assert_eq!(rushed.outcome, "open_ended");
+    if rushed.approved {
+        let improve = status
+            .planner
+            .expect("planner status")
+            .open_todos
+            .into_iter()
+            .find(|todo| todo.id == "polish:d-report")
+            .expect("an Improve to-do keeps the time left");
+        println!(
+            "{} for up to {:?} minutes",
+            improve.title, improve.estimate_minutes
+        );
+        assert!(improve
+            .estimate_minutes
+            .is_some_and(|minutes| minutes >= 200));
+    }
+}
+
 fn todo(id: &str, title: &str, notes: &str, due_in_days: Option<i64>, priority: u8) -> Value {
     let deadline = due_in_days
         .map(|days| (chrono::Local::now().date_naive() + chrono::Duration::days(days)).to_string());

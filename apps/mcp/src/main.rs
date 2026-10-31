@@ -167,7 +167,8 @@ fn tools() -> Value {
                     "change": { "type": "string", "enum": ["done", "switch_todo", "switch_free", "end", "notify_when_time_is_up", "reassign_when_time_is_up"] },
                     "todo_id": { "type": "string", "description": "For switch_todo: id from get_status" },
                     "task": { "type": "string", "description": "For switch_free: what to do instead" },
-                    "reason": { "type": "string", "description": "The user's reason, in their words" }
+                    "reason": { "type": "string", "description": "The user's reason, in their words" },
+                    "evidence": { "type": "string", "description": "For done: proof of the result in the user's words (what was sent, to whom, an order number). The app's AI asks for proof when the result is a fact like a sent mail or an order; work that can always be improved (a report, practice) is accepted and the planned time left comes back later as an \"Improve: ...\" to-do." }
                 },
                 "required": ["change", "reason"]
             }
@@ -291,7 +292,11 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
             let status = status_from(
                 agent,
                 "request_change",
-                json!({ "request": request, "reason": reason }),
+                json!({
+                    "request": request,
+                    "reason": reason,
+                    "evidence": arguments["evidence"].as_str().unwrap_or_default(),
+                }),
             )?;
             let decision = status
                 .last_decision
