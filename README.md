@@ -84,11 +84,18 @@ blocks and unblock, access grants and revoke, AI usage and daily budget, task
 planner and life rules) are edited in the Focus app's **Settings** tab, from a
 managed (standard) account: the tab keeps a private copy, and that session's
 agent writes the real files as SYSTEM. The program does not tell administrator
-and standard accounts apart; only the **settings lock** decides. While unlocked,
-anyone on the PC can edit; the Settings tab locks them for 1 hour to 366 days,
-a lock can only be extended, and nothing in the program unlocks early. Windows
-cannot stop an administrator account from stopping the service or deleting
-`settings_lock.json`, so work in a standard account and use the administrator
+and standard accounts apart; only the **settings protection** decides. During
+**setup** (right after installing) an edit takes effect at once, and anyone on
+the PC can make it. The user ends setup with "Protect the settings" in the
+Settings tab; this is one way, and nothing in the program turns it off. From
+then on every saved file (from the Settings tab or Claude Desktop) becomes a
+**scheduled update**: two days later the Focus app asks "Is this update really
+right?", each "yes" brings the next question two days after the answer, and the
+third "yes" in a row puts it in force (so at least six days); one "no" rejects
+it, and an unanswered question waits. The Settings tab shows what each update
+changes and can withdraw it. Windows cannot stop an administrator account from
+stopping the service or deleting `settings_protection.json`, so work in a
+standard account and use the administrator
 account only to install and to change which accounts are managed
 (`install --manage` / `machine.json`, which the Settings tab cannot edit).
 
@@ -107,28 +114,33 @@ the agent log.
 
 **Task planner** (machine install): the user keeps a to-do list (deadline,
 priority, notes) and life rules in the *Task planner* page of the Focus app's
-Settings tab, then locks the settings. When it is on, the AI picks the
+Settings tab, then protects the settings. When it is on, the AI picks the
 user's task from the list ("Get my task" in the Focus app) and that becomes the
 AI focus task; finishing, switching or ending needs a reason the AI approves.
-Every request is logged and shown in that page. Guide (Korean):
+Every request is logged and shown in that page. The three instructions the
+planner's AI follows (picking a task, reviewing a change request, reviewing a
+proposed to-do) are settings too: empty means the built-in text, and an edit
+goes through the same scheduled-update confirmations. Guide (Korean):
 [`docs/task_planner.md`](docs/task_planner.md).
 
 **Access requests**: from the Focus app the user can ask for an app or site
 the AI check blocks, for some minutes or permanently, stating the purpose.
 If the AI approves, the block is lifted, but the app stays observed and is
 judged against that purpose; off-purpose use revokes the grant and blocks
-again. Blocks do not expire: an approved request lifts them, or, while the
-settings are unlocked, the "unblock" button in the Settings tab (it lists every
-user's blocks). The Settings tab also sets the limits and can revoke grants; the
+again. Blocks do not expire: an approved request lifts them, or the "unblock"
+button in the Settings tab (it lists every user's blocks; once the settings are
+protected, an unblock is a scheduled update like any other edit). The Settings tab also sets the limits and can revoke grants; the
 blacklist of the settings is never lifted this way. Guide (Korean):
 [`docs/access_grants.md`](docs/access_grants.md).
 
 **Claude Desktop** (machine install): `digital-wellbeing-mcp.exe` is an MCP
 server for Claude Desktop in the work account. Its tools show the list and the
-current task, propose a to-do and ask for a change, all through the agent API
-the Focus app uses, so the assistant can do nothing the user cannot. Proposed
-to-dos join the list only if the agent's AI approves them against the life
-rules (set in the Settings tab); the task-picking prompt is fixed in the code.
+current task, propose a to-do and ask for a change, read the settings (without
+the API key) and, once they are protected, schedule an update of them, all
+through the agent API the Focus app uses, so the assistant can do nothing the
+user cannot. Proposed to-dos join the list only if the agent's AI approves them
+against the life rules. A scheduled update takes effect only after the user
+confirms it three times in the Focus app; no tool answers those questions.
 Setup (Korean): [`docs/claude_desktop.md`](docs/claude_desktop.md).
 
 **AI usage**: every Claude call's token counts are recorded per day and purpose

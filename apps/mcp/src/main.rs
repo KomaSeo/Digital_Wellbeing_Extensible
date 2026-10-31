@@ -160,7 +160,7 @@ fn tools() -> Value {
         },
         {
             "name": "schedule_settings_update",
-            "description": "Schedule an update of one settings file: send the whole new file (start from get_settings). Accepted only once the settings are protected. The update takes effect only after the user answers \"is this update really right?\" with yes in the app three times, two days apart (the first question comes two days from now); one no rejects it. Scheduling the same file again replaces the earlier update and starts over.",
+            "description": "Schedule an update of one settings file: send the whole new file (start from get_settings). Accepted only once the settings are protected. The update takes effect only after the user answers \"is this update really right?\" with yes in the app three times, two days apart (the first question comes two days from now); one no rejects it. Scheduling a file that already has a scheduled update replaces that update (possibly one the user made in the app) and its confirmations start over: start from that update's content in get_settings, and tell the user.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -247,12 +247,17 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
                 .into_iter()
                 .flatten()
                 .map(|reservation| {
+                    let mut content = reservation["content"].clone();
+                    if let Some(fields) = content.as_object_mut() {
+                        fields.remove("api_key");
+                    }
                     json!({
                         "id": reservation["id"],
                         "name": reservation["name"],
                         "via": reservation["via"],
                         "scheduled_at": reservation["scheduled_at"],
                         "confirmations": reservation["approvals"].as_array().map_or(0, Vec::len),
+                        "content": content,
                     })
                 })
                 .collect();

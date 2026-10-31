@@ -13,26 +13,36 @@
 | **MCP** | Claude 같은 AI 앱이 바깥 프로그램의 기능(도구)을 부를 때 쓰는 약속입니다. Model Context Protocol의 줄임말입니다. |
 | **MCP 서버** | AI 앱에 도구를 제공하는 프로그램입니다. 이 프로젝트의 MCP 서버는 `digital-wellbeing-mcp.exe`입니다. |
 | **agent** | 로그인한 사용자마다 하나씩 SYSTEM 권한으로 도는, 차단과 할 일 플래너를 맡은 프로그램입니다([`multi_account.md`](multi_account.md)). |
-| **Settings 탭** | Focus 앱의 설정 화면입니다. 사용자는 이 탭에서 할 일 목록, 생활 규칙, 차단 규칙 같은 모든 설정을 고칩니다. 설정이 잠겨 있으면, 고친 내용은 잠금이 끝날 때 적용됩니다([`multi_account.md`](multi_account.md) 6.4절). |
-| **생활 규칙** | 사용자가 Settings 탭의 Task planner 화면에 적는 고정된 규칙입니다. 할 일 고르기, 변경 요청 심사, 할 일 제안 심사가 모두 이 규칙을 따릅니다([`task_planner.md`](task_planner.md) 5.4절). |
+| **Settings 탭** | Focus 앱의 설정 화면입니다. 사용자는 이 탭에서 할 일 목록, 생활 규칙, 차단 규칙 같은 모든 설정을 고칩니다([`multi_account.md`](multi_account.md) 6.4절). |
+| **설정 단계** | 프로그램을 설치한 직후부터 사용자가 설정을 보호할 때까지의 기간입니다. 이 기간에 Settings 탭에서 저장한 변경은 바로 적용됩니다. |
+| **설정 보호** | 사용자가 Settings 탭에서 **Protect the settings**를 눌러 설정 단계를 끝내는 것입니다. 보호는 한 방향이고, 프로그램 안의 어떤 화면이나 도구도 보호를 끄지 못합니다. |
+| **예약된 업데이트** | 설정이 보호된 뒤에 저장하거나 예약한 설정 파일입니다. agent는 지금의 설정을 그대로 두고 새 파일을 보관합니다. 예약된 업데이트는 확인 질문(바로 아래 줄)을 거쳐야 적용됩니다([`multi_account.md`](multi_account.md) 6.4절). |
+| **확인 질문** | Focus 앱이 예약된 업데이트마다 사용자에게 묻는 "이 업데이트가 정말 맞는가?"라는 질문입니다. 첫 질문은 예약하고 이틀 뒤에 오고, 다음 질문은 앞 질문에 "예"라고 답하고 이틀 뒤에 옵니다. 세 번 연속 "예"이면 업데이트가 적용되고, 한 번이라도 "아니요"이면 거절됩니다. 사용자만 Focus 앱에서 답할 수 있습니다. |
+| **생활 규칙** | 사용자가 Settings 탭의 Task planner 화면에 적는, 늘 따라야 하는 규칙입니다. 할 일 고르기, 변경 요청 심사, 할 일 제안 심사가 모두 이 규칙을 따릅니다([`task_planner.md`](task_planner.md) 5.4절). |
+| **지시문** | agent의 플래너가 AI에게 질문할 때 함께 보내는, "무엇을 어떤 기준으로 판단하라"는 글입니다. 할 일 고르기, 변경 요청 심사, 할 일 제안 심사에 하나씩 있습니다. 프로그램에 기본 지시문이 들어 있고, 사용자는 설정에서 자기 지시문으로 바꿀 수 있습니다([`task_planner.md`](task_planner.md) 5.6절). |
 
 ---
 
 ## 1. 무엇을 할 수 있고 무엇을 할 수 없는가
 
 Claude Desktop은 `digital-wellbeing-mcp.exe`를 작업 계정의 권한으로 실행합니다. 이 MCP 서버는 Focus 앱과 **같은 agent API만** 부릅니다.
-그래서 Claude는 사용자가 Focus 앱으로 할 수 있는 일만 할 수 있습니다. Claude를 연결해도 차단을 우회할 길이 새로 생기지 않습니다.
+그래서 Claude는 사용자가 Focus 앱으로 할 수 있는 일만 할 수 있고, 확인 질문에 답하는 일처럼 그중 일부는 할 수 없습니다. Claude를 연결해도 차단을 우회할 길이 새로 생기지 않습니다.
 
 | Claude가 하려는 것 | 결과 |
 |---|---|
 | 할 일 목록, 지금 할 일, 차단 목록 보기 (`get_status`) | ✅ 할 수 있습니다. |
-| 할 일 제안하기 (`propose_todo`) | 제안은 목록에 바로 들어가지 않습니다. agent의 AI가 고정된 지시문과 생활 규칙으로 심사하고, 승인한 것만 목록에 들어갑니다. |
+| 할 일 제안하기 (`propose_todo`) | 제안은 목록에 바로 들어가지 않습니다. agent의 AI가 설정의 지시문과 생활 규칙으로 심사하고, 승인한 것만 목록에 들어갑니다. |
 | 할 일 받기 (`get_my_task`) | ✅ 할 수 있습니다. 어떤 할 일을 줄지는 agent의 AI가 고릅니다. |
 | 지금 할 일을 끝내거나 바꾸기 (`request_change`) | Focus 앱처럼 이유를 적어 요청하고, agent의 AI가 심사합니다. |
-| 차단 풀기, 규칙 바꾸기, 생활 규칙이나 Settings 탭에서 적은 할 일 목록 고치기 | ❌ MCP 서버에 그런 도구가 없습니다. agent API에는 Settings 탭이 쓰는 설정 요청(`settings_get`, `settings_put`)이 있지만, MCP 서버는 그 요청을 보내지 않습니다. 또 설정이 잠겨 있으면, 그 요청으로 바꾼 설정은 잠금이 끝날 때에야 적용됩니다. |
+| 설정 보기 (`get_settings`) | ✅ 할 수 있습니다. Claude는 설정이 보호되어 있는지, 지금 적용된 설정 파일 세 개, 기본 지시문, 예약된 업데이트와 각 업데이트가 받은 "예" 답의 수, 최근 업데이트의 결과를 봅니다. **API 키는 보여 주지 않습니다.** |
+| 생활 규칙, 지시문, 할 일 목록, 차단 규칙 같은 설정 바꾸기 (`schedule_settings_update`) | 설정이 보호된 뒤에는 Claude가 업데이트를 **예약만** 할 수 있습니다. 예약된 업데이트는 사용자가 Focus 앱에서 확인 질문에 이틀 간격으로 세 번 "예"라고 답해야 적용됩니다(빨라도 6일 뒤). 사용자가 한 번이라도 "아니요"라고 답하면 거절됩니다. 설정 단계에서는 이 도구가 거부합니다. 설정 단계의 설정은 사용자가 Settings 탭에서 직접 고칩니다. |
+| 확인 질문에 답하기 | ❌ 그런 도구가 없습니다. 확인 질문에는 사용자만 Focus 앱에서 답할 수 있습니다. 그래서 Claude가 예약한 업데이트도 사용자가 세 번 승인하기 전에는 아무것도 바꾸지 못합니다. |
+| 차단 바로 풀기, 설정 보호 끄기 | ❌ 그런 도구가 없습니다. 차단을 푸는 설정 변경도 예약된 업데이트가 되어 확인 질문을 거칩니다. 차단된 앱이나 사이트를 바로 써야 하면, 사용자는 Focus 앱에서 목적을 적어 접근을 요청합니다([`access_grants.md`](access_grants.md)). 보호를 끄는 기능은 프로그램 어디에도 없습니다. |
 
-**할 일을 추천하는 지시문은 고정되어 있습니다.** 추천은 Claude Desktop이 하지 않고, agent가 프로그램 코드 안의 지시문(`PICK_PROMPT`)으로 합니다.
-사용자도 Claude도 이 지시문을 바꿀 수 없습니다. 사용자는 Settings 탭에서 생활 규칙만 바꿀 수 있습니다. 설정이 잠겨 있으면, 바꾼 생활 규칙은 잠금이 끝날 때 적용됩니다.
+**할 일을 추천하는 지시문은 설정의 일부입니다.** 추천은 Claude Desktop이 하지 않고, agent가 설정의 지시문으로 합니다. 설정에 자기 지시문이 없으면, agent는 프로그램에 들어 있는 기본 지시문(`PICK_PROMPT`)을 씁니다.
+지시문과 생활 규칙은 다른 설정과 똑같이 바뀝니다. 설정 단계에서는 사용자가 Settings 탭에서 고치면 바로 적용됩니다. 설정이 보호된 뒤에는 사용자가 Settings 탭에서 고치든 Claude가 `schedule_settings_update`로 예약하든, 그 변경은 사용자가 확인 질문에 이틀 간격으로 세 번 "예"라고 답한 뒤에야 적용됩니다.
+그래서 놀고 싶은 순간에 Claude에게 "생활 규칙에서 게임 금지를 빼 줘"라고 해도, 그 변경은 빨라도 6일 뒤에 적용되고 그동안 사용자는 차분한 날에 세 번 거절할 기회가 있습니다.
+MCP 서버는 Claude에게 "예약된 업데이트는 사용자가 앱에서 이틀 간격으로 세 번 확인해야 적용된다고 알리고, 확인하라고 재촉하지 말라"고 안내합니다(`INSTRUCTIONS`).
 
 예를 들어 놀고 싶은 순간에 사용자가 Claude에게 "할 일에 '놀기' 넣어 줘"라고 하면 다음과 같이 됩니다.
 1. Claude는 `propose_todo`로 "놀기"를 제안합니다.
@@ -62,6 +72,9 @@ Claude Desktop은 `digital-wellbeing-mcp.exe`를 작업 계정의 권한으로 �
 
 이 설정 파일은 작업 계정의 사용자 폴더에 있으므로 사용자가 마음대로 고칠 수 있습니다. 하지만 1장에서 설명한 대로 MCP 서버에는 Focus 앱보다 큰 권한이 없으므로, 사용자가 이 파일을 고쳐도 얻는 것이 없습니다.
 
+Claude Desktop으로 설정을 바꾸는 업데이트를 예약하려면, 사용자는 먼저 Focus 앱의 Settings 탭에서 설정을 마치고 설정을 보호해야 합니다([`multi_account.md`](multi_account.md) 4.3절). 설정 단계에서는 `schedule_settings_update`가 "the settings are not protected yet (setup)…"라는 오류를 돌려줍니다.
+Claude가 업데이트를 예약하면, 사용자는 이틀 뒤부터 Focus 앱의 Settings 탭에서 확인 질문을 받습니다. 그 업데이트는 Settings 탭의 "Scheduled updates" 목록에 "via claude desktop"으로 표시됩니다.
+
 ---
 
 ## 3. 사용 예
@@ -74,6 +87,9 @@ Claude Desktop은 `digital-wellbeing-mcp.exe`를 작업 계정의 권한으로 �
 | "3장 초안 10쪽 다 썼어. 끝났다고 해 줘." | `request_change` (`change: "done"`, `reason`) |
 | "이 증명 거의 다 됐어. 시간 끝나도 새 할 일 주지 말고 계속하게 해 줘." | `request_change` (`change: "notify_when_time_is_up"`, `reason`). agent의 AI가 심사합니다. |
 | "자료가 아직 안 와서 막혔어. 다른 할 일로 바꿔 줘." | `get_status`로 목록을 본 뒤 `request_change` (`change: "switch_todo"`, `todo_id`, `reason`) |
+| "지금 생활 규칙이랑 할 일 고르는 지시문 보여 줘." | `get_settings` |
+| "생활 규칙에 '일요일 오후에는 운동이나 쉬기만 고른다'를 넣어 줘." | `get_settings`로 지금의 `planner.json`을 본 뒤, 생활 규칙만 고친 파일 전체로 `schedule_settings_update` (`name: "planner"`, `content`). Claude는 사용자에게 이틀 뒤부터 Focus 앱에서 세 번 확인해야 적용된다고 알립니다. |
+| "변경 요청 심사를 조금 덜 엄격하게 바꾸고 싶어." | `get_settings`로 기본 지시문(`built_in_instructions.change_review`)을 본 뒤, 고친 지시문을 `instructions.change_review`에 넣은 `planner.json` 전체로 `schedule_settings_update`. 이 업데이트도 세 번의 확인을 거칩니다. |
 
 **Claude Docs의 할 일 목록과의 관계:** 이 프로그램은 Claude Docs 문서를 직접 읽지 않습니다. 할 일의 원본은 이 프로그램의 목록입니다.
 Claude Docs에 적어 둔 할 일을 옮기고 싶다면, Claude에게 "문서의 할 일을 하나씩 제안해 줘"라고 하면 됩니다. 각 할 일은 따로 심사를 받습니다.
@@ -88,6 +104,8 @@ Claude Docs에 적어 둔 할 일을 옮기고 싶다면, Claude에게 "문서�
 | `propose_todo` | `title`(필수), `notes`, `deadline`(`YYYY-MM-DD`), `priority`(1~5), `estimate_minutes` | agent의 `propose_todo`를 `via: "claude desktop"`으로 부르고, 승인 여부와 AI의 답을 돌려줍니다. |
 | `get_my_task` | 없음 | agent의 `assign`을 부르고, 할당된 할 일을 돌려줍니다. |
 | `request_change` | `change`(`done`, `switch_todo`, `switch_free`, `end`, `notify_when_time_is_up`, `reassign_when_time_is_up`), `todo_id`, `task`, `reason`(필수) | agent의 `request_change`를 부르고, 승인 여부, AI의 답, 바뀐 할당을 돌려줍니다. |
+| `get_settings` | 없음 | agent의 `settings_get`을 부르고 다음을 돌려줍니다. 설정이 보호되어 있는지(`protected`), 지금 적용된 설정 파일(`files`: `policy`는 차단 목록, `ai_focus`는 AI 집중 설정, `planner`는 할 일 목록·생활 규칙·지시문), 기본 지시문 세 개(`built_in_instructions`), 예약된 업데이트(`scheduled_updates`: 번호, 파일 이름, 예약한 곳, 예약한 시각, 받은 "예" 답의 수 `confirmations`, 예약된 파일 내용 `content`), 최근 업데이트의 결과(`recent_outcomes`). `ai_focus`의 API 키(`api_key`)는 빼고 돌려줍니다. |
+| `schedule_settings_update` | `name`(`policy`, `ai_focus`, `planner` 중 하나, 필수), `content`(새 설정 파일 전체, 필수) | 먼저 `settings_get`으로 설정이 보호되어 있는지 확인하고, 설정 단계이면 아무것도 보내지 않고 오류를 돌려줍니다. 보호되어 있으면 agent의 `settings_put`을 `via: "claude desktop"`으로 부르고, 예약 결과(업데이트 번호, 첫 질문 시각)와 "사용자가 앱에서 세 번 확인해야 적용된다"는 안내를 돌려줍니다. `ai_focus`의 `content`에 `api_key`가 없으면, 지금 적용된 키를 그대로 넣어 보냅니다. 그래서 Claude는 키를 보지 않고도 `ai_focus.json`을 고칠 수 있습니다. |
 
 agent가 요청을 거부하거나 agent에 연결할 수 없으면, 도구는 오류 표시(`isError: true`)와 함께 이유를 돌려줍니다. Claude는 그 이유를 사용자에게 전합니다.
 
@@ -102,11 +120,16 @@ agent가 요청을 거부하거나 agent에 연결할 수 없으면, 도구는 �
 - **agent 찾기:** 이 프로그램은 자기 Windows 로그인 세션 번호를 알아내고, 그 세션의 agent 포트(`127.0.0.1:8770 + 세션 번호`)로 요청을 보냅니다. Focus 앱과 같은 방식입니다.
 - **테스트:** `cargo test -p digital-wellbeing-mcp`는 가짜 agent로 다음을 확인합니다. 초기화와 도구 목록이 맞는지, 각 도구가 정해진 agent 요청만 보내는지,
   모르는 도구(예: `unblock`)는 agent에 아무것도 보내지 않고 오류를 돌려주는지, 모르는 메서드가 프로토콜 오류가 되는지.
+  또 `settings_updates_are_scheduled_only_once_protected_and_keep_the_key` 테스트는 설정 단계에서 `schedule_settings_update`가 아무것도 쓰지 않고 거부되는지, 보호된 뒤에는 `via: "claude desktop"`과 지금의 API 키를 담아 `settings_put`을 보내는지, `get_settings`의 답에 API 키가 없고 기본 지시문이 있는지 확인합니다.
 
 ---
 
 ## 6. 한계
 
 1. **실제 Claude Desktop으로는 아직 시험하지 않았습니다.** 개발자는 표준 입출력으로 메시지를 직접 넣어서 응답 형식만 확인했습니다.
-2. **할 일을 지우는 도구는 없습니다.** 할 일은 승인된 변경 요청(`done`)으로 끝나거나, 사용자가 Focus 앱의 Settings 탭(Task planner 화면)에서 지웁니다. 설정이 잠겨 있으면, 지운 것은 잠금이 끝날 때 적용됩니다.
+2. **할 일을 바로 지우는 도구는 없습니다.** 할 일은 승인된 변경 요청(`done`)으로 끝나거나, 목록에서 지워집니다. 목록에서 지우려면 사용자가 Focus 앱의 Settings 탭(Task planner 화면)에서 지우거나, Claude가 그 할 일을 뺀 `planner.json`을 `schedule_settings_update`로 예약합니다. 설정이 보호되어 있으면, 어느 쪽이든 확인 질문에 세 번 "예"라는 답을 받은 뒤에 적용됩니다.
 3. **같은 PC의 어떤 프로그램이든 agent API를 부를 수 있습니다.** 이것은 Focus 앱 때부터 같습니다. 그래서 agent API에는 사용자가 원래 할 수 있는 요청만 있습니다.
+   MCP 서버에는 확인 질문에 답하는 도구가 없지만, agent API의 `settings_answer`는 같은 PC의 다른 프로그램도 부를 수 있습니다. 그래도 질문할 때가 되기 전의 답은 agent가 거부하므로, 이틀 간격은 건너뛸 수 없습니다.
+4. **`schedule_settings_update`는 파일 전체를 바꿉니다.** 같은 파일을 다시 예약하면 새 업데이트가 예전 업데이트를 대신하고, 예전 업데이트가 받은 "예" 답은 사라집니다. 사용자가 Settings 탭에서 예약해 둔 업데이트도 마찬가지입니다.
+   그래서 `get_settings`는 예약된 업데이트마다 그 내용(`content`, API 키는 빼고)도 보여 줍니다. 도구 설명은 Claude에게 "같은 파일에 예약된 업데이트가 있으면 그 내용에서 시작하고, 예약을 대신한다는 것을 사용자에게 알리라"고 안내합니다. 다만 Claude가 이 안내를 따르지 않으면, 사용자가 예약해 둔 업데이트가 대신되고 확인을 처음부터 다시 받게 됩니다. Settings 탭의 예약 목록에는 누가 예약했는지(`via`)가 나오므로, 사용자는 이것을 알아볼 수 있습니다.
+   그래서 사용자는 Claude에게 설정 변경을 맡기기 전에 Settings 탭의 "Scheduled updates" 목록을 확인하는 편이 안전합니다. 또 사용자는 확인 질문에 답하기 전에 **What changes**에서 무엇이 바뀌는지 읽습니다.
