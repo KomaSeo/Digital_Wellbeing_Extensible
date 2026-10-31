@@ -147,6 +147,8 @@ struct FocusApp {
     evidence: String,
     /// Take a screenshot as proof a few seconds after sending "I finished it".
     proof_screenshot: bool,
+    /// When the last change request was sent, until its answer (or error) has come.
+    change_sent_at: Option<chrono::DateTime<chrono::Utc>>,
     access: AccessForm,
     todo_ui: todo::TodoUiState,
     /// Settings questions due at the last status; more than before brings the window up.
@@ -194,6 +196,7 @@ impl FocusApp {
             reason: String::new(),
             evidence: String::new(),
             proof_screenshot: false,
+            change_sent_at: None,
             access: AccessForm::default(),
             todo_ui: todo::TodoUiState::default(),
             questions_due: 0,

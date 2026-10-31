@@ -392,6 +392,24 @@ fn apply_writes(fixture: &Harness, writes: Vec<TodoListWrite>) {
                         config.todos.retain(|existing| existing.id != todo.id);
                         config.todos.push(todo.clone());
                     }
+                    TodoListWrite::Merge {
+                        todo_id,
+                        changed_fields,
+                        base,
+                    } => {
+                        let position = config
+                            .todos
+                            .iter()
+                            .position(|existing| &existing.id == todo_id);
+                        let current = match (position, base) {
+                            (Some(index), _) => config.todos.remove(index),
+                            (None, Some(base_item)) => base_item.clone(),
+                            (None, None) => continue,
+                        };
+                        let mut item = serde_json::to_value(current).unwrap();
+                        item.as_object_mut().unwrap().extend(changed_fields.clone());
+                        config.todos.push(serde_json::from_value(item).unwrap());
+                    }
                     TodoListWrite::Remove(todo_id) => {
                         config.todos.retain(|existing| &existing.id != todo_id)
                     }
@@ -533,11 +551,39 @@ fn edits_and_removals_write_the_list_or_hide_an_older_proposed_todo() {
     assert_eq!(record.before.as_ref().unwrap().priority, 3);
     let after = record.after.clone().unwrap();
     assert_eq!((after.title.as_str(), after.priority), ("title a", 1));
+    let mut changed_fields = serde_json::Map::new();
+    changed_fields.insert("priority".into(), serde_json::json!(1));
     assert_eq!(
         fixture.planner.writes_for(&record),
-        [TodoListWrite::Put(after)]
+        [TodoListWrite::Merge {
+            todo_id: "a".into(),
+            changed_fields,
+            base: None,
+        }]
     );
+    // Applied later (as a scheduled change would be): an edit made meanwhile stays.
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.todos[0].notes = "changed meanwhile".into())
+        .unwrap();
     apply_writes(&fixture, fixture.planner.writes_for(&record));
+    let edited = fixture
+        .planner
+        .config_store()
+        .get()
+        .todos
+        .into_iter()
+        .find(|todo| todo.id == "a")
+        .unwrap();
+    assert_eq!(
+        (
+            edited.priority,
+            edited.notes.as_str(),
+            edited.title.as_str()
+        ),
+        (1, "changed meanwhile", "title a")
+    );
 
     let remove = TodoChange::Remove {
         todo_id: "b".into(),
@@ -581,7 +627,10 @@ fn edits_and_removals_write_the_list_or_hide_an_older_proposed_todo() {
         .unwrap();
     assert_eq!(
         fixture.planner.writes_for(&record),
-        [TodoListWrite::Dismiss("old".into())]
+        [
+            TodoListWrite::Dismiss("old".into()),
+            TodoListWrite::Remove("old".into())
+        ]
     );
 }
 
@@ -1076,4 +1125,58 @@ fn without_an_estimate_only_this_assignment_counts_for_improving() {
         fixture.planner.state_store_for_tests().get().polish["a"].minutes_left,
         20
     );
+}
+
+#[test]
+fn improve_todos_are_dropped_after_two_weeks() {
+    let fixture = harness(true, &["b"]);
+    let finished = todo("a");
+    fixture
+        .planner
+        .state_store_for_tests()
+        .update(|state| {
+            for (todo_id, days_ago) in [("a", 15), ("c", 13)] {
+                state.polish.insert(
+                    todo_id.into(),
+                    PolishItem {
+                        todo: TodoItem {
+                            id: todo_id.into(),
+                            ..finished.clone()
+                        },
+                        minutes_left: 60,
+                        since: Utc::now() - chrono::Duration::days(days_ago),
+                    },
+                );
+            }
+        })
+        .unwrap();
+    let improving: Vec<_> = fixture
+        .planner
+        .open_todos()
+        .into_iter()
+        .map(|todo| todo.id)
+        .filter(|todo_id| todo_id.starts_with("polish:"))
+        .collect();
+    assert_eq!(improving, ["polish:c"]);
+    // The next change of assignment also removes it from the state.
+    fixture.planner.assign(Utc::now()).unwrap();
+    fixture
+        .planner
+        .request_change(
+            Utc::now(),
+            ChangeKind::SwitchTodo {
+                todo_id: "polish:c".into(),
+            },
+            "time to improve c",
+            Evidence::default(),
+        )
+        .unwrap();
+    let kept: Vec<_> = fixture
+        .planner
+        .state_store_for_tests()
+        .get()
+        .polish
+        .into_keys()
+        .collect();
+    assert_eq!(kept, ["c"]);
 }

@@ -20,6 +20,7 @@ use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use parking_lot::Mutex;
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -116,6 +117,7 @@ impl TaskPlanner {
     pub(crate) fn open_todos(&self) -> Vec<TodoItem> {
         let state = self.state.get();
         let config = self.config.get();
+        let now = Utc::now();
         config
             .todos
             .into_iter()
@@ -131,6 +133,7 @@ impl TaskPlanner {
                 state
                     .polish
                     .iter()
+                    .filter(|(_, polish)| now - polish.since < POLISH_KEPT_FOR)
                     .map(|(todo_id, polish)| polish_todo(todo_id, polish)),
             )
             .collect()
@@ -425,18 +428,29 @@ impl TaskPlanner {
                 .map(TodoListWrite::Put)
                 .into_iter()
                 .collect(),
-            TodoChange::Edit { todo_id, .. } => {
+            // Only the fields the user changed: a change scheduled for hours later must not
+            // undo edits made meanwhile.
+            TodoChange::Edit { todo_id, todo } => {
+                let outside_the_file = !in_settings(todo_id);
                 let mut writes = Vec::new();
-                if !in_settings(todo_id) {
+                if outside_the_file {
                     writes.push(TodoListWrite::Dismiss(todo_id.clone()));
                 }
-                writes.extend(record.after.clone().map(TodoListWrite::Put));
+                writes.push(TodoListWrite::Merge {
+                    todo_id: todo_id.clone(),
+                    changed_fields: edited_fields(todo),
+                    base: record.before.clone().filter(|_| outside_the_file),
+                });
                 writes
             }
             TodoChange::Remove { todo_id } if in_settings(todo_id) => {
                 vec![TodoListWrite::Remove(todo_id.clone())]
             }
-            TodoChange::Remove { todo_id } => vec![TodoListWrite::Dismiss(todo_id.clone())],
+            // Kept outside the file, unless an edit has put it there by the time this applies.
+            TodoChange::Remove { todo_id } => vec![
+                TodoListWrite::Dismiss(todo_id.clone()),
+                TodoListWrite::Remove(todo_id.clone()),
+            ],
         }
     }
 
@@ -866,6 +880,9 @@ impl TaskPlanner {
 /// Log how long the current assignment ran, as it ends at `ended`; time spent improving a
 /// finished to-do comes off its time left.
 fn close_span(planner_state: &mut PlannerState, ended: DateTime<Utc>) {
+    planner_state
+        .polish
+        .retain(|_, polish| ended - polish.since < POLISH_KEPT_FOR);
     if let Some(current) = &planner_state.assignment {
         if let Some(base_id) = current
             .todo_id
@@ -896,6 +913,9 @@ fn close_span(planner_state: &mut PlannerState, ended: DateTime<Utc>) {
 const POLISH_PREFIX: &str = "polish:";
 /// Less time left than this is not worth an "Improve: …" to-do.
 const MIN_POLISH_MINUTES: i64 = 10;
+/// An "Improve: …" to-do not done within this time is dropped: work finished that long ago
+/// has usually been handed in or no longer matters.
+const POLISH_KEPT_FOR: Duration = Duration::days(14);
 
 fn is_polish(todo_id: &str) -> bool {
     todo_id.starts_with(POLISH_PREFIX)
@@ -990,23 +1010,36 @@ fn completed_todo(
 
 /// `before` with the fields the user set in `draft`.
 fn edited(before: &TodoItem, draft: &ProposalInput) -> TodoItem {
-    let mut after = before.clone();
+    let mut item = serde_json::to_value(before).unwrap_or(Value::Null);
+    if let Value::Object(item_fields) = &mut item {
+        item_fields.extend(edited_fields(draft));
+    }
+    serde_json::from_value(item).unwrap_or_else(|_| before.clone())
+}
+
+/// The fields of a to-do that `draft` sets, as `planner.json` stores them: an empty title or
+/// notes and a missing value leave the field as it is; an estimate of 0 clears it.
+fn edited_fields(draft: &ProposalInput) -> Map<String, Value> {
+    let mut changed_fields = Map::new();
     if !draft.title.is_empty() {
-        after.title = draft.title.clone();
+        changed_fields.insert("title".into(), json!(draft.title));
     }
     if !draft.notes.is_empty() {
-        after.notes = draft.notes.clone();
+        changed_fields.insert("notes".into(), json!(draft.notes));
     }
-    if draft.deadline.is_some() {
-        after.deadline = draft.deadline;
+    if let Some(deadline) = draft.deadline {
+        changed_fields.insert("deadline".into(), json!(deadline));
     }
     if let Some(priority) = draft.priority {
-        after.priority = priority.clamp(1, 5);
+        changed_fields.insert("priority".into(), json!(priority.clamp(1, 5)));
     }
     if let Some(minutes) = draft.estimate_minutes {
-        after.estimate_minutes = (minutes > 0).then_some(minutes.min(6000));
+        changed_fields.insert(
+            "estimate_minutes".into(),
+            json!((minutes > 0).then_some(minutes.min(6000))),
+        );
     }
-    after
+    changed_fields
 }
 
 fn local_now_text() -> String {

@@ -318,6 +318,25 @@ impl FocusApp {
         planner: &PlannerStatus,
     ) {
         let idle = !self.pending.load(Ordering::SeqCst);
+        // The answer to the request sent last has come (or the request failed): an answer
+        // clears the reason, an approval also the proof. After an error both stay.
+        if let Some(sent_at) = self.change_sent_at.filter(|_| idle) {
+            self.change_sent_at = None;
+            let answer = self
+                .shared
+                .lock()
+                .decision
+                .as_ref()
+                .filter(|decision| decision.at >= sent_at)
+                .map(|decision| decision.approved);
+            if let Some(approved) = answer {
+                self.reason.clear();
+                if approved {
+                    self.evidence.clear();
+                    self.proof_screenshot = false;
+                }
+            }
+        }
         egui::CollapsingHeader::new("Ask to change")
             .id_salt("ask_to_change")
             .default_open(true)
@@ -433,11 +452,11 @@ impl FocusApp {
                                     params["proof_screenshot_after_secs"] =
                                         json!(PROOF_SCREENSHOT_DELAY_SECONDS);
                                 }
-                                self.evidence.clear();
-                                self.proof_screenshot = false;
                             }
+                            // The texts stay until the AI answers (see below), so an error
+                            // does not lose them.
+                            self.change_sent_at = Some(Utc::now());
                             self.send("request_change", params);
-                            self.reason.clear();
                         }
                     }
                     if !idle {

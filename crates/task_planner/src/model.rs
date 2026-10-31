@@ -275,6 +275,14 @@ pub struct TodoChangeRecord {
 pub enum TodoListWrite {
     /// Put this to-do in `planner.json` (replacing the one with its id).
     Put(TodoItem),
+    /// Set only these fields of the to-do with this id in `planner.json`, so edits made
+    /// meanwhile to its other fields stay. When the to-do is not in the file, add `base` with
+    /// the fields set (a to-do an older version kept outside the file), or do nothing.
+    Merge {
+        todo_id: String,
+        changed_fields: serde_json::Map<String, serde_json::Value>,
+        base: Option<TodoItem>,
+    },
     /// Remove the to-do with this id from `planner.json`.
     Remove(String),
     /// Hide a to-do an older version kept outside `planner.json` (a proposed one).

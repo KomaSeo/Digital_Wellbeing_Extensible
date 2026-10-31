@@ -191,6 +191,18 @@ fn todo_list_edits(writes: &[TodoListWrite]) -> Vec<crate::setting_edits::Edit> 
                 id: todo.id.clone(),
                 item: Some(serde_json::to_value(todo).unwrap_or(Value::Null)),
             },
+            TodoListWrite::Merge {
+                todo_id,
+                changed_fields,
+                base,
+            } => Edit::MergeListItem {
+                path: vec!["todos".into()],
+                id: todo_id.clone(),
+                changed_fields: changed_fields.clone(),
+                base: base
+                    .as_ref()
+                    .map(|todo| serde_json::to_value(todo).unwrap_or(Value::Null)),
+            },
             TodoListWrite::Remove(todo_id) => Edit::PutListItem {
                 path: vec!["todos".into()],
                 id: todo_id.clone(),

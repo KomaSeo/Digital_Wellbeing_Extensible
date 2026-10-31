@@ -329,6 +329,7 @@ AI 집중 규칙의 모니터는 3초마다 설정을 확인합니다. 모니터
 3. agent는 그 변경을 예약된 업데이트로 만듭니다(`settings::schedule`). 이 업데이트의 출처(`origin`)는 `todo_change`이고, 확인 질문의 간격(`interval_seconds`)은 두 시간입니다. 업데이트에는 변경 내용, 이유, AI의 답을 적은 메모(`note`)가 붙습니다.
 4. Settings 탭의 "Scheduled updates" 목록에 이 업데이트가 "a to-do change"로 나옵니다. 예약하고 두 시간 뒤부터 확인 질문이 오고, 사용자가 두 시간 간격으로 세 번 "예"라고 답하면 그 변경이 `planner.json`에 적용됩니다. 한 번이라도 "아니요"라고 답하면 거절됩니다.
 5. Settings 탭에서 설정 파일을 다시 저장해도 이 업데이트는 대신되지 않습니다. 이 업데이트는 그 할 일 변경 하나만 담고 있기 때문입니다.
+6. 고치기는 사용자가 바꾼 칸만 담습니다(`MergeListItem`). 그래서 예약한 뒤 적용될 때까지 몇 시간 동안 그 할 일의 다른 칸이 바뀌었어도(예: 승인된 다른 고치기로 마감이 바뀜), 그 변경은 지워지지 않습니다. 그 사이에 할 일이 목록에서 지워졌다면 고치기는 아무것도 하지 않습니다.
 
 이 방법은 사용자만 쓸 수 있습니다. Claude Desktop에는 이 요청을 보내는 도구가 없습니다([`claude_desktop.md`](claude_desktop.md)).
 간격이 설정의 이틀보다 짧은 두 시간인 이유는, 할 일 변경은 대개 그날의 일이어서 6일을 기다리면 쓸모가 없어지기 때문입니다. 그래도 세 번의 확인을 거치므로 순간적인 충동만으로는 적용되지 않습니다.
@@ -380,7 +381,7 @@ agent는 다듬기 시간을 `planner_state.json`의 `polish`에 저장하고, �
 - 사용자가 Improve 할 일을 하는 동안 들인 시간만큼 다듬기 시간이 줄어듭니다. 다듬기 시간이 10분보다 적어지면 Improve 할 일은 목록에서 빠집니다.
 - 사용자가 Improve 할 일을 "끝냈다"고 요청하고 AI가 승인해도 Improve 할 일은 목록에서 빠집니다.
 - Improve 할 일은 agent가 만든 것이므로, 사용자는 이 할 일을 고치거나 지울 수 없습니다. To-do 탭에는 그 버튼이 없고, Claude Desktop이 할 일 변경으로 고치거나 지우려 해도 agent가 AI에게 묻지 않고 거부합니다.
-- Improve 할 일에는 기한이 없습니다. 다듬기 시간을 다 쓰거나 "끝냈다"가 승인될 때까지 남습니다.
+- Improve 할 일은 만들어지고 **14일**이 지나면 목록에서 빠집니다. 그만큼 지난 일은 대개 이미 제출했거나 더는 중요하지 않기 때문입니다.
 
 ---
 
@@ -577,6 +578,7 @@ AI 검사가 멈춰 있으면 "paused"와 **Start** 버튼이 나옵니다. AI �
 - `I finished it`을 고르면 증거 칸("proof of the result …")과 **attach a screenshot as proof** 칸이 나옵니다. 사용자는 결과가 분명한 일(메일 보내기, 주문하기 등)이면 증거를 적고, 필요하면 화면 캡처 칸을 체크합니다. 화면 캡처는 "Send request"를 누르고 5초 뒤에 찍히므로, 사용자는 그 사이에 결과가 보이는 창으로 바꿉니다(4.9절).
 - 이유 입력란. 사용자가 이유를 4글자 이상 적고 요청 대상을 정하면, "Send request" 버튼이 눌리게 됩니다.
 - AI가 심사하는 동안, To-do 탭은 돌아가는 표시와 "the AI is deciding…"을 보여 줍니다. 결과가 오면 To-do 탭은 승인(approved) 또는 거절(rejected)과 AI의 답을 보여 줍니다.
+- 사용자가 적은 이유와 증거는 AI의 답이 올 때까지 칸에 남습니다. 답이 오면 이유 칸이 비워집니다. 승인되면 증거 칸과 화면 캡처 칸도 비워지고, 거절되면 증거는 남으므로 사용자는 증거를 더 적어 다시 보낼 수 있습니다. 요청이 오류로 끝나면(AI 호출 실패, 캡처 실패 등) 이유와 증거가 모두 남습니다.
 
 **할 일 목록 ("To-do list (개수)")**은 플래너가 켜져 있든 꺼져 있든 언제나 펼쳐져 있습니다.
 - 목록은 마감이 가까운 순서로, 마감이 같으면 중요도가 높은 순서로 정렬됩니다. 마감이 없는 할 일은 맨 뒤에 옵니다.
@@ -675,6 +677,7 @@ Settings 탭의 **Rules for the AI** 영역에 플래너 설정이 있습니다.
 | `improve_todos_cannot_be_edited_or_removed` | Improve 할 일을 할 일 변경으로 지우려 하면, 플래너가 AI에게 묻지 않고 거부한다. |
 | `without_an_estimate_only_this_assignment_counts_for_improving` | 예상 시간이 없는 할 일은 이번 할당의 계획된 시간에서 이번 할당이 이어진 시간만 빼서 다듬기 시간을 정한다. |
 | `decisive_or_nearly_full_work_leaves_no_improve_todo` | 결과가 분명한 일이거나, 남은 시간이 10분보다 적으면 Improve 할 일이 생기지 않는다. |
+| `improve_todos_are_dropped_after_two_weeks` | 14일이 지난 Improve 할 일은 목록에 나오지 않고, 다음에 할당이 바뀔 때 상태에서도 지워진다. |
 | `a_day_plan_keeps_only_open_todos_and_sensible_lengths` | 하루 계획에는 남은 할 일만 남고 시간이 480분을 넘지 않는다. 하루 계획 기본 지시문이 AI에게 가고, 계획이 상태에 저장된다. |
 | `change_kind_json_shape` | Focus 앱과 agent가 주고받는 변경 요청의 JSON 모양이 바뀌지 않았다. |
 | `free_task_and_stop_are_refused_while_planner_is_active` (`machine` 모듈) | 플래너가 켜져 있으면, agent가 직접 입력한 할 일과 그냥 멈추기를 거부한다. AI 호출이 실패하면 아무것도 바뀌지 않는다. |

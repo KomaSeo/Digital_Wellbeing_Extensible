@@ -37,6 +37,16 @@ pub enum Edit {
         id: String,
         item: Option<Value>,
     },
+    /// In the list of objects at `path`, set `changed_fields` on the element whose `id` is
+    /// `id`, keeping its other fields. When there is none, append `base` with the fields set,
+    /// or change nothing when there is no `base`.
+    MergeListItem {
+        path: Vec<String>,
+        id: String,
+        changed_fields: Map<String, Value>,
+        #[serde(default)]
+        base: Option<Value>,
+    },
 }
 
 impl Edit {
@@ -45,7 +55,8 @@ impl Edit {
             Edit::Set { path, .. }
             | Edit::AddItems { path, .. }
             | Edit::RemoveItems { path, .. }
-            | Edit::PutListItem { path, .. } => path,
+            | Edit::PutListItem { path, .. }
+            | Edit::MergeListItem { path, .. } => path,
         }
     }
 
@@ -72,6 +83,16 @@ impl Edit {
                 item: Some(item),
                 ..
             } => format!("{path}: {id} = {}", short(item)),
+            Edit::MergeListItem {
+                id, changed_fields, ..
+            } => format!(
+                "{path}: {id}: {}",
+                changed_fields
+                    .iter()
+                    .map(|(key, value)| format!("{key} = {}", short(value)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -258,6 +279,30 @@ pub fn apply(file: &mut Value, edits: &[Edit]) {
                         list.remove(index);
                     }
                     (None, None) => {}
+                }
+            }
+            Edit::MergeListItem {
+                id,
+                changed_fields,
+                base,
+                ..
+            } => {
+                let list = array_at(fields, last);
+                let position = list
+                    .iter()
+                    .position(|element| element.get("id").and_then(Value::as_str) == Some(id));
+                let element = match (position, base) {
+                    (Some(index), _) => Some(&mut list[index]),
+                    (None, Some(base_item)) => {
+                        list.push(base_item.clone());
+                        list.last_mut()
+                    }
+                    (None, None) => None,
+                };
+                if let Some(Value::Object(element_fields)) = element {
+                    for (key, value) in changed_fields {
+                        element_fields.insert(key.clone(), value.clone());
+                    }
                 }
             }
         }
@@ -455,6 +500,43 @@ mod tests {
         assert_eq!(
             planner_direction(json!({ "enabled": false, "life_rules": "b" })),
             Looser
+        );
+    }
+
+    #[test]
+    fn a_merge_sets_only_its_fields_and_adds_the_base_when_missing() {
+        let mut file = json!({ "todos": [{ "id": "t1", "title": "one", "notes": "kept" }] });
+        let mut changed_fields = Map::new();
+        changed_fields.insert("title".into(), json!("one!"));
+        apply(
+            &mut file,
+            &[
+                Edit::MergeListItem {
+                    path: vec!["todos".into()],
+                    id: "t1".into(),
+                    changed_fields: changed_fields.clone(),
+                    base: None,
+                },
+                Edit::MergeListItem {
+                    path: vec!["todos".into()],
+                    id: "gone".into(),
+                    changed_fields: changed_fields.clone(),
+                    base: None,
+                },
+                Edit::MergeListItem {
+                    path: vec!["todos".into()],
+                    id: "old".into(),
+                    changed_fields,
+                    base: Some(json!({ "id": "old", "title": "x", "notes": "n" })),
+                },
+            ],
+        );
+        assert_eq!(
+            file["todos"],
+            json!([
+                { "id": "t1", "title": "one!", "notes": "kept" },
+                { "id": "old", "title": "one!", "notes": "n" }
+            ])
         );
     }
 }
