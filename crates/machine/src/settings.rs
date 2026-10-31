@@ -290,7 +290,9 @@ pub fn put(
 ) -> Result<PutOutcome, String> {
     let file = file_of(name)?;
     validate(name, content)?;
-    let in_force = read_json(&data_directory.join(file));
+    // Both sides as the program reads them (defaults filled in), so only real changes count.
+    let in_force = normalize(name, &read_json(&data_directory.join(file)))?;
+    let content = &normalize(name, content)?;
     let edits = setting_edits::diff(&in_force, content);
     if !is_protected(data_directory) {
         write_setting(data_directory, file, content)?;
@@ -361,7 +363,7 @@ pub fn put(
 /// Refused when the result does not parse as that file's settings.
 pub fn apply_now(data_directory: &Path, name: &str, edits: &[Edit]) -> Result<(), String> {
     let file = file_of(name)?;
-    let mut updated = read_json(&data_directory.join(file));
+    let mut updated = normalize(name, &read_json(&data_directory.join(file)))?;
     setting_edits::apply(&mut updated, edits);
     validate(name, &updated)?;
     write_setting(data_directory, file, &updated)
@@ -607,6 +609,30 @@ fn write_reservations(data_directory: &Path, reservations: &Reservations) -> Res
         .map_err(|error| format!("could not save {RESERVATIONS_FILE}: {error}"))
 }
 
+/// `content` as the program reads it, written back: missing settings get their defaults.
+/// A missing file (`null`) counts as all defaults.
+pub fn normalize(name: &str, content: &Value) -> Result<Value, String> {
+    fn round_trip<T: serde::de::DeserializeOwned + Serialize>(
+        content: &Value,
+    ) -> Result<Value, String> {
+        let typed: T =
+            serde_json::from_value(content.clone()).map_err(|error| error.to_string())?;
+        serde_json::to_value(typed).map_err(|error| error.to_string())
+    }
+    let content = if content.is_null() {
+        &Value::Object(Default::default())
+    } else {
+        content
+    };
+    match name {
+        "policy" => round_trip::<list_based_rule::ListConfig>(content),
+        "ai_focus" => round_trip::<ai_focus_rule::AiFocusConfig>(content),
+        "planner" => round_trip::<task_planner::PlannerConfig>(content),
+        _ => Err(format!("'{name}' is not an editable setting")),
+    }
+    .map_err(|error| format!("{name}: {error}"))
+}
+
 /// The content must load as the program that reads the file expects it.
 fn validate(name: &str, content: &Value) -> Result<(), String> {
     let result = match name {
@@ -789,6 +815,37 @@ mod tests {
         assert_eq!(final_file["model"], "cheap");
         assert_eq!(final_file["send_screenshot"], true);
         assert_eq!(final_file["strikes_to_block"], 1);
+    }
+
+    #[test]
+    fn missing_defaults_in_the_file_in_force_are_not_changes() {
+        let data_directory = temp_dir("defaults");
+        let start = Utc::now();
+        // A sparse file, as an older version or a hand edit leaves it.
+        fs::write(
+            data_directory.join("ai_focus.json"),
+            json!({ "api_key": "k", "send_screenshot": false }).to_string(),
+        )
+        .unwrap();
+        protect(&data_directory, start).unwrap();
+        // The Settings tab sends the whole typed config, defaults included, with one change.
+        let mut full: ai_focus_rule::AiFocusConfig =
+            serde_json::from_value(json!({ "api_key": "k", "send_screenshot": false })).unwrap();
+        full.send_screenshot = true;
+        let outcome = put(
+            &data_directory,
+            start,
+            "ai_focus",
+            &serde_json::to_value(&full).unwrap(),
+            "settings tab",
+        )
+        .unwrap();
+        assert_eq!(outcome.applied, ["send_screenshot = true"]);
+        assert!(outcome.scheduled.is_none(), "{outcome:?}");
+        assert_eq!(
+            in_force(&data_directory, "ai_focus")["send_screenshot"],
+            true
+        );
     }
 
     #[test]

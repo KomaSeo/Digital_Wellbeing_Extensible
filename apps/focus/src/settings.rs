@@ -1,160 +1,180 @@
-//! Responsibility: Show the admin settings in the Focus app, send the user's edits to the
-//! agent, ask the user about scheduled updates ("is this update really right?"), and turn
-//! the protection of the settings on.
+//! Responsibility: Show and edit the settings the app needs (the AI connection, the rules for
+//! the AI, blocking, the AI checks), ask the user about scheduled updates ("is this update
+//! really right?"), and turn the protection of the settings on.
 //!
-//! This tab is where the settings of a machine install are edited, from any managed
-//! (standard) account. It asks the agent for the settings (`settings_get`), writes them into
-//! a private copy ("mirror") under `%LOCALAPPDATA%`, and opens the usual stores and panels on
-//! that copy. A background thread sends every file the panels save back to the agent
-//! (`settings_put`), which writes the real file as SYSTEM, and refreshes the read-only views
-//! (planner state, grants, blocks).
-//!
-//! During setup an edit takes effect at once. Once the settings are protected
-//! (`settings_protect`, one way) the agent keeps every edit as a scheduled update; this tab
-//! lists them, asks about each one when its question is due (`settings_answer`: three "yes"
-//! answers two days apart put it in force, one "no" rejects it), and can withdraw one
-//! (`settings_withdraw`). The mirror shows a scheduled update's version, so editing goes on
-//! from it. Rules: `machine::settings`; guide: `docs/multi_account.md` 6.4.
+//! The settings are three files in the data folder (`ai_focus.json`, `policy.json`,
+//! `planner.json`) that only the agent (SYSTEM) writes. This tab reads them through the agent
+//! (`settings_get`), with the scheduled settings updates already applied so the user goes on
+//! from what they saved, edits typed copies, and saves a changed file whole (`settings_put`).
+//! During setup a save takes effect at once. Once protected (`settings_protect`, one way) the
+//! agent puts the stricter edits in force at once and schedules the looser ones; the tab says
+//! which is which before and after saving. Scheduled updates are asked about here
+//! (`settings_answer`: three "yes" answers put one in force, one "no" rejects it) and can be
+//! withdrawn (`settings_withdraw`). The to-do list itself is edited in the To-do tab.
+//! Rules: `machine::settings`, `machine::setting_edits`; guide: `docs/multi_account.md` 6.4.
 
 use ai_focus_rule::grants::GrantState;
-use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
-use chrono::{DateTime, Local, Utc};
-use list_based_rule::{FileListPersistence, ListBasedRuleHandle, ListStore};
+use ai_focus_rule::usage::UsageLog;
+use ai_focus_rule::{AiFocusConfig, SavedBlocks};
+use chrono::{DateTime, Datelike, Local, Utc};
+use list_based_rule::ListConfig;
+use machine::setting_edits::{self, Direction};
 use machine::settings::{
-    AnswerOutcome, PutOutcome, Reservation, SettingsSnapshot, APPROVALS_NEEDED, EDITABLE,
+    AnswerOutcome, PutOutcome, Reservation, ReservationOrigin, SettingsSnapshot, APPROVALS_NEEDED,
+    EDITABLE,
 };
 use machine::user_api::call_value;
 use parking_lot::Mutex;
-use rule_ui::{Panel, RuleUi};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use task_planner::{JsonStore, PlannerAdminUi, PlannerConfig, PlannerState};
+use task_planner::{PlannerConfig, DAY_PLAN_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT};
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
 const RED: egui::Color32 = egui::Color32::from_rgb(200, 80, 80);
-/// How often the list of scheduled updates is fetched while this tab is shown.
-const RESERVATIONS_REFRESH: Duration = Duration::from_secs(3);
+const GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
+/// How often the settings are fetched again while this tab is shown.
+const REFRESH: Duration = Duration::from_secs(3);
 
-/// Responsibility: Hold the Settings tab: the loaded panels, the sync thread, the scheduled
-/// updates last fetched, and the protection form.
+/// Responsibility: Name the sections of the Settings tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Connection,
+    Rules,
+    Blocking,
+    Checks,
+}
+
+/// Responsibility: Hold the Settings tab: the settings last fetched, the copies being edited,
+/// and the form inputs.
 pub struct SettingsTab {
     session: u32,
-    loaded: Option<Loaded>,
     error: String,
     confirm_protect: bool,
-    /// The last `settings_get` answer, for the scheduled-updates list and its questions.
+    /// The last `settings_get` answer.
     latest: Option<SettingsSnapshot>,
     fetched_at: Option<Instant>,
-    /// What the last answer did, shown under the list.
-    answer_message: String,
+    /// What the last answer or save did.
+    message: String,
+    section: Section,
+    /// Copies being edited; `None` until the first fetch, and again after saving.
+    drafts: Option<Drafts>,
+    show_key: bool,
+    new_key: String,
+    /// Result of the last "Check key", written by a background thread.
+    key_check: Arc<Mutex<String>>,
+    /// Text typed into the "add" fields of the lists, by list.
+    adding: HashMap<&'static str, String>,
 }
 
-/// Responsibility: Keep the panels opened on the mirror and the thread that syncs it.
-struct Loaded {
-    rule_uis: Vec<Arc<dyn RuleUi>>,
-    panels: Vec<Arc<dyn Panel>>,
-    selected: usize,
-    sync: Arc<Sync>,
+/// Responsibility: Hold the editable copies of the three files and what they were when loaded
+/// (the files in force with the scheduled settings updates applied), in [`EDITABLE`] order.
+struct Drafts {
+    policy: ListConfig,
+    ai_focus: AiFocusConfig,
+    planner: PlannerConfig,
+    loaded: [Value; 3],
 }
 
-impl Drop for Loaded {
-    fn drop(&mut self) {
-        self.sync.stop.store(true, Ordering::SeqCst);
+impl Drafts {
+    fn as_values(&self) -> [Value; 3] {
+        [
+            to_value(&self.policy),
+            to_value(&self.ai_focus),
+            to_value(&self.planner),
+        ]
     }
-}
-
-/// Responsibility: State shared between the Settings tab and its sync thread.
-struct Sync {
-    stop: AtomicBool,
-    /// Last bytes of each editable file the agent has accepted (or sent us).
-    synced: Mutex<HashMap<&'static str, Option<Vec<u8>>>>,
-    message: Mutex<String>,
 }
 
 impl SettingsTab {
     pub fn new(session: u32) -> Self {
         Self {
             session,
-            loaded: None,
             error: String::new(),
             confirm_protect: false,
             latest: None,
             fetched_at: None,
-            answer_message: String::new(),
+            message: String::new(),
+            section: Section::Connection,
+            drafts: None,
+            show_key: false,
+            new_key: String::new(),
+            key_check: Arc::new(Mutex::new(String::new())),
+            adding: HashMap::new(),
         }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, protected: bool) {
+        self.refresh();
         if protected {
             ui.label(format!(
-                "The settings are protected. Every change you save is scheduled: two days \
-                 later you are asked whether it is really right, and it takes effect only \
-                 after {APPROVALS_NEEDED} \"yes\" answers in a row, two days apart. One \"no\" \
-                 rejects it."
+                "The settings are protected. A change that makes the rules stricter takes effect \
+                 at once. Any other change is scheduled: two days later you are asked whether \
+                 it is really right, and it takes effect after {APPROVALS_NEEDED} \"yes\" answers \
+                 in a row, two days apart. One \"no\" rejects it."
             ));
         } else {
             self.protect_ui(ui);
         }
         if self.reservations_ui(ui) {
-            // A scheduled update was answered or withdrawn: reopen on what is now true.
-            if self.loaded.is_some() {
-                self.open();
-            }
+            // Answered or withdrawn: edit on top of what is now true.
+            self.fetched_at = None;
+            self.drafts = None;
+            self.refresh();
+        }
+        if !self.message.is_empty() {
+            ui.label(&self.message);
+        }
+        if !self.error.is_empty() {
+            ui.colored_label(RED, &self.error);
+        }
+        let Some(snapshot) = self.latest.clone() else {
+            ui.label("connecting…");
+            return;
+        };
+        if self.drafts.is_none() {
+            self.drafts = Some(drafts_from(&snapshot));
         }
 
         ui.separator();
-        if self.loaded.is_none() {
-            if ui.button("Open the settings").clicked() {
-                self.open();
-            }
-            if !self.error.is_empty() {
-                ui.colored_label(RED, &self.error);
-            }
-            return;
-        }
-        let Some(loaded) = &mut self.loaded else {
-            return;
-        };
-        let message = loaded.sync.message.lock().clone();
-        if !message.is_empty() {
-            ui.small(message);
-        }
-        let names: Vec<String> = loaded
-            .rule_uis
-            .iter()
-            .map(|rule_ui| rule_ui.name().to_string())
-            .chain(loaded.panels.iter().map(|panel| panel.name().to_string()))
-            .collect();
-        ui.horizontal(|ui| {
-            for (index, name) in names.iter().enumerate() {
-                if ui
-                    .selectable_label(loaded.selected == index, name)
-                    .clicked()
-                {
-                    loaded.selected = index;
-                }
+        ui.horizontal_wrapped(|ui| {
+            for (section, label) in [
+                (Section::Connection, "AI connection"),
+                (Section::Rules, "Rules for the AI"),
+                (Section::Blocking, "Blocking"),
+                (Section::Checks, "AI checks"),
+            ] {
+                ui.selectable_value(&mut self.section, section, label);
             }
         });
         ui.separator();
-        let rules = loaded.rule_uis.len();
-        if loaded.selected < rules {
-            loaded.rule_uis[loaded.selected].settings_ui(ui, &[]);
-        } else if let Some(panel) = loaded.panels.get(loaded.selected - rules) {
-            panel.ui(ui);
+        match self.section {
+            Section::Connection => self.connection_ui(ui, &snapshot),
+            Section::Rules => self.rules_ui(ui),
+            Section::Blocking => self.blocking_ui(ui, &snapshot),
+            Section::Checks => self.checks_ui(ui),
         }
+        ui.separator();
+        self.save_ui(ui, &snapshot, protected);
     }
 
-    fn open(&mut self) {
-        self.loaded = None;
-        match self.load() {
-            Ok(loaded) => {
-                self.loaded = Some(loaded);
+    fn refresh(&mut self) {
+        if self
+            .fetched_at
+            .is_some_and(|fetched_at| fetched_at.elapsed() < REFRESH)
+        {
+            return;
+        }
+        self.fetched_at = Some(Instant::now());
+        match call_value(self.session, "settings_get", json!({}))
+            .and_then(|reply| serde_json::from_value(reply).map_err(|error| error.to_string()))
+        {
+            Ok(snapshot) => {
+                self.latest = Some(snapshot);
                 self.error.clear();
             }
             Err(error) => self.error = error,
@@ -168,9 +188,9 @@ impl SettingsTab {
             "Setup: changes take effect at once, and anyone using this PC can make them.",
         );
         ui.label(format!(
-            "When everything is set, protect the settings. From then on every change is \
-             scheduled and takes effect only after you confirm it {APPROVALS_NEEDED} times, \
-             two days apart."
+            "When everything is set, protect the settings. From then on a change that makes \
+             the rules stricter takes effect at once, and any other change only after you \
+             confirm it {APPROVALS_NEEDED} times, two days apart."
         ));
         ui.checkbox(
             &mut self.confirm_protect,
@@ -186,28 +206,418 @@ impl SettingsTab {
             match call_value(self.session, "settings_protect", json!({})) {
                 Ok(_) => {
                     self.confirm_protect = false;
-                    self.error.clear();
+                    self.fetched_at = None;
                 }
                 Err(error) => self.error = error,
             }
         }
     }
 
+    // --- AI connection ------------------------------------------------------------------
+
+    fn connection_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
+        let Some(drafts) = &mut self.drafts else {
+            return;
+        };
+        let config = &mut drafts.ai_focus;
+        ui.heading("Anthropic API key");
+        let saved = config.api_key.trim();
+        if saved.is_empty() {
+            ui.colored_label(
+                RED,
+                "No key is saved: the AI cannot judge or plan anything.",
+            );
+        } else {
+            let tail: String = saved
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            ui.label(format!("A key is saved (…{tail})."));
+        }
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_key)
+                    .password(!self.show_key)
+                    .hint_text("paste a new key")
+                    .desired_width(300.0),
+            );
+            ui.checkbox(&mut self.show_key, "show");
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !self.new_key.trim().is_empty(),
+                    egui::Button::new("Use this key"),
+                )
+                .clicked()
+            {
+                config.api_key = self.new_key.trim().to_string();
+                self.new_key.clear();
+            }
+            if ui
+                .add_enabled(!config.api_key.is_empty(), egui::Button::new("Clear"))
+                .clicked()
+            {
+                config.api_key.clear();
+            }
+            if ui
+                .add_enabled(!config.api_key.is_empty(), egui::Button::new("Check key"))
+                .clicked()
+            {
+                let (key, model, result) = (
+                    config.api_key.clone(),
+                    config.model.clone(),
+                    Arc::clone(&self.key_check),
+                );
+                *result.lock() = "checking…".into();
+                thread::spawn(move || {
+                    let answer = match ai_focus_rule::claude::ClaudeClient::new(key, model).check()
+                    {
+                        Ok(()) => "✔ The key works (no cost: only the model list was read).".into(),
+                        Err(error) => format!("The key was not accepted: {error}"),
+                    };
+                    *result.lock() = answer;
+                });
+            }
+        });
+        let check = self.key_check.lock().clone();
+        if !check.is_empty() {
+            ui.small(check);
+        }
+        ui.horizontal(|ui| {
+            ui.label("Model");
+            ui.add(egui::TextEdit::singleline(&mut config.model).desired_width(200.0));
+        });
+
+        ui.separator();
+        ui.heading("AI usage");
+        ui.horizontal(|ui| {
+            ui.label("Daily budget for the AI checks (USD, 0 = none)");
+            ui.add(
+                egui::DragValue::new(&mut config.daily_budget_usd)
+                    .speed(0.05)
+                    .range(0.0..=1000.0),
+            );
+        });
+        usage_ui(ui, snapshot);
+    }
+
+    // --- rules for the AI ---------------------------------------------------------------
+
+    fn rules_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(drafts) = &mut self.drafts else {
+            return;
+        };
+        let planner = &mut drafts.planner;
+        ui.checkbox(
+            &mut planner.enabled,
+            "The AI picks what I do from my to-do list (planner)",
+        );
+        ui.small(
+            "Off: you type what you do yourself, and the AI judges apps against that. Turning it \
+             on takes effect at once; turning it off is scheduled.",
+        );
+        ui.separator();
+        ui.heading("Life rules");
+        ui.label(
+            "Standing rules every AI decision follows: picking what you do, reviewing changes \
+             and to-do changes, planning the day.",
+        );
+        ui.add(
+            egui::TextEdit::multiline(&mut planner.life_rules)
+                .desired_rows(4)
+                .desired_width(f32::INFINITY)
+                .hint_text(
+                    "e.g. 평일 18시 전에는 게임과 영상을 할당하지 않는다. 2시간 일하면 20분 쉰다.",
+                ),
+        );
+        ui.separator();
+        ui.heading("AI instructions");
+        ui.label(
+            "What the planner's AI is told to do. An empty box means the built-in instruction.",
+        );
+        let instructions = &mut planner.instructions;
+        for (label, own, built_in) in [
+            (
+                "Picking what you do and for how long",
+                &mut instructions.pick,
+                PICK_PROMPT,
+            ),
+            (
+                "Reviewing a change of what you do",
+                &mut instructions.change_review,
+                REVIEW_PROMPT,
+            ),
+            (
+                "Reviewing a to-do change (and filling in a new to-do)",
+                &mut instructions.proposal_review,
+                PROPOSAL_PROMPT,
+            ),
+            (
+                "Planning the rest of the day",
+                &mut instructions.day_plan,
+                DAY_PLAN_PROMPT,
+            ),
+        ] {
+            egui::CollapsingHeader::new(label)
+                .id_salt(("instruction", label))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if own.trim().is_empty() {
+                            ui.small("built-in");
+                            if ui
+                                .small_button("Edit a copy of the built-in text")
+                                .clicked()
+                            {
+                                *own = built_in.to_string();
+                            }
+                        } else if ui.small_button("Back to the built-in text").clicked() {
+                            own.clear();
+                        }
+                    });
+                    if own.trim().is_empty() {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(built_in).small().weak()).wrap(),
+                        );
+                    } else {
+                        ui.add(
+                            egui::TextEdit::multiline(own)
+                                .desired_rows(8)
+                                .desired_width(f32::INFINITY),
+                        );
+                    }
+                });
+        }
+    }
+
+    // --- blocking -----------------------------------------------------------------------
+
+    fn blocking_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
+        let Some(drafts) = &mut self.drafts else {
+            return;
+        };
+        ui.heading("Always blocked programs");
+        ui.small(
+            "Closed whenever they start. Adding one takes effect at once; removing one is \
+             scheduled.",
+        );
+        set_ui(
+            ui,
+            "blacklist",
+            &mut drafts.policy.blacklist,
+            &mut self.adding,
+            "e.g. steam.exe",
+        );
+
+        ui.separator();
+        ui.heading("Blocked now");
+        ui.small(
+            "Unblocking is scheduled. To get something at once, ask for access in the Blocking \
+             tab.",
+        );
+        let mut any = false;
+        for (user, value) in &snapshot.blocks {
+            let blocks: SavedBlocks = from_value(value);
+            for (key, entry) in blocks.processes.iter().chain(blocks.tabs.iter()) {
+                any = true;
+                let unblocking = drafts.ai_focus.unblocked.contains(&entry.id);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("{user}: {key} — {}", entry.reason));
+                    if unblocking {
+                        ui.colored_label(YELLOW, "unblock pending");
+                        if ui.small_button("keep blocked").clicked() {
+                            drafts.ai_focus.unblocked.remove(&entry.id);
+                        }
+                    } else if !entry.id.is_empty() && ui.small_button("unblock").clicked() {
+                        drafts.ai_focus.unblocked.insert(entry.id.clone());
+                    }
+                });
+            }
+        }
+        if !any {
+            ui.label("Nothing.");
+        }
+
+        ui.separator();
+        ui.heading("Access granted by the AI");
+        ui.small("Revoking takes effect at once.");
+        let now = Utc::now();
+        let mut any = false;
+        for (user, value) in &snapshot.grants {
+            let grants: GrantState = from_value(value);
+            for grant in grants
+                .grants
+                .iter()
+                .filter(|grant| grant.until.is_none_or(|until| now < until))
+            {
+                any = true;
+                let revoked = drafts.ai_focus.revoked_grants.contains(&grant.id);
+                ui.horizontal_wrapped(|ui| {
+                    let until = grant.until.map_or("permanent".to_string(), |until| {
+                        format!("until {}", local(until))
+                    });
+                    ui.label(format!(
+                        "{user}: {} ({until}) — {}",
+                        grant.target.label(),
+                        grant.purpose
+                    ));
+                    if revoked {
+                        ui.colored_label(RED, "revoked");
+                    } else if ui.small_button("revoke").clicked() {
+                        drafts.ai_focus.revoked_grants.insert(grant.id.clone());
+                    }
+                });
+            }
+        }
+        if !any {
+            ui.label("None.");
+        }
+
+        ui.separator();
+        ui.heading("Asking for access");
+        let config = &mut drafts.ai_focus;
+        ui.horizontal(|ui| {
+            ui.label("Longest timed access (minutes)");
+            ui.add(egui::DragValue::new(&mut config.max_grant_minutes).range(5..=1440));
+        });
+        ui.checkbox(
+            &mut config.allow_permanent_grants,
+            "The AI may grant access until revoked",
+        );
+    }
+
+    // --- AI checks ----------------------------------------------------------------------
+
+    fn checks_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(drafts) = &mut self.drafts else {
+            return;
+        };
+        let config = &mut drafts.ai_focus;
+        ui.small("Stricter values take effect at once; looser ones are scheduled.");
+        egui::Grid::new("checks").num_columns(2).show(ui, |ui| {
+            ui.label("Judge an on-task window again after (minutes, 0 = as often as unsure ones)");
+            ui.add(egui::DragValue::new(&mut config.recheck_minutes).range(0..=240));
+            ui.end_row();
+            ui.label("Judge an unsure window again after (seconds)");
+            ui.add(egui::DragValue::new(&mut config.check_interval_secs).range(15..=3600));
+            ui.end_row();
+            ui.label("Off-task verdicts before an app is closed (tabs: the first)");
+            ui.add(egui::DragValue::new(&mut config.strikes_to_block).range(1..=10));
+            ui.end_row();
+            ui.label("Send a screenshot with each check");
+            ui.checkbox(&mut config.send_screenshot, "");
+            ui.end_row();
+        });
+        ui.separator();
+        ui.heading("Never judged (always allowed)");
+        set_ui(
+            ui,
+            "always_allow",
+            &mut config.always_allow,
+            &mut self.adding,
+            "e.g. zoom.exe",
+        );
+        ui.heading("Judged without a screenshot (private)");
+        set_ui(
+            ui,
+            "private_apps",
+            &mut config.private_apps,
+            &mut self.adding,
+            "e.g. bank.exe",
+        );
+        ui.heading("Browsers (tabs are closed instead of the program)");
+        set_ui(
+            ui,
+            "browsers",
+            &mut config.browsers,
+            &mut self.adding,
+            "e.g. chrome.exe",
+        );
+    }
+
+    // --- saving -------------------------------------------------------------------------
+
+    /// What saving would do (in force now or scheduled), and the Save button.
+    fn save_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
+        let Some(drafts) = &self.drafts else {
+            return;
+        };
+        let current = drafts.as_values();
+        let changed: Vec<usize> = (0..EDITABLE.len())
+            .filter(|index| current[*index] != drafts.loaded[*index])
+            .collect();
+        if changed.is_empty() {
+            ui.small("No unsaved changes.");
+            return;
+        }
+        ui.strong("Unsaved changes");
+        for index in &changed {
+            let (name, _) = EDITABLE[*index];
+            // As the agent compares: defaults filled in.
+            let in_force = snapshot.files.get(name).cloned().unwrap_or(Value::Null);
+            let in_force = machine::settings::normalize(name, &in_force).unwrap_or(in_force);
+            for edit in setting_edits::diff(&drafts.loaded[*index], &current[*index]) {
+                let (color, when) = if !protected {
+                    (GREEN, "now")
+                } else {
+                    match setting_edits::direction(name, &edit, &in_force) {
+                        Direction::Looser => (YELLOW, "scheduled"),
+                        _ => (GREEN, "now"),
+                    }
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(color, when);
+                    ui.label(redact(&edit.describe()));
+                });
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Save").clicked() {
+                let mut results = Vec::new();
+                for index in &changed {
+                    let (name, file) = EDITABLE[*index];
+                    let reply = call_value(
+                        self.session,
+                        "settings_put",
+                        json!({ "name": name, "content": current[*index], "via": "settings tab" }),
+                    )
+                    .and_then(|reply| {
+                        serde_json::from_value::<PutOutcome>(reply)
+                            .map_err(|error| error.to_string())
+                    });
+                    results.push(match reply {
+                        Ok(outcome) => match outcome.scheduled {
+                            None => format!("{file}: in force now."),
+                            Some(scheduled) => format!(
+                                "{file}: {}scheduled; first question {}.",
+                                if outcome.applied.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("{} in force now, the rest ", outcome.applied.len())
+                                },
+                                local(scheduled.first_question_at)
+                            ),
+                        },
+                        Err(error) => format!("{file} was not saved: {error}"),
+                    });
+                }
+                self.message = results.join(" ");
+                self.fetched_at = None;
+                self.drafts = None;
+            }
+            if ui.button("Discard").clicked() {
+                self.drafts = None;
+            }
+        });
+    }
+
     /// The scheduled updates, with the question for each one that is due, and a Withdraw
     /// button. Returns whether one was answered or withdrawn.
     fn reservations_ui(&mut self, ui: &mut egui::Ui) -> bool {
-        if self
-            .fetched_at
-            .is_none_or(|fetched_at| fetched_at.elapsed() >= RESERVATIONS_REFRESH)
-        {
-            self.fetched_at = Some(Instant::now());
-            match call_value(self.session, "settings_get", json!({}))
-                .and_then(|reply| serde_json::from_value(reply).map_err(|error| error.to_string()))
-            {
-                Ok(snapshot) => self.latest = Some(snapshot),
-                Err(error) => self.error = error,
-            }
-        }
         let Some(snapshot) = self.latest.clone() else {
             return false;
         };
@@ -218,29 +628,40 @@ impl SettingsTab {
             ui.heading("Scheduled updates");
         }
         for reservation in &snapshot.reservations.scheduled {
-            let file = file_name(&reservation.name);
+            let what = match reservation.origin {
+                ReservationOrigin::Settings => file_name(&reservation.name).to_string(),
+                ReservationOrigin::TodoChange => "a to-do change".to_string(),
+            };
+            let every = if reservation.interval_seconds >= 24 * 3600 {
+                format!("{} days", reservation.interval_seconds / (24 * 3600))
+            } else {
+                format!("{} hours", (reservation.interval_seconds / 3600).max(1))
+            };
             ui.group(|ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
-                    ui.strong(file);
+                    ui.strong(&what);
                     ui.label(format!(
-                        "scheduled {} via {} — {}/{APPROVALS_NEEDED} confirmed",
+                        "scheduled {} via {} — {}/{APPROVALS_NEEDED} confirmed, asked every {every}",
                         local(reservation.scheduled_at),
                         reservation.via,
                         reservation.approvals.len()
                     ));
                 });
+                if !reservation.note.is_empty() {
+                    ui.small(&reservation.note);
+                }
                 egui::CollapsingHeader::new("What changes")
                     // Read before answering.
                     .default_open(reservation.question_due(now))
                     .id_salt(("changes", &reservation.id))
                     .show(ui, |ui| {
                         for line in reservation.describe() {
-                            ui.label(line);
+                            ui.label(redact(&line));
                         }
                     });
                 if reservation.question_due(now) {
-                    changed |= self.question_ui(ui, reservation);
+                    changed |= self.question_ui(ui, reservation, &what);
                 } else {
                     ui.label(format!(
                         "Next question: {}",
@@ -254,7 +675,7 @@ impl SettingsTab {
                         json!({ "id": reservation.id }),
                     ) {
                         Ok(_) => {
-                            self.answer_message = format!("The update of {file} was withdrawn.");
+                            self.message = format!("The update of {what} was withdrawn.");
                             changed = true;
                         }
                         Err(error) => self.error = error,
@@ -262,22 +683,15 @@ impl SettingsTab {
                 }
             });
         }
-        if !self.answer_message.is_empty() {
-            ui.label(&self.answer_message);
-        }
-        if changed {
-            self.fetched_at = None;
-        }
         changed
     }
 
     /// "Is this update really right?" with Yes and No. Returns whether it was answered.
-    fn question_ui(&mut self, ui: &mut egui::Ui, reservation: &Reservation) -> bool {
-        let file = file_name(&reservation.name);
+    fn question_ui(&mut self, ui: &mut egui::Ui, reservation: &Reservation, what: &str) -> bool {
         ui.colored_label(
             RED,
             format!(
-                "Is this update of {file} really right? (question {} of {APPROVALS_NEEDED})",
+                "Is this update of {what} really right? (question {} of {APPROVALS_NEEDED})",
                 reservation.approvals.len() + 1
             ),
         );
@@ -307,193 +721,128 @@ impl SettingsTab {
                 approvals,
                 next_question_at,
             }) => {
-                self.answer_message = format!(
-                    "{file}: {approvals}/{APPROVALS_NEEDED} confirmed. Next question: {}.",
+                self.message = format!(
+                    "{what}: {approvals}/{APPROVALS_NEEDED} confirmed. Next question: {}.",
                     local(next_question_at)
                 )
             }
             Ok(AnswerOutcome::Applied) => {
-                self.answer_message =
-                    format!("{file}: confirmed {APPROVALS_NEEDED} times; in force now.")
+                self.message = format!("{what}: confirmed {APPROVALS_NEEDED} times; in force now.")
             }
             Ok(AnswerOutcome::Rejected) => {
-                self.answer_message = format!("{file}: the update was rejected.")
+                self.message = format!("{what}: the update was rejected.")
             }
             Err(error) => self.error = error,
         }
         true
     }
+}
 
-    /// Ask the agent for the settings, write the mirror, open the panels on it.
-    fn load(&self) -> Result<Loaded, String> {
-        let snapshot: SettingsSnapshot =
-            serde_json::from_value(call_value(self.session, "settings_get", json!({}))?)
-                .map_err(|error| error.to_string())?;
-        let mirror_directory = mirror_dir();
-        let _ = fs::remove_dir_all(&mirror_directory);
-        let mut synced = HashMap::new();
-        for (name, file) in EDITABLE {
-            // A scheduled update is what the user saved last: go on editing from it.
-            let mut current = snapshot.files.get(name).cloned().unwrap_or(Value::Null);
-            for reservation in snapshot
-                .reservations
-                .scheduled
-                .iter()
-                .filter(|reservation| {
-                    reservation.name == name
-                        && reservation.origin == machine::settings::ReservationOrigin::Settings
-                })
-            {
-                machine::setting_edits::apply(&mut current, &reservation.edits);
-            }
-            let bytes = match Some(&current).filter(|value| !value.is_null()) {
-                Some(value) => {
-                    let bytes =
-                        serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
-                    write(&mirror_directory.join(file), &bytes)?;
-                    Some(bytes)
-                }
-                None => None,
-            };
-            synced.insert(name, bytes);
+/// The files in force with the scheduled settings updates applied: what the user saved last.
+fn drafts_from(snapshot: &SettingsSnapshot) -> Drafts {
+    let view = |name: &str| {
+        let mut file = snapshot.files.get(name).cloned().unwrap_or(Value::Null);
+        for reservation in snapshot
+            .reservations
+            .scheduled
+            .iter()
+            .filter(|reservation| {
+                reservation.name == name && reservation.origin == ReservationOrigin::Settings
+            })
+        {
+            setting_edits::apply(&mut file, &reservation.edits);
         }
-        write_read_only(&mirror_directory, &snapshot)?;
+        file
+    };
+    let policy: ListConfig = from_value(&view("policy"));
+    let ai_focus: AiFocusConfig = from_value(&view("ai_focus"));
+    let planner: PlannerConfig = from_value(&view("planner"));
+    let loaded = [to_value(&policy), to_value(&ai_focus), to_value(&planner)];
+    Drafts {
+        policy,
+        ai_focus,
+        planner,
+        loaded,
+    }
+}
 
-        let list_store = ListStore::with_persistence(Arc::new(FileListPersistence::new(
-            mirror_directory.join("policy.json"),
-        )))
-        .map_err(|error| error.to_string())?;
-        let ai_store = AiFocusStore::open(mirror_directory.join("ai_focus.json"))
-            .map_err(|error| error.to_string())?;
-        let monitor = native_monitor(ai_store, JsonStore::in_memory(GrantState::default()), None);
-        let ai_rule = AiFocusRuleHandle::settings_only(
-            monitor,
-            mirror_directory.join("grants"),
-            mirror_directory.join("blocks"),
-            mirror_directory.join("usage"),
+/// A list of names used as a set, each with a remove button, and a field to add one.
+fn set_ui(
+    ui: &mut egui::Ui,
+    list: &'static str,
+    names: &mut BTreeSet<String>,
+    adding: &mut HashMap<&'static str, String>,
+    hint: &str,
+) {
+    let mut remove = None;
+    ui.horizontal_wrapped(|ui| {
+        for name in names.iter() {
+            if ui.small_button(format!("{name}  x")).clicked() {
+                remove = Some(name.clone());
+            }
+        }
+        if names.is_empty() {
+            ui.small("(none)");
+        }
+    });
+    if let Some(name) = remove {
+        names.remove(&name);
+    }
+    let text = adding.entry(list).or_default();
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(text)
+                .hint_text(hint)
+                .desired_width(200.0),
         );
-        let planner = PlannerAdminUi::new(
-            JsonStore::<PlannerConfig>::open(mirror_directory.join("planner.json"), true)
-                .map_err(|error| error.to_string())?,
-            JsonStore::<PlannerState>::open(mirror_directory.join("planner_state.json"), false)
-                .map_err(|error| error.to_string())?,
-        );
-        // Opening a store may write its file back with defaults filled in; that is the same
-        // settings, not an edit to send (once protected it would become a scheduled update).
-        for (name, file) in EDITABLE {
-            if let Ok(bytes) = fs::read(mirror_directory.join(file)) {
-                synced.insert(name, Some(bytes));
+        if ui
+            .add_enabled(!text.trim().is_empty(), egui::Button::new("Add"))
+            .clicked()
+        {
+            names.insert(text.trim().to_lowercase());
+            text.clear();
+        }
+    });
+}
+
+/// Calls and estimated cost today and this month, all users together.
+fn usage_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
+    let today = Local::now().date_naive();
+    let (mut today_calls, mut today_cost, mut month_calls, mut month_cost) = (0u64, 0.0, 0u64, 0.0);
+    for value in snapshot.usage.values() {
+        let log: UsageLog = from_value(value);
+        for (date, day) in &log.days {
+            if *date == today {
+                today_calls += day.total.calls;
+                today_cost += day.total.cost_usd;
+            }
+            if date.year() == today.year() && date.month() == today.month() {
+                month_calls += day.total.calls;
+                month_cost += day.total.cost_usd;
             }
         }
+    }
+    ui.label(format!(
+        "Today: {today_calls} calls, about ${today_cost:.2} · this month: {month_calls} calls, \
+         about ${month_cost:.2}"
+    ));
+}
 
-        let sync = Arc::new(Sync {
-            stop: AtomicBool::new(false),
-            synced: Mutex::new(synced),
-            message: Mutex::new(String::new()),
-        });
-        let (session, thread_sync) = (self.session, Arc::clone(&sync));
-        thread::spawn(move || sync_loop(session, &mirror_directory, &thread_sync));
-        Ok(Loaded {
-            rule_uis: vec![ListBasedRuleHandle::new(list_store).ui(), ai_rule.ui()],
-            panels: vec![Arc::new(planner)],
-            selected: 0,
-            sync,
-        })
+/// Hide an API key in an edit's description.
+fn redact(line: &str) -> String {
+    if line.starts_with("api_key") {
+        "api_key = (a new key)".into()
+    } else {
+        line.to_string()
     }
 }
 
-/// Every second: send edited files to the agent. Every few seconds: refresh the read-only
-/// views. Stops when the tab drops the panels.
-fn sync_loop(session: u32, mirror_directory: &Path, sync: &Sync) {
-    let mut tick = 0u32;
-    while !sync.stop.load(Ordering::SeqCst) {
-        for (name, file) in EDITABLE {
-            let Ok(bytes) = fs::read(mirror_directory.join(file)) else {
-                continue;
-            };
-            if sync.synced.lock().get(name).cloned().flatten().as_ref() == Some(&bytes) {
-                continue;
-            }
-            let content: Value = match serde_json::from_slice(&bytes) {
-                Ok(content) => content,
-                Err(_) => continue, // being written; next tick
-            };
-            let result = call_value(
-                session,
-                "settings_put",
-                json!({ "name": name, "content": content }),
-            );
-            let at = Local::now().format("%H:%M:%S");
-            let outcome = result.and_then(|reply| {
-                serde_json::from_value::<PutOutcome>(reply).map_err(|error| error.to_string())
-            });
-            *sync.message.lock() = match outcome {
-                Ok(outcome) => {
-                    sync.synced.lock().insert(name, Some(bytes));
-                    match outcome.scheduled {
-                        None => format!("Saved {file} at {at}; in force now."),
-                        Some(scheduled) => format!(
-                            "Saved {file} at {at}. {}Scheduled: {}. You will be asked about it \
-                             from {} on; it takes effect after {APPROVALS_NEEDED} \"yes\" answers.",
-                            if outcome.applied.is_empty() {
-                                String::new()
-                            } else {
-                                format!("In force now: {}. ", outcome.applied.join("; "))
-                            },
-                            scheduled.edits.join("; "),
-                            local(scheduled.first_question_at)
-                        ),
-                    }
-                }
-                Err(error) => format!("{file} was not saved: {error}"),
-            };
-        }
-        if tick.is_multiple_of(3) {
-            if let Ok(snapshot) = call_value(session, "settings_get", json!({}))
-                .and_then(|reply| serde_json::from_value(reply).map_err(|error| error.to_string()))
-            {
-                let _ = write_read_only(mirror_directory, &snapshot);
-            }
-        }
-        tick = tick.wrapping_add(1);
-        thread::sleep(Duration::from_secs(1));
-    }
+fn from_value<T: DeserializeOwned + Default>(value: &Value) -> T {
+    serde_json::from_value(value.clone()).unwrap_or_default()
 }
 
-/// The views the panels read but never write: planner state, grants, blocks.
-fn write_read_only(mirror_directory: &Path, snapshot: &SettingsSnapshot) -> Result<(), String> {
-    let json = |value: &Value| serde_json::to_vec_pretty(value).map_err(|error| error.to_string());
-    if !snapshot.planner_state.is_null() {
-        write(
-            &mirror_directory.join("planner_state.json"),
-            &json(&snapshot.planner_state)?,
-        )?;
-    }
-    for (folder, files) in [
-        ("grants", &snapshot.grants),
-        ("blocks", &snapshot.blocks),
-        ("usage", &snapshot.usage),
-    ] {
-        let folder = mirror_directory.join(folder);
-        let _ = fs::remove_dir_all(&folder);
-        fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
-        for (user, value) in files {
-            write(&folder.join(format!("{user}.json")), &json(value)?)?;
-        }
-    }
-    Ok(())
-}
-
-fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    machine::settings::write_atomic(path, bytes)
-        .map_err(|error| format!("{}: {error}", path.display()))
-}
-
-/// `%LOCALAPPDATA%\DigitalWellbeing\...\settings_mirror`: this user's private copy.
-fn mirror_dir() -> PathBuf {
-    directories::ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
-        .map(|project_dirs| project_dirs.data_local_dir().join("settings_mirror"))
-        .unwrap_or_else(|| std::env::temp_dir().join("DigitalWellbeing_settings_mirror"))
+fn to_value<T: Serialize>(value: &T) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
 fn file_name(name: &str) -> &str {
