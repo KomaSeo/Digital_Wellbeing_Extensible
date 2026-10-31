@@ -39,6 +39,28 @@ impl Advisor for FakeAdvisor {
         })
     }
 
+    fn plan_day(&self, request: &PickRequest) -> Result<DayPlan, JudgeError> {
+        *self.saw_instructions.lock() = request.instructions.to_string();
+        Ok(DayPlan {
+            at: None,
+            items: request
+                .open
+                .iter()
+                .map(|todo| DayPlanItem {
+                    todo_id: todo.id.clone(),
+                    minutes: 600,
+                    why: "next".into(),
+                })
+                .chain(std::iter::once(DayPlanItem {
+                    todo_id: "not on the list".into(),
+                    minutes: 30,
+                    why: "made up".into(),
+                }))
+                .collect(),
+            summary: "a good day".into(),
+        })
+    }
+
     fn review_todo_change(&self, request: &TodoChangeRequest) -> Result<TodoReview, JudgeError> {
         self.reviews.fetch_add(1, Ordering::SeqCst);
         *self.saw_rules.lock() = request.life_rules.to_string();
@@ -689,4 +711,92 @@ fn the_owners_instructions_replace_the_built_in_ones() {
         ..Default::default()
     };
     assert_eq!(blank.pick_or_default(), crate::advisor::PICK_PROMPT);
+}
+
+#[test]
+fn time_spent_per_todo_is_counted_from_the_assignments() {
+    let fixture = harness(true, &["a", "b"]);
+    let start = Utc::now() - chrono::Duration::minutes(50);
+    fixture.planner.assign(start).unwrap();
+    // 30 minutes on a, then a switch to b.
+    fixture
+        .planner
+        .request_change(
+            start + chrono::Duration::minutes(30),
+            ChangeKind::SwitchTodo {
+                todo_id: "b".into(),
+            },
+            "blocked on data for a",
+        )
+        .unwrap();
+    let status = fixture.planner.status();
+    assert_eq!(status.minutes_total.get("a"), Some(&30));
+    // b runs from then until now (about 20 minutes).
+    let on_b = *status.minutes_total.get("b").unwrap();
+    assert!((19..=21).contains(&on_b), "{on_b}");
+}
+
+#[test]
+fn notes_are_saved_for_open_todos_and_reach_the_done_review() {
+    let fixture = harness(true, &["a"]);
+    fixture.planner.assign(Utc::now()).unwrap();
+    let notes = TaskNotes {
+        text: "outline done".into(),
+        steps: vec![
+            TaskStep {
+                text: "write intro".into(),
+                done: true,
+            },
+            TaskStep {
+                text: "  ".into(),
+                done: false,
+            },
+        ],
+    };
+    fixture.planner.put_task_notes("a", notes).unwrap();
+    assert!(fixture
+        .planner
+        .put_task_notes("zzz", TaskNotes::default())
+        .is_err());
+    let saved = &fixture.planner.status().task_notes["a"];
+    assert_eq!(saved.steps.len(), 1, "empty steps are dropped");
+    let state = fixture.planner.state_store_for_tests().get();
+    let text = crate::advisor::review_text(&ReviewRequest {
+        instructions: crate::advisor::REVIEW_PROMPT,
+        now_local: "now",
+        life_rules: "",
+        current: state.assignment.as_ref(),
+        request: &ChangeKind::Done,
+        target_title: None,
+        reason: "finished",
+        open: &[],
+        recent_requests: &[],
+        history: "",
+        notes: state.task_notes.get("a"),
+    });
+    assert!(
+        text.contains("outline done") && text.contains("- [x] write intro"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_day_plan_keeps_only_open_todos_and_sensible_lengths() {
+    let fixture = harness(true, &["a", "b"]);
+    let plan = fixture.planner.plan_day(Utc::now()).unwrap();
+    let ids: Vec<_> = plan
+        .items
+        .iter()
+        .map(|item| item.todo_id.as_str())
+        .collect();
+    assert_eq!(ids, ["a", "b"]);
+    assert!(plan.items.iter().all(|item| item.minutes <= 480));
+    assert_eq!(
+        *fixture.advisor.saw_instructions.lock(),
+        crate::advisor::DAY_PLAN_PROMPT
+    );
+    assert_eq!(
+        fixture.planner.status().day_plan.unwrap().summary,
+        "a good day"
+    );
 }

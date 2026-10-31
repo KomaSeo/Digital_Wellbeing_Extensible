@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Responsibility: Describe one to-do on the admin's list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,8 +82,10 @@ pub struct PlannerInstructions {
     pub pick: String,
     /// Whether a change request (done, switch, end, notify only) is approved.
     pub change_review: String,
-    /// Whether a proposed to-do may join the list.
+    /// Whether a to-do change (add, edit, remove) is approved; fills in a new to-do.
     pub proposal_review: String,
+    /// The suggested order for the rest of the day.
+    pub day_plan: String,
 }
 
 impl PlannerInstructions {
@@ -97,6 +99,10 @@ impl PlannerInstructions {
 
     pub fn proposal_review_or_default(&self) -> &str {
         or_default(&self.proposal_review, crate::advisor::PROPOSAL_PROMPT)
+    }
+
+    pub fn day_plan_or_default(&self) -> &str {
+        or_default(&self.day_plan, crate::advisor::DAY_PLAN_PROMPT)
     }
 }
 
@@ -269,6 +275,54 @@ pub struct ProposalRecord {
     pub reply: String,
 }
 
+/// Responsibility: Record how long one assignment ran, for the time spent per to-do.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssignmentSpan {
+    pub todo_id: Option<String>,
+    pub task: String,
+    pub started: DateTime<Utc>,
+    pub ended: DateTime<Utc>,
+}
+
+/// Responsibility: Hold the user's own working notes and steps for one to-do.
+///
+/// They change nothing the rules depend on, so they are saved at once; the AI sees them
+/// when it reviews "I finished it".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TaskNotes {
+    pub text: String,
+    pub steps: Vec<TaskStep>,
+}
+
+/// Responsibility: Hold one step of a to-do and whether it is done.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskStep {
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+}
+
+/// Responsibility: Hold the AI's suggested order for the rest of the day (a preview: the
+/// planner still assigns one to-do at a time).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DayPlan {
+    pub at: Option<DateTime<Utc>>,
+    pub items: Vec<DayPlanItem>,
+    /// One or two sentences about the day.
+    pub summary: String,
+}
+
+/// Responsibility: Hold one block of a day plan.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DayPlanItem {
+    pub todo_id: String,
+    pub minutes: u32,
+    pub why: String,
+}
+
 /// Responsibility: Record that a to-do was finished.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoneRecord {
@@ -296,6 +350,15 @@ pub struct PlannerState {
     /// Every to-do change and the AI's decision, newest last, capped.
     #[serde(default)]
     pub todo_changes: VecDeque<TodoChangeRecord>,
+    /// Finished assignments, newest last, capped: the time spent per to-do.
+    #[serde(default)]
+    pub assignment_log: VecDeque<AssignmentSpan>,
+    /// The user's notes and steps per to-do id.
+    #[serde(default)]
+    pub task_notes: BTreeMap<String, TaskNotes>,
+    /// The last day plan the user asked for.
+    #[serde(default)]
+    pub day_plan: Option<DayPlan>,
 }
 
 impl PlannerState {
@@ -321,4 +384,18 @@ pub struct PlannerStatus {
     /// Newest first.
     #[serde(default)]
     pub recent_todo_changes: Vec<TodoChangeRecord>,
+    /// Finished to-dos of the last seven days, newest first.
+    #[serde(default)]
+    pub recent_done: Vec<DoneRecord>,
+    /// Minutes spent today (local day) per to-do id, the current assignment included.
+    #[serde(default)]
+    pub minutes_today: BTreeMap<String, i64>,
+    /// Minutes spent in total per to-do id (finished to-dos of the last week included).
+    #[serde(default)]
+    pub minutes_total: BTreeMap<String, i64>,
+    /// The user's notes and steps of the open to-dos.
+    #[serde(default)]
+    pub task_notes: BTreeMap<String, TaskNotes>,
+    #[serde(default)]
+    pub day_plan: Option<DayPlan>,
 }

@@ -1,5 +1,6 @@
-//! Responsibility: Show the standard user their focus session, and send their requests (start,
-//! get a task, change it, ask for access) to the agent of their session.
+//! Responsibility: Show the standard user their daily wellbeing (what to do now, the to-do
+//! list, what is blocked), and send their requests (get a task, change it, change the list,
+//! ask for access) to the agent of their session.
 //!
 //! Digital Wellbeing Focus — the app a *standard* (non-admin) user sees.
 //!
@@ -7,13 +8,12 @@
 //! user's own rights, and talks to the agent of the user's session through
 //! [`machine::user_api`]. Closing it changes nothing: the agent keeps enforcing.
 //!
-//! Two modes, decided by the agent:
-//! - **planner active** (admin enabled it and to-dos are open): the AI assigns
-//!   the task; changing or ending it needs a reason the AI approves.
-//! - otherwise: the user types their task and starts / ends the session freely.
-//!
-//! A second tab, **Settings** (`settings.rs`), edits the admin settings through the
-//! agent while they are unlocked, and locks them for a while.
+//! Three tabs: **To-do** (`todo.rs`: what to do now, the list, today), **Blocking** (what the
+//! AI checks and blocks, asking for access) and **Settings** (`settings.rs`). The app runs all
+//! day; the AI checks are called "daily wellbeing", never a "session".
+//! - **planner active** (enabled and to-dos are open): the AI assigns the task; changing it
+//!   needs a reason the AI approves.
+//! - otherwise: the user types what they do and starts or pauses the AI checks freely.
 //!
 //! The app sits in the tray (`tray.rs`): closing the window hides it, and the tray icon
 //! opens it again (or its Settings tab). Starting the app again shows the running one.
@@ -21,6 +21,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod settings;
+mod todo;
 mod tray;
 
 use chrono::{Local, Utc};
@@ -34,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use task_planner::{ChangeKind, ChangeRecord, PlannerStatus, ProposalRecord, WhenTimeIsUp};
+use task_planner::{ChangeRecord, ProposalRecord, TodoChangeRecord};
 
 const POLL: Duration = Duration::from_secs(2);
 const TITLE: &str = "Digital Wellbeing Focus";
@@ -75,6 +76,8 @@ struct Shared {
     access: Option<GrantLogEntry>,
     /// The AI's answer to the last proposed to-do.
     proposal: Option<ProposalRecord>,
+    /// The AI's answer to the last to-do change.
+    todo_change: Option<TodoChangeRecord>,
 }
 
 /// Responsibility: Keep what the user types into the access request form.
@@ -110,9 +113,9 @@ enum ChangeChoice {
     ReassignWhenTimeIsUp,
 }
 
-/// Responsibility: Name the Focus window's tabs: what to do (the focus session, the
-/// planner's assignment, change requests, proposals), what is blocked (blocks, access
-/// requests, the AI's checks), and the settings.
+/// Responsibility: Name the Focus window's tabs: what to do (the planner's assignment, the
+/// to-do list, today), what is blocked (blocks, access requests, the AI's checks), and the
+/// settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Todo,
@@ -141,8 +144,7 @@ struct FocusApp {
     free_task: String,
     reason: String,
     access: AccessForm,
-    /// Title of a to-do the user is about to propose.
-    proposal_title: String,
+    todo_ui: todo::TodoUiState,
     /// Settings questions due at the last status; more than before brings the window up.
     questions_due: usize,
 }
@@ -187,7 +189,7 @@ impl FocusApp {
             free_task: String::new(),
             reason: String::new(),
             access: AccessForm::default(),
-            proposal_title: String::new(),
+            todo_ui: todo::TodoUiState::default(),
             questions_due: 0,
         }
     }
@@ -218,6 +220,9 @@ impl FocusApp {
                         }
                         if status.last_proposal.is_some() {
                             shared_state.proposal = status.last_proposal.clone();
+                        }
+                        if status.last_todo_change.is_some() {
+                            shared_state.todo_change = status.last_todo_change.clone();
                         }
                         shared_state.status = Some(Ok(status));
                     }
@@ -259,7 +264,7 @@ impl FocusApp {
     fn access_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
         ui.heading("Need an app or website?");
         if !status.session_active {
-            ui.label("Start a focus session first.");
+            ui.label("The AI checks are paused; nothing needs asking for.");
             return;
         }
         ui.label(
@@ -367,307 +372,9 @@ impl FocusApp {
             );
         }
     }
-
-    fn free_mode_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
-        if !self.task_loaded {
-            self.task_input = status.task.clone();
-            self.task_loaded = true;
-        }
-        ui.label("What are you working on? Be specific: the AI judges every app against this.");
-        ui.add(
-            egui::TextEdit::multiline(&mut self.task_input)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY)
-                .hint_text("e.g. 졸업논문 3장 작성 — Overleaf, 논문 PDF, Google Scholar 필요"),
-        );
-        let has_task = !self.task_input.trim().is_empty();
-        let idle = !self.pending.load(Ordering::SeqCst);
-        ui.horizontal(|ui| {
-            if status.session_active {
-                ui.colored_label(GREEN, "● running");
-                if ui
-                    .add_enabled(has_task && idle, egui::Button::new("Change task"))
-                    .clicked()
-                {
-                    self.send("start_session", json!({ "task": self.task_input }));
-                }
-                if ui
-                    .add_enabled(idle, egui::Button::new("End session"))
-                    .clicked()
-                {
-                    self.send("stop_session", json!({}));
-                }
-            } else {
-                ui.label("○ not running");
-                if ui
-                    .add_enabled(has_task && idle, egui::Button::new("Start focus"))
-                    .clicked()
-                {
-                    self.send("start_session", json!({ "task": self.task_input }));
-                }
-            }
-        });
-    }
-
-    /// Propose a to-do for the list; the AI reviews it against the admin's
-    /// life rules (the same as a proposal from the user's AI assistant).
-    fn propose_ui(&mut self, ui: &mut egui::Ui) {
-        let idle = !self.pending.load(Ordering::SeqCst);
-        ui.collapsing("Propose a to-do", |ui| {
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.proposal_title)
-                        .desired_width(300.0)
-                        .hint_text("e.g. Reply to the advisor's email"),
-                );
-                let ready = idle && self.proposal_title.trim().chars().count() >= 2;
-                if ui.add_enabled(ready, egui::Button::new("Propose")).clicked() {
-                    self.send(
-                        "propose_todo",
-                        json!({ "todo": { "title": self.proposal_title.trim() }, "via": "focus app" }),
-                    );
-                    self.proposal_title.clear();
-                }
-            });
-            if let Some(proposal) = &self.shared.lock().proposal {
-                let (color, label) = if proposal.approved {
-                    (GREEN, "added")
-                } else {
-                    (RED, "rejected")
-                };
-                ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(color, label);
-                    ui.label(format!("\"{}\": {}", proposal.item.title, proposal.reply));
-                });
-            }
-        });
-    }
-
-    fn planner_ui(&mut self, ui: &mut egui::Ui, status: &Status, planner: &PlannerStatus) {
-        let idle = !self.pending.load(Ordering::SeqCst);
-        let assignment = planner
-            .assignment
-            .as_ref()
-            .filter(|_| status.session_active);
-
-        let Some(assignment) = assignment else {
-            ui.label("Your task is picked by the AI from your to-do list.");
-            if ui
-                .add_enabled(idle, egui::Button::new("Get my task"))
-                .clicked()
-            {
-                self.send("assign", json!({}));
-            }
-            open_todos_ui(ui, planner);
-            return;
-        };
-
-        ui.colored_label(GREEN, "● running");
-        ui.group(|ui| {
-            ui.set_width(ui.available_width());
-            ui.strong(&assignment.task);
-            ui.small(format!(
-                "{} — since {}",
-                assignment.why,
-                assignment.at.with_timezone(&Local).format("%H:%M")
-            ));
-            if let Some(until) = assignment.until {
-                let until_text = until.with_timezone(&Local).format("%H:%M");
-                let minutes_left = (until - Utc::now()).num_minutes();
-                match assignment.when_time_is_up {
-                    WhenTimeIsUp::Reassign if minutes_left >= 0 => ui.label(format!(
-                        "Until {until_text} ({minutes_left} min left). Then the AI picks the \
-                         next task."
-                    )),
-                    WhenTimeIsUp::Reassign => ui.label(format!(
-                        "Time was up at {until_text}; picking the next task…"
-                    )),
-                    WhenTimeIsUp::NotifyOnly if minutes_left >= 0 => ui.label(format!(
-                        "Until {until_text} ({minutes_left} min left). Then you only get a \
-                         notice and keep this task."
-                    )),
-                    WhenTimeIsUp::NotifyOnly => ui.colored_label(
-                        RED,
-                        format!(
-                            "Time was up at {until_text}. Keep going, or ask for a change when \
-                             you are done."
-                        ),
-                    ),
-                };
-            }
-        });
-
-        // --- change request --------------------------------------------------
-        ui.separator();
-        ui.heading("Ask to change");
-        ui.horizontal_wrapped(|ui| {
-            ui.radio_value(&mut self.choice, ChangeChoice::Done, "I finished it");
-            ui.radio_value(&mut self.choice, ChangeChoice::OtherTodo, "Another to-do");
-            ui.radio_value(&mut self.choice, ChangeChoice::Free, "Something else");
-            ui.radio_value(&mut self.choice, ChangeChoice::End, "End session");
-            match assignment.when_time_is_up {
-                WhenTimeIsUp::Reassign => ui.radio_value(
-                    &mut self.choice,
-                    ChangeChoice::NotifyWhenTimeIsUp,
-                    "Only notify me when time is up",
-                ),
-                WhenTimeIsUp::NotifyOnly => ui.radio_value(
-                    &mut self.choice,
-                    ChangeChoice::ReassignWhenTimeIsUp,
-                    "Pick a new task when time is up",
-                ),
-            };
-        });
-        let others: Vec<_> = planner
-            .open_todos
-            .iter()
-            .filter(|todo| assignment.todo_id.as_deref() != Some(todo.id.as_str()))
-            .collect();
-        match self.choice {
-            ChangeChoice::OtherTodo => {
-                let selected = others
-                    .iter()
-                    .find(|todo| Some(&todo.id) == self.other_todo.as_ref())
-                    .map(|todo| todo.title.clone())
-                    .unwrap_or_else(|| "choose…".into());
-                egui::ComboBox::from_id_salt("other_todo")
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        for todo in &others {
-                            ui.selectable_value(
-                                &mut self.other_todo,
-                                Some(todo.id.clone()),
-                                &todo.title,
-                            );
-                        }
-                    });
-            }
-            ChangeChoice::Free => {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.free_task)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("what you want to do instead"),
-                );
-            }
-            ChangeChoice::Done
-            | ChangeChoice::End
-            | ChangeChoice::NotifyWhenTimeIsUp
-            | ChangeChoice::ReassignWhenTimeIsUp => {}
-        }
-        ui.add(
-            egui::TextEdit::multiline(&mut self.reason)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY)
-                .hint_text("reason — the AI decides whether it is good enough"),
-        );
-        let request = match self.choice {
-            ChangeChoice::Done => Some(ChangeKind::Done),
-            ChangeChoice::End => Some(ChangeKind::End),
-            ChangeChoice::OtherTodo => self
-                .other_todo
-                .clone()
-                .filter(|id| others.iter().any(|todo| &todo.id == id))
-                .map(|todo_id| ChangeKind::SwitchTodo { todo_id }),
-            ChangeChoice::Free => Some(self.free_task.trim().to_string())
-                .filter(|task| !task.is_empty())
-                .map(|task| ChangeKind::SwitchFree { task }),
-            // Offered only for the mode that is not in force.
-            ChangeChoice::NotifyWhenTimeIsUp => (assignment.when_time_is_up
-                == WhenTimeIsUp::Reassign)
-                .then_some(ChangeKind::SetWhenTimeIsUp {
-                    action: WhenTimeIsUp::NotifyOnly,
-                }),
-            ChangeChoice::ReassignWhenTimeIsUp => (assignment.when_time_is_up
-                == WhenTimeIsUp::NotifyOnly)
-                .then_some(ChangeKind::SetWhenTimeIsUp {
-                    action: WhenTimeIsUp::Reassign,
-                }),
-        };
-        let ready = idle && request.is_some() && self.reason.trim().chars().count() >= 4;
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ready, egui::Button::new("Send request"))
-                .clicked()
-            {
-                if let Some(request) = request {
-                    self.send(
-                        "request_change",
-                        json!({ "request": request, "reason": self.reason }),
-                    );
-                    self.reason.clear();
-                }
-            }
-            if !idle {
-                ui.spinner();
-                ui.label("the AI is deciding…");
-            }
-        });
-        if let Some(decision) = &self.shared.lock().decision {
-            let (color, label) = if decision.approved {
-                (GREEN, "approved")
-            } else {
-                (RED, "rejected")
-            };
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(color, label);
-                ui.label(&decision.reply);
-            });
-        }
-
-        open_todos_ui(ui, planner);
-    }
-}
-
-fn open_todos_ui(ui: &mut egui::Ui, planner: &PlannerStatus) {
-    ui.separator();
-    ui.collapsing(
-        format!("Open to-dos ({})", planner.open_todos.len()),
-        |ui| {
-            for todo in &planner.open_todos {
-                let deadline = todo
-                    .deadline
-                    .map(|due_date| format!(" · due {due_date}"))
-                    .unwrap_or_default();
-                ui.label(format!("P{} {}{deadline}", todo.priority, todo.title));
-            }
-        },
-    );
 }
 
 impl FocusApp {
-    /// The To-do tab: what to do now, and how to change it.
-    fn todo_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
-        if status.settings_questions_due > 0 {
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(
-                    RED,
-                    "A scheduled settings update is waiting for your answer: is it really right?",
-                );
-                if ui.link("Answer in the Settings tab").clicked() {
-                    self.tab = Tab::Settings;
-                }
-            });
-            ui.separator();
-        }
-        ui.heading("Focus session");
-        match status.planner.clone().filter(|planner| planner.active) {
-            Some(planner) => self.planner_ui(ui, status, &planner),
-            None => self.free_mode_ui(ui, status),
-        }
-        if status.planner.is_some() {
-            self.propose_ui(ui);
-        }
-        if !status.blocked.is_empty() {
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(format!("{} blocked.", status.blocked.len()));
-                if ui.link("See the Blocking tab").clicked() {
-                    self.tab = Tab::Blocking;
-                }
-            });
-        }
-    }
-
     /// The Blocking tab: what the AI checks, what is blocked, and asking for access.
     fn blocking_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
         ui.heading("AI checks");
@@ -680,7 +387,7 @@ impl FocusApp {
                 None => ui.label("First AI check in a moment…"),
             };
         } else {
-            ui.label("No focus session: the AI checks nothing (blocking rules still apply).");
+            ui.label("The AI checks are paused (the blacklist still applies).");
         }
         if let Some(error) = &status.last_error {
             ui.colored_label(RED, format!("AI check failed: {error}"));

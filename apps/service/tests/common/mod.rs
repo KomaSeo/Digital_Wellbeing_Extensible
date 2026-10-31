@@ -152,6 +152,8 @@ fn answer(request: &Value) -> Value {
             })
             .collect();
         json!({ "verdict": verdict(front), "reason": "test", "channel": "", "others": others })
+    } else if system.contains("rest of their day") {
+        json!({ "items": [], "summary": "a calm day" })
     } else {
         // A change review or a to-do review; a to-do review also fills in the to-do.
         // "please reject" in the request makes it say no.

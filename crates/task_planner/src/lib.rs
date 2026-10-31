@@ -21,14 +21,15 @@ mod planner;
 pub use admin_ui::PlannerAdminUi;
 pub use advisor::{
     change_summary, claude_advisor_provider, Advisor, AdvisorProvider, ClaudeAdvisor, Pick,
-    PickRequest, Review, ReviewRequest, ReviewedTodo, TodoChangeRequest, TodoReview, PICK_PROMPT,
-    PROPOSAL_PROMPT, REVIEW_PROMPT,
+    PickRequest, Review, ReviewRequest, ReviewedTodo, TodoChangeRequest, TodoReview,
+    DAY_PLAN_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT,
 };
 pub use ai_focus_rule::store::JsonStore;
 pub use model::{
-    Assignment, AssignmentSource, ChangeKind, ChangeRecord, DoneRecord, PlannerConfig,
-    PlannerInstructions, PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TodoChange,
-    TodoChangeRecord, TodoItem, TodoListWrite, WhenTimeIsUp,
+    Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, DayPlan, DayPlanItem,
+    DoneRecord, PlannerConfig, PlannerInstructions, PlannerState, PlannerStatus, ProposalInput,
+    ProposalRecord, TaskNotes, TaskStep, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite,
+    WhenTimeIsUp,
 };
 pub use planner::{PlannerError, TaskPlanner};
 

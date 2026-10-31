@@ -12,14 +12,15 @@ use crate::advisor::{
     AdvisorProvider, PickRequest, Review, ReviewRequest, ReviewedTodo, TodoChangeRequest,
 };
 use crate::model::{
-    Assignment, AssignmentSource, ChangeKind, ChangeRecord, DoneRecord, PlannerConfig,
-    PlannerState, PlannerStatus, ProposalInput, TodoChange, TodoChangeRecord, TodoItem,
-    TodoListWrite, WhenTimeIsUp,
+    Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, DayPlan, DoneRecord,
+    PlannerConfig, PlannerState, PlannerStatus, ProposalInput, TaskNotes, TodoChange,
+    TodoChangeRecord, TodoItem, TodoListWrite, WhenTimeIsUp,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use parking_lot::Mutex;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::info;
@@ -39,6 +40,10 @@ const RESUME_WITHIN: Duration = Duration::hours(12);
 const MIN_ASSIGNMENT_MINUTES: u32 = 10;
 const MAX_ASSIGNMENT_MINUTES: u32 = 480;
 const DEFAULT_ASSIGNMENT_MINUTES: u32 = 60;
+/// Finished assignments kept for the time spent per to-do (a few weeks).
+const ASSIGNMENT_LOG_CAPACITY: usize = 1000;
+const MAX_TASK_NOTES_CHARS: usize = 4000;
+const MAX_TASK_STEPS: usize = 50;
 
 /// Responsibility: Report why an assignment or a change request was refused.
 #[derive(Debug, Error)]
@@ -130,14 +135,115 @@ impl TaskPlanner {
 
     pub fn status(&self) -> PlannerStatus {
         let state = self.state.get();
+        let now = Utc::now();
+        let open_todos = self.open_todos();
+        // Finished spans plus the one running now.
+        let mut spans: Vec<AssignmentSpan> = state.assignment_log.iter().cloned().collect();
+        if let Some(current) = &state.assignment {
+            spans.push(AssignmentSpan {
+                todo_id: current.todo_id.clone(),
+                task: current.task.clone(),
+                started: current.at,
+                ended: now,
+            });
+        }
+        let start_of_today = Local::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|midnight| midnight.and_local_timezone(Local).earliest())
+            .map(|midnight| midnight.with_timezone(&Utc))
+            .unwrap_or(now - Duration::days(1));
+        let mut minutes_today = BTreeMap::new();
+        let mut minutes_total = BTreeMap::new();
+        for span in &spans {
+            let Some(todo_id) = &span.todo_id else {
+                continue;
+            };
+            let total = (span.ended - span.started).num_minutes().max(0);
+            *minutes_total.entry(todo_id.clone()).or_insert(0) += total;
+            let today = (span.ended - span.started.max(start_of_today))
+                .num_minutes()
+                .max(0);
+            if today > 0 {
+                *minutes_today.entry(todo_id.clone()).or_insert(0) += today;
+            }
+        }
         PlannerStatus {
             active: self.is_active(),
-            assignment: state.assignment,
-            open_todos: self.open_todos(),
+            assignment: state.assignment.clone(),
             recent_requests: state.requests.iter().rev().take(10).cloned().collect(),
             recent_proposals: state.proposals.iter().rev().take(10).cloned().collect(),
             recent_todo_changes: state.todo_changes.iter().rev().take(20).cloned().collect(),
+            recent_done: state
+                .done
+                .iter()
+                .rev()
+                .filter(|done| now - done.at < Duration::days(7))
+                .cloned()
+                .collect(),
+            minutes_today,
+            minutes_total,
+            task_notes: state
+                .task_notes
+                .iter()
+                .filter(|(todo_id, _)| open_todos.iter().any(|todo| &todo.id == *todo_id))
+                .map(|(todo_id, notes)| (todo_id.clone(), notes.clone()))
+                .collect(),
+            day_plan: state.day_plan.clone(),
+            open_todos,
         }
+    }
+
+    /// Save the user's notes and steps for an open to-do. They change nothing the rules
+    /// depend on, so no AI is asked.
+    pub fn put_task_notes(&self, todo_id: &str, mut notes: TaskNotes) -> Result<(), PlannerError> {
+        if !self.open_todos().iter().any(|todo| todo.id == todo_id) {
+            return Err(PlannerError::UnknownTodo(todo_id.to_string()));
+        }
+        notes.text = notes.text.chars().take(MAX_TASK_NOTES_CHARS).collect();
+        notes.steps.truncate(MAX_TASK_STEPS);
+        for step in &mut notes.steps {
+            step.text = step.text.trim().chars().take(MAX_TITLE_CHARS).collect();
+        }
+        notes.steps.retain(|step| !step.text.is_empty());
+        self.state.update(|planner_state| {
+            planner_state.task_notes.insert(todo_id.to_string(), notes);
+        })?;
+        Ok(())
+    }
+
+    /// Ask the AI for an order for the rest of the day (a preview; one AI call), keep it
+    /// and return it.
+    pub fn plan_day(&self, now: DateTime<Utc>) -> Result<DayPlan, PlannerError> {
+        let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
+        let open = self.open_todos();
+        if open.is_empty() {
+            return Err(PlannerError::NotActive);
+        }
+        let state = self.state.get();
+        let recently_done: Vec<DoneRecord> = state.done.iter().rev().take(10).cloned().collect();
+        let history = self.focus.state().history_text();
+        let now_local = local_now_text();
+        let advisor = (self.advisor)(&self.focus.store().get())?;
+        let config = self.config.get();
+        let mut plan = advisor.plan_day(&PickRequest {
+            instructions: config.instructions.day_plan_or_default(),
+            now_local: &now_local,
+            life_rules: &config.life_rules,
+            open: &open,
+            recently_done: &recently_done,
+            previous: state.assignment.as_ref(),
+            history: &history,
+        })?;
+        plan.items
+            .retain(|item| open.iter().any(|todo| todo.id == item.todo_id));
+        for item in &mut plan.items {
+            item.minutes = item.minutes.clamp(5, MAX_ASSIGNMENT_MINUTES);
+        }
+        plan.at = Some(now);
+        self.state
+            .update(|planner_state| planner_state.day_plan = Some(plan.clone()))?;
+        Ok(plan)
     }
 
     /// The user asks to add, edit or remove a to-do (from the Focus app or their AI
@@ -425,6 +531,11 @@ impl TaskPlanner {
             open: &open,
             recent_requests: &recent,
             history: &history,
+            notes: state
+                .assignment
+                .as_ref()
+                .and_then(|assignment| assignment.todo_id.as_ref())
+                .and_then(|todo_id| state.task_notes.get(todo_id)),
         })?;
         self.record_and_apply(now, request, reason, review, &open)
     }
@@ -602,8 +713,10 @@ impl TaskPlanner {
     }
 
     fn apply(&self, assignment: Assignment) -> Result<(), PlannerError> {
-        self.state
-            .update(|planner_state| planner_state.assignment = Some(assignment.clone()))?;
+        self.state.update(|planner_state| {
+            close_span(planner_state, assignment.at);
+            planner_state.assignment = Some(assignment.clone());
+        })?;
         self.start_focus(&assignment)
     }
 
@@ -619,14 +732,31 @@ impl TaskPlanner {
         Ok(())
     }
 
-    fn end(&self, _now: DateTime<Utc>) -> Result<(), PlannerError> {
-        self.state
-            .update(|planner_state| planner_state.assignment = None)?;
+    fn end(&self, now: DateTime<Utc>) -> Result<(), PlannerError> {
+        self.state.update(|planner_state| {
+            close_span(planner_state, now);
+            planner_state.assignment = None;
+        })?;
         self.focus
             .store()
             .update(|config| config.session_active = false)
             .map_err(|error| PlannerError::Io(std::io::Error::other(error.to_string())))?;
         Ok(())
+    }
+}
+
+/// Log how long the current assignment ran, as it ends at `ended`.
+fn close_span(planner_state: &mut PlannerState, ended: DateTime<Utc>) {
+    if let Some(current) = &planner_state.assignment {
+        if planner_state.assignment_log.len() >= ASSIGNMENT_LOG_CAPACITY {
+            planner_state.assignment_log.pop_front();
+        }
+        planner_state.assignment_log.push_back(AssignmentSpan {
+            todo_id: current.todo_id.clone(),
+            task: current.task.clone(),
+            started: current.at,
+            ended: ended.max(current.at),
+        });
     }
 }
 
