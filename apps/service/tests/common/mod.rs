@@ -73,7 +73,8 @@ pub fn wait_for<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> Opt
 }
 
 /// A stand-in for the Claude Messages API on `address` (e.g. `127.0.0.1:0`): windows whose title
-/// mentions cats are off task, everything else is on task, and every proposal is approved.
+/// mentions cats are off task, everything else is on task, and every request is approved
+/// unless it says "please reject".
 /// Returns its base URL and a call counter.
 pub fn fake_claude(address: &str) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind(address).unwrap();
@@ -152,6 +153,17 @@ fn answer(request: &Value) -> Value {
             .collect();
         json!({ "verdict": verdict(front), "reason": "test", "channel": "", "others": others })
     } else {
-        json!({ "approved": true, "reply": "ok" })
+        // A change review or a to-do review; a to-do review also fills in the to-do.
+        // "please reject" in the request makes it say no.
+        let approved = !text.contains("please reject");
+        json!({
+            "approved": approved,
+            "reply": if approved { "ok" } else { "no" },
+            "minutes": 30,
+            "todo": {
+                "title": "", "notes": "filled by the stand-in", "deadline": "",
+                "priority": 2, "estimate_minutes": 25
+            },
+        })
     }
 }

@@ -17,7 +17,9 @@
 //! | `assign`         | `{}` (planner active)                    | [`Status`] |
 //! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
 //! | `request_access` | `{ "target": GrantTarget, "duration": GrantDuration, "purpose": "…" }` | [`Status`], `last_access` set |
-//! | `propose_todo`   | `{ "todo": ProposalInput, "via": "…" }`  | [`Status`], `last_proposal` set |
+//! | `propose_todo`   | `{ "todo": ProposalInput, "via": "…" }` (= `todo_change` add) | [`Status`], `last_proposal` set |
+//! | `todo_change`    | `{ "change": TodoChange, "reason": "…", "via": "…" }` | [`Status`], `last_todo_change` set; approved = in force |
+//! | `todo_change_schedule` | `{ "id": "…" }` (a change the AI did not approve) | [`Status`], `last_todo_change` set |
 //! | `settings_get`   | `{}`                                     | [`crate::settings::SettingsSnapshot`] |
 //! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…}, "via": "…" }` | [`crate::settings::PutOutcome`] (what is in force now, what was scheduled) |
 //! | `settings_answer` | `{ "id": "…", "approve": true\|false }` (once the question is due) | [`crate::settings::AnswerOutcome`] |
@@ -49,6 +51,7 @@ use std::time::Duration;
 use std::time::Instant;
 use task_planner::{
     ChangeKind, ChangeRecord, PlannerStatus, ProposalInput, ProposalRecord, TaskPlanner,
+    TodoChange, TodoChangeRecord, TodoListWrite,
 };
 
 /// Re-exported so clients need not depend on the rule crates.
@@ -103,6 +106,9 @@ pub struct Status {
     /// Set only in the reply to `propose_todo`.
     #[serde(default)]
     pub last_proposal: Option<ProposalRecord>,
+    /// Set only in the reply to `todo_change`, `propose_todo` and `todo_change_schedule`.
+    #[serde(default)]
+    pub last_todo_change: Option<TodoChangeRecord>,
     /// Setup is over: settings edits are scheduled and need three confirmations.
     #[serde(default)]
     pub settings_protected: bool,
@@ -164,11 +170,36 @@ fn status(api: &AgentApi) -> Status {
         grant_log: grants.log.into_iter().rev().take(10).collect(),
         last_access: None,
         last_proposal: None,
+        last_todo_change: None,
         settings_protected: crate::settings::is_protected(&crate::data_dir()),
         settings_questions_due: crate::settings::questions_due(&crate::data_dir(), Utc::now()),
         ai_cost_today_usd: monitor.usage().map(|usage| usage.today_cost()),
         daily_budget_usd: config.daily_budget_usd,
     }
+}
+
+/// The settings edits that write `writes` to `planner.json`.
+fn todo_list_edits(writes: &[TodoListWrite]) -> Vec<crate::setting_edits::Edit> {
+    use crate::setting_edits::Edit;
+    writes
+        .iter()
+        .map(|write| match write {
+            TodoListWrite::Put(todo) => Edit::PutListItem {
+                path: vec!["todos".into()],
+                id: todo.id.clone(),
+                item: Some(serde_json::to_value(todo).unwrap_or(Value::Null)),
+            },
+            TodoListWrite::Remove(todo_id) => Edit::PutListItem {
+                path: vec!["todos".into()],
+                id: todo_id.clone(),
+                item: None,
+            },
+            TodoListWrite::Dismiss(todo_id) => Edit::AddItems {
+                path: vec!["dismissed".into()],
+                items: vec![Value::String(todo_id.clone())],
+            },
+        })
+        .collect()
 }
 
 /// Handle one request.
@@ -177,6 +208,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     let mut last_decision = None;
     let mut last_access = None;
     let mut last_proposal = None;
+    let mut last_todo_change = None;
     let data_directory = crate::data_dir();
     match method {
         "settings_get" => {
@@ -284,15 +316,80 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .map_err(|error| error.to_string())?;
             last_access = Some(entry);
         }
-        "propose_todo" => {
+        "propose_todo" | "todo_change" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
-            let input: ProposalInput = serde_json::from_value(params["todo"].clone())
-                .map_err(|error| format!("params.todo: {error}"))?;
-            let via = params["via"].as_str().unwrap_or("focus app");
+            let change: TodoChange = if method == "propose_todo" {
+                let input: ProposalInput = serde_json::from_value(params["todo"].clone())
+                    .map_err(|error| format!("params.todo: {error}"))?;
+                TodoChange::Add { todo: input }
+            } else {
+                serde_json::from_value(params["change"].clone())
+                    .map_err(|error| format!("params.change: {error}"))?
+            };
+            let via = params["via"].as_str().unwrap_or("to-do tab");
+            let reason = params["reason"].as_str().unwrap_or_default();
             let record = planner
-                .propose(Utc::now(), input, via)
+                .review_todo_change(Utc::now(), change, reason, via)
                 .map_err(|error| error.to_string())?;
-            last_proposal = Some(record);
+            if record.approved {
+                // Approved by the AI: in force at once, protected or not.
+                crate::settings::apply_now(
+                    &data_directory,
+                    "planner",
+                    &todo_list_edits(&planner.writes_for(&record)),
+                )?;
+                planner
+                    .config_store()
+                    .reload()
+                    .map_err(|error| error.to_string())?;
+            }
+            last_proposal = Some(ProposalRecord {
+                at: record.at,
+                item: record
+                    .after
+                    .clone()
+                    .or_else(|| record.before.clone())
+                    .unwrap_or_else(|| TodoItem::new("")),
+                via: record.via.clone(),
+                approved: record.approved,
+                reply: record.reply.clone(),
+            });
+            last_todo_change = Some(record);
+        }
+        "todo_change_schedule" => {
+            // The user's way around an AI that said no (or could not answer): the change
+            // takes effect after three confirmations, two hours apart.
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            let id = params["id"].as_str().ok_or("params.id required")?;
+            let record = planner
+                .todo_change(id)
+                .ok_or_else(|| format!("no to-do change '{id}'"))?;
+            if record.approved {
+                return Err("the AI approved this change; it is already in force".into());
+            }
+            if record.scheduled_update.is_some() {
+                return Err("this change is already scheduled".into());
+            }
+            let note = format!(
+                "{} — reason: {} — AI: {}",
+                task_planner::change_summary(&record.change, record.before.as_ref()),
+                record.reason,
+                record.reply
+            );
+            let scheduled = crate::settings::schedule(
+                &data_directory,
+                Utc::now(),
+                "planner",
+                todo_list_edits(&planner.writes_for(&record)),
+                &record.via,
+                crate::settings::TODO_QUESTION_INTERVAL_SECONDS,
+                &note,
+            )?;
+            planner
+                .mark_scheduled(id, &scheduled.id)
+                .map_err(|error| error.to_string())?;
+            tracing::info!("to-do change {id} scheduled as update {}", scheduled.id);
+            last_todo_change = planner.todo_change(id);
         }
         other => return Err(format!("unknown method '{other}'")),
     }
@@ -300,6 +397,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     status.last_decision = last_decision;
     status.last_access = last_access;
     status.last_proposal = last_proposal;
+    status.last_todo_change = last_todo_change;
     serde_json::to_value(status).map_err(|error| error.to_string())
 }
 
@@ -546,15 +644,18 @@ mod tests {
             dispatch(&api, "status", &json!({})).unwrap()["session_active"],
             false
         );
-        // A proposal reaches the planner (and fails here at the AI call);
-        // malformed params are refused before that.
-        let error = dispatch(
+        // A proposal reaches the planner; the AI cannot review it here, so it is logged
+        // (the user may schedule it) and the list does not change. Malformed params are
+        // refused before that.
+        let status = dispatch(
             &api,
             "propose_todo",
             &json!({ "todo": { "title": "장보기" }, "via": "claude desktop" }),
         )
-        .unwrap_err();
-        assert!(error.starts_with("AI:"), "{error}");
+        .unwrap();
+        assert_eq!(status["last_todo_change"]["ai_failed"], true);
+        assert_eq!(status["last_proposal"]["approved"], false);
+        assert_eq!(status["planner"]["open_todos"].as_array().unwrap().len(), 1);
         assert!(dispatch(&api, "propose_todo", &json!({ "todo": 5 }))
             .unwrap_err()
             .starts_with("params.todo"));

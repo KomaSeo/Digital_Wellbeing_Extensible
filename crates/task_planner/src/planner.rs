@@ -8,14 +8,17 @@
 //! calls [`TaskPlanner::reassign_if_time_is_up`] and the AI picks again, unless the user got
 //! "only notify me" approved for that assignment.
 
-use crate::advisor::{AdvisorProvider, PickRequest, ProposalRequest, Review, ReviewRequest};
+use crate::advisor::{
+    AdvisorProvider, PickRequest, Review, ReviewRequest, ReviewedTodo, TodoChangeRequest,
+};
 use crate::model::{
     Assignment, AssignmentSource, ChangeKind, ChangeRecord, DoneRecord, PlannerConfig,
-    PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TodoItem, WhenTimeIsUp,
+    PlannerState, PlannerStatus, ProposalInput, TodoChange, TodoChangeRecord, TodoItem,
+    TodoListWrite, WhenTimeIsUp,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
-use chrono::{DateTime, Duration, Local, Utc};
+use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use thiserror::Error;
@@ -96,6 +99,11 @@ impl TaskPlanner {
         &self.config
     }
 
+    #[cfg(test)]
+    pub(crate) fn state_store_for_tests(&self) -> &JsonStore<PlannerState> {
+        &self.state
+    }
+
     /// The admin's to-dos plus approved proposals the admin has not removed,
     /// minus finished ones.
     fn open_todos(&self) -> Vec<TodoItem> {
@@ -128,98 +136,184 @@ impl TaskPlanner {
             open_todos: self.open_todos(),
             recent_requests: state.requests.iter().rev().take(10).cloned().collect(),
             recent_proposals: state.proposals.iter().rev().take(10).cloned().collect(),
+            recent_todo_changes: state.todo_changes.iter().rev().take(20).cloned().collect(),
         }
     }
 
-    /// The user proposes a to-do (from the Focus app or their AI assistant,
-    /// named by `via`). The AI reviews it against the life rules; an approved
-    /// one joins the open list. Works whether or not the planner is on.
-    pub fn propose(
+    /// The user asks to add, edit or remove a to-do (from the Focus app or their AI
+    /// assistant, named by `via`). The AI reviews it against the life rules and fills in the
+    /// fields of a new to-do the user left empty. The decision is logged and returned; the
+    /// caller applies an approved one ([`Self::writes_for`]) to `planner.json`. When the AI
+    /// cannot answer, the record says so (`ai_failed`) and nothing is approved. Works
+    /// whether or not the planner is on.
+    pub fn review_todo_change(
         &self,
         now: DateTime<Utc>,
-        input: ProposalInput,
+        change: TodoChange,
+        reason: &str,
         via: &str,
-    ) -> Result<ProposalRecord, PlannerError> {
+    ) -> Result<TodoChangeRecord, PlannerError> {
         let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
-        let title = input.title.split_whitespace().collect::<Vec<_>>().join(" ");
-        let notes = input.notes.trim().to_string();
-        if title.chars().count() < 2
-            || title.chars().count() > MAX_TITLE_CHARS
-            || notes.chars().count() > MAX_NOTES_CHARS
-        {
-            return Err(PlannerError::BadProposal);
-        }
+        let reason = reason
+            .trim()
+            .chars()
+            .take(MAX_NOTES_CHARS)
+            .collect::<String>();
         let open = self.open_todos();
-        if let Some(duplicate) = open
-            .iter()
-            .find(|todo| todo.title.trim().eq_ignore_ascii_case(&title))
-        {
-            return Err(PlannerError::Duplicate(duplicate.title.clone()));
-        }
         let state = self.state.get();
         let today = state
-            .proposals
+            .todo_changes
             .iter()
-            .filter(|proposal| now - proposal.at < Duration::days(1))
+            .filter(|record| now - record.at < Duration::days(1))
             .count();
-        if today >= PROPOSALS_PER_DAY
-            || open.iter().filter(|todo| todo.proposed).count() >= MAX_OPEN_PROPOSED
-        {
+        if today >= PROPOSALS_PER_DAY {
             return Err(PlannerError::TooManyProposals);
         }
-
-        let item = TodoItem {
-            id: format!("p{}", now.timestamp_millis()),
-            title,
-            notes,
-            deadline: input.deadline,
-            priority: input.priority.unwrap_or(3).clamp(1, 5),
-            estimate_minutes: input.estimate_minutes.map(|minutes| minutes.min(6000)),
-            proposed: true,
+        let change = clean_change(change)?;
+        let target = match &change {
+            TodoChange::Add { todo } => {
+                if let Some(duplicate) = open
+                    .iter()
+                    .find(|existing| existing.title.trim().eq_ignore_ascii_case(&todo.title))
+                {
+                    return Err(PlannerError::Duplicate(duplicate.title.clone()));
+                }
+                if open.iter().filter(|existing| existing.proposed).count() >= MAX_OPEN_PROPOSED {
+                    return Err(PlannerError::TooManyProposals);
+                }
+                None
+            }
+            TodoChange::Edit { todo_id, .. } | TodoChange::Remove { todo_id } => {
+                if reason.chars().count() < MIN_REASON_CHARS {
+                    return Err(PlannerError::ReasonTooShort);
+                }
+                Some(
+                    open.iter()
+                        .find(|existing| &existing.id == todo_id)
+                        .cloned()
+                        .ok_or_else(|| PlannerError::UnknownTodo(todo_id.clone()))?,
+                )
+            }
         };
-        let recent: Vec<ProposalRecord> = state.proposals.iter().rev().cloned().collect();
+
+        let recent: Vec<TodoChangeRecord> = state.todo_changes.iter().rev().cloned().collect();
         let history = self.focus.state().history_text();
         let now_local = local_now_text();
         let config = self.config.get();
-        let advisor = (self.advisor)(&self.focus.store().get())?;
-        let review = advisor.review_proposal(&ProposalRequest {
-            instructions: config.instructions.proposal_review_or_default(),
-            life_rules: &config.life_rules,
-            now_local: &now_local,
-            item: &item,
-            open: &open,
-            recent_proposals: &recent,
-            history: &history,
-        })?;
-
-        let record = ProposalRecord {
+        let review = (self.advisor)(&self.focus.store().get()).and_then(|advisor| {
+            advisor.review_todo_change(&TodoChangeRequest {
+                instructions: config.instructions.proposal_review_or_default(),
+                now_local: &now_local,
+                life_rules: &config.life_rules,
+                change: &change,
+                target: target.as_ref(),
+                reason: &reason,
+                open: &open,
+                recent_changes: &recent,
+                history: &history,
+            })
+        });
+        let (approved, reply, ai_failed, filled) = match review {
+            Ok(review) => (review.approved, review.reply, false, Some(review.todo)),
+            Err(error) => (
+                false,
+                format!("The AI could not review this: {error}"),
+                true,
+                None,
+            ),
+        };
+        let after = match &change {
+            TodoChange::Add { todo } => Some(completed_todo(now, todo, filled.as_ref())),
+            TodoChange::Edit { todo, .. } => target.as_ref().map(|before| edited(before, todo)),
+            TodoChange::Remove { .. } => None,
+        };
+        let record = TodoChangeRecord {
+            id: format!("c{}", now.timestamp_millis()),
             at: now,
-            item: item.clone(),
+            change,
+            reason,
             via: via.trim().chars().take(40).collect(),
-            approved: review.approved,
-            reply: review.reply,
+            approved,
+            reply,
+            ai_failed,
+            before: target,
+            after,
+            scheduled_update: None,
         };
         self.state.update(|planner_state| {
-            if planner_state.proposals.len() >= REQUEST_LOG_CAPACITY {
-                planner_state.proposals.pop_front();
+            if planner_state.todo_changes.len() >= REQUEST_LOG_CAPACITY {
+                planner_state.todo_changes.pop_front();
             }
-            planner_state.proposals.push_back(record.clone());
-            if record.approved {
-                planner_state.proposed.push(item.clone());
-            }
+            planner_state.todo_changes.push_back(record.clone());
         })?;
         info!(
-            "proposal \"{}\" via {} ({}): {}",
-            record.item.title,
+            "to-do change {} via {} ({}): {}",
+            crate::advisor::change_summary(&record.change, record.before.as_ref()),
             record.via,
             if record.approved {
                 "approved"
+            } else if record.ai_failed {
+                "not reviewed"
             } else {
                 "rejected"
             },
             record.reply
         );
         Ok(record)
+    }
+
+    /// A logged to-do change by id.
+    pub fn todo_change(&self, id: &str) -> Option<TodoChangeRecord> {
+        self.state
+            .get()
+            .todo_changes
+            .into_iter()
+            .find(|record| record.id == id)
+    }
+
+    /// The writes to the to-do list that apply `record`.
+    pub fn writes_for(&self, record: &TodoChangeRecord) -> Vec<TodoListWrite> {
+        let in_settings = |todo_id: &str| {
+            self.config
+                .get()
+                .todos
+                .iter()
+                .any(|todo| todo.id == todo_id)
+        };
+        match &record.change {
+            TodoChange::Add { .. } => record
+                .after
+                .clone()
+                .map(TodoListWrite::Put)
+                .into_iter()
+                .collect(),
+            TodoChange::Edit { todo_id, .. } => {
+                let mut writes = Vec::new();
+                if !in_settings(todo_id) {
+                    writes.push(TodoListWrite::Dismiss(todo_id.clone()));
+                }
+                writes.extend(record.after.clone().map(TodoListWrite::Put));
+                writes
+            }
+            TodoChange::Remove { todo_id } if in_settings(todo_id) => {
+                vec![TodoListWrite::Remove(todo_id.clone())]
+            }
+            TodoChange::Remove { todo_id } => vec![TodoListWrite::Dismiss(todo_id.clone())],
+        }
+    }
+
+    /// Note that the user scheduled a change the AI did not approve.
+    pub fn mark_scheduled(&self, record_id: &str, update_id: &str) -> Result<(), PlannerError> {
+        self.state.update(|planner_state| {
+            if let Some(record) = planner_state
+                .todo_changes
+                .iter_mut()
+                .find(|record| record.id == record_id)
+            {
+                record.scheduled_update = Some(update_id.to_string());
+            }
+        })?;
+        Ok(())
     }
 
     /// Start (or resume) the session with an assigned task.
@@ -539,6 +633,91 @@ impl TaskPlanner {
 /// `now` plus `minutes`, kept within the bounds an assignment may run.
 fn end_after(now: DateTime<Utc>, minutes: u32) -> DateTime<Utc> {
     now + Duration::minutes(minutes.clamp(MIN_ASSIGNMENT_MINUTES, MAX_ASSIGNMENT_MINUTES) as i64)
+}
+
+/// Trim the texts of a change and refuse an addition without a usable title.
+fn clean_change(change: TodoChange) -> Result<TodoChange, PlannerError> {
+    let clean = |mut todo: ProposalInput| {
+        todo.title = todo.title.split_whitespace().collect::<Vec<_>>().join(" ");
+        todo.notes = todo.notes.trim().to_string();
+        todo
+    };
+    let fits = |todo: &ProposalInput| {
+        todo.title.chars().count() <= MAX_TITLE_CHARS
+            && todo.notes.chars().count() <= MAX_NOTES_CHARS
+    };
+    let change = match change {
+        TodoChange::Add { todo } => TodoChange::Add { todo: clean(todo) },
+        TodoChange::Edit { todo_id, todo } => TodoChange::Edit {
+            todo_id,
+            todo: clean(todo),
+        },
+        remove @ TodoChange::Remove { .. } => remove,
+    };
+    match &change {
+        TodoChange::Add { todo } if todo.title.chars().count() < 2 || !fits(todo) => {
+            Err(PlannerError::BadProposal)
+        }
+        TodoChange::Edit { todo, .. } if !fits(todo) => Err(PlannerError::BadProposal),
+        _ => Ok(change),
+    }
+}
+
+/// A new to-do: what the user filled in, completed by the AI where the user left a field
+/// empty (and only there).
+fn completed_todo(
+    now: DateTime<Utc>,
+    draft: &ProposalInput,
+    filled: Option<&ReviewedTodo>,
+) -> TodoItem {
+    let filled = filled.cloned().unwrap_or_default();
+    let deadline = draft
+        .deadline
+        .or_else(|| filled.deadline.trim().parse::<NaiveDate>().ok());
+    let notes = if draft.notes.is_empty() {
+        filled.notes.trim().chars().take(MAX_NOTES_CHARS).collect()
+    } else {
+        draft.notes.clone()
+    };
+    let priority = draft
+        .priority
+        .or((filled.priority > 0).then_some(filled.priority))
+        .unwrap_or(3)
+        .clamp(1, 5);
+    let estimate_minutes = draft
+        .estimate_minutes
+        .or((filled.estimate_minutes > 0).then_some(filled.estimate_minutes))
+        .map(|minutes| minutes.min(6000));
+    TodoItem {
+        id: format!("p{}", now.timestamp_millis()),
+        title: draft.title.clone(),
+        notes,
+        deadline,
+        priority,
+        estimate_minutes,
+        proposed: true,
+    }
+}
+
+/// `before` with the fields the user set in `draft`.
+fn edited(before: &TodoItem, draft: &ProposalInput) -> TodoItem {
+    let mut after = before.clone();
+    if !draft.title.is_empty() {
+        after.title = draft.title.clone();
+    }
+    if !draft.notes.is_empty() {
+        after.notes = draft.notes.clone();
+    }
+    if draft.deadline.is_some() {
+        after.deadline = draft.deadline;
+    }
+    if let Some(priority) = draft.priority {
+        after.priority = priority.clamp(1, 5);
+    }
+    if let Some(minutes) = draft.estimate_minutes {
+        after.estimate_minutes = (minutes > 0).then_some(minutes.min(6000));
+    }
+    after
 }
 
 fn local_now_text() -> String {

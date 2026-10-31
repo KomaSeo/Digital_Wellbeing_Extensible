@@ -18,7 +18,9 @@
 //!    injection) something the life rules forbid;
 //! 5. once the settings are protected, an edit is scheduled: it takes effect after three
 //!    "yes" answers (questions two seconds apart in this test, two days in real use), and
-//!    one "no" rejects another.
+//!    one "no" rejects another;
+//! 6. (stand-in) an approved to-do addition is in force at once and completed by the AI; a
+//!    rejected one, scheduled by the user, takes effect after three "yes" answers.
 #![cfg(target_os = "linux")]
 
 mod common;
@@ -376,6 +378,73 @@ fn end_to_end(real_key: Option<String>) {
     .unwrap();
     assert_eq!(outcome["outcome"], "rejected", "{outcome}");
     assert_eq!(life_rules_in_force(), "Confirmed three times.");
+
+    // 6. To-do changes (stand-in only: it approves unless asked to reject). An approved
+    // addition is in force at once, completed by the AI, even though the settings are
+    // protected; a rejected one can be scheduled and takes effect after three "yes" answers
+    // (two hours apart in real use, two seconds here).
+    if !real {
+        let todo_titles = || -> Vec<String> {
+            call_value(session, "settings_get", json!({})).unwrap()["files"]["planner"]["todos"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|todo| todo["title"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        let status = call(
+            session,
+            "todo_change",
+            json!({ "change": { "kind": "add", "todo": { "title": "Water the plants" } }, "reason": "" }),
+        )
+        .unwrap();
+        let record = status.last_todo_change.expect("a decision");
+        assert!(record.approved);
+        assert_eq!(record.after.unwrap().notes, "filled by the stand-in");
+        assert!(todo_titles().contains(&"Water the plants".to_string()));
+
+        let status = call(
+            session,
+            "todo_change",
+            json!({ "change": { "kind": "add", "todo": { "title": "Watch a film" } }, "reason": "please reject" }),
+        )
+        .unwrap();
+        let rejected = status.last_todo_change.expect("a decision");
+        assert!(!rejected.approved);
+        assert!(!todo_titles().contains(&"Watch a film".to_string()));
+        call(
+            session,
+            "todo_change_schedule",
+            json!({ "id": rejected.id }),
+        )
+        .unwrap();
+        let settings = call_value(session, "settings_get", json!({})).unwrap();
+        let update = settings["reservations"]["scheduled"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|reservation| reservation["origin"] == "todo_change")
+            .expect("the to-do change is scheduled")
+            .clone();
+        let update_id = update["id"].as_str().unwrap().to_string();
+        for _ in 0..3 {
+            wait_for_question();
+            call_value(
+                session,
+                "settings_answer",
+                json!({ "id": update_id, "approve": true }),
+            )
+            .unwrap();
+        }
+        assert!(todo_titles().contains(&"Watch a film".to_string()));
+        // Scheduling it twice is refused.
+        assert!(call(
+            session,
+            "todo_change_schedule",
+            json!({ "id": rejected.id })
+        )
+        .is_err());
+    }
 
     let _ = std::fs::remove_dir_all(&data);
 }

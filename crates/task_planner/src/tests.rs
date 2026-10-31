@@ -10,6 +10,8 @@ use std::sync::Arc;
 /// per flag, count calls.
 struct FakeAdvisor {
     approve: AtomicBool,
+    /// Every to-do change review fails (no key, no network).
+    fail: AtomicBool,
     bogus_pick: AtomicBool,
     picks: AtomicUsize,
     reviews: AtomicUsize,
@@ -37,14 +39,24 @@ impl Advisor for FakeAdvisor {
         })
     }
 
-    fn review_proposal(&self, request: &ProposalRequest) -> Result<Review, JudgeError> {
+    fn review_todo_change(&self, request: &TodoChangeRequest) -> Result<TodoReview, JudgeError> {
         self.reviews.fetch_add(1, Ordering::SeqCst);
         *self.saw_rules.lock() = request.life_rules.to_string();
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(JudgeError::NoApiKey);
+        }
         let approved = self.approve.load(Ordering::SeqCst);
-        Ok(Review {
+        Ok(TodoReview {
             approved,
             reply: if approved { "ok" } else { "no" }.into(),
-            minutes: 30,
+            // What the AI fills in; the user's own fields must win.
+            todo: ReviewedTodo {
+                title: "ignored".into(),
+                notes: "filled by the AI".into(),
+                deadline: "2030-01-01".into(),
+                priority: 2,
+                estimate_minutes: 30,
+            },
         })
     }
 
@@ -83,6 +95,7 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
     ));
     let advisor = Arc::new(FakeAdvisor {
         approve: AtomicBool::new(true),
+        fail: AtomicBool::new(false),
         bogus_pick: AtomicBool::new(false),
         picks: AtomicUsize::new(0),
         reviews: AtomicUsize::new(0),
@@ -304,8 +317,38 @@ fn proposal(title: &str) -> ProposalInput {
     }
 }
 
+/// What the agent does with an approved change: write it to `planner.json`.
+fn apply_writes(fixture: &Harness, writes: Vec<TodoListWrite>) {
+    fixture
+        .planner
+        .config_store()
+        .update(|config| {
+            for write in &writes {
+                match write {
+                    TodoListWrite::Put(todo) => {
+                        config.todos.retain(|existing| existing.id != todo.id);
+                        config.todos.push(todo.clone());
+                    }
+                    TodoListWrite::Remove(todo_id) => {
+                        config.todos.retain(|existing| &existing.id != todo_id)
+                    }
+                    TodoListWrite::Dismiss(todo_id) => {
+                        config.dismissed.insert(todo_id.clone());
+                    }
+                }
+            }
+        })
+        .unwrap();
+}
+
+fn add(title: &str) -> TodoChange {
+    TodoChange::Add {
+        todo: proposal(title),
+    }
+}
+
 #[test]
-fn an_approved_proposal_joins_the_list() {
+fn an_approved_addition_is_completed_by_the_ai_and_joins_the_list() {
     let fixture = harness(true, &[]);
     assert!(!fixture.planner.is_active());
     fixture
@@ -315,82 +358,187 @@ fn an_approved_proposal_joins_the_list() {
         .unwrap();
     let record = fixture
         .planner
-        .propose(Utc::now(), proposal("  Buy   groceries "), "claude desktop")
+        .review_todo_change(Utc::now(), add("  Buy   groceries "), "", "claude desktop")
         .unwrap();
     assert!(record.approved);
     assert_eq!(record.via, "claude desktop");
     assert_eq!(*fixture.advisor.saw_rules.lock(), "No games on weekdays.");
+    let after = record.after.clone().unwrap();
+    assert_eq!(after.title, "Buy groceries");
+    assert_eq!(after.priority, 5, "the user's priority, clamped to 1..=5");
+    assert_eq!(after.notes, "filled by the AI");
+    assert_eq!(after.deadline.unwrap().to_string(), "2030-01-01");
+    assert_eq!(after.estimate_minutes, Some(30));
+    assert!(after.proposed);
+
+    // The agent applies it to planner.json.
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
     let status = fixture.planner.status();
     assert!(status.active);
-    let item = &status.open_todos[0];
-    assert_eq!(item.title, "Buy groceries");
-    assert!(item.proposed);
-    assert_eq!(item.priority, 5, "priority is clamped to 1..=5");
-    assert_eq!(status.recent_proposals.len(), 1);
+    assert_eq!(status.open_todos[0].title, "Buy groceries");
+    assert_eq!(status.recent_todo_changes.len(), 1);
+
+    // What the user filled in is kept.
+    let mine = TodoChange::Add {
+        todo: ProposalInput {
+            title: "Call the bank".into(),
+            notes: "about the card".into(),
+            ..Default::default()
+        },
+    };
+    let record = fixture
+        .planner
+        .review_todo_change(Utc::now(), mine, "", "to-do tab")
+        .unwrap();
+    assert_eq!(record.after.unwrap().notes, "about the card");
 }
 
 #[test]
-fn a_rejected_proposal_is_logged_only() {
+fn a_rejected_or_unreviewed_change_is_logged_only() {
     let fixture = harness(true, &["a"]);
     fixture.advisor.approve.store(false, Ordering::SeqCst);
     let record = fixture
         .planner
-        .propose(Utc::now(), proposal("Play games"), "claude desktop")
+        .review_todo_change(Utc::now(), add("Play games"), "", "claude desktop")
         .unwrap();
-    assert!(!record.approved);
+    assert!(!record.approved && !record.ai_failed);
+    fixture.advisor.fail.store(true, Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .review_todo_change(Utc::now(), add("Read a novel"), "", "to-do tab")
+        .unwrap();
+    assert!(!record.approved && record.ai_failed);
+    assert!(record.reply.contains("could not review"));
+    // Without the AI the user's own fields still make a to-do the user may schedule.
+    assert_eq!(record.after.unwrap().title, "Read a novel");
     let status = fixture.planner.status();
     assert_eq!(status.open_todos.len(), 1);
-    assert_eq!(status.recent_proposals.len(), 1);
+    assert_eq!(status.recent_todo_changes.len(), 2);
+    assert!(fixture.planner.todo_change(&record.id).is_some());
 }
 
 #[test]
-fn bad_and_duplicate_proposals_are_refused_without_asking_the_ai() {
+fn bad_duplicate_and_reasonless_changes_are_refused_without_asking_the_ai() {
     let fixture = harness(true, &["a"]);
-    assert!(matches!(
-        fixture.planner.propose(Utc::now(), proposal(" "), "x"),
-        Err(PlannerError::BadProposal)
-    ));
-    assert!(matches!(
+    let refuse = |change: TodoChange, reason: &str| {
         fixture
             .planner
-            .propose(Utc::now(), proposal("TITLE A"), "x"),
-        Err(PlannerError::Duplicate(_))
+            .review_todo_change(Utc::now(), change, reason, "x")
+            .unwrap_err()
+    };
+    assert!(matches!(refuse(add(" "), ""), PlannerError::BadProposal));
+    assert!(matches!(
+        refuse(add("TITLE A"), ""),
+        PlannerError::Duplicate(_)
+    ));
+    let remove_a = TodoChange::Remove {
+        todo_id: "a".into(),
+    };
+    assert!(matches!(
+        refuse(remove_a, "no"),
+        PlannerError::ReasonTooShort
+    ));
+    let remove_unknown = TodoChange::Remove {
+        todo_id: "zzz".into(),
+    };
+    assert!(matches!(
+        refuse(remove_unknown, "finished elsewhere"),
+        PlannerError::UnknownTodo(_)
     ));
     assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn the_admin_can_remove_a_proposed_todo() {
-    let fixture = harness(true, &[]);
+fn edits_and_removals_write_the_list_or_hide_an_older_proposed_todo() {
+    let fixture = harness(true, &["a", "b"]);
+    let edit = TodoChange::Edit {
+        todo_id: "a".into(),
+        todo: ProposalInput {
+            priority: Some(1),
+            ..Default::default()
+        },
+    };
     let record = fixture
         .planner
-        .propose(Utc::now(), proposal("Buy groceries"), "focus app")
+        .review_todo_change(
+            Utc::now(),
+            edit,
+            "the advisor moved it to next month",
+            "to-do tab",
+        )
         .unwrap();
+    assert_eq!(record.before.as_ref().unwrap().priority, 3);
+    let after = record.after.clone().unwrap();
+    assert_eq!((after.title.as_str(), after.priority), ("title a", 1));
+    assert_eq!(
+        fixture.planner.writes_for(&record),
+        [TodoListWrite::Put(after)]
+    );
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+
+    let remove = TodoChange::Remove {
+        todo_id: "b".into(),
+    };
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            remove,
+            "done at the office already",
+            "to-do tab",
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.planner.writes_for(&record),
+        [TodoListWrite::Remove("b".into())]
+    );
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    let open: Vec<_> = fixture
+        .planner
+        .status()
+        .open_todos
+        .into_iter()
+        .map(|todo| (todo.id, todo.priority))
+        .collect();
+    assert_eq!(open, [("a".to_string(), 1)]);
+
+    // A to-do an older version kept outside planner.json is hidden instead.
+    let older = todo("old");
     fixture
         .planner
-        .config_store()
-        .update(|config| {
-            config.dismissed.insert(record.item.id.clone());
-        })
+        .state_store_for_tests()
+        .update(|state| state.proposed.push(older.clone()))
         .unwrap();
-    assert!(fixture.planner.status().open_todos.is_empty());
-    assert!(!fixture.planner.is_active());
+    let remove_old = TodoChange::Remove {
+        todo_id: "old".into(),
+    };
+    let record = fixture
+        .planner
+        .review_todo_change(Utc::now(), remove_old, "not needed any more", "to-do tab")
+        .unwrap();
+    assert_eq!(
+        fixture.planner.writes_for(&record),
+        [TodoListWrite::Dismiss("old".into())]
+    );
 }
 
 #[test]
-fn the_proposal_question_carries_the_rules_and_the_item() {
-    let item = TodoItem::new("Watch a movie");
-    let text = crate::advisor::proposal_text(&ProposalRequest {
+fn the_todo_change_question_carries_the_rules_and_the_item() {
+    let change = add("Watch a movie");
+    let text = crate::advisor::todo_change_text(&TodoChangeRequest {
         instructions: crate::advisor::PROPOSAL_PROMPT,
         now_local: "2026-10-30 Friday 14:05",
         life_rules: "No movies before 18:00.",
-        item: &item,
+        change: &change,
+        target: None,
+        reason: "",
         open: &[],
-        recent_proposals: &[],
+        recent_changes: &[],
         history: "",
     });
     assert!(text.contains("The owner's life rules (binding):\nNo movies before 18:00."));
     assert!(text.contains("\"title\": \"Watch a movie\""));
+    assert!(text.contains("empty fields are for you to fill in"));
 }
 
 #[test]

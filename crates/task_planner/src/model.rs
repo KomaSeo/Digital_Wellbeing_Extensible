@@ -191,8 +191,62 @@ pub struct ChangeRecord {
     pub reply: String,
 }
 
+/// Responsibility: Say what the user asks to change in the to-do list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TodoChange {
+    /// Put a new to-do on the list. Fields left empty are filled in by the AI.
+    Add { todo: ProposalInput },
+    /// Change an open to-do. Fields left empty stay as they are.
+    Edit {
+        todo_id: String,
+        todo: ProposalInput,
+    },
+    /// Take an open to-do off the list.
+    Remove { todo_id: String },
+}
+
+/// Responsibility: Record one to-do change, the AI's decision, and what the list holds if
+/// it is applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoChangeRecord {
+    pub id: String,
+    pub at: DateTime<Utc>,
+    pub change: TodoChange,
+    pub reason: String,
+    /// Who sent it: "to-do tab", "claude desktop", ...
+    pub via: String,
+    pub approved: bool,
+    /// The AI's answer, or why it could not answer.
+    pub reply: String,
+    /// The AI could not review it (no key, no network); the user may schedule it.
+    #[serde(default)]
+    pub ai_failed: bool,
+    /// The to-do as it was (edit, remove).
+    #[serde(default)]
+    pub before: Option<TodoItem>,
+    /// The to-do after the change (add, edit), with the fields the AI filled in.
+    #[serde(default)]
+    pub after: Option<TodoItem>,
+    /// Set when the user scheduled a change the AI did not approve: the settings update
+    /// that applies it after three confirmations, two hours apart.
+    #[serde(default)]
+    pub scheduled_update: Option<String>,
+}
+
+/// Responsibility: Name one write to the to-do list that applies a [`TodoChangeRecord`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TodoListWrite {
+    /// Put this to-do in `planner.json` (replacing the one with its id).
+    Put(TodoItem),
+    /// Remove the to-do with this id from `planner.json`.
+    Remove(String),
+    /// Hide a to-do an older version kept outside `planner.json` (a proposed one).
+    Dismiss(String),
+}
+
 /// Responsibility: Carry a to-do the user proposes, as it arrives over the agent API.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProposalInput {
     pub title: String,
@@ -237,8 +291,11 @@ pub struct PlannerState {
     /// Proposed to-dos the AI approved; they join the admin's list (see
     /// `TaskPlanner::open_todos`).
     pub proposed: Vec<TodoItem>,
-    /// Every proposal and the AI's decision, newest last, capped.
+    /// Every proposal and the AI's decision, newest last, capped (older versions).
     pub proposals: VecDeque<ProposalRecord>,
+    /// Every to-do change and the AI's decision, newest last, capped.
+    #[serde(default)]
+    pub todo_changes: VecDeque<TodoChangeRecord>,
 }
 
 impl PlannerState {
@@ -261,4 +318,7 @@ pub struct PlannerStatus {
     /// Newest first.
     #[serde(default)]
     pub recent_proposals: Vec<ProposalRecord>,
+    /// Newest first.
+    #[serde(default)]
+    pub recent_todo_changes: Vec<TodoChangeRecord>,
 }
