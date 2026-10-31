@@ -124,7 +124,7 @@ pub struct MonitorState {
     /// After a failed call (no key, no network, budget spent): no call before this,
     /// so a failure is not retried at every sample.
     retry_at: Option<DateTime<Utc>>,
-    rng: u64,
+    random_state: u64,
     pub last_error: Option<String>,
 }
 
@@ -144,10 +144,10 @@ impl MonitorState {
         };
     }
 
-    pub fn record(&mut self, now: DateTime<Utc>, fg: &Foreground) {
-        let title = truncate(&fg.title, MAX_TITLE_CHARS);
+    pub fn record(&mut self, now: DateTime<Utc>, foreground: &Foreground) {
+        let title = truncate(&foreground.title, MAX_TITLE_CHARS);
         if let Some(last) = self.history.back_mut() {
-            if last.process_name == fg.process_name && last.title == title {
+            if last.process_name == foreground.process_name && last.title == title {
                 last.last_seen = now;
                 return;
             }
@@ -156,7 +156,7 @@ impl MonitorState {
             self.history.pop_front();
         }
         self.history.push_back(ActivityEntry {
-            process_name: fg.process_name.clone(),
+            process_name: foreground.process_name.clone(),
             title,
             since: now,
             last_seen: now,
@@ -166,15 +166,15 @@ impl MonitorState {
     pub fn history_text(&self) -> String {
         self.history
             .iter()
-            .map(|e| {
-                let secs = (e.last_seen - e.since).num_seconds().max(0);
+            .map(|entry| {
+                let seconds = (entry.last_seen - entry.since).num_seconds().max(0);
                 format!(
                     "[{}] {} — \"{}\" ({}m {}s)",
-                    e.since.with_timezone(&Local).format("%H:%M:%S"),
-                    e.process_name,
-                    e.title,
-                    secs / 60,
-                    secs % 60
+                    entry.since.with_timezone(&Local).format("%H:%M:%S"),
+                    entry.process_name,
+                    entry.title,
+                    seconds / 60,
+                    seconds % 60
                 )
             })
             .collect::<Vec<_>>()
@@ -204,10 +204,10 @@ impl MonitorState {
         window: &OpenWindow,
         verdict: &OtherVerdict,
     ) -> bool {
-        let fg = window.as_foreground();
-        let is_browser = config.is_browser(&fg.process_name);
-        let target = self.target_key(config, &fg);
-        self.remember_verdict(now, config, &fg, verdict.verdict);
+        let foreground = window.as_foreground();
+        let is_browser = config.is_browser(&foreground.process_name);
+        let target = self.target_key(config, &foreground);
+        self.remember_verdict(now, config, &foreground, verdict.verdict);
         let mut minimize = false;
         let mut action = String::new();
         if verdict.verdict == Verdict::OffTask {
@@ -215,7 +215,7 @@ impl MonitorState {
             let entry = BlockedEntry {
                 id,
                 reason: verdict.reason.clone(),
-                title: fg.title.clone(),
+                title: foreground.title.clone(),
             };
             if is_browser {
                 self.blocked_tabs.insert(target, entry);
@@ -245,8 +245,11 @@ impl MonitorState {
         }
         self.verdicts.push_back(VerdictLogEntry {
             at: now,
-            process_name: fg.process_name.clone(),
-            title: truncate(&format!("(background) {}", fg.title), MAX_TITLE_CHARS),
+            process_name: foreground.process_name.clone(),
+            title: truncate(
+                &format!("(background) {}", foreground.title),
+                MAX_TITLE_CHARS,
+            ),
             verdict: verdict.verdict,
             reason: verdict.reason.clone(),
             action,
@@ -257,30 +260,30 @@ impl MonitorState {
     /// xorshift64; seeded from the clock on first use. Not for security, only
     /// so check times are not guessable.
     fn next_random(&mut self) -> u64 {
-        if self.rng == 0 {
-            self.rng = Utc::now().timestamp_nanos_opt().unwrap_or(1) as u64 | 1;
+        if self.random_state == 0 {
+            self.random_state = Utc::now().timestamp_nanos_opt().unwrap_or(1) as u64 | 1;
         }
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng = x;
-        x
+        let mut random = self.random_state;
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        self.random_state = random;
+        random
     }
 
     /// What a block of this window would be keyed by, and so what "the same
     /// window" means for early checks: the process for an app, the site for a
     /// browser tab, and on YouTube the channel (or, unknown, the page).
-    pub fn target_key(&self, config: &AiFocusConfig, fg: &Foreground) -> String {
-        if !config.is_browser(&fg.process_name) {
-            return normalize_process_name(&fg.process_name);
+    pub fn target_key(&self, config: &AiFocusConfig, foreground: &Foreground) -> String {
+        if !config.is_browser(&foreground.process_name) {
+            return normalize_process_name(&foreground.process_name);
         }
-        if !youtube::is_youtube(&fg.title) {
-            return tab_key(fg);
+        if !youtube::is_youtube(&foreground.title) {
+            return tab_key(foreground);
         }
-        match self.channels.get(&youtube::page_name(&fg.title)) {
-            Some(channel) => youtube::channel_key(&fg.process_name, channel),
-            None => youtube::page_key(&fg.process_name, &fg.title),
+        match self.channels.get(&youtube::page_name(&foreground.title)) {
+            Some(channel) => youtube::channel_key(&foreground.process_name, channel),
+            None => youtube::page_key(&foreground.process_name, &foreground.title),
         }
     }
 
@@ -288,15 +291,15 @@ impl MonitorState {
     /// change with every file), the page for a browser tab (one good page
     /// says nothing about the rest of the site), and on YouTube the channel
     /// or page (see [`Self::target_key`]).
-    pub fn verdict_key(&self, config: &AiFocusConfig, fg: &Foreground) -> String {
-        if config.is_browser(&fg.process_name) && !youtube::is_youtube(&fg.title) {
+    pub fn verdict_key(&self, config: &AiFocusConfig, foreground: &Foreground) -> String {
+        if config.is_browser(&foreground.process_name) && !youtube::is_youtube(&foreground.title) {
             format!(
                 "{}|{}",
-                normalize_process_name(&fg.process_name),
-                strip_browser_noise(&fg.title).to_lowercase()
+                normalize_process_name(&foreground.process_name),
+                strip_browser_noise(&foreground.title).to_lowercase()
             )
         } else {
-            self.target_key(config, fg)
+            self.target_key(config, foreground)
         }
     }
 
@@ -308,9 +311,12 @@ impl MonitorState {
         &self,
         now: DateTime<Utc>,
         config: &AiFocusConfig,
-        fg: &Foreground,
+        foreground: &Foreground,
     ) -> bool {
-        match self.last_verdicts.get(&self.verdict_key(config, fg)) {
+        match self
+            .last_verdicts
+            .get(&self.verdict_key(config, foreground))
+        {
             None => true,
             Some((at, verdict)) => now - *at >= recheck_after(config, *verdict),
         }
@@ -320,12 +326,13 @@ impl MonitorState {
         &mut self,
         now: DateTime<Utc>,
         config: &AiFocusConfig,
-        fg: &Foreground,
+        foreground: &Foreground,
         verdict: Verdict,
     ) {
-        let key = self.verdict_key(config, fg);
-        self.last_verdicts
-            .retain(|_, (at, v)| now - *at < recheck_after(config, *v));
+        let key = self.verdict_key(config, foreground);
+        self.last_verdicts.retain(|_, (at, remembered_verdict)| {
+            now - *at < recheck_after(config, *remembered_verdict)
+        });
         self.last_verdicts.insert(key, (now, verdict));
     }
 
@@ -344,8 +351,8 @@ impl MonitorState {
             return false;
         }
         let before = self.blocked_processes.len() + self.blocked_tabs.len();
-        let lifted = |key: &String, b: &mut BlockedEntry| {
-            let keep = !config.unblocked.contains(&b.id);
+        let lifted = |key: &String, block: &mut BlockedEntry| {
+            let keep = !config.unblocked.contains(&block.id);
             if !keep {
                 info!("block on {key} lifted by an administrator");
             }
@@ -357,8 +364,8 @@ impl MonitorState {
     }
 
     /// Remember which channel a YouTube page belongs to.
-    fn learn_channel(&mut self, fg: &Foreground, channel: &str) {
-        if !youtube::is_youtube(&fg.title) {
+    fn learn_channel(&mut self, foreground: &Foreground, channel: &str) {
+        if !youtube::is_youtube(&foreground.title) {
             return;
         }
         let Some(channel) = youtube::normalize_channel(channel) else {
@@ -367,19 +374,21 @@ impl MonitorState {
         if self.channels.len() >= CHANNEL_CACHE_CAPACITY {
             self.channels.clear();
         }
-        self.channels.insert(youtube::page_name(&fg.title), channel);
+        self.channels
+            .insert(youtube::page_name(&foreground.title), channel);
     }
 
     /// Is this browser tab blocked?
-    pub fn tab_blocked(&self, config: &AiFocusConfig, fg: &Foreground) -> bool {
-        self.blocked_tabs.contains_key(&self.target_key(config, fg))
+    pub fn tab_blocked(&self, config: &AiFocusConfig, foreground: &Foreground) -> bool {
+        self.blocked_tabs
+            .contains_key(&self.target_key(config, foreground))
     }
 
     /// Blocked process names with their reasons.
     pub fn process_blocks(&self) -> Vec<(String, String)> {
         self.blocked_processes
             .iter()
-            .map(|(name, b)| (name.clone(), b.reason.clone()))
+            .map(|(name, block)| (name.clone(), block.reason.clone()))
             .collect()
     }
 
@@ -387,16 +396,16 @@ impl MonitorState {
         &mut self,
         now: DateTime<Utc>,
         config: &AiFocusConfig,
-        fg: &Foreground,
+        foreground: &Foreground,
         judgement: Judgement,
         grant: Option<&Grant>,
     ) -> Action {
-        let is_browser = config.is_browser(&fg.process_name);
+        let is_browser = config.is_browser(&foreground.process_name);
         if is_browser {
-            self.learn_channel(fg, &judgement.channel);
+            self.learn_channel(foreground, &judgement.channel);
         }
-        let target = self.target_key(config, fg);
-        self.remember_verdict(now, config, fg, judgement.verdict);
+        let target = self.target_key(config, foreground);
+        self.remember_verdict(now, config, foreground, judgement.verdict);
 
         let mut action = Action::None;
         let mut action_label = String::new();
@@ -415,7 +424,7 @@ impl MonitorState {
                     BlockedEntry {
                         id,
                         reason: judgement.reason.clone(),
-                        title: fg.title.clone(),
+                        title: foreground.title.clone(),
                     },
                 );
                 action = Action::CloseTab;
@@ -426,7 +435,7 @@ impl MonitorState {
             // `strikes_to_block` off-task verdicts in a row. Strikes on a
             // granted app count per grant.
             let key = match grant {
-                Some(g) => format!("grant:{}", g.id),
+                Some(active_grant) => format!("grant:{}", active_grant.id),
                 None => target.clone(),
             };
             match judgement.verdict {
@@ -446,7 +455,7 @@ impl MonitorState {
                             BlockedEntry {
                                 id,
                                 reason: judgement.reason.clone(),
-                                title: fg.title.clone(),
+                                title: foreground.title.clone(),
                             },
                         );
                         action = Action::BlockProcess(target);
@@ -466,8 +475,8 @@ impl MonitorState {
         }
         self.verdicts.push_back(VerdictLogEntry {
             at: now,
-            process_name: fg.process_name.clone(),
-            title: truncate(&fg.title, MAX_TITLE_CHARS),
+            process_name: foreground.process_name.clone(),
+            title: truncate(&foreground.title, MAX_TITLE_CHARS),
             verdict: judgement.verdict,
             reason: judgement.reason,
             action: action_label,
@@ -485,8 +494,9 @@ impl MonitorState {
         let covered = |key: &str, entry: &BlockedEntry| {
             target.matches_block_key(key) || target.matches_block_key(&format!("x|{}", entry.title))
         };
-        self.blocked_processes.retain(|key, b| !covered(key, b));
-        self.blocked_tabs.retain(|key, b| !covered(key, b));
+        self.blocked_processes
+            .retain(|key, block| !covered(key, block));
+        self.blocked_tabs.retain(|key, block| !covered(key, block));
         self.strikes.retain(|key, _| !target.matches_block_key(key));
     }
 }
@@ -494,11 +504,11 @@ impl MonitorState {
 /// Block key of a browser window: `process|site`. A block per exact title
 /// would let the user dodge it by moving to the next video or post; a block
 /// per site does not. (YouTube is blocked per channel instead: `youtube.rs`.)
-pub fn tab_key(fg: &Foreground) -> String {
+pub fn tab_key(foreground: &Foreground) -> String {
     format!(
         "{}|{}",
-        normalize_process_name(&fg.process_name),
-        site_of(&fg.title)
+        normalize_process_name(&foreground.process_name),
+        site_of(&foreground.title)
     )
 }
 
@@ -506,12 +516,16 @@ pub fn tab_key(fg: &Foreground) -> String {
 /// `(3) Funny cats - YouTube - Google Chrome` -> `youtube`. Without a
 /// separator the whole title is used.
 pub fn site_of(title: &str) -> String {
-    let t = strip_browser_noise(title);
+    let stripped = strip_browser_noise(title);
     let site = [" - ", " | ", " — ", " · "]
         .iter()
-        .filter_map(|sep| t.rfind(sep).map(|i| &t[i + sep.len()..]))
-        .min_by_key(|s| s.len())
-        .unwrap_or(t);
+        .filter_map(|separator| {
+            stripped
+                .rfind(separator)
+                .map(|index| &stripped[index + separator.len()..])
+        })
+        .min_by_key(|candidate| candidate.len())
+        .unwrap_or(stripped);
     truncate(site.trim(), 60).to_lowercase()
 }
 
@@ -529,25 +543,31 @@ pub fn strip_browser_noise(title: &str) -> &str {
         " - Brave",
         " - Opera",
     ];
-    let mut t = title.trim();
+    let mut trimmed = title.trim();
     for suffix in BROWSER_SUFFIXES {
-        if let Some(rest) = t.strip_suffix(suffix) {
-            t = rest;
+        if let Some(rest) = trimmed.strip_suffix(suffix) {
+            trimmed = rest;
             break;
         }
     }
     // Edge: "Title and 3 more pages"
-    if let Some(i) = t.rfind(" and ").filter(|_| t.ends_with(" more pages")) {
-        t = &t[..i];
+    if let Some(index) = trimmed
+        .rfind(" and ")
+        .filter(|_| trimmed.ends_with(" more pages"))
+    {
+        trimmed = &trimmed[..index];
     }
-    if let Some(rest) = t.strip_prefix('(') {
+    if let Some(rest) = trimmed.strip_prefix('(') {
         if let Some((count, after)) = rest.split_once(") ") {
-            if count.chars().all(|c| c.is_ascii_digit() || c == '+') {
-                t = after;
+            if count
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '+')
+            {
+                trimmed = after;
             }
         }
     }
-    t.trim()
+    trimmed.trim()
 }
 
 /// How long a verdict stands before the window is judged again.
@@ -565,15 +585,15 @@ fn clamp_recheck_minutes(minutes: u64) -> i64 {
     minutes.min(24 * 60) as i64
 }
 
-fn clamp_interval(secs: u64) -> i64 {
-    secs.clamp(10, 24 * 3600) as i64
+fn clamp_interval(seconds: u64) -> i64 {
+    seconds.clamp(10, 24 * 3600) as i64
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
     } else {
-        s.chars().take(max).chain(['…']).collect()
+        text.chars().take(max).chain(['…']).collect()
     }
 }
 
@@ -674,13 +694,13 @@ impl FocusMonitor {
                 .blocked_processes
                 .values_mut()
                 .chain(state.blocked_tabs.values_mut())
-                .filter(|b| b.id.is_empty())
+                .filter(|block| block.id.is_empty())
                 .collect();
             let ids: Vec<String> = (0..missing.len())
-                .map(|i| format!("b{}-{i:04}", now.timestamp_millis()))
+                .map(|index| format!("b{}-{index:04}", now.timestamp_millis()))
                 .collect();
-            for (b, id) in missing.iter_mut().zip(ids) {
-                b.id = id;
+            for (block, id) in missing.iter_mut().zip(ids) {
+                block.id = id;
             }
         }
         self.blocks = store;
@@ -697,8 +717,8 @@ impl FocusMonitor {
             }
         };
         if current != self.blocks.get() {
-            if let Err(err) = self.blocks.update(|b| *b = current) {
-                warn!("could not save blocks: {err}");
+            if let Err(error) = self.blocks.update(|saved| *saved = current) {
+                warn!("could not save blocks: {error}");
             }
         }
     }
@@ -782,41 +802,43 @@ impl FocusMonitor {
 
         self.tidy_grants(now, &config);
 
-        let Some(fg) = self.desktop.foreground() else {
+        let Some(foreground) = self.desktop.foreground() else {
             return;
         };
         let grant = self
             .grants
             .get()
-            .covering(now, &config, &fg.process_name, &fg.title)
+            .covering(now, &config, &foreground.process_name, &foreground.title)
             .cloned();
-        let exempt = self.exempt(&config, &fg);
+        let exempt = self.exempt(&config, &foreground);
         let open = self.desktop.open_windows();
 
         let (due, judge_front, others) = {
             let mut state = self.state.lock();
-            state.record(now, &fg);
+            state.record(now, &foreground);
             if !exempt
                 && grant.is_none()
-                && config.is_browser(&fg.process_name)
-                && state.tab_blocked(&config, &fg)
+                && config.is_browser(&foreground.process_name)
+                && state.tab_blocked(&config, &foreground)
             {
                 drop(state);
-                if self.close_tab_if_unchanged(&fg) {
-                    info!("closed blocked tab \"{}\"", fg.title);
+                if self.close_tab_if_unchanged(&foreground) {
+                    info!("closed blocked tab \"{}\"", foreground.title);
                 }
                 return;
             }
             let hide: Vec<isize> = open
                 .iter()
-                .filter(|w| w.window != fg.window && !w.minimized)
-                .filter(|w| config.is_browser(&w.process_name))
-                .filter(|w| state.tab_blocked(&config, &w.as_foreground()))
-                .filter(|w| self.covering_grant(now, &config, w).is_none())
-                .map(|w| w.window)
+                .filter(|open_window| {
+                    open_window.window != foreground.window && !open_window.minimized
+                })
+                .filter(|open_window| config.is_browser(&open_window.process_name))
+                .filter(|open_window| state.tab_blocked(&config, &open_window.as_foreground()))
+                .filter(|open_window| self.covering_grant(now, &config, open_window).is_none())
+                .map(|open_window| open_window.window)
                 .collect();
-            let others = self.others_to_judge(now, &config, &state, &fg, &open);
-            let judge_front = !exempt && state.needs_judging(now, &config, &fg);
+            let others = self.others_to_judge(now, &config, &state, &foreground, &open);
+            let judge_front = !exempt && state.needs_judging(now, &config, &foreground);
             let due = (judge_front || !others.is_empty()) && state.call_allowed(now);
             drop(state);
             // A blocked tab shown in a background window (say, a video on a second
@@ -834,25 +856,35 @@ impl FocusMonitor {
         let listed: Vec<OtherWindow> = others
             .iter()
             .enumerate()
-            .map(|(id, w)| OtherWindow {
+            .map(|(id, other)| OtherWindow {
                 id,
-                is_browser: config.is_browser(&w.process_name),
-                process_name: w.process_name.clone(),
-                title: truncate(&w.title, MAX_TITLE_CHARS),
+                is_browser: config.is_browser(&other.process_name),
+                process_name: other.process_name.clone(),
+                title: truncate(&other.title, MAX_TITLE_CHARS),
             })
             .collect();
-        let result = self.run_judge(&config, &fg, grant.as_ref(), &listed);
+        let result = self.run_judge(&config, &foreground, grant.as_ref(), &listed);
         // The judge call can take a while; if access to this window was granted
         // (or revoked) meanwhile, the verdict was made under the old terms.
         let grant_now = self
             .grants
             .get()
-            .covering(now, &self.store.get(), &fg.process_name, &fg.title)
-            .map(|g| g.id.clone());
-        if result.is_ok() && grant_now != grant.as_ref().map(|g| g.id.clone()) {
+            .covering(
+                now,
+                &self.store.get(),
+                &foreground.process_name,
+                &foreground.title,
+            )
+            .map(|current_grant| current_grant.id.clone());
+        if result.is_ok()
+            && grant_now
+                != grant
+                    .as_ref()
+                    .map(|original_grant| original_grant.id.clone())
+        {
             info!(
                 "discarding verdict for {}: access changed during the check",
-                fg.process_name
+                foreground.process_name
             );
             return;
         }
@@ -878,10 +910,11 @@ impl FocusMonitor {
                 }
                 info!(
                     "{} \"{}\": {:?} ({})",
-                    fg.process_name, fg.title, judgement.verdict, judgement.reason
+                    foreground.process_name, foreground.title, judgement.verdict, judgement.reason
                 );
                 let reason = judgement.reason.clone();
-                let action = state.apply_judgement(now, &config, &fg, judgement, grant.as_ref());
+                let action =
+                    state.apply_judgement(now, &config, &foreground, judgement, grant.as_ref());
                 drop(state);
                 for window in minimize {
                     self.desktop.minimize(window);
@@ -891,16 +924,16 @@ impl FocusMonitor {
                         self.revoke_for_misuse(now, grant, &reason);
                     }
                 }
-                if action == Action::CloseTab && !self.close_tab_if_unchanged(&fg) {
+                if action == Action::CloseTab && !self.close_tab_if_unchanged(&foreground) {
                     warn!(
                         "did not close tab of {}: window or tab changed",
-                        fg.process_name
+                        foreground.process_name
                     );
                 }
             }
-            Err(err) => {
-                warn!("focus check failed: {err}");
-                state.last_error = Some(err.to_string());
+            Err(error) => {
+                warn!("focus check failed: {error}");
+                state.last_error = Some(error.to_string());
             }
         }
     }
@@ -924,7 +957,7 @@ impl FocusMonitor {
             .cloned()
     }
 
-    /// Open windows other than `fg` that need a verdict: not exempt, not granted, not
+    /// Open windows other than `foreground` that need a verdict: not exempt, not granted, not
     /// already blocked, without a verdict that still stands; one per verdict key
     /// (the same app's other windows, the same page in two windows), at most
     /// [`MAX_OTHER_WINDOWS`].
@@ -933,27 +966,27 @@ impl FocusMonitor {
         now: DateTime<Utc>,
         config: &AiFocusConfig,
         state: &MonitorState,
-        fg: &Foreground,
+        foreground: &Foreground,
         open: &[OpenWindow],
     ) -> Vec<OpenWindow> {
-        let front_key = state.verdict_key(config, fg);
+        let front_key = state.verdict_key(config, foreground);
         let mut seen = std::collections::HashSet::from([front_key]);
         open.iter()
-            .filter(|w| w.window != fg.window)
-            .filter(|w| {
-                let as_fg = w.as_foreground();
-                let blocked = if config.is_browser(&w.process_name) {
-                    state.tab_blocked(config, &as_fg)
+            .filter(|window| window.window != foreground.window)
+            .filter(|window| {
+                let window_as_foreground = window.as_foreground();
+                let blocked = if config.is_browser(&window.process_name) {
+                    state.tab_blocked(config, &window_as_foreground)
                 } else {
                     state
                         .blocked_processes
-                        .contains_key(&normalize_process_name(&w.process_name))
+                        .contains_key(&normalize_process_name(&window.process_name))
                 };
-                !self.exempt(config, &as_fg)
+                !self.exempt(config, &window_as_foreground)
                     && !blocked
-                    && state.needs_judging(now, config, &as_fg)
-                    && self.covering_grant(now, config, w).is_none()
-                    && seen.insert(state.verdict_key(config, &as_fg))
+                    && state.needs_judging(now, config, &window_as_foreground)
+                    && self.covering_grant(now, config, window).is_none()
+                    && seen.insert(state.verdict_key(config, &window_as_foreground))
             })
             .take(MAX_OTHER_WINDOWS)
             .cloned()
@@ -965,10 +998,9 @@ impl FocusMonitor {
     /// the user switched tabs and we would close the wrong one. The block stays
     /// recorded, so the tab is closed the next time it comes to the front.
     fn close_tab_if_unchanged(&self, judged: &Foreground) -> bool {
-        let still_same = self
-            .desktop
-            .foreground()
-            .is_some_and(|now| now.window == judged.window && now.title == judged.title);
+        let still_same = self.desktop.foreground().is_some_and(|current| {
+            current.window == judged.window && current.title == judged.title
+        });
         still_same && self.desktop.close_active_tab(judged)
     }
 
@@ -1027,15 +1059,15 @@ impl FocusMonitor {
             id: format!("g{}", now.timestamp_millis()),
             target: target.clone(),
             purpose: purpose.to_string(),
-            until: minutes.map(|m| now + ChronoDuration::minutes(m as i64)),
+            until: minutes.map(|minute_count| now + ChronoDuration::minutes(minute_count as i64)),
             granted_at: now,
             task: config.task.clone(),
         });
-        self.grants.update(|s| {
+        self.grants.update(|grant_state| {
             if let Some(grant) = grant.clone() {
-                s.grants.push(grant);
+                grant_state.grants.push(grant);
             }
-            s.push_log(entry.clone());
+            grant_state.push_log(entry.clone());
         })?;
         if grant.is_some() {
             info!("access granted: {} ({purpose})", target.label());
@@ -1047,36 +1079,42 @@ impl FocusMonitor {
     /// Drop expired grants and those the admin revoked (logged).
     fn tidy_grants(&self, now: DateTime<Utc>, config: &AiFocusConfig) {
         let state = self.grants.get();
-        if state.grants.iter().all(|g| g.is_active(now, config)) {
+        if state
+            .grants
+            .iter()
+            .all(|grant| grant.is_active(now, config))
+        {
             return;
         }
-        let result = self.grants.update(|s| {
-            let (keep, ended): (Vec<_>, Vec<_>) = std::mem::take(&mut s.grants)
+        let result = self.grants.update(|grant_state| {
+            let (keep, ended): (Vec<_>, Vec<_>) = std::mem::take(&mut grant_state.grants)
                 .into_iter()
-                .partition(|g| g.is_active(now, config));
-            s.grants = keep;
-            for g in ended {
-                if config.revoked_grants.contains(&g.id) {
-                    s.push_log(GrantLogEntry {
+                .partition(|grant| grant.is_active(now, config));
+            grant_state.grants = keep;
+            for grant in ended {
+                if config.revoked_grants.contains(&grant.id) {
+                    grant_state.push_log(GrantLogEntry {
                         at: now,
-                        target: g.target,
-                        purpose: g.purpose,
+                        target: grant.target,
+                        purpose: grant.purpose,
                         event: GrantEvent::RevokedByAdmin,
                         message: String::new(),
                     });
                 }
             }
         });
-        if let Err(err) = result {
-            warn!("could not save grants: {err}");
+        if let Err(error) = result {
+            warn!("could not save grants: {error}");
         }
     }
 
     fn revoke_for_misuse(&self, now: DateTime<Utc>, grant: &Grant, reason: &str) {
         info!("access to {} revoked: {reason}", grant.target.label());
-        let result = self.grants.update(|s| {
-            s.grants.retain(|g| g.id != grant.id);
-            s.push_log(GrantLogEntry {
+        let result = self.grants.update(|grant_state| {
+            grant_state
+                .grants
+                .retain(|existing| existing.id != grant.id);
+            grant_state.push_log(GrantLogEntry {
                 at: now,
                 target: grant.target.clone(),
                 purpose: grant.purpose.clone(),
@@ -1084,23 +1122,27 @@ impl FocusMonitor {
                 message: reason.to_string(),
             });
         });
-        if let Err(err) = result {
-            warn!("could not save grants: {err}");
+        if let Err(error) = result {
+            warn!("could not save grants: {error}");
         }
     }
 
     fn run_judge(
         &self,
         config: &AiFocusConfig,
-        fg: &Foreground,
+        foreground: &Foreground,
         grant: Option<&Grant>,
         others: &[OtherWindow],
     ) -> Result<Judgement, JudgeError> {
-        if let Some((spent, limit)) = self.usage.as_ref().and_then(|u| u.over_budget(config)) {
+        if let Some((spent, limit)) = self
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.over_budget(config))
+        {
             return Err(JudgeError::BudgetReached { spent, limit });
         }
         let judge = (self.judge)(config)?;
-        let private_on_screen = config.is_private(&fg.process_name)
+        let private_on_screen = config.is_private(&foreground.process_name)
             || (!config.private_apps.is_empty()
                 && self
                     .desktop
@@ -1108,7 +1150,7 @@ impl FocusMonitor {
                     .iter()
                     .any(|name| config.is_private(name)));
         let screenshot = if config.send_screenshot && !private_on_screen {
-            self.desktop.screenshot(fg).and_then(encode_jpeg)
+            self.desktop.screenshot(foreground).and_then(encode_jpeg)
         } else {
             None
         };
@@ -1116,33 +1158,34 @@ impl FocusMonitor {
         judge.judge(&JudgeRequest {
             task: &config.task,
             history: &history,
-            process_name: &fg.process_name,
-            title: &fg.title,
-            youtube: config.is_browser(&fg.process_name) && youtube::is_youtube(&fg.title),
+            process_name: &foreground.process_name,
+            title: &foreground.title,
+            youtube: config.is_browser(&foreground.process_name)
+                && youtube::is_youtube(&foreground.title),
             screenshot: screenshot.as_deref(),
-            grant_purpose: grant.map(|g| g.purpose.as_str()),
+            grant_purpose: grant.map(|active_grant| active_grant.purpose.as_str()),
             others,
         })
     }
 }
 
 /// Downscale to at most [`SCREENSHOT_MAX_WIDTH`] wide and encode as JPEG.
-fn encode_jpeg(shot: Screenshot) -> Option<Vec<u8>> {
+fn encode_jpeg(screenshot: Screenshot) -> Option<Vec<u8>> {
     use image::codecs::jpeg::JpegEncoder;
     use image::{imageops::FilterType, DynamicImage, RgbaImage};
 
     // Takes the pixels by value: a 4K capture is ~33 MB, not worth copying.
-    let rgba = RgbaImage::from_raw(shot.width, shot.height, shot.rgba)?;
-    let mut img = DynamicImage::ImageRgba8(rgba);
-    if img.width() > SCREENSHOT_MAX_WIDTH {
-        let height = img.height() * SCREENSHOT_MAX_WIDTH / img.width();
-        img = img.resize(SCREENSHOT_MAX_WIDTH, height, FilterType::Triangle);
+    let rgba = RgbaImage::from_raw(screenshot.width, screenshot.height, screenshot.rgba)?;
+    let mut dynamic_image = DynamicImage::ImageRgba8(rgba);
+    if dynamic_image.width() > SCREENSHOT_MAX_WIDTH {
+        let height = dynamic_image.height() * SCREENSHOT_MAX_WIDTH / dynamic_image.width();
+        dynamic_image = dynamic_image.resize(SCREENSHOT_MAX_WIDTH, height, FilterType::Triangle);
     }
-    let mut out = Vec::new();
-    JpegEncoder::new_with_quality(&mut out, 70)
-        .encode_image(&img.to_rgb8())
+    let mut jpeg_bytes = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg_bytes, 70)
+        .encode_image(&dynamic_image.to_rgb8())
         .ok()?;
-    Some(out)
+    Some(jpeg_bytes)
 }
 
 #[cfg(test)]
@@ -1153,7 +1196,7 @@ mod tests {
     /// Responsibility: Test double for Desktop: a settable foreground window, a gray
     /// screenshot, counted tab closes.
     struct FakeDesktop {
-        fg: Arc<Mutex<Option<Foreground>>>,
+        foreground: Arc<Mutex<Option<Foreground>>>,
         tabs_closed: Arc<AtomicUsize>,
         visible: Arc<Mutex<Vec<String>>>,
         open: Arc<Mutex<Vec<OpenWindow>>>,
@@ -1162,9 +1205,9 @@ mod tests {
 
     impl Desktop for FakeDesktop {
         fn foreground(&self) -> Option<Foreground> {
-            self.fg.lock().clone()
+            self.foreground.lock().clone()
         }
-        fn screenshot(&self, _fg: &Foreground) -> Option<Screenshot> {
+        fn screenshot(&self, _foreground: &Foreground) -> Option<Screenshot> {
             Some(Screenshot {
                 width: 2560,
                 height: 1440,
@@ -1174,7 +1217,7 @@ mod tests {
         fn visible_processes(&self) -> Vec<String> {
             self.visible.lock().clone()
         }
-        fn close_active_tab(&self, _fg: &Foreground) -> bool {
+        fn close_active_tab(&self, _foreground: &Foreground) -> bool {
             self.tabs_closed.fetch_add(1, Ordering::SeqCst);
             true
         }
@@ -1202,7 +1245,7 @@ mod tests {
         during_call: Hook,
         saw_grant: Arc<Mutex<Option<String>>>,
         /// Foreground of the fake desktop, and what to switch it to mid-call.
-        fg: Arc<Mutex<Option<Foreground>>>,
+        foreground: Arc<Mutex<Option<Foreground>>>,
         switch_to: Arc<Mutex<Option<Foreground>>>,
         calls: Arc<AtomicUsize>,
         saw_screenshot: Arc<AtomicBool>,
@@ -1215,13 +1258,13 @@ mod tests {
                 hook();
             }
             if let Some(next) = self.switch_to.lock().take() {
-                *self.fg.lock() = Some(next);
+                *self.foreground.lock() = Some(next);
             }
             self.saw_screenshot
                 .store(request.screenshot.is_some(), Ordering::SeqCst);
             *self.saw_grant.lock() = request.grant_purpose.map(str::to_string);
             *self.saw_others.lock() = request.others.to_vec();
-            let other = *self.others_verdict.lock();
+            let other_verdict = *self.others_verdict.lock();
             Ok(Judgement {
                 verdict: *self.verdict.lock(),
                 reason: "test".into(),
@@ -1229,9 +1272,9 @@ mod tests {
                 others: request
                     .others
                     .iter()
-                    .map(|w| OtherVerdict {
-                        id: w.id,
-                        verdict: other,
+                    .map(|other_window| OtherVerdict {
+                        id: other_window.id,
+                        verdict: other_verdict,
                         reason: "bg".into(),
                     })
                     .collect(),
@@ -1258,7 +1301,7 @@ mod tests {
         visible: Arc<Mutex<Vec<String>>>,
     }
 
-    fn fg(process: &str, title: &str) -> Foreground {
+    fn foreground(process: &str, title: &str) -> Foreground {
         Foreground {
             window: 1,
             pid: 4242,
@@ -1289,7 +1332,7 @@ mod tests {
             others_verdict: Arc::clone(&others_verdict),
             saw_others: Arc::clone(&saw_others),
             saw_grant: Arc::clone(&saw_grant),
-            fg: Arc::clone(&current),
+            foreground: Arc::clone(&current),
             switch_to: Arc::clone(&switch_to),
             calls: Arc::clone(&calls),
             saw_screenshot: Arc::clone(&saw_screenshot),
@@ -1297,7 +1340,7 @@ mod tests {
         let monitor = FocusMonitor::new(
             AiFocusStore::in_memory(config),
             Box::new(FakeDesktop {
-                fg: Arc::clone(&current),
+                foreground: Arc::clone(&current),
                 tabs_closed: Arc::clone(&tabs_closed),
                 visible: Arc::clone(&visible),
                 open: Arc::clone(&open),
@@ -1336,191 +1379,229 @@ mod tests {
 
     #[test]
     fn blocks_app_after_strikes() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OffTask,
-            fg("steam.exe", "Steam"),
+            foreground("steam.exe", "Steam"),
             session("write thesis"),
         );
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert!(h.monitor.state().blocked_processes.is_empty());
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert!(fixture.monitor.state().blocked_processes.is_empty());
         // Not due yet: sampled, but not judged again.
-        h.monitor.step(t0 + ChronoDuration::seconds(5));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
-        h.monitor.step(t0 + ChronoDuration::seconds(61));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
-        let blocks = h.monitor.state().process_blocks();
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(5));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(61));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        let blocks = fixture.monitor.state().process_blocks();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].0, "steam.exe");
         // Blocks do not expire: a day later steam is still blocked.
-        *h.current.lock() = Some(fg("code.exe", "main.rs"));
-        h.monitor.step(t0 + ChronoDuration::days(1));
-        assert_eq!(h.monitor.state().process_blocks().len(), 1);
+        *fixture.current.lock() = Some(foreground("code.exe", "main.rs"));
+        fixture.monitor.step(start_time + ChronoDuration::days(1));
+        assert_eq!(fixture.monitor.state().process_blocks().len(), 1);
     }
 
     #[test]
     fn on_task_never_blocks_and_screenshot_is_sent() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OnTask,
-            fg("code.exe", "main.rs"),
+            foreground("code.exe", "main.rs"),
             session("coding"),
         );
-        let mut config = h.monitor.store().get();
+        let mut config = fixture.monitor.store().get();
         config.recheck_minutes = 0; // judge at every check
-        h.monitor.store().update(|c| *c = config).unwrap();
-        let t0 = Utc::now();
-        for i in 0..5 {
-            h.monitor.step(t0 + ChronoDuration::seconds(61 * i));
+        fixture
+            .monitor
+            .store()
+            .update(|stored_config| *stored_config = config)
+            .unwrap();
+        let start_time = Utc::now();
+        for check_index in 0..5 {
+            fixture
+                .monitor
+                .step(start_time + ChronoDuration::seconds(61 * check_index));
         }
-        assert_eq!(h.calls.load(Ordering::SeqCst), 5);
-        assert!(h.saw_screenshot.load(Ordering::SeqCst));
-        assert!(h.monitor.state().process_blocks().is_empty());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 5);
+        assert!(fixture.saw_screenshot.load(Ordering::SeqCst));
+        assert!(fixture.monitor.state().process_blocks().is_empty());
     }
 
     #[test]
     fn an_on_task_app_is_not_rechecked_for_recheck_minutes() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OnTask,
-            fg("code.exe", "main.rs"),
+            foreground("code.exe", "main.rs"),
             session("coding"), // recheck_minutes = 15 (default)
         );
-        let t0 = Utc::now();
-        for i in 0..5 {
-            h.monitor.step(t0 + ChronoDuration::seconds(61 * i));
+        let start_time = Utc::now();
+        for check_index in 0..5 {
+            fixture
+                .monitor
+                .step(start_time + ChronoDuration::seconds(61 * check_index));
         }
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
         // Another file of the same app is vouched for too.
-        *h.current.lock() = Some(fg("code.exe", "lib.rs"));
-        h.monitor.step(t0 + ChronoDuration::minutes(10));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
-        h.monitor.step(t0 + ChronoDuration::minutes(16));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+        *fixture.current.lock() = Some(foreground("code.exe", "lib.rs"));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::minutes(10));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::minutes(16));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
         // A new task forgets the verdict: judged at once.
-        h.monitor
+        fixture
+            .monitor
             .store()
-            .update(|c| c.task = "write docs".into())
+            .update(|stored_config| stored_config.task = "write docs".into())
             .unwrap();
-        h.monitor.step(t0 + ChronoDuration::minutes(17));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 3);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::minutes(17));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]
     fn an_on_task_page_does_not_vouch_for_the_rest_of_its_site() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OnTask,
-            fg("chrome.exe", "Rust 강의 - NAVER"),
+            foreground("chrome.exe", "Rust 강의 - NAVER"),
             session("learn Rust"),
         );
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        h.monitor.step(t0 + ChronoDuration::seconds(61));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
-        *h.current.lock() = Some(fg("chrome.exe", "웹툰 - NAVER"));
-        h.monitor.step(t0 + ChronoDuration::seconds(66));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(61));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        *fixture.current.lock() = Some(foreground("chrome.exe", "웹툰 - NAVER"));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(66));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
     fn browser_tab_is_closed_and_stays_closed() {
         let mut config = session("write thesis");
         config.strikes_to_block = 1;
-        let h = harness(
+        let fixture = harness(
             Verdict::OffTask,
-            fg("chrome.exe", "Funny cats - YouTube"),
+            foreground("chrome.exe", "Funny cats - YouTube"),
             config,
         );
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
-        assert!(h.monitor.state().blocked_processes.is_empty());
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
+        assert!(fixture.monitor.state().blocked_processes.is_empty());
         // Reopened: closed on the next sample without asking the judge.
-        h.monitor.step(t0 + ChronoDuration::seconds(5));
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 2);
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(5));
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn tab_is_not_closed_if_user_switched_tabs_meanwhile() {
         let mut config = session("write thesis");
         config.strikes_to_block = 1;
-        let h = harness(
+        let fixture = harness(
             Verdict::OffTask,
-            fg("chrome.exe", "Funny cats - YouTube"),
+            foreground("chrome.exe", "Funny cats - YouTube"),
             config,
         );
         // While the judge is "thinking", the user switches to another tab
         // in the same browser window.
-        *h.switch_to.lock() = Some(fg("chrome.exe", "Overleaf - thesis.tex"));
-        h.monitor.step(Utc::now());
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 0);
+        *fixture.switch_to.lock() = Some(foreground("chrome.exe", "Overleaf - thesis.tex"));
+        fixture.monitor.step(Utc::now());
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 0);
         // The block is still recorded for the next time that tab is in front.
-        assert_eq!(h.monitor.state().blocked_tabs.len(), 1);
+        assert_eq!(fixture.monitor.state().blocked_tabs.len(), 1);
     }
 
     #[test]
     fn idle_without_session_and_skips_exempt_apps() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OffTask,
-            fg("steam.exe", "Steam"),
+            foreground("steam.exe", "Steam"),
             AiFocusConfig::default(),
         );
-        h.monitor.step(Utc::now());
-        assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+        fixture.monitor.step(Utc::now());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
 
         let mut config = session("x");
         config.always_allow.insert("steam.exe".into());
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
-        h.monitor.step(Utc::now());
-        assert_eq!(h.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(h.monitor.state().history.len(), 1);
+        let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
+        fixture.monitor.step(Utc::now());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.monitor.state().history.len(), 1);
     }
 
     #[test]
     fn private_apps_are_not_screenshotted() {
-        let h = harness(Verdict::OnTask, fg("KeePass.exe", "db"), session("x"));
-        h.monitor.step(Utc::now());
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
-        assert!(!h.saw_screenshot.load(Ordering::SeqCst));
+        let fixture = harness(
+            Verdict::OnTask,
+            foreground("KeePass.exe", "db"),
+            session("x"),
+        );
+        fixture.monitor.step(Utc::now());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert!(!fixture.saw_screenshot.load(Ordering::SeqCst));
     }
 
     #[test]
     fn changing_task_rechecks_at_once_and_keeps_blocks() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert_eq!(h.monitor.state().blocked_processes.len(), 1);
-        h.monitor
+        let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.monitor.state().blocked_processes.len(), 1);
+        fixture
+            .monitor
             .store()
-            .update(|c| c.task = "play games".into())
+            .update(|stored_config| stored_config.task = "play games".into())
             .unwrap();
-        h.monitor.step(t0 + ChronoDuration::seconds(1));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(1));
         // Reset, then judged again under the new task; the block stays.
-        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(h.monitor.state().task, "play games");
-        assert_eq!(h.monitor.state().blocked_processes.len(), 1);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.monitor.state().task, "play games");
+        assert_eq!(fixture.monitor.state().blocked_processes.len(), 1);
     }
 
     #[test]
     fn history_merges_consecutive_samples() {
         let mut state = MonitorState::default();
-        let t0 = Utc::now();
-        state.record(t0, &fg("code.exe", "a"));
-        state.record(t0 + ChronoDuration::seconds(90), &fg("code.exe", "a"));
-        state.record(t0 + ChronoDuration::seconds(95), &fg("chrome.exe", "b"));
+        let start_time = Utc::now();
+        state.record(start_time, &foreground("code.exe", "a"));
+        state.record(
+            start_time + ChronoDuration::seconds(90),
+            &foreground("code.exe", "a"),
+        );
+        state.record(
+            start_time + ChronoDuration::seconds(95),
+            &foreground("chrome.exe", "b"),
+        );
         assert_eq!(state.history.len(), 2);
         assert!(state.history_text().contains("(1m 30s)"));
     }
 
     #[test]
     fn screenshot_is_downscaled_jpeg() {
-        let shot = Screenshot {
+        let screenshot = Screenshot {
             width: 2560,
             height: 1440,
             rgba: vec![200; 2560 * 1440 * 4],
         };
-        let jpeg = encode_jpeg(shot).unwrap();
+        let jpeg = encode_jpeg(screenshot).unwrap();
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
         let decoded = image::load_from_memory(&jpeg).unwrap();
         assert_eq!(decoded.width(), 1280);
@@ -1540,7 +1621,7 @@ mod tests {
     }
 
     impl AccessReviewer for FixedReviewer {
-        fn review(&self, _r: &AccessRequest) -> Result<AccessDecision, JudgeError> {
+        fn review(&self, _request: &AccessRequest) -> Result<AccessDecision, JudgeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(AccessDecision {
                 approved: self.approve,
@@ -1550,7 +1631,7 @@ mod tests {
         }
     }
 
-    fn with_reviewer(h: Harness, approve: bool, minutes: u32) -> (Harness, Arc<AtomicUsize>) {
+    fn with_reviewer(fixture: Harness, approve: bool, minutes: u32) -> (Harness, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let reviewer: Arc<dyn AccessReviewer> = Arc::new(FixedReviewer {
             approve,
@@ -1573,7 +1654,7 @@ mod tests {
             current,
             during_call,
             visible,
-        } = h;
+        } = fixture;
         let monitor = monitor.with_reviewer(Arc::new(move |_| Ok(Arc::clone(&reviewer))));
         (
             Harness {
@@ -1603,35 +1684,41 @@ mod tests {
         }
     }
 
-    fn minutes(m: u32) -> GrantDuration {
-        GrantDuration::Minutes { minutes: m }
+    fn minutes(minutes: u32) -> GrantDuration {
+        GrantDuration::Minutes { minutes }
     }
 
     #[test]
     fn access_needs_a_session_and_a_real_purpose() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OnTask,
-            fg("chrome.exe", "x"),
+            foreground("chrome.exe", "x"),
             AiFocusConfig::default(),
         );
-        let (h, calls) = with_reviewer(h, true, 0);
-        let r = h
-            .monitor
-            .request_access(Utc::now(), site("youtube"), minutes(30), "강의 시청");
-        assert!(matches!(r, Err(AccessError::NoSession)));
+        let (fixture, calls) = with_reviewer(fixture, true, 0);
+        let result =
+            fixture
+                .monitor
+                .request_access(Utc::now(), site("youtube"), minutes(30), "강의 시청");
+        assert!(matches!(result, Err(AccessError::NoSession)));
 
-        let h = harness(Verdict::OnTask, fg("chrome.exe", "x"), session("thesis"));
-        let (h, calls2) = with_reviewer(h, true, 0);
-        let r = h
+        let fixture = harness(
+            Verdict::OnTask,
+            foreground("chrome.exe", "x"),
+            session("thesis"),
+        );
+        let (fixture, second_calls) = with_reviewer(fixture, true, 0);
+        let result = fixture
             .monitor
             .request_access(Utc::now(), site("youtube"), minutes(30), "응");
-        assert!(matches!(r, Err(AccessError::PurposeTooShort)));
-        let r = h
-            .monitor
-            .request_access(Utc::now(), site(" "), minutes(30), "강의 시청");
-        assert!(matches!(r, Err(AccessError::EmptyTarget)));
+        assert!(matches!(result, Err(AccessError::PurposeTooShort)));
+        let result =
+            fixture
+                .monitor
+                .request_access(Utc::now(), site(" "), minutes(30), "강의 시청");
+        assert!(matches!(result, Err(AccessError::EmptyTarget)));
         assert_eq!(
-            calls.load(Ordering::SeqCst) + calls2.load(Ordering::SeqCst),
+            calls.load(Ordering::SeqCst) + second_calls.load(Ordering::SeqCst),
             0
         );
     }
@@ -1640,15 +1727,19 @@ mod tests {
     fn rejected_request_is_logged_and_lifts_nothing() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
-        let h = harness(Verdict::OffTask, fg("chrome.exe", "Cats - YouTube"), config);
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert_eq!(h.monitor.state().blocked_tabs.len(), 1);
+        let fixture = harness(
+            Verdict::OffTask,
+            foreground("chrome.exe", "Cats - YouTube"),
+            config,
+        );
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.monitor.state().blocked_tabs.len(), 1);
 
-        let (h, _) = with_reviewer(h, false, 0);
-        let entry = h
+        let (fixture, _) = with_reviewer(fixture, false, 0);
+        let entry = fixture
             .monitor
-            .request_access(t0, site("youtube"), minutes(30), "그냥 보고 싶어서")
+            .request_access(start_time, site("youtube"), minutes(30), "그냥 보고 싶어서")
             .unwrap();
         assert!(matches!(
             entry.event,
@@ -1657,105 +1748,136 @@ mod tests {
                 ..
             }
         ));
-        assert!(h.monitor.grants().get().grants.is_empty());
-        assert_eq!(h.monitor.state().blocked_tabs.len(), 1);
+        assert!(fixture.monitor.grants().get().grants.is_empty());
+        assert_eq!(fixture.monitor.state().blocked_tabs.len(), 1);
     }
 
     #[test]
     fn approved_request_lifts_the_block_and_is_judged_by_purpose() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
-        let h = harness(
+        let fixture = harness(
             Verdict::OffTask,
-            fg("chrome.exe", "Rust async - YouTube"),
+            foreground("chrome.exe", "Rust async - YouTube"),
             config,
         );
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert_eq!(h.monitor.state().blocked_tabs.len(), 1);
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.monitor.state().blocked_tabs.len(), 1);
 
-        let (h, _) = with_reviewer(h, true, 0);
-        h.monitor
-            .request_access(t0, site("youtube"), minutes(30), "Rust async 강의 시청")
+        let (fixture, _) = with_reviewer(fixture, true, 0);
+        fixture
+            .monitor
+            .request_access(
+                start_time,
+                site("youtube"),
+                minutes(30),
+                "Rust async 강의 시청",
+            )
             .unwrap();
-        assert!(h.monitor.state().blocked_tabs.is_empty());
+        assert!(fixture.monitor.state().blocked_tabs.is_empty());
 
         // Still observed: the next check sees the grant's purpose.
-        *h.verdict.lock() = Verdict::OnTask;
-        let closed_before = h.tabs_closed.load(Ordering::SeqCst);
-        h.monitor.step(t0 + ChronoDuration::seconds(61));
-        assert_eq!(h.saw_grant.lock().as_deref(), Some("Rust async 강의 시청"));
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), closed_before);
-        assert_eq!(h.monitor.grants().get().grants.len(), 1);
+        *fixture.verdict.lock() = Verdict::OnTask;
+        let closed_before = fixture.tabs_closed.load(Ordering::SeqCst);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(61));
+        assert_eq!(
+            fixture.saw_grant.lock().as_deref(),
+            Some("Rust async 강의 시청")
+        );
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), closed_before);
+        assert_eq!(fixture.monitor.grants().get().grants.len(), 1);
     }
 
     #[test]
     fn off_purpose_use_of_a_granted_site_revokes_the_grant_at_once() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OnTask,
-            fg("chrome.exe", "Rust async - YouTube"),
+            foreground("chrome.exe", "Rust async - YouTube"),
             session("thesis"),
         );
-        let (h, _) = with_reviewer(h, true, 0);
-        let t0 = Utc::now();
-        h.monitor
-            .request_access(t0, site("youtube"), minutes(60), "Rust async 강의 시청")
+        let (fixture, _) = with_reviewer(fixture, true, 0);
+        let start_time = Utc::now();
+        fixture
+            .monitor
+            .request_access(
+                start_time,
+                site("youtube"),
+                minutes(60),
+                "Rust async 강의 시청",
+            )
             .unwrap();
 
-        *h.verdict.lock() = Verdict::OffTask;
-        *h.current.lock() = Some(fg("chrome.exe", "Funny cats - YouTube"));
-        h.monitor.step(t0 + ChronoDuration::seconds(1));
+        *fixture.verdict.lock() = Verdict::OffTask;
+        *fixture.current.lock() = Some(foreground("chrome.exe", "Funny cats - YouTube"));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(1));
 
-        let grants = h.monitor.grants().get();
+        let grants = fixture.monitor.grants().get();
         assert!(grants.grants.is_empty());
         assert_eq!(
-            grants.log.back().map(|e| e.event.clone()),
+            grants.log.back().map(|log_entry| log_entry.event.clone()),
             Some(GrantEvent::RevokedForMisuse)
         );
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
-        let last = h.monitor.state().verdicts.back().cloned().unwrap();
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
+        let last = fixture.monitor.state().verdicts.back().cloned().unwrap();
         assert_eq!(last.action, "access revoked, tab closed");
     }
 
     #[test]
     fn grants_expire_and_admin_can_revoke() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OnTask,
-            fg("code.exe", "main.rs"),
+            foreground("code.exe", "main.rs"),
             session("thesis"),
         );
-        let (h, _) = with_reviewer(h, true, 0);
-        let t0 = Utc::now();
+        let (fixture, _) = with_reviewer(fixture, true, 0);
+        let start_time = Utc::now();
         let app = GrantTarget::App {
             process: "Spotify".into(),
         };
-        h.monitor
-            .request_access(t0, app.clone(), minutes(10), "집중용 음악 재생")
+        fixture
+            .monitor
+            .request_access(start_time, app.clone(), minutes(10), "집중용 음악 재생")
             .unwrap();
-        h.monitor
-            .request_access(t0, app, GrantDuration::Permanent, "업무용 음악 재생")
+        fixture
+            .monitor
+            .request_access(
+                start_time,
+                app,
+                GrantDuration::Permanent,
+                "업무용 음악 재생",
+            )
             .unwrap();
-        assert_eq!(h.monitor.grants().get().grants.len(), 2);
+        assert_eq!(fixture.monitor.grants().get().grants.len(), 2);
 
         // Timed one runs out.
-        h.monitor.step(t0 + ChronoDuration::minutes(11));
-        let grants = h.monitor.grants().get().grants;
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::minutes(11));
+        let grants = fixture.monitor.grants().get().grants;
         assert_eq!(grants.len(), 1);
         assert!(grants[0].until.is_none());
 
         // Admin revokes the permanent one through the config.
         let id = grants[0].id.clone();
-        h.monitor
+        fixture
+            .monitor
             .store()
-            .update(|c| {
-                c.revoked_grants.insert(id);
+            .update(|stored_config| {
+                stored_config.revoked_grants.insert(id);
             })
             .unwrap();
-        h.monitor.step(t0 + ChronoDuration::minutes(12));
-        let state = h.monitor.grants().get();
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::minutes(12));
+        let state = fixture.monitor.grants().get();
         assert!(state.grants.is_empty());
         assert_eq!(
-            state.log.back().map(|e| e.event.clone()),
+            state.log.back().map(|log_entry| log_entry.event.clone()),
             Some(GrantEvent::RevokedByAdmin)
         );
     }
@@ -1764,15 +1886,15 @@ mod tests {
     fn permanent_requests_are_refused_when_the_admin_disallows_them() {
         let mut config = session("thesis");
         config.allow_permanent_grants = false;
-        let h = harness(Verdict::OnTask, fg("code.exe", "x"), config);
-        let (h, calls) = with_reviewer(h, true, 0);
-        let r = h.monitor.request_access(
+        let fixture = harness(Verdict::OnTask, foreground("code.exe", "x"), config);
+        let (fixture, calls) = with_reviewer(fixture, true, 0);
+        let result = fixture.monitor.request_access(
             Utc::now(),
             site("docs.rs"),
             GrantDuration::Permanent,
             "Rust 문서 참고",
         );
-        assert!(matches!(r, Err(AccessError::PermanentNotAllowed)));
+        assert!(matches!(result, Err(AccessError::PermanentNotAllowed)));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -1795,55 +1917,69 @@ mod tests {
     #[test]
     fn a_channel_is_blocked_at_the_first_off_task_verdict() {
         // `strikes_to_block` (2 here) applies to apps only.
-        let h = harness(
+        let fixture = harness(
             Verdict::OffTask,
-            fg("chrome.exe", "Video 1 - YouTube"),
+            foreground("chrome.exe", "Video 1 - YouTube"),
             session("thesis"),
         );
-        *h.channel.lock() = "Cat TV".into();
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
-        let blocked: Vec<String> = h.monitor.state().blocked_tabs.keys().cloned().collect();
+        *fixture.channel.lock() = "Cat TV".into();
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
+        let blocked: Vec<String> = fixture
+            .monitor
+            .state()
+            .blocked_tabs
+            .keys()
+            .cloned()
+            .collect();
         assert_eq!(blocked, ["chrome.exe|youtube channel: cat tv"]);
         // Video 1 again: its channel is known, so it is closed without a check.
-        h.monitor.step(t0 + ChronoDuration::seconds(5));
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 2);
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(5));
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn youtube_blocks_one_channel_not_the_whole_site() {
         let mut config = session("learn Rust");
         config.strikes_to_block = 1;
-        let h = harness(
+        let fixture = harness(
             Verdict::OffTask,
-            fg("chrome.exe", "Funny cats - YouTube"),
+            foreground("chrome.exe", "Funny cats - YouTube"),
             config,
         );
-        *h.channel.lock() = "Cat TV".into();
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+        *fixture.channel.lock() = "Cat TV".into();
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
 
         // Another channel stays open: judged at once, on task, and not again soon.
-        *h.verdict.lock() = Verdict::OnTask;
-        *h.channel.lock() = "Rust Lang".into();
-        *h.current.lock() = Some(fg("chrome.exe", "Async in depth - YouTube"));
-        h.monitor.step(t0 + ChronoDuration::seconds(20));
-        h.monitor.step(t0 + ChronoDuration::seconds(30));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+        *fixture.verdict.lock() = Verdict::OnTask;
+        *fixture.channel.lock() = "Rust Lang".into();
+        *fixture.current.lock() = Some(foreground("chrome.exe", "Async in depth - YouTube"));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(20));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(30));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
 
         // A new video of the blocked channel: unknown until judged (at once), then
         // closed even though this verdict alone would have let it stay.
-        *h.channel.lock() = "cat  tv".into();
-        *h.current.lock() = Some(fg("chrome.exe", "More cats - YouTube"));
-        h.monitor.step(t0 + ChronoDuration::seconds(40));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 3);
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 2);
+        *fixture.channel.lock() = "cat  tv".into();
+        *fixture.current.lock() = Some(foreground("chrome.exe", "More cats - YouTube"));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(40));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 2);
         assert_eq!(
-            h.monitor.state().verdicts.back().unwrap().action,
+            fixture.monitor.state().verdicts.back().unwrap().action,
             "tab closed (already blocked)"
         );
     }
@@ -1852,42 +1988,56 @@ mod tests {
     fn youtube_pages_without_a_channel_are_blocked_alone() {
         let mut config = session("learn Rust");
         config.strikes_to_block = 1;
-        let h = harness(
+        let fixture = harness(
             Verdict::OffTask,
-            fg("chrome.exe", "YouTube - Google Chrome"),
+            foreground("chrome.exe", "YouTube - Google Chrome"),
             config,
         );
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
-        let keys: Vec<String> = h.monitor.state().blocked_tabs.keys().cloned().collect();
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
+        let keys: Vec<String> = fixture
+            .monitor
+            .state()
+            .blocked_tabs
+            .keys()
+            .cloned()
+            .collect();
         assert_eq!(keys, ["chrome.exe|youtube page: youtube"]);
         // A video is not covered by the home page's block (it is judged itself).
-        *h.verdict.lock() = Verdict::OnTask;
-        *h.current.lock() = Some(fg("chrome.exe", "Async in depth - YouTube"));
-        h.monitor.step(t0 + ChronoDuration::seconds(5));
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+        *fixture.verdict.lock() = Verdict::OnTask;
+        *fixture.current.lock() = Some(foreground("chrome.exe", "Async in depth - YouTube"));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(5));
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn blocks_survive_a_task_change_and_a_session_restart() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        h.monitor
+        let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        fixture
+            .monitor
             .store()
-            .update(|c| c.task = "thesis.".into())
+            .update(|stored_config| stored_config.task = "thesis.".into())
             .unwrap();
-        *h.current.lock() = None;
-        h.monitor.step(t0 + ChronoDuration::seconds(1));
-        h.monitor
+        *fixture.current.lock() = None;
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(1));
+        fixture
+            .monitor
             .store()
-            .update(|c| c.session_active = false)
+            .update(|stored_config| stored_config.session_active = false)
             .unwrap();
-        h.monitor.step(t0 + ChronoDuration::seconds(2));
-        assert_eq!(h.monitor.state().process_blocks().len(), 1);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(2));
+        assert_eq!(fixture.monitor.state().process_blocks().len(), 1);
     }
 
     #[test]
@@ -1895,41 +2045,45 @@ mod tests {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
         let long = format!("(3) {} - YouTube - Google Chrome", "x".repeat(150));
-        let h = harness(Verdict::OffTask, fg("chrome.exe", &long), config);
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
-        let (h, _) = with_reviewer(h, true, 0);
-        h.monitor
-            .request_access(t0, site("youtube"), minutes(30), "강의 영상 시청")
+        let fixture = harness(Verdict::OffTask, foreground("chrome.exe", &long), config);
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
+        let (fixture, _) = with_reviewer(fixture, true, 0);
+        fixture
+            .monitor
+            .request_access(start_time, site("youtube"), minutes(30), "강의 영상 시청")
             .unwrap();
-        assert!(h.monitor.state().blocked_tabs.is_empty());
-        *h.verdict.lock() = Verdict::OnTask;
-        h.monitor.step(t0 + ChronoDuration::seconds(5));
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
+        assert!(fixture.monitor.state().blocked_tabs.is_empty());
+        *fixture.verdict.lock() = Verdict::OnTask;
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(5));
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn verdict_is_discarded_when_access_is_granted_during_the_check() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
-        let (h, _) = with_reviewer(h, true, 0);
-        let monitor = Arc::new(h.monitor);
-        let m = Arc::clone(&monitor);
-        let t0 = Utc::now();
-        *h.during_call.lock() = Some(Box::new(move || {
-            m.request_access(
-                t0,
-                GrantTarget::App {
-                    process: "steam".into(),
-                },
-                minutes(30),
-                "팀 회의용 화면 공유",
-            )
-            .unwrap();
+        let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
+        let (fixture, _) = with_reviewer(fixture, true, 0);
+        let monitor = Arc::new(fixture.monitor);
+        let monitor_for_hook = Arc::clone(&monitor);
+        let start_time = Utc::now();
+        *fixture.during_call.lock() = Some(Box::new(move || {
+            monitor_for_hook
+                .request_access(
+                    start_time,
+                    GrantTarget::App {
+                        process: "steam".into(),
+                    },
+                    minutes(30),
+                    "팀 회의용 화면 공유",
+                )
+                .unwrap();
         }));
-        monitor.step(t0);
+        monitor.step(start_time);
         assert!(monitor.state().blocked_processes.is_empty());
         assert_eq!(monitor.grants().get().grants.len(), 1);
     }
@@ -1939,32 +2093,38 @@ mod tests {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
         config.check_interval_secs = u64::MAX;
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
-        h.monitor.step(Utc::now());
-        assert_eq!(h.monitor.state().blocked_processes.len(), 1);
+        let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
+        fixture.monitor.step(Utc::now());
+        assert_eq!(fixture.monitor.state().blocked_processes.len(), 1);
     }
 
     #[test]
     fn a_window_without_a_verdict_is_judged_at_once() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OnTask,
-            fg("code.exe", "main.rs"),
+            foreground("code.exe", "main.rs"),
             session("thesis"),
         );
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
         // The verdict stands: no call on the next samples.
-        h.monitor.step(t0 + ChronoDuration::seconds(3));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(3));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
         // A game shows up: judged at the first sample that sees it, no dwell.
-        *h.current.lock() = Some(fg("game.exe", "Game"));
-        h.monitor.step(t0 + ChronoDuration::seconds(6));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+        *fixture.current.lock() = Some(foreground("game.exe", "Game"));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(6));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
         // Back to the editor, whose verdict still stands: no call.
-        *h.current.lock() = Some(fg("code.exe", "main.rs"));
-        h.monitor.step(t0 + ChronoDuration::seconds(9));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+        *fixture.current.lock() = Some(foreground("code.exe", "main.rs"));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(9));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -1973,29 +2133,33 @@ mod tests {
         config.check_interval_secs = 60;
         config.recheck_minutes = 15;
         let mut state = MonitorState::default();
-        let t0 = Utc::now();
-        let app = fg("code.exe", "main.rs");
-        assert!(state.needs_judging(t0, &config, &app));
-        state.remember_verdict(t0, &config, &app, Verdict::OnTask);
-        assert!(!state.needs_judging(t0 + ChronoDuration::minutes(14), &config, &app));
-        assert!(state.needs_judging(t0 + ChronoDuration::minutes(15), &config, &app));
+        let start_time = Utc::now();
+        let app = foreground("code.exe", "main.rs");
+        assert!(state.needs_judging(start_time, &config, &app));
+        state.remember_verdict(start_time, &config, &app, Verdict::OnTask);
+        assert!(!state.needs_judging(start_time + ChronoDuration::minutes(14), &config, &app));
+        assert!(state.needs_judging(start_time + ChronoDuration::minutes(15), &config, &app));
         // Unsure (and off_task on an app still collecting strikes): after the interval.
-        state.remember_verdict(t0, &config, &app, Verdict::Unsure);
-        assert!(!state.needs_judging(t0 + ChronoDuration::seconds(59), &config, &app));
-        assert!(state.needs_judging(t0 + ChronoDuration::seconds(60), &config, &app));
+        state.remember_verdict(start_time, &config, &app, Verdict::Unsure);
+        assert!(!state.needs_judging(start_time + ChronoDuration::seconds(59), &config, &app));
+        assert!(state.needs_judging(start_time + ChronoDuration::seconds(60), &config, &app));
         // A new task forgets every verdict.
-        state.remember_verdict(t0, &config, &app, Verdict::OnTask);
+        state.remember_verdict(start_time, &config, &app, Verdict::OnTask);
         state.reset("write docs");
-        assert!(state.needs_judging(t0, &config, &app));
+        assert!(state.needs_judging(start_time, &config, &app));
     }
 
     #[test]
     fn no_screenshot_while_a_private_app_is_visible_behind() {
-        let h = harness(Verdict::OnTask, fg("chrome.exe", "Docs"), session("thesis"));
-        *h.visible.lock() = vec!["chrome.exe".into(), "KeePass.exe".into()];
-        h.monitor.step(Utc::now());
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
-        assert!(!h.saw_screenshot.load(Ordering::SeqCst));
+        let fixture = harness(
+            Verdict::OnTask,
+            foreground("chrome.exe", "Docs"),
+            session("thesis"),
+        );
+        *fixture.visible.lock() = vec!["chrome.exe".into(), "KeePass.exe".into()];
+        fixture.monitor.step(Utc::now());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert!(!fixture.saw_screenshot.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -2007,8 +2171,8 @@ mod tests {
             JsonStore::in_memory(UsageLog::default()),
             None,
         ));
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
-        let monitor = h.monitor.with_usage(Arc::clone(&usage));
+        let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
+        let monitor = fixture.monitor.with_usage(Arc::clone(&usage));
         // $4 of input on Opus 5.5: over the $1 budget.
         let spent = TokenUsage {
             input: 1_000_000,
@@ -2016,20 +2180,24 @@ mod tests {
         };
         usage.record("focus check", "claude-opus-5-5", &spent);
         monitor.step(Utc::now());
-        assert_eq!(h.calls.load(Ordering::SeqCst), 0, "the judge is not asked");
+        assert_eq!(
+            fixture.calls.load(Ordering::SeqCst),
+            0,
+            "the judge is not asked"
+        );
         assert!(monitor.state().process_blocks().is_empty());
         assert!(monitor
             .state()
             .last_error
             .as_deref()
-            .is_some_and(|e| e.contains("budget")));
+            .is_some_and(|error| error.contains("budget")));
         // A failed call is not retried at every sample, only after the interval.
         let first = monitor.state().last_check;
         monitor.step(Utc::now() + ChronoDuration::seconds(3));
         assert_eq!(monitor.state().last_check, first);
     }
 
-    fn win(window: isize, process: &str, title: &str, minimized: bool) -> OpenWindow {
+    fn open_window(window: isize, process: &str, title: &str, minimized: bool) -> OpenWindow {
         OpenWindow {
             window,
             pid: 5000 + window as u32,
@@ -2041,101 +2209,117 @@ mod tests {
 
     #[test]
     fn other_open_windows_are_listed_by_title_only() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OnTask,
-            fg("code.exe", "main.rs"),
+            foreground("code.exe", "main.rs"),
             session("coding"),
         );
-        *h.open.lock() = vec![
-            win(1, "code.exe", "main.rs", false), // the front window itself
-            win(2, "chrome.exe", "Rust docs - Google Chrome", true),
-            win(3, "explorer.exe", "Downloads", false), // Windows essential
-            win(4, "spotify.exe", "Spotify", false),
-            win(5, "spotify.exe", "Spotify mini player", false), // same app again
+        *fixture.open.lock() = vec![
+            open_window(1, "code.exe", "main.rs", false), // the front window itself
+            open_window(2, "chrome.exe", "Rust docs - Google Chrome", true),
+            open_window(3, "explorer.exe", "Downloads", false), // Windows essential
+            open_window(4, "spotify.exe", "Spotify", false),
+            open_window(5, "spotify.exe", "Spotify mini player", false), // same app again
         ];
-        h.monitor.step(Utc::now());
-        let listed = h.saw_others.lock().clone();
-        let titles: Vec<&str> = listed.iter().map(|w| w.title.as_str()).collect();
+        fixture.monitor.step(Utc::now());
+        let listed = fixture.saw_others.lock().clone();
+        let titles: Vec<&str> = listed.iter().map(|window| window.title.as_str()).collect();
         assert_eq!(titles, ["Rust docs - Google Chrome", "Spotify"]);
         assert!(listed[0].is_browser && !listed[1].is_browser);
     }
 
     #[test]
     fn an_off_task_background_tab_is_blocked_hidden_and_closed_in_front() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OnTask,
-            fg("code.exe", "main.rs"),
+            foreground("code.exe", "main.rs"),
             session("coding"),
         );
-        *h.others_verdict.lock() = Verdict::OffTask;
-        *h.open.lock() = vec![win(2, "chrome.exe", "Funny cats - YouTube", false)];
-        let t0 = Utc::now();
-        h.monitor.step(t0);
+        *fixture.others_verdict.lock() = Verdict::OffTask;
+        *fixture.open.lock() = vec![open_window(2, "chrome.exe", "Funny cats - YouTube", false)];
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
         assert_eq!(
-            *h.minimized.lock(),
+            *fixture.minimized.lock(),
             [2],
             "shown on a second monitor: hidden"
         );
-        assert_eq!(h.monitor.state().blocked_tabs.len(), 1);
-        assert!(h
+        assert_eq!(fixture.monitor.state().blocked_tabs.len(), 1);
+        assert!(fixture
             .monitor
             .state()
             .verdicts
             .iter()
-            .any(|v| v.title == "(background) Funny cats - YouTube"
-                && v.action.contains("minimized")));
+            .any(
+                |verdict_entry| verdict_entry.title == "(background) Funny cats - YouTube"
+                    && verdict_entry.action.contains("minimized")
+            ));
         // Brought to the front: closed without asking the judge again.
-        *h.current.lock() = Some(Foreground {
+        *fixture.current.lock() = Some(Foreground {
             window: 2,
-            ..fg("chrome.exe", "Funny cats - YouTube")
+            ..foreground("chrome.exe", "Funny cats - YouTube")
         });
-        h.monitor.step(t0 + ChronoDuration::seconds(5));
-        assert_eq!(h.tabs_closed.load(Ordering::SeqCst), 1);
-        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(5));
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn background_apps_collect_strikes_even_while_the_front_is_trusted() {
-        let h = harness(
+        let fixture = harness(
             Verdict::OnTask,
-            fg("code.exe", "main.rs"),
+            foreground("code.exe", "main.rs"),
             session("coding"),
         );
-        *h.others_verdict.lock() = Verdict::OffTask;
-        *h.open.lock() = vec![win(2, "steam.exe", "Steam", false)];
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        assert!(h.monitor.state().process_blocks().is_empty(), "strike 1/2");
+        *fixture.others_verdict.lock() = Verdict::OffTask;
+        *fixture.open.lock() = vec![open_window(2, "steam.exe", "Steam", false)];
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert!(
+            fixture.monitor.state().process_blocks().is_empty(),
+            "strike 1/2"
+        );
         // code.exe is trusted for 15 minutes, but the schedule still runs a check
         // for the background window.
-        h.monitor.step(t0 + ChronoDuration::seconds(61));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(h.monitor.state().process_blocks()[0].0, "steam.exe");
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(61));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.monitor.state().process_blocks()[0].0, "steam.exe");
         // Nothing left to judge and the front is trusted: no more calls.
-        h.monitor.step(t0 + ChronoDuration::seconds(122));
-        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(122));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
     fn an_administrator_can_lift_a_block() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config);
-        let t0 = Utc::now();
-        h.monitor.step(t0);
-        let id = h.monitor.state().blocked_processes["steam.exe"].id.clone();
+        let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        let id = fixture.monitor.state().blocked_processes["steam.exe"]
+            .id
+            .clone();
         assert!(!id.is_empty());
         // The Settings tab names the block in the config; the agent drops it,
         // even without a running session.
-        h.monitor
+        fixture
+            .monitor
             .store()
-            .update(|c| {
-                c.session_active = false;
-                c.unblocked.insert(id);
+            .update(|stored_config| {
+                stored_config.session_active = false;
+                stored_config.unblocked.insert(id);
             })
             .unwrap();
-        h.monitor.step(t0 + ChronoDuration::seconds(5));
-        assert!(h.monitor.state().process_blocks().is_empty());
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(5));
+        assert!(fixture.monitor.state().process_blocks().is_empty());
     }
 
     #[test]
@@ -2145,8 +2329,12 @@ mod tests {
             "steam.exe".into(),
             serde_json::from_str(r#"{"reason":"games","until":null}"#).unwrap(),
         );
-        let h = harness(Verdict::OnTask, fg("code.exe", "x"), session("thesis"));
-        let monitor = h.monitor.with_block_store(JsonStore::in_memory(old));
+        let fixture = harness(
+            Verdict::OnTask,
+            foreground("code.exe", "x"),
+            session("thesis"),
+        );
+        let monitor = fixture.monitor.with_block_store(JsonStore::in_memory(old));
         assert!(!monitor.state().blocked_processes["steam.exe"].id.is_empty());
     }
 
@@ -2155,20 +2343,24 @@ mod tests {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
         let saved = JsonStore::in_memory(SavedBlocks::default());
-        let h = harness(Verdict::OffTask, fg("steam.exe", "Steam"), config.clone());
-        let monitor = h.monitor.with_block_store(saved.clone());
+        let fixture = harness(
+            Verdict::OffTask,
+            foreground("steam.exe", "Steam"),
+            config.clone(),
+        );
+        let monitor = fixture.monitor.with_block_store(saved.clone());
         monitor.step(Utc::now());
         monitor.save_blocks();
         assert_eq!(saved.get().processes.len(), 1);
 
         // A new agent (e.g. after logging out and in) starts with the block.
-        let h2 = harness(
+        let restarted_fixture = harness(
             Verdict::OnTask,
-            fg("code.exe", "x"),
+            foreground("code.exe", "x"),
             AiFocusConfig::default(),
         );
-        let monitor2 = h2.monitor.with_block_store(saved);
-        let blocks = monitor2.state().process_blocks();
+        let restarted_monitor = restarted_fixture.monitor.with_block_store(saved);
+        let blocks = restarted_monitor.state().process_blocks();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].0, "steam.exe");
     }
