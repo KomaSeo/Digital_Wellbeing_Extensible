@@ -6,6 +6,7 @@
 4. 설치가 끝나면 작업 계정으로 로그인합니다. 로그인하면 **Digital Wellbeing Focus** 창(Focus 앱)이 뜹니다. 창이 보이지 않으면 시작 메뉴의 **Digital Wellbeing Focus**나 트레이의 Focus 아이콘으로 엽니다.
 5. 설치 직후는 **설정 단계**입니다. 설정 단계에서는 저장한 설정이 바로 적용됩니다. Focus 앱의 **Settings** 탭을 열고, **AI connection** 영역에 Anthropic API 키를 넣고 **Use this key**와 **Save**를 누릅니다. 항상 막을 프로그램(블랙리스트)과 할 일 플래너의 규칙 같은 다른 설정도 이 탭에서 정합니다. 할 일 목록은 **To-do** 탭에서 만듭니다.
 6. 설정을 다 정했으면 같은 Settings 탭에서 설정을 보호합니다(아래 "설정을 보호하세요").
+7. (권장) 관리자 계정에서 우회를 막는 추가 설정을 합니다. 관리자 계정 비밀번호를 쉽게 꺼낼 수 없는 곳에 두고, BIOS(UEFI)에 관리자 비밀번호를 걸고 USB 부팅을 끄고, 안전 모드로 들어가는 길(Windows 복구 환경)을 끕니다. 방법은 `docs\multi_account.md` 4.4절에 있습니다.
 
 설치 프로그램 없이 쓰려면 `…-windows-x64.zip`을 풀고 `install.cmd`를 실행합니다.
 자세한 설명은 설치 폴더의 `docs\multi_account.md`에 있습니다.
