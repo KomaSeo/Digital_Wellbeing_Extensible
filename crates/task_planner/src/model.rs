@@ -47,8 +47,9 @@ impl TodoItem {
 
 /// Responsibility: Hold the admin's planner settings and to-do list (planner.json).
 ///
-/// Part of the settings (`planner.json`): edited in the Focus app's Settings tab while the
-/// settings are not locked, never by a planner request.
+/// Part of the settings (`planner.json`): edited in the Focus app's Settings tab (while the
+/// settings are locked, an edit takes effect only when the lock ends), never by a planner
+/// request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlannerConfig {

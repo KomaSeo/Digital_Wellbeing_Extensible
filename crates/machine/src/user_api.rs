@@ -18,12 +18,14 @@
 //! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
 //! | `request_access` | `{ "target": GrantTarget, "duration": GrantDuration, "purpose": "…" }` | [`Status`], `last_access` set |
 //! | `propose_todo`   | `{ "todo": ProposalInput, "via": "…" }`  | [`Status`], `last_proposal` set |
-//! | `settings_get`   | `{}` (refused while locked)              | [`crate::settings::SettingsSnapshot`] |
-//! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…} }` (refused while locked) | `{ "ok": true }` |
+//! | `settings_get`   | `{}`                                     | [`crate::settings::SettingsSnapshot`] |
+//! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…} }` | [`crate::settings::PutOutcome`] (in force now, or pending until the lock ends) |
+//! | `settings_discard` | `{ "name": "…" }` or `{}` (all)        | `{ "ok": true }` |
 //! | `settings_lock`  | `{ "hours": n }` (only extends)           | [`crate::settings::SettingsLock`] |
 //!
-//! The `settings_*` methods let a standard user edit the admin settings while
-//! they are unlocked; see [`crate::settings`].
+//! The `settings_*` methods let a standard user edit the admin settings: while they are
+//! unlocked an edit takes effect at once, while they are locked it waits for the lock to
+//! end; see [`crate::settings`].
 //!
 //! `propose_todo` asks the AI to add a to-do to the planner's list; it judges
 //! the proposal against the admin's life rules (see `task_planner`).
@@ -100,7 +102,7 @@ pub struct Status {
     /// Set only in the reply to `propose_todo`.
     #[serde(default)]
     pub last_proposal: Option<ProposalRecord>,
-    /// Admin settings are locked for standard users until then; `None` = unlocked.
+    /// Settings edits wait until then (they are locked); `None` = unlocked.
     #[serde(default)]
     pub settings_locked_until: Option<DateTime<Utc>>,
     /// Estimated cost of today's Claude calls on this PC, and the admin's daily
@@ -177,8 +179,21 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
         }
         "settings_put" => {
             let name = params["name"].as_str().ok_or("params.name required")?;
-            crate::settings::put(&data, Utc::now(), name, &params["content"])?;
-            tracing::info!("settings '{name}' changed through the agent");
+            let outcome = crate::settings::put(&data, Utc::now(), name, &params["content"])?;
+            match &outcome {
+                crate::settings::PutOutcome::Applied => {
+                    tracing::info!("settings '{name}' changed through the agent")
+                }
+                crate::settings::PutOutcome::Pending { applies_at } => tracing::info!(
+                    "settings '{name}' saved through the agent; in force from {applies_at}"
+                ),
+            }
+            return serde_json::to_value(outcome).map_err(|e| e.to_string());
+        }
+        "settings_discard" => {
+            let name = params["name"].as_str();
+            crate::settings::discard_pending(&data, name)?;
+            tracing::info!("pending settings discarded: {}", name.unwrap_or("all"));
             return Ok(json!({ "ok": true }));
         }
         "settings_lock" => {

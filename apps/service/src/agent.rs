@@ -9,8 +9,9 @@
 //!   of its own session.
 //!
 //! It reads config from `%ProgramData%\DigitalWellbeing` and writes it only
-//! for the Focus app's Settings tab (`settings_put`, while unlocked); every
-//! agent reloads changed files within a few seconds. The files it
+//! for the Focus app's Settings tab (`settings_put`: at once while unlocked;
+//! while locked the edit waits, and the reload loop applies it when the lock
+//! ends); every agent reloads changed files within a few seconds. The files it
 //! writes are `planner_state.json` (task assignment, change requests),
 //! `grants\<user>.json` (this user's access grants) and `blocks\<user>.json`
 //! (blocks in force, so logging out and back in does not lift them).
@@ -149,6 +150,15 @@ fn reload_loop(
     let mut seen = (modified(&policy), modified(&ai), modified(&plan));
     loop {
         thread::sleep(RELOAD_INTERVAL);
+        // Edits saved while the settings were locked take effect once the lock has ended;
+        // the reload below then picks them up.
+        let applied = machine::settings::apply_pending(&machine::data_dir(), chrono::Utc::now());
+        if !applied.is_empty() {
+            info!(
+                "the settings lock ended: applied pending {}",
+                applied.join(", ")
+            );
+        }
         let now = (modified(&policy), modified(&ai), modified(&plan));
         // A change counts as seen only once its reload worked; a file that was
         // locked or half-written (e.g. saved in place by an editor) is retried.

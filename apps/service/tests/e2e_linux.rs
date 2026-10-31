@@ -13,7 +13,8 @@
 //! 4. settings_get / settings_put work while unlocked; with the stand-in, a to-do proposal
 //!    goes through; with the real AI, the planner picks what to do now from a list that
 //!    mixes work, rest and play (urgent work first; rest or play on a rest day);
-//! 5. settings_lock makes the agent refuse settings_get.
+//! 5. after settings_lock, a saved edit waits for the lock to end instead of taking effect,
+//!    and can be discarded; when a lock ends, the agent puts the waiting edit in force.
 #![cfg(target_os = "linux")]
 
 mod common;
@@ -267,13 +268,31 @@ fn end_to_end(real_key: Option<String>) {
         .unwrap();
         assert!(proposed.last_proposal.as_ref().is_some_and(|p| p.approved));
     }
-    call_value(session, "settings_lock", json!({ "hours": 1 })).unwrap();
-    let refused = call_value(session, "settings_get", json!({})).unwrap_err();
-    assert!(refused.contains("locked"), "{refused}");
-    assert!(call(session, "status", json!({}))
-        .unwrap()
-        .settings_locked_until
-        .is_some());
+    // A short lock (written directly; the API only locks for whole hours): the edit saved
+    // meanwhile takes effect once the lock ends, through the agent's reload loop.
+    let until = chrono::Utc::now() + chrono::Duration::seconds(5);
+    std::fs::write(
+        data.join("settings_lock.json"),
+        json!({ "until": until, "set_at": chrono::Utc::now() }).to_string(),
+    )
+    .unwrap();
+    let edit = json!({ "enabled": false, "todos": [], "life_rules": "After the lock." });
+    let outcome = call_value(
+        session,
+        "settings_put",
+        json!({ "name": "planner", "content": edit }),
+    )
+    .unwrap();
+    assert_eq!(outcome["outcome"], "pending", "{outcome}");
+    let applied = wait_for(Duration::from_secs(20), || {
+        let s = call_value(session, "settings_get", json!({})).ok()?;
+        (s["files"]["planner"]["life_rules"] == "After the lock.").then_some(s)
+    })
+    .expect("the pending edit took effect when the lock ended");
+    assert!(applied["pending"].as_object().is_none_or(|p| p.is_empty()));
+    assert!(chrono::Utc::now() >= until);
+
+    common::check_lock_delays_edits(session);
 
     let _ = std::fs::remove_dir_all(&data);
 }

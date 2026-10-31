@@ -1,6 +1,7 @@
 //! Responsibility: Start the desktop window. Standalone: enforce the rules in this process and
 //! serve the local API. On a PC with the machine install it only points to the Focus app,
-//! whose Settings tab edits the shared settings (while they are not locked).
+//! whose Settings tab edits the shared settings (while they are locked, edits wait for the
+//! lock to end).
 
 use ai_focus_rule::grants::GrantState;
 use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
@@ -128,7 +129,8 @@ impl eframe::App for InstalledNotice {
             ui.label(
                 "The service enforces the rules in the managed accounts. Open the Digital \
                  Wellbeing Focus app in a managed account (Start menu or the tray icon); its \
-                 Settings tab edits the settings while they are not locked.",
+                 Settings tab edits the settings (while they are locked, edits take effect \
+                 when the lock ends).",
             );
             ui.label("This window does nothing else; close it.");
         });

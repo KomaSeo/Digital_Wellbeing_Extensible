@@ -1,27 +1,29 @@
-//! Responsibility: Show the admin settings in the Focus app while they are unlocked, send the
-//! user's edits to the agent, and let the user lock the settings for a while.
+//! Responsibility: Show the admin settings in the Focus app, send the user's edits to the
+//! agent, show and discard the edits that wait for the lock to end, and let the user lock the
+//! settings for a while.
 //!
 //! This tab is where the settings of a machine install are edited, from any managed
-//! (standard) account, as long as they are not locked. It asks the agent for the
-//! settings (`settings_get`), writes them into a private copy ("mirror") under
-//! `%LOCALAPPDATA%`, and opens the usual stores and panels on that copy. A background thread
-//! sends every file the panels save back to the agent (`settings_put`), which writes the real
-//! file as SYSTEM, and refreshes the read-only views (planner state, grants, blocks).
+//! (standard) account, locked or not. It asks the agent for the settings (`settings_get`),
+//! writes them into a private copy ("mirror") under `%LOCALAPPDATA%`, and opens the usual
+//! stores and panels on that copy. A background thread sends every file the panels save back
+//! to the agent (`settings_put`), which writes the real file as SYSTEM, and refreshes the
+//! read-only views (planner state, grants, blocks).
 //!
-//! Locking (`settings_lock`) only ever extends. Once locked, the agent refuses both reading and
-//! writing, and this tab deletes its copy. Rules: `machine::settings`; guide:
-//! `docs/multi_account.md` 6.4.
+//! While the settings are locked the agent keeps a saved file as a pending edit and puts it
+//! in force only when the lock ends. The mirror then shows the pending version, so editing
+//! goes on from it; "Discard" drops it (`settings_discard`). Locking (`settings_lock`) only
+//! ever extends. Rules: `machine::settings`; guide: `docs/multi_account.md` 6.4.
 
 use ai_focus_rule::grants::GrantState;
 use ai_focus_rule::{native_monitor, AiFocusRuleHandle, AiFocusStore};
 use chrono::{DateTime, Local, Utc};
 use list_based_rule::{FileListPersistence, ListBasedRuleHandle, ListStore};
-use machine::settings::{SettingsSnapshot, EDITABLE};
+use machine::settings::{PendingFile, PutOutcome, SettingsSnapshot, EDITABLE};
 use machine::user_api::call_value;
 use parking_lot::Mutex;
 use rule_ui::{Panel, RuleUi};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,6 +64,8 @@ struct Sync {
     stop: AtomicBool,
     /// Last bytes of each editable file the agent has accepted (or sent us).
     synced: Mutex<HashMap<&'static str, Option<Vec<u8>>>>,
+    /// Edits the agent keeps until the lock ends (refreshed every few seconds).
+    pending: Mutex<BTreeMap<String, PendingFile>>,
     message: Mutex<String>,
 }
 
@@ -80,46 +84,36 @@ impl SettingsTab {
     pub fn ui(&mut self, ui: &mut egui::Ui, locked_until: Option<DateTime<Utc>>) {
         match locked_until {
             Some(until) => {
-                // Locked meanwhile (here, by Claude Desktop, or by another user):
-                // stop and remove the copy, which holds the API key.
-                if self.loaded.take().is_some() {
-                    let _ = fs::remove_dir_all(mirror_dir());
-                }
-                ui.colored_label(
-                    RED,
-                    format!(
-                        "The admin settings are locked until {}.",
-                        until.with_timezone(&Local).format("%Y-%m-%d %H:%M")
-                    ),
-                );
-                ui.label("Nobody can change them until then. You can only lock them for longer.");
+                let until = until.with_timezone(&Local).format("%Y-%m-%d %H:%M");
+                ui.colored_label(RED, format!("The admin settings are locked until {until}."));
+                ui.label(format!(
+                    "You can still edit them, but what you save takes effect only when the \
+                     lock ends ({until}). Until then the current settings stay in force."
+                ));
             }
             None => {
                 ui.colored_label(
                     YELLOW,
-                    "The admin settings are unlocked: anyone using this PC can change them here.",
+                    "The admin settings are unlocked: anyone using this PC can change them \
+                     here, and changes take effect at once.",
                 );
             }
         }
         self.lock_ui(ui, locked_until);
-        if locked_until.is_some() {
-            return;
-        }
 
         ui.separator();
         if self.loaded.is_none() {
             if ui.button("Open the settings").clicked() {
-                match self.load() {
-                    Ok(loaded) => {
-                        self.loaded = Some(loaded);
-                        self.error.clear();
-                    }
-                    Err(err) => self.error = err,
-                }
+                self.open();
             }
             if !self.error.is_empty() {
                 ui.colored_label(RED, &self.error);
             }
+            return;
+        }
+        if self.pending_ui(ui, locked_until) {
+            // A pending edit was dropped: reopen on the settings in force.
+            self.open();
             return;
         }
         let Some(loaded) = &mut self.loaded else {
@@ -149,6 +143,58 @@ impl SettingsTab {
         } else if let Some(panel) = loaded.panels.get(loaded.selected - rules) {
             panel.ui(ui);
         }
+    }
+
+    fn open(&mut self) {
+        self.loaded = None;
+        match self.load() {
+            Ok(loaded) => {
+                self.loaded = Some(loaded);
+                self.error.clear();
+            }
+            Err(err) => self.error = err,
+        }
+    }
+
+    /// The saved edits that wait for the lock to end, each with a Discard button. Returns
+    /// whether one was discarded.
+    fn pending_ui(&mut self, ui: &mut egui::Ui, locked_until: Option<DateTime<Utc>>) -> bool {
+        let Some(loaded) = &self.loaded else {
+            return false;
+        };
+        let pending = loaded.sync.pending.lock().clone();
+        if pending.is_empty() {
+            return false;
+        }
+        let when = locked_until.map_or("in a few seconds".to_string(), |u| {
+            format!(
+                "when the lock ends ({})",
+                u.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+            )
+        });
+        ui.strong(format!("Saved changes that take effect {when}:"));
+        let mut discarded = false;
+        for (name, edit) in &pending {
+            let file = EDITABLE
+                .iter()
+                .find(|(n, _)| n == name)
+                .map_or(name.as_str(), |(_, f)| f);
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{file} (saved {})",
+                    edit.saved_at.with_timezone(&Local).format("%m-%d %H:%M")
+                ));
+                if ui.small_button("Discard").clicked() {
+                    match call_value(self.session, "settings_discard", json!({ "name": name })) {
+                        Ok(_) => discarded = true,
+                        Err(err) => self.error = err,
+                    }
+                }
+            });
+        }
+        ui.small("The tabs below show your saved changes, not the settings in force.");
+        ui.separator();
+        discarded
     }
 
     fn lock_ui(&mut self, ui: &mut egui::Ui, locked_until: Option<DateTime<Utc>>) {
@@ -191,7 +237,13 @@ impl SettingsTab {
         let _ = fs::remove_dir_all(&dir);
         let mut synced = HashMap::new();
         for (name, file) in EDITABLE {
-            let bytes = match snapshot.files.get(name).filter(|v| !v.is_null()) {
+            // A pending edit is what the user saw last: go on editing from it.
+            let current = snapshot
+                .pending
+                .get(name)
+                .map(|p| &p.content)
+                .or_else(|| snapshot.files.get(name));
+            let bytes = match current.filter(|v| !v.is_null()) {
                 Some(value) => {
                     let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
                     write(&dir.join(file), &bytes)?;
@@ -221,10 +273,18 @@ impl SettingsTab {
             JsonStore::<PlannerState>::open(dir.join("planner_state.json"), false)
                 .map_err(|e| e.to_string())?,
         );
+        // Opening a store may write its file back with defaults filled in; that is the same
+        // settings, not an edit to send (while locked it would show as a pending change).
+        for (name, file) in EDITABLE {
+            if let Ok(bytes) = fs::read(dir.join(file)) {
+                synced.insert(name, Some(bytes));
+            }
+        }
 
         let sync = Arc::new(Sync {
             stop: AtomicBool::new(false),
             synced: Mutex::new(synced),
+            pending: Mutex::new(snapshot.pending.clone()),
             message: Mutex::new(String::new()),
         });
         let (session, thread_sync) = (self.session, Arc::clone(&sync));
@@ -259,10 +319,28 @@ fn sync_loop(session: u32, dir: &Path, sync: &Sync) {
                 "settings_put",
                 json!({ "name": name, "content": content }),
             );
-            *sync.message.lock() = match result {
-                Ok(_) => {
+            let at = Local::now().format("%H:%M:%S");
+            let outcome = result
+                .and_then(|v| serde_json::from_value::<PutOutcome>(v).map_err(|e| e.to_string()));
+            *sync.message.lock() = match outcome {
+                Ok(outcome) => {
                     sync.synced.lock().insert(name, Some(bytes));
-                    format!("Saved {file} at {}.", Local::now().format("%H:%M:%S"))
+                    match outcome {
+                        PutOutcome::Applied => format!("Saved {file} at {at}; in force now."),
+                        PutOutcome::Pending { applies_at } => {
+                            sync.pending.lock().insert(
+                                name.to_string(),
+                                PendingFile {
+                                    content,
+                                    saved_at: Utc::now(),
+                                },
+                            );
+                            format!(
+                                "Saved {file} at {at}; takes effect when the lock ends ({}).",
+                                applies_at.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                            )
+                        }
+                    }
                 }
                 Err(err) => format!("{file} was not saved: {err}"),
             };
@@ -272,6 +350,7 @@ fn sync_loop(session: u32, dir: &Path, sync: &Sync) {
                 .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
             {
                 let _ = write_read_only(dir, &snapshot);
+                *sync.pending.lock() = snapshot.pending;
             }
         }
         tick = tick.wrapping_add(1);
