@@ -32,7 +32,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use task_planner::{PlannerConfig, DAY_PLAN_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT};
+use task_planner::{PlannerConfig, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT};
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
 const RED: egui::Color32 = egui::Color32::from_rgb(200, 80, 80);
@@ -357,11 +357,6 @@ impl SettingsTab {
                 "Reviewing a to-do change (and filling in a new to-do)",
                 &mut instructions.proposal_review,
                 PROPOSAL_PROMPT,
-            ),
-            (
-                "Planning the rest of the day",
-                &mut instructions.day_plan,
-                DAY_PLAN_PROMPT,
             ),
         ] {
             egui::CollapsingHeader::new(label)

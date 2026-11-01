@@ -160,8 +160,6 @@ fn answer(request: &Value) -> Value {
             .and_then(|rest| rest.split('"').next())
             .unwrap_or_default();
         json!({ "todo_id": first_id, "task": "work on it", "why": "first", "minutes": 30 })
-    } else if system.contains("rest of their day") {
-        json!({ "items": [], "summary": "a calm day" })
     } else {
         // A change review or a to-do review; a to-do review also fills in the to-do.
         // "please reject" in the request makes it say no.

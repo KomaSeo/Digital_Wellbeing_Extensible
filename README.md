@@ -133,11 +133,11 @@ is on, the AI picks the user's task from the list ("Get my task") and that
 becomes the task the AI checks judge against; finishing, switching or pausing
 the AI checks needs a reason the AI approves. The To-do tab also shows the
 progress to the task's planned end, notes and steps (saved at once and shown
-to the AI when it reviews "I finished it"), the time spent per to-do, an
-optional AI plan for the rest of the day, finished to-dos and every request
-with its answer. The four instructions the planner's AI follows (picking a
-task, reviewing a change request, reviewing a to-do change, planning the day)
-are settings: empty means the built-in text, and an edit is scheduled like any
+to the AI when it reviews "I finished it"), the time spent per to-do,
+finished to-dos and every request with its answer. There is no plan for the
+whole day: the AI decides what to do now, each time, from the life rules. The
+three instructions the planner's AI follows (picking a task, reviewing a change
+request, reviewing a to-do change) are settings: empty means the built-in text, and an edit is scheduled like any
 looser edit. Guide (Korean): [`docs/task_planner.md`](docs/task_planner.md).
 
 **Access requests**: from the Focus app the user can ask for an app or site
@@ -227,7 +227,7 @@ $json = '{"id":1,"method":"add_blacklist","params":{"name":"discord.exe"}}'
 apps/desktop           egui shell: rule tabs + shared process/block views (standalone only; with the service installed it only shows a notice)
 crates/list_based_rule blacklist/whitelist BlockRule + RuleUi settings
 crates/ai_focus_rule   AI-judged focus BlockRule + RuleUi (activity sampler, Claude judge)
-crates/task_planner    AI picks the task from a to-do list; reviews change requests and to-do changes; day plan
+crates/task_planner    AI picks the task from a to-do list; reviews change requests and to-do changes
 crates/machine         machine-install paths, managed users, session ids, agent<->Focus API, settings protection (stricter/looser edits)
 apps/service           Windows service, per-session agent, installer
 apps/focus             Focus app for standard users (To-do tab, Blocking tab, Settings tab; tray icon)

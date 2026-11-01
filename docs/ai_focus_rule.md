@@ -405,7 +405,7 @@ Claude API는 응답마다 그 호출에 쓴 토큰 수(`usage`)를 돌려줍니
 
 **세는 방법:**
 1. `ClaudeClient::structured()`는 응답을 받으면, 답을 해석하기 전에 `usage::record(용도, 모델, 응답)`을 부릅니다. 거절되거나 잘린 응답도 요금이 나가기 때문입니다.
-   용도는 `focus check`(창 검사), `access review`(접근 요청 심사), `planner pick`(할 일 고르기), `planner review`(변경 요청 심사), `to-do change review`(할 일 변경 심사), `day plan`(하루 계획) 중 하나입니다. 예전 버전의 기록에는 `proposal review`(할 일 제안 심사)도 있습니다.
+   용도는 `focus check`(창 검사), `access review`(접근 요청 심사), `planner pick`(할 일 고르기), `planner review`(변경 요청 심사), `to-do change review`(할 일 변경 심사) 중 하나입니다. 예전 버전의 기록에는 `proposal review`(할 일 제안 심사)와 `day plan`(하루 계획, 지금은 없앤 기능)도 있습니다.
 2. 서버가 다른 모델로 다시 시도해서 답했다면, 응답의 `model` 항목이 실제로 답한 모델입니다. `record()`는 그 모델의 단가를 씁니다.
 3. `record()`는 프로세스에 설치된 `UsageRecorder`에 그 값을 더합니다. `UsageRecorder`는 날짜(이 PC의 현지 날짜)별, 용도별로 호출 수, 토큰 수, 예상 비용을 쌓고 파일에 저장합니다. 파일은 최근 62일만 남깁니다.
    - 머신 설치: 사용자마다 `usage\<사용자>.json`. 그 사용자의 agent가 씁니다.

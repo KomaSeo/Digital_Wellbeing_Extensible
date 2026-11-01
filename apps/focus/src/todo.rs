@@ -807,9 +807,8 @@ impl FocusApp {
         }
     }
 
-    /// Today: the AI's suggested order for the rest of the day, and what happened so far.
+    /// Today: what happened so far.
     fn today_ui(&mut self, ui: &mut egui::Ui, status: &Status, planner: &PlannerStatus) {
-        let idle = !self.pending.load(Ordering::SeqCst);
         egui::CollapsingHeader::new("Today")
             .id_salt("today")
             .show(ui, |ui| {
@@ -828,28 +827,6 @@ impl FocusApp {
                         })
                         .unwrap_or_else(|| todo_id.to_string())
                 };
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(idle, egui::Button::new("Plan the rest of my day"))
-                        .clicked()
-                    {
-                        self.send("plan_day", json!({}));
-                    }
-                    ui.small("one AI call; the AI still assigns one to-do at a time");
-                });
-                if let Some(plan) = &planner.day_plan {
-                    let made = plan.at.map(local_time).unwrap_or_default();
-                    ui.small(format!("Plan made at {made}: {}", plan.summary));
-                    for item in &plan.items {
-                        ui.label(format!(
-                            "• {} — {} ({})",
-                            title_of(&item.todo_id),
-                            minutes_text(item.minutes as i64),
-                            item.why
-                        ));
-                    }
-                }
-                ui.separator();
                 let today = Local::now().date_naive();
                 let is_today = |at: DateTime<Utc>| at.with_timezone(&Local).date_naive() == today;
                 let done_today: Vec<_> = planner

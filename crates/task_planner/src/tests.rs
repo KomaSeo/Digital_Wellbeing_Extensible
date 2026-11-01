@@ -45,28 +45,6 @@ impl Advisor for FakeAdvisor {
         })
     }
 
-    fn plan_day(&self, request: &PickRequest) -> Result<DayPlan, JudgeError> {
-        *self.saw_instructions.lock() = request.instructions.to_string();
-        Ok(DayPlan {
-            at: None,
-            items: request
-                .open
-                .iter()
-                .map(|todo| DayPlanItem {
-                    todo_id: todo.id.clone(),
-                    minutes: 600,
-                    why: "next".into(),
-                })
-                .chain(std::iter::once(DayPlanItem {
-                    todo_id: "not on the list".into(),
-                    minutes: 30,
-                    why: "made up".into(),
-                }))
-                .collect(),
-            summary: "a good day".into(),
-        })
-    }
-
     fn review_todo_change(&self, request: &TodoChangeRequest) -> Result<TodoReview, JudgeError> {
         self.reviews.fetch_add(1, Ordering::SeqCst);
         *self.saw_rules.lock() = request.life_rules.to_string();
@@ -891,27 +869,6 @@ fn notes_are_saved_for_open_todos_and_reach_the_done_review() {
     assert!(
         text.contains("outline done") && text.contains("- [x] write intro"),
         "{text}"
-    );
-}
-
-#[test]
-fn a_day_plan_keeps_only_open_todos_and_sensible_lengths() {
-    let fixture = harness(true, &["a", "b"]);
-    let plan = fixture.planner.plan_day(Utc::now()).unwrap();
-    let ids: Vec<_> = plan
-        .items
-        .iter()
-        .map(|item| item.todo_id.as_str())
-        .collect();
-    assert_eq!(ids, ["a", "b"]);
-    assert!(plan.items.iter().all(|item| item.minutes <= 480));
-    assert_eq!(
-        *fixture.advisor.saw_instructions.lock(),
-        crate::advisor::DAY_PLAN_PROMPT
-    );
-    assert_eq!(
-        fixture.planner.status().day_plan.unwrap().summary,
-        "a good day"
     );
 }
 

@@ -130,7 +130,7 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
     machine.json         관리 대상 계정 목록
     planner.json         할 일 목록, 생활 규칙, 플래너 AI의 지시문. agent가 씁니다. 할 일 목록은 To-do 탭의 할 일 변경으로(AI가 승인하면 바로),
                          나머지는 Settings 탭의 저장으로 바뀝니다. (할 일 플래너)
-    planner_state.json   현재 할당, 변경 요청과 할 일 변경의 기록, 메모와 단계, 들인 시간, 하루 계획. agent가 씁니다. (할 일 플래너)
+    planner_state.json   현재 할당, 변경 요청과 할 일 변경의 기록, 메모와 단계, 들인 시간. agent가 씁니다. (할 일 플래너)
     grants\<사용자>.json  앱·사이트 접근 허용과 그 기록. 그 사용자의 agent가 씁니다. (접근 요청, docs/access_grants.md)
     blocks\<사용자>.json  지금 걸려 있는 차단. 그 사용자의 agent가 씁니다. 로그아웃했다가 다시 로그인해도 차단이 이어집니다.
                          차단은 시간이 지나도 풀리지 않습니다. 사용자는 Settings 탭의 Blocking 영역(Blocked now)에서 차단을 풀 수 있습니다.
@@ -369,7 +369,7 @@ agent가 뜨지 않으면, 관리자는 관리자 계정에서 `C:\ProgramData\D
 - 확인 질문에 답할 때가 되면, Focus 앱은 창을 띄워 Settings 탭을 보여 줍니다. To-do 탭에도 "A scheduled update is waiting for your answer: is it really right?"라는 빨간 줄과 Settings 탭으로 가는 링크(**Answer in the Settings tab**)가 보입니다.
 - Settings 탭은 이 앱에 필요한 설정만 네 영역으로 나눠 보여 줍니다. 각 영역의 설명 문구는 어떤 변경이 바로 적용되고 어떤 변경이 예약되는지도 알려 줍니다.
   - **AI connection** (`ai_focus.json`): Anthropic API 키(**Use this key**, **Clear**, **Check key**, **show**), 모델, AI 검사의 하루 예산(USD, 0은 예산 없음), 오늘과 이번 달의 AI 사용량(호출 수와 예상 비용).
-  - **Rules for the AI** (`planner.json`): 플래너 켜기("The AI picks what I do from my to-do list (planner)"), 생활 규칙(**Life rules**), 플래너 AI의 지시문 네 개(**AI instructions**: 할 일 고르기, 변경 요청 심사, 할 일 변경 심사, 하루 계획).
+  - **Rules for the AI** (`planner.json`): 플래너 켜기("The AI picks what I do from my to-do list (planner)"), 생활 규칙(**Life rules**), 플래너 AI의 지시문 세 개(**AI instructions**: 할 일 고르기, 변경 요청 심사, 할 일 변경 심사).
     플래너가 켜져 있으면 AI가 할 일 목록에서 사용자가 할 일을 고르고, 사용자가 그것을 바꾸려면 AI의 승인이 필요합니다. 꺼져 있으면 사용자가 하는 일을 직접 적습니다. 켜기는 바로 적용되고, 끄기는 예약됩니다.
     지시문마다 기본 지시문의 글이 보이고, **Edit a copy of the built-in text**와 **Back to the built-in text** 버튼이 있습니다([`task_planner.md`](task_planner.md) 7.2절).
   - **Blocking** (`policy.json`, `ai_focus.json`): 항상 막을 프로그램(**Always blocked programs**, 블랙리스트), 지금 걸린 모든 사용자의 차단(**Blocked now**)과 "unblock"(예약됨)·"keep blocked" 버튼, AI가 준 접근 허용(**Access granted by the AI**)과 "revoke"(바로 적용) 버튼, 접근 요청의 한도(**Asking for access**: 시간 허용의 최대 길이, 영구 허용을 줄 수 있는지).

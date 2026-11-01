@@ -12,9 +12,9 @@ use crate::advisor::{
     AdvisorProvider, PickRequest, Review, ReviewRequest, ReviewedTodo, TodoChangeRequest,
 };
 use crate::model::{
-    Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, DayPlan, DoneRecord,
-    Evidence, PlannerConfig, PlannerState, PlannerStatus, PolishItem, ProposalInput, TaskNotes,
-    TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WhenTimeIsUp,
+    Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, Evidence,
+    PlannerConfig, PlannerState, PlannerStatus, PolishItem, ProposalInput, TaskNotes, TodoChange,
+    TodoChangeRecord, TodoItem, TodoListWrite, WhenTimeIsUp,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -221,7 +221,6 @@ impl TaskPlanner {
                 .filter(|(todo_id, _)| open_todos.iter().any(|todo| &todo.id == *todo_id))
                 .map(|(todo_id, notes)| (todo_id.clone(), notes.clone()))
                 .collect(),
-            day_plan: state.day_plan.clone(),
             open_todos,
         }
     }
@@ -242,40 +241,6 @@ impl TaskPlanner {
             planner_state.task_notes.insert(todo_id.to_string(), notes);
         })?;
         Ok(())
-    }
-
-    /// Ask the AI for an order for the rest of the day (a preview; one AI call), keep it
-    /// and return it.
-    pub fn plan_day(&self, now: DateTime<Utc>) -> Result<DayPlan, PlannerError> {
-        let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
-        let open = self.open_todos();
-        if open.is_empty() {
-            return Err(PlannerError::NotActive);
-        }
-        let state = self.state.get();
-        let recently_done: Vec<DoneRecord> = state.done.iter().rev().take(10).cloned().collect();
-        let history = self.focus.state().history_text();
-        let now_local = local_now_text();
-        let advisor = (self.advisor)(&self.focus.store().get())?;
-        let config = self.config.get();
-        let mut plan = advisor.plan_day(&PickRequest {
-            instructions: config.instructions.day_plan_or_default(),
-            now_local: &now_local,
-            life_rules: &config.life_rules,
-            open: &open,
-            recently_done: &recently_done,
-            previous: state.assignment.as_ref(),
-            history: &history,
-        })?;
-        plan.items
-            .retain(|item| open.iter().any(|todo| todo.id == item.todo_id));
-        for item in &mut plan.items {
-            item.minutes = item.minutes.clamp(5, MAX_ASSIGNMENT_MINUTES);
-        }
-        plan.at = Some(now);
-        self.state
-            .update(|planner_state| planner_state.day_plan = Some(plan.clone()))?;
-        Ok(plan)
     }
 
     /// The user asks to add, edit or remove a to-do (from the Focus app or their AI

@@ -84,8 +84,6 @@ pub struct PlannerInstructions {
     pub change_review: String,
     /// Whether a to-do change (add, edit, remove) is approved; fills in a new to-do.
     pub proposal_review: String,
-    /// The suggested order for the rest of the day.
-    pub day_plan: String,
 }
 
 impl PlannerInstructions {
@@ -99,10 +97,6 @@ impl PlannerInstructions {
 
     pub fn proposal_review_or_default(&self) -> &str {
         or_default(&self.proposal_review, crate::advisor::PROPOSAL_PROMPT)
-    }
-
-    pub fn day_plan_or_default(&self) -> &str {
-        or_default(&self.day_plan, crate::advisor::DAY_PLAN_PROMPT)
     }
 }
 
@@ -341,26 +335,6 @@ pub struct TaskStep {
     pub done: bool,
 }
 
-/// Responsibility: Hold the AI's suggested order for the rest of the day (a preview: the
-/// planner still assigns one to-do at a time).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DayPlan {
-    pub at: Option<DateTime<Utc>>,
-    pub items: Vec<DayPlanItem>,
-    /// One or two sentences about the day.
-    pub summary: String,
-}
-
-/// Responsibility: Hold one block of a day plan.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DayPlanItem {
-    pub todo_id: String,
-    pub minutes: u32,
-    pub why: String,
-}
-
 /// Responsibility: Record that a to-do was finished.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoneRecord {
@@ -394,9 +368,6 @@ pub struct PlannerState {
     /// The user's notes and steps per to-do id.
     #[serde(default)]
     pub task_notes: BTreeMap<String, TaskNotes>,
-    /// The last day plan the user asked for.
-    #[serde(default)]
-    pub day_plan: Option<DayPlan>,
     /// Open-ended to-dos finished early, by to-do id, with the time left to improve them.
     #[serde(default)]
     pub polish: BTreeMap<String, PolishItem>,
@@ -437,6 +408,4 @@ pub struct PlannerStatus {
     /// The user's notes and steps of the open to-dos.
     #[serde(default)]
     pub task_notes: BTreeMap<String, TaskNotes>,
-    #[serde(default)]
-    pub day_plan: Option<DayPlan>,
 }

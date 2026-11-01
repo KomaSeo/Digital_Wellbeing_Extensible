@@ -21,9 +21,9 @@
 | **엄격한 변경과 느슨한 변경** | 규칙을 더 엄격하게 만드는 설정 변경(더 많이 막고, 덜 허용하고, 더 자주 검사하는 변경)을 **엄격한 변경**이라고 합니다. 그 밖의 변경과, 어느 쪽인지 알 수 없는 변경(API 키, 모델, 생활 규칙, 지시문, 브라우저 목록 등)을 **느슨한 변경**이라고 합니다. 설정이 보호된 뒤에는 엄격한 변경은 바로 적용되고, 느슨한 변경은 예약된 업데이트가 됩니다([`multi_account.md`](multi_account.md) 6.4절의 표). |
 | **예약된 업데이트** | 설정이 보호된 뒤에 저장하거나 예약한 느슨한 변경의 묶음입니다. agent는 지금의 설정을 그대로 두고 그 변경을 보관합니다. 예약된 업데이트는 확인 질문(바로 아래 줄)을 거쳐야 적용됩니다([`multi_account.md`](multi_account.md) 6.4절). |
 | **확인 질문** | Focus 앱이 예약된 업데이트마다 사용자에게 묻는 "이 업데이트가 정말 맞는가?"라는 질문입니다. 첫 질문은 예약하고 이틀 뒤에 오고, 다음 질문은 앞 질문에 "예"라고 답하고 이틀 뒤에 옵니다. 세 번 연속 "예"이면 업데이트가 적용되고, 한 번이라도 "아니요"이면 거절됩니다. 사용자만 Focus 앱에서 답할 수 있습니다. |
-| **생활 규칙** | 사용자가 Settings 탭의 **Rules for the AI** 영역에 적는, 늘 따라야 하는 규칙입니다. 할 일 고르기, 변경 요청 심사, 할 일 변경 심사, 하루 계획이 모두 이 규칙을 따릅니다([`task_planner.md`](task_planner.md) 5.4절). |
+| **생활 규칙** | 사용자가 Settings 탭의 **Rules for the AI** 영역에 적는, 늘 따라야 하는 규칙입니다. 할 일 고르기, 변경 요청 심사, 할 일 변경 심사가 모두 이 규칙을 따릅니다([`task_planner.md`](task_planner.md) 5.4절). |
 | **할 일 변경** | 할 일 목록에 할 일을 추가하거나, 할 일을 고치거나 지우겠다고 agent의 AI에게 보내는 요청입니다. AI는 생활 규칙에 비추어 심사하고, 승인한 변경은 바로 적용됩니다. 추가할 때 비워 둔 칸(메모, 마감, 중요도, 예상 시간)은 AI가 채웁니다([`task_planner.md`](task_planner.md) 4.6절). |
-| **지시문** | agent의 플래너가 AI에게 질문할 때 함께 보내는, "무엇을 어떤 기준으로 판단하라"는 글입니다. 할 일 고르기, 변경 요청 심사, 할 일 변경 심사, 하루 계획에 하나씩 있습니다. 프로그램에 기본 지시문이 들어 있고, 사용자는 설정에서 자기 지시문으로 바꿀 수 있습니다([`task_planner.md`](task_planner.md) 5.6절). |
+| **지시문** | agent의 플래너가 AI에게 질문할 때 함께 보내는, "무엇을 어떤 기준으로 판단하라"는 글입니다. 할 일 고르기, 변경 요청 심사, 할 일 변경 심사에 하나씩 있습니다. 프로그램에 기본 지시문이 들어 있고, 사용자는 설정에서 자기 지시문으로 바꿀 수 있습니다([`task_planner.md`](task_planner.md) 5.6절). |
 
 ---
 
@@ -116,7 +116,7 @@ Claude Docs에 적어 둔 할 일을 옮기고 싶다면, Claude에게 "문서�
 | `change_todo` | `todo_id`(필수), `reason`(필수), `remove`, `title`, `notes`, `deadline`, `priority`, `estimate_minutes` | `remove`가 `true`이면 그 할 일을 지우는 요청(`kind: "remove"`)을, 아니면 준 칸만 바꾸는 요청(`kind: "edit"`)을 agent의 `todo_change`로 보냅니다. `propose_todo`와 같은 모양의 답을 돌려줍니다. 지우기라면 `todo`는 지울 할 일입니다. |
 | `get_my_task` | 없음 | agent의 `assign`을 부르고, 할당된 할 일을 돌려줍니다. |
 | `request_change` | `change`(`done`, `switch_todo`, `switch_free`, `end`, `notify_when_time_is_up`, `reassign_when_time_is_up`), `todo_id`, `task`, `reason`(필수), `evidence`(`done`의 증거 글) | agent의 `request_change`를 부르고, 승인 여부, AI의 답, 바뀐 할당을 돌려줍니다. |
-| `get_settings` | 없음 | agent의 `settings_get`을 부르고 다음을 돌려줍니다. 설정이 보호되어 있는지(`protected`), 지금 적용된 설정 파일(`files`: `policy`는 차단 목록, `ai_focus`는 AI 집중 설정, `planner`는 할 일 목록·생활 규칙·지시문), 기본 지시문 네 개(`built_in_instructions`: 할 일 고르기, 변경 요청 심사, 할 일 변경 심사, 하루 계획), 예약된 업데이트를 더한 설정 파일(`files_with_scheduled_updates`: Settings 탭이 보여 주는 것과 같은 내용입니다. 할 일 변경의 예약된 업데이트는 더하지 않습니다), 예약된 업데이트(`scheduled_updates`: 번호, 파일 이름, 예약한 곳, 출처 `origin`(`settings` 또는 `todo_change`), 예약한 시각, 받은 "예" 답의 수 `confirmations`, 바뀌는 설정을 한 줄에 하나씩 적은 `changes`), 최근 업데이트의 결과(`recent_outcomes`). `ai_focus`의 API 키(`api_key`)는 어디에서도 빼고 돌려줍니다. |
+| `get_settings` | 없음 | agent의 `settings_get`을 부르고 다음을 돌려줍니다. 설정이 보호되어 있는지(`protected`), 지금 적용된 설정 파일(`files`: `policy`는 차단 목록, `ai_focus`는 AI 집중 설정, `planner`는 할 일 목록·생활 규칙·지시문), 기본 지시문 세 개(`built_in_instructions`: 할 일 고르기, 변경 요청 심사, 할 일 변경 심사), 예약된 업데이트를 더한 설정 파일(`files_with_scheduled_updates`: Settings 탭이 보여 주는 것과 같은 내용입니다. 할 일 변경의 예약된 업데이트는 더하지 않습니다), 예약된 업데이트(`scheduled_updates`: 번호, 파일 이름, 예약한 곳, 출처 `origin`(`settings` 또는 `todo_change`), 예약한 시각, 받은 "예" 답의 수 `confirmations`, 바뀌는 설정을 한 줄에 하나씩 적은 `changes`), 최근 업데이트의 결과(`recent_outcomes`). `ai_focus`의 API 키(`api_key`)는 어디에서도 빼고 돌려줍니다. |
 | `schedule_settings_update` | `name`(`policy`, `ai_focus`, `planner` 중 하나, 필수), `content`(새 설정 파일 전체, 필수) | 먼저 `settings_get`으로 설정이 보호되어 있는지 확인하고, 설정 단계이면 아무것도 보내지 않고 오류를 돌려줍니다. 보호되어 있으면 agent의 `settings_put`을 `via: "claude desktop"`으로 부릅니다. agent는 Settings 탭의 저장과 똑같이, 엄격한 변경은 바로 적용하고 느슨한 변경은 예약합니다. 도구는 agent의 답(`applied`: 바로 적용된 변경, `scheduled`: 예약된 업데이트의 번호와 첫 질문 시각과 변경, 없으면 `null`)과 "사용자가 앱에서 세 번 확인해야 적용된다"는 안내를 돌려줍니다. `ai_focus`의 `content`에 `api_key`가 없으면, 지금 적용된 키를 그대로 넣어 보냅니다. 그래서 Claude는 키를 보지 않고도 `ai_focus.json`을 고칠 수 있습니다. |
 
 agent가 요청을 거부하거나 agent에 연결할 수 없으면, 도구는 오류 표시(`isError: true`)와 함께 이유를 돌려줍니다. Claude는 그 이유를 사용자에게 전합니다.

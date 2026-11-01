@@ -21,7 +21,6 @@
 //! | `todo_change`    | `{ "change": TodoChange, "reason": "…", "via": "…" }` | [`Status`], `last_todo_change` set; approved = in force |
 //! | `todo_change_schedule` | `{ "id": "…" }` (a change the AI did not approve) | [`Status`], `last_todo_change` set |
 //! | `task_notes_put` | `{ "todo_id": "…", "notes": TaskNotes }` | [`Status`] |
-//! | `plan_day`       | `{}` (one AI call)                       | [`Status`] with `planner.day_plan` |
 //! | `settings_get`   | `{}`                                     | [`crate::settings::SettingsSnapshot`] |
 //! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…}, "via": "…" }` | [`crate::settings::PutOutcome`] (what is in force now, what was scheduled) |
 //! | `settings_answer` | `{ "id": "…", "approve": true\|false }` (once the question is due) | [`crate::settings::AnswerOutcome`] |
@@ -396,12 +395,6 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .map_err(|error| format!("params.notes: {error}"))?;
             planner
                 .put_task_notes(todo_id, notes)
-                .map_err(|error| error.to_string())?;
-        }
-        "plan_day" => {
-            let planner = api.planner.as_ref().ok_or("no task planner")?;
-            planner
-                .plan_day(Utc::now())
                 .map_err(|error| error.to_string())?;
         }
         "todo_change_schedule" => {
