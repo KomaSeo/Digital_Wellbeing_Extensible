@@ -12,13 +12,18 @@ const CLAUDE_DESKTOP_CONFIG: &str = r#"{
   }
 }"#;
 
-/// The Help tab: one collapsible guide per topic.
-pub(crate) fn help_tab(ui: &mut egui::Ui) {
+/// The Help tab: one collapsible guide per topic. `true` when the user asked to open the
+/// Settings tab.
+pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
     ui.heading("도움말");
     ui.label("이 탭은 이 프로그램을 쓰는 방법을 주제마다 설명합니다. 제목을 누르면 펼쳐집니다.");
     ui.separator();
-    egui::CollapsingHeader::new("AI 비서 탭으로 말로 쓰기")
+    let mut open_settings = false;
+    egui::CollapsingHeader::new("설정 잠그기 (설정 보호)")
         .default_open(true)
+        .show(ui, |ui| open_settings = protection_guide(ui));
+    egui::CollapsingHeader::new("AI 비서 탭으로 말로 쓰기")
+        .default_open(false)
         .show(ui, assistant_guide);
     egui::CollapsingHeader::new("Claude Desktop으로 이 프로그램 쓰기")
         .default_open(false)
@@ -29,6 +34,53 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) {
     egui::CollapsingHeader::new("카카오톡처럼 관리자 권한이 필요한 프로그램 업데이트하기")
         .default_open(false)
         .show(ui, updates_guide);
+    open_settings
+}
+
+/// How to protect (lock) the settings; `true` when "설정 탭 열기" was pressed.
+fn protection_guide(ui: &mut egui::Ui) -> bool {
+    paragraph(
+        ui,
+        "설치한 직후는 설정 단계입니다. 설정 단계에서는 이 PC를 쓰는 누구나 설정을 바꿀 수 있고, \
+         바꾼 것이 바로 적용됩니다. 설정을 잠그는 것을 이 프로그램은 \"설정 보호\"라고 부릅니다. 설정을 \
+         보호하면, 규칙을 더 엄격하게 만드는 변경만 바로 적용되고, 그 밖의 변경은 이틀 간격으로 세 번 \
+         \"예\"라고 답해야 적용됩니다.",
+    );
+    ui.add_space(4.0);
+    ui.strong("잠그는 방법");
+    for line in [
+        "1) 설정 탭을 엽니다(아래 \"설정 탭 열기\" 버튼, 또는 창 맨 위의 \"설정\").",
+        "2) 설정 탭 맨 위의 \"설정 보호(잠금)\" 제목 아래에 노란 글 \"설정 단계: …\"가 있습니다.",
+        "3) 그 아래의 \"프로그램 안의 어떤 것도 보호를 끄지 못한다는 것을 이해했습니다.\" 칸을 \
+         체크합니다. 체크하기 전에는 \"설정 보호하기\" 버튼이 흐리게 보이고 눌리지 않습니다.",
+        "4) \"설정 보호하기\" 버튼을 누릅니다.",
+        "5) 맨 위의 글이 \"설정이 보호되어 있습니다.…\"로 바뀌면 잠긴 것입니다. 할 일 탭 맨 위의 노란 줄도 \
+         사라집니다. 이미 보호되어 있으면 버튼 대신 이 글이 보입니다.",
+    ] {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("•");
+            paragraph(ui, line);
+        });
+    }
+    let open_settings = ui.button("설정 탭 열기").clicked();
+    ui.add_space(4.0);
+    ui.strong("잠그기 전에 확인할 것");
+    for line in [
+        "보호는 한 방향입니다. 프로그램 안의 어떤 것도 보호를 끄지 못합니다.",
+        "처음 설치하면 설정은 보호되지 않은 설정 단계로 시작합니다. 설치 프로그램은 설정을 보호하지 \
+         않으므로, 모두 정한 뒤에 위의 방법으로 직접 보호합니다. 다만 프로그램을 지웠다가 다시 설치하면 \
+         설정 폴더(C:\\ProgramData\\DigitalWellbeing)가 남아 있어서 보호도 그대로 이어집니다.",
+        "API 키가 동작하는지 설정 탭 → AI 연결의 \"키 확인\"으로 확인하세요. 보호된 뒤에 AI 연결이 끊기면 \
+         모든 앱과 웹사이트가 잠깁니다(아래 \"모든 앱이 잠겼을 때\").",
+        "생활 규칙, 항상 막을 프로그램과 웹사이트, 업데이트할 프로그램 목록, 지킬 시간대를 미리 \
+         정하세요. 보호된 뒤에 이것들을 느슨하게 바꾸면 빨라도 6일 뒤에 적용됩니다.",
+    ] {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("•");
+            paragraph(ui, line);
+        });
+    }
+    open_settings
 }
 
 fn lockdown_guide(ui: &mut egui::Ui) {
@@ -41,8 +93,8 @@ fn lockdown_guide(ui: &mut egui::Ui) {
     for line in [
         "열어 둘 수 있는 것: Claude Desktop, 브라우저의 Claude·Anthropic 페이지와 빈 새 탭과 Google \
          로그인 페이지, Windows 설정, 이 앱. 다른 탭은 닫히고 다른 앱은 꺼집니다.",
-        "푸는 방법: 브라우저에서 Claude Console(platform.claude.com 또는 console.anthropic.com)에 들어가 새 키를 만들거나 \
-         크레딧을 채웁니다. 새 키는 설정 탭 → AI 연결에 붙여 넣고 \"적용\"을 누릅니다. 잠긴 동안에는 \
+        "푸는 방법: 아래 링크로 Claude Console에 들어가 새 키를 만들거나 크레딧을 채웁니다. 링크는 \
+         브라우저에서 열리고, 잠긴 동안에도 Claude Console 페이지는 닫히지 않습니다. 새 키는 설정 탭 → AI 연결에 붙여 넣고 \"적용\"을 누릅니다. 잠긴 동안에는 \
          키 변경이 예약되지 않고 바로 적용되고, 몇 초 안에 잠금이 풀립니다.",
         "크레딧을 채운 경우에는 30초쯤 뒤에 저절로 풀립니다.",
     ] {
@@ -51,6 +103,27 @@ fn lockdown_guide(ui: &mut egui::Ui) {
             paragraph(ui, line);
         });
     }
+    console_links(ui);
+}
+
+/// Links to the Claude Console, where API keys are made and credit is bought.
+pub(crate) fn console_links(ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        ui.hyperlink_to(
+            "Claude Console의 API 키 화면 열기",
+            "https://platform.claude.com/settings/keys",
+        );
+        ui.label("·");
+        ui.hyperlink_to(
+            "크레딧(결제) 화면 열기",
+            "https://platform.claude.com/settings/billing",
+        );
+        ui.label("·");
+        ui.hyperlink_to(
+            "예전 주소(console.anthropic.com)",
+            "https://console.anthropic.com/settings/keys",
+        );
+    });
 }
 
 fn updates_guide(ui: &mut egui::Ui) {

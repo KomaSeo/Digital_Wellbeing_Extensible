@@ -480,6 +480,7 @@ impl eframe::App for FocusApp {
                          AI 연결에서 동작하는 키를 넣고 \"적용\"을 누르면 몇 초 안에 풀립니다. 잠긴 \
                          동안에는 키를 바꾸는 것이 예약되지 않고 바로 적용됩니다.",
                     );
+                    help::console_links(ui);
                     if self.tab != Tab::Settings && ui.button("설정 탭 열기").clicked() {
                         self.tab = Tab::Settings;
                     }
@@ -499,7 +500,11 @@ impl eframe::App for FocusApp {
                         status.lockdown.as_ref(),
                     ),
                     Tab::Statistics => self.statistics_tab(ui, &status),
-                    Tab::Help => help::help_tab(ui),
+                    Tab::Help => {
+                        if help::help_tab(ui) {
+                            self.tab = Tab::Settings;
+                        }
+                    },
                 }
             });
         });
