@@ -936,7 +936,8 @@ impl FocusApp {
             ui.colored_label(color, label);
             ui.label(format!("{summary}: {}", record.reply));
         });
-        if record.approved {
+        // An appointment the AI did not take cannot be scheduled without it.
+        if record.approved || matches!(record.change, TodoChange::AddAppointment { .. }) {
             return;
         }
         match &record.scheduled_update {

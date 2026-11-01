@@ -230,7 +230,9 @@ fn installed_agent_end_to_end() {
     // With a to-do on the list the planner is on (always): plain "stop" is refused, and
     // pausing the AI checks is a change request the AI reviews.
     assert!(call(session, "stop_session", json!({})).is_err());
-    // The agent's own loop may be picking a task this very moment ("busy"): try again.
+    // A task comes only when the user asks for it ("할 일 받기").
+    call(session, "assign", json!({})).unwrap();
+    // The agent's own loop may be busy this very moment: try again.
     let paused = desktop
         .wait(Duration::from_secs(30), || {
             call(

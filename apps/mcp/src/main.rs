@@ -153,6 +153,8 @@ mod tests {
                 "get_status",
                 "propose_todo",
                 "change_todo",
+                "add_appointment",
+                "remove_appointment",
                 "get_my_task",
                 "request_change",
                 "plan_week",

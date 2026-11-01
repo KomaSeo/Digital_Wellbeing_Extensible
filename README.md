@@ -163,7 +163,15 @@ so the clock does not run while the user is away. When the task's time is up, th
 user must report — done (AI-reviewed) or not finished (the to-do stays) — before
 anything else; then nothing is given until the next 「할 일 받기」. Routines (sleep,
 getting ready, exercise) are marked "repeat" and stay on the list when done. The
-blocks the AI makes belong to the to-do they were made for and change with it. Finishing the task, getting something else or pausing the AI checks
+blocks the AI makes belong to the to-do they were made for and change with it.
+To-dos done away from the computer (sleep, exercise) lock every app while they run,
+and leaving them early needs an urgent reason. Appointments (fixed clock times; the
+AI accepts them by the owner's appointment rules) replace the task at their start
+and end by themselves. 「⏻ 사용 중지」 (stop using) ends the task, locks everything and
+stops all but the blocking until 「다시 사용하기」. The model is chosen from the list
+the Models API gives (refreshed weekly) and checked before it is applied; the
+Statistics tab shows the AI cost per feature (options to cut it:
+[`docs/cost_reduction_options.md`](docs/cost_reduction_options.md)). Finishing the task, getting something else or pausing the AI checks
 needs a reason the AI approves; the user never chooses what comes next. "Something
 else" (「다른 일 받기」, change kind `repick`) carries only the reason, and once
 approved the AI picks the next task with that reason in view. The To-do tab shows

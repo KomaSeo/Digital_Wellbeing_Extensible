@@ -530,6 +530,10 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             if record.approved {
                 return Err("AI가 이미 승인해서 적용된 변경입니다".into());
             }
+            // Whether to take an appointment is the AI's call (the owner's request).
+            if matches!(record.change, TodoChange::AddAppointment { .. }) {
+                return Err("약속은 AI가 받을지 정합니다. AI 없이 예약할 수 없습니다".into());
+            }
             if record.scheduled_update.is_some() {
                 return Err("이미 예약된 변경입니다".into());
             }

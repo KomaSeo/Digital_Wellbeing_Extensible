@@ -28,7 +28,7 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
     egui::CollapsingHeader::new("설정 잠그기 (설정 보호)")
         .default_open(true)
         .show(ui, |ui| open_settings = protection_guide(ui));
-    egui::CollapsingHeader::new("할 일 받기와 완료 보고 (할 일이 없을 때 잠기는 이유)")
+    egui::CollapsingHeader::new("할 일 받기, 완료 보고, 약속, 사용 중지")
         .default_open(false)
         .show(ui, task_flow_guide);
     egui::CollapsingHeader::new("AI 비서 탭으로 말로 쓰기")
@@ -171,6 +171,24 @@ fn task_flow_guide(ui: &mut egui::Ui) {
         "4. 반복하는 할 일: 잠자기, 출근 준비, 운동처럼 되풀이하는 일은 할 일을 추가할 때 \"반복하는 할 \
          일\"에 표시하세요. 반복하는 할 일은 끝내도 목록에서 사라지지 않습니다. 할 일 목록은 할 일마다 \
          지금까지 쓴 시간과 예상 시간을 함께 보여 줍니다.",
+    );
+    paragraph(
+        ui,
+        "컴퓨터 없이 하는 일: 잠자기, 운동처럼 컴퓨터 없이 하는 할 일을 하는 동안에는 설정이 보호되어 \
+         있으면 이 앱 말고는 모든 앱과 웹사이트가 잠깁니다. 할 일을 추가할 때 고를 수 있고, 비워 두면 AI가 \
+         정합니다. 이런 일을 그만두거나 바꾸려면 급한 이유가 필요합니다.",
+    );
+    paragraph(
+        ui,
+        "약속: 만남, 수업, 병원처럼 시각이 정해진 일은 할 일 탭 아래의 \"+ 약속 추가\"로 넣습니다. AI가 \
+         설정 탭의 약속 규칙에 따라 받을지 정합니다. 받은 약속은 시작 시각에 하던 일 대신 저절로 시작되고, \
+         끝나는 시각에 저절로 끝납니다.",
+    );
+    paragraph(
+        ui,
+        "사용 중지: 컴퓨터를 그만 쓸 때 할 일 탭 맨 위의 \"⏻ 사용 중지\"를 누릅니다. 모든 앱과 웹사이트가 \
+         잠기고, 차단 말고는 아무것도 하지 않습니다(AI도 부르지 않습니다). \"다시 사용하기\"를 누르면 \
+         풀립니다.",
     );
     paragraph(
         ui,
