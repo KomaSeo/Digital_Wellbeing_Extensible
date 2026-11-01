@@ -130,3 +130,39 @@ jobs:
           Start-Sleep -Seconds 2
           $left = Get-Service DigitalWellbeing -ErrorAction SilentlyContinue
           if ($left -and $left.Status -eq "Running") { throw "the service still runs after uninstall" }
+
+      # Uninstall, then install again: the data folder the first install locked down is kept
+      # (settings and API key stay); a folder anyone else may write to is moved aside.
+      - name: Install again after an uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "target\release\digital-wellbeing-service.exe"
+          $data = "C:\ProgramData\DigitalWellbeing"
+          $aside = { Get-ChildItem "C:\ProgramData" -Directory -Filter "DigitalWellbeing.untrusted-*" }
+          $before = @(& $aside).Count
+          if (-not (Select-String -Path "$data\ai_focus.json" -Pattern "test-key" -Quiet)) {
+            throw "the end-to-end test left no API key to keep"
+          }
+
+          Write-Host "== install again: the locked-down folder and its API key stay"
+          & $exe install --manage-all
+          if ($LASTEXITCODE -ne 0) { throw "install after uninstall failed ($LASTEXITCODE)" }
+          if (@(& $aside).Count -ne $before) { throw "the locked-down data folder was moved aside" }
+          if (-not (Select-String -Path "$data\ai_focus.json" -Pattern "test-key" -Quiet)) {
+            throw "the API key was lost"
+          }
+          & $exe uninstall
+          if ($LASTEXITCODE -ne 0) { throw "uninstall failed ($LASTEXITCODE)" }
+          Start-Sleep -Seconds 2
+
+          Write-Host "== a folder standard users may write to is moved aside"
+          icacls $data /grant "*S-1-5-32-545:(OI)(CI)M" | Out-Null
+          & $exe install --manage-all
+          if ($LASTEXITCODE -ne 0) { throw "install over an open folder failed ($LASTEXITCODE)" }
+          if (@(& $aside).Count -ne $before + 1) { throw "the open data folder was not moved aside" }
+          if (Select-String -Path "$data\ai_focus.json" -Pattern "test-key" -Quiet -ErrorAction SilentlyContinue) {
+            throw "settings from an open folder were kept"
+          }
+          & $exe uninstall
+          if ($LASTEXITCODE -ne 0) { throw "final uninstall failed ($LASTEXITCODE)" }

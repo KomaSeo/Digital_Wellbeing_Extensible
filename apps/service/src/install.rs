@@ -267,7 +267,15 @@ fn prepare_data_dir(data: &Path, upgrade: bool) -> anyhow::Result<()> {
             );
         }
     }
-    if data.exists() && !upgrade {
+    // A folder an earlier install locked down (uninstalled, then installed again) keeps the
+    // settings, the API key and the protection. Any other folder may have been made by a
+    // standard user, who could have planted settings in it, so it is moved aside.
+    if data.exists() && !upgrade && is_locked_down(data) {
+        println!(
+            "kept the data folder of an earlier install ({}): settings, API key and protection stay",
+            data.display()
+        );
+    } else if data.exists() && !upgrade {
         let aside = data.with_file_name(format!(
             "DigitalWellbeing.untrusted-{}",
             std::time::SystemTime::now()
@@ -281,6 +289,92 @@ fn prepare_data_dir(data: &Path, upgrade: bool) -> anyhow::Result<()> {
     }
     fs::create_dir_all(machine::log_dir())?;
     Ok(())
+}
+
+/// Whether `path` is as `install` leaves the data folder: owned by Administrators or SYSTEM,
+/// and nobody else may write, delete or change permissions in it.
+fn is_locked_down(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetAce, IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE,
+        ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    };
+    /// Rights that change the folder or what is in it.
+    const WRITE_RIGHTS: u32 = 0x2 // add file / write data
+        | 0x4 // add subfolder / append data
+        | 0x10 // write extended attributes
+        | 0x40 // delete child
+        | 0x100 // write attributes
+        | 0x1_0000 // delete
+        | 0x4_0000 // write DACL
+        | 0x8_0000 // write owner
+        | 0x1000_0000 // generic all
+        | 0x4000_0000; // generic write
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut owner = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: valid NUL-terminated path and out-pointers; the descriptor is freed below.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return false;
+    }
+    // SAFETY: `owner` and every SID below point into `descriptor`, alive until LocalFree.
+    let trusted_sid = |sid| unsafe {
+        IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+            || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+    };
+    let mut locked = !owner.is_null() && trusted_sid(owner) && !dacl.is_null();
+    if locked {
+        // SAFETY: `dacl` is a valid ACL inside `descriptor`.
+        let count = unsafe { (*dacl).AceCount };
+        for index in 0..u32::from(count) {
+            let mut ace = std::ptr::null_mut();
+            // SAFETY: index < AceCount; `ace` receives a pointer into the ACL.
+            if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
+                locked = false;
+                break;
+            }
+            // SAFETY: every ACE starts with an ACE_HEADER.
+            let header = unsafe { &*(ace as *const ACE_HEADER) };
+            match header.AceType {
+                ACCESS_DENIED_ACE_TYPE => {}
+                ACCESS_ALLOWED_ACE_TYPE => {
+                    // SAFETY: an access-allowed ACE is an ACCESS_ALLOWED_ACE.
+                    let allowed = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
+                    let sid = std::ptr::addr_of!(allowed.SidStart) as *mut core::ffi::c_void;
+                    if allowed.Mask & WRITE_RIGHTS != 0 && !trusted_sid(sid) {
+                        locked = false;
+                        break;
+                    }
+                }
+                // Object or callback ACEs: not what `install` writes.
+                _ => {
+                    locked = false;
+                    break;
+                }
+            }
+        }
+    }
+    // SAFETY: allocated by GetNamedSecurityInfoW.
+    unsafe { LocalFree(descriptor) };
+    locked
 }
 
 fn is_reparse_point(path: &Path) -> bool {

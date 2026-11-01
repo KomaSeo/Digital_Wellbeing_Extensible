@@ -388,7 +388,13 @@ pub fn apply_now(data_directory: &Path, name: &str, edits: &[Edit]) -> Result<()
 /// [`apply_now`] for a caller that already holds the write lock.
 fn apply_edits(data_directory: &Path, name: &str, edits: &[Edit]) -> Result<(), String> {
     let file = file_of(name)?;
-    let mut updated = normalize(name, &read_json(&data_directory.join(file)))?;
+    let path = data_directory.join(file);
+    let current = read_json(&path);
+    // An unreadable file must not be replaced by the defaults (it holds the API key).
+    if current.is_null() && path.exists() {
+        return Err(format!("{file}을(를) 읽지 못해서 바꾸지 않았습니다"));
+    }
+    let mut updated = normalize(name, &current)?;
     setting_edits::apply(&mut updated, edits);
     validate(name, &updated)?;
     write_setting(data_directory, file, &updated)
@@ -746,6 +752,23 @@ mod tests {
             .scheduled
             .expect("a scheduled update")
             .id
+    }
+
+    #[test]
+    fn an_unreadable_file_is_never_replaced_by_the_defaults() {
+        let data_directory = temp_dir("unreadable");
+        fs::write(
+            data_directory.join("ai_focus.json"),
+            "{ \"api_key\": \"k\", broken",
+        )
+        .unwrap();
+        let edit = Edit::Set {
+            path: vec!["time_zone".into()],
+            value: json!("Korea Standard Time"),
+        };
+        assert!(apply_now(&data_directory, "ai_focus", &[edit]).is_err());
+        let left = fs::read_to_string(data_directory.join("ai_focus.json")).unwrap();
+        assert!(left.contains("\"k\""), "{left}");
     }
 
     #[test]
