@@ -460,6 +460,26 @@ impl eframe::App for FocusApp {
                         return;
                     }
                 };
+                if let Some(lockdown) = &status.lockdown {
+                    ui.colored_label(
+                        RED,
+                        egui::RichText::new(format!(
+                            "모든 앱과 웹사이트가 잠겨 있습니다. {}",
+                            lockdown.reason
+                        ))
+                        .strong(),
+                    );
+                    ui.label(
+                        "설정이 보호된 상태에서 AI 연결이 끊기면, 연결될 때까지 Claude Desktop과 \
+                         Claude·Anthropic 웹사이트 말고는 모든 앱과 웹사이트를 막습니다. 설정 탭의 \
+                         AI 연결에서 동작하는 키를 넣고 \"적용\"을 누르면 몇 초 안에 풀립니다. 잠긴 \
+                         동안에는 키를 바꾸는 것이 예약되지 않고 바로 적용됩니다.",
+                    );
+                    if self.tab != Tab::Settings && ui.button("설정 탭 열기").clicked() {
+                        self.tab = Tab::Settings;
+                    }
+                    ui.separator();
+                }
                 // A refused or failed request from either tab.
                 if !message.is_empty() && self.tab != Tab::Settings {
                     ui.colored_label(RED, &message);
@@ -467,7 +487,11 @@ impl eframe::App for FocusApp {
                 match self.tab {
                     Tab::Todo => self.todo_tab(ui, &status),
                     Tab::Blocking => self.blocking_tab(ui, &status),
-                    Tab::Settings => self.settings.ui(ui, status.settings_protected),
+                    Tab::Settings => self.settings.ui(
+                        ui,
+                        status.settings_protected,
+                        status.lockdown.as_ref(),
+                    ),
                     Tab::Statistics => self.statistics_tab(ui, &status),
                     Tab::Help => help::help_tab(ui),
                 }

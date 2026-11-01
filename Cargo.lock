@@ -2235,6 +2235,7 @@ version = "0.1.0"
 dependencies = [
  "ai_focus_rule",
  "chrono",
+ "enforcer",
  "list_based_rule",
  "serde",
  "serde_json",

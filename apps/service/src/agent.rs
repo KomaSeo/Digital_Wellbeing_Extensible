@@ -16,13 +16,17 @@
 //! `grants\<user>.json` (this user's access grants) and `blocks\<user>.json`
 //! (blocks in force, so logging out and back in does not lift them).
 
+use ai_focus_rule::claude::ClaudeClient;
+use ai_focus_rule::connection::{self, Connection, KeyProblem};
 use ai_focus_rule::grants::GrantState;
 use ai_focus_rule::usage::UsageRecorder;
+use ai_focus_rule::JudgeError;
 use ai_focus_rule::{
     claude_judge_provider, platform, AiFocusRuleHandle, AiFocusStore, FocusMonitor, SavedBlocks,
 };
 use enforcer::Enforcer;
 use list_based_rule::{FileListPersistence, ListBasedRuleHandle, ListStore};
+use machine::lockdown::LockdownRule;
 use machine::session::{current_session_id, process_session_id};
 use machine::user_api::AgentApi;
 use std::path::Path;
@@ -37,6 +41,9 @@ const RELOAD_INTERVAL: Duration = Duration::from_secs(3);
 /// up, and how long it waits after a failed AI call before trying again.
 const PLANNER_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 const PLANNER_RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
+/// How often the AI connection is checked while it works, and while it is broken.
+const PROBE_WHILE_WORKING: Duration = Duration::from_secs(300);
+const PROBE_WHILE_BROKEN: Duration = Duration::from_secs(30);
 
 pub fn run() -> anyhow::Result<()> {
     let session = current_session_id();
@@ -82,7 +89,8 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         )
         .with_grants(grants)
         .with_block_store(blocks)
-        .with_usage(Arc::clone(&usage)),
+        .with_usage(Arc::clone(&usage))
+        .with_lockdown(Arc::new(|| machine::user_api::lockdown_now().is_some())),
     );
     let ai_rule = AiFocusRuleHandle::new(Arc::clone(&monitor));
 
@@ -92,6 +100,15 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     }));
     enforcer.register_rule(list_rule.rule());
     enforcer.register_rule(ai_rule.rule());
+    // Protected settings and a broken AI connection: every app but the browsers (Claude pages
+    // only, see the monitor) and Claude Desktop is closed until the key works again.
+    enforcer.register_rule(Arc::new(LockdownRule {
+        active: Arc::new(machine::user_api::lockdown_now),
+        settings: ai_store.clone(),
+        closes_programs: cfg!(windows),
+    }));
+    let probe_store = ai_store.clone();
+    thread::spawn(move || connection_probe_loop(probe_store));
 
     let enforce = enforcer.start_background(Duration::from_millis(800));
     let _monitor = monitor.start_background();
@@ -157,6 +174,58 @@ fn planner_loop(planner: Arc<TaskPlanner>, monitor: Arc<FocusMonitor>) {
             warn!("planner: {error}");
             next_attempt = Instant::now() + PLANNER_RETRY_AFTER_FAILURE;
         }
+    }
+}
+
+/// Keep [`connection`] current even when no AI call happens: check the key and the model
+/// (the Models API, free) every few minutes, at once when either changes, and every 30
+/// seconds while the connection is broken. An account without credit is checked with the
+/// smallest message, since the Models API answers without credit.
+fn connection_probe_loop(ai_store: AiFocusStore) {
+    let mut last_checked: Option<(String, String)> = None;
+    let mut next_check = Instant::now();
+    loop {
+        let config = ai_store.get();
+        let key = config.resolve_api_key();
+        let checked = (key.clone().unwrap_or_default(), config.model.clone());
+        if last_checked.as_ref() != Some(&checked) || Instant::now() >= next_check {
+            last_checked = Some(checked);
+            match key {
+                None => connection::report_error(&JudgeError::NoApiKey),
+                Some(key) => {
+                    let client = ClaudeClient::new(key, config.model.clone());
+                    let billing = matches!(
+                        connection::current().0,
+                        Connection::Broken {
+                            problem: KeyProblem::Billing,
+                            ..
+                        }
+                    );
+                    let result = if billing {
+                        client.ping()
+                    } else {
+                        client.check()
+                    };
+                    if let Err(error) = result {
+                        tracing::debug!("connection check: {error}");
+                    }
+                }
+            }
+            let broken = matches!(connection::current().0, Connection::Broken { .. });
+            // Tests check every few seconds (DW_CONNECTION_CHECK_SECONDS); on Windows only an
+            // administrator can set the service's environment.
+            let test_interval = std::env::var("DW_CONNECTION_CHECK_SECONDS")
+                .ok()
+                .and_then(|seconds| seconds.parse().ok())
+                .map(Duration::from_secs);
+            next_check = Instant::now()
+                + test_interval.unwrap_or(if broken {
+                    PROBE_WHILE_BROKEN
+                } else {
+                    PROBE_WHILE_WORKING
+                });
+        }
+        thread::sleep(RELOAD_INTERVAL);
     }
 }
 

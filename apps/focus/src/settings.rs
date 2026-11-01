@@ -18,11 +18,13 @@ use ai_focus_rule::usage::UsageLog;
 use ai_focus_rule::{AiFocusConfig, SavedBlocks};
 use chrono::{DateTime, Datelike, Local, Utc};
 use list_based_rule::ListConfig;
+use machine::lockdown::Lockdown;
 use machine::setting_edits::{self, Direction, Edit};
 use machine::settings::{
     AnswerOutcome, PutOutcome, Reservation, ReservationOrigin, SettingsSnapshot, APPROVALS_NEEDED,
     EDITABLE,
 };
+use machine::system_care::{CareStatus, UpdateOutcome};
 use machine::user_api::call_value;
 use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
@@ -50,6 +52,8 @@ enum Section {
     Rules,
     Blocking,
     Checks,
+    /// Program updates and the time zone: what the service does as administrator.
+    System,
 }
 
 /// Responsibility: Name one group of settings that is saved, applied, discarded and reset on
@@ -171,8 +175,20 @@ const BROWSERS: Block = Block {
     paths: &[&["browsers"]],
     has_default: true,
 };
+const PROGRAM_UPDATES: Block = Block {
+    id: "program_updates",
+    file: "ai_focus",
+    paths: &[&["updatable_programs"], &["auto_update_programs"]],
+    has_default: true,
+};
+const TIME_ZONE: Block = Block {
+    id: "time_zone",
+    file: "ai_focus",
+    paths: &[&["time_zone"]],
+    has_default: false,
+};
 /// Every group; an edit outside them (such as a timestamp) is not the user's.
-const BLOCKS: [&Block; 17] = [
+const BLOCKS: [&Block; 19] = [
     &API_KEY,
     &MODEL,
     &BUDGET,
@@ -190,6 +206,8 @@ const BLOCKS: [&Block; 17] = [
     &ALWAYS_ALLOW,
     &PRIVATE_APPS,
     &BROWSERS,
+    &PROGRAM_UPDATES,
+    &TIME_ZONE,
 ];
 
 /// The user's edits not yet applied, by file name: what the drafts file keeps.
@@ -232,6 +250,13 @@ pub struct SettingsTab {
     key_check: Arc<Mutex<String>>,
     /// Text typed into the "add" fields of the lists, by list.
     adding: HashMap<&'static str, String>,
+    /// Settings whose edits take effect at once during a lockdown (the API key).
+    fix_now: Vec<Vec<String>>,
+    /// The last `system_care_status` answer, and when it was fetched.
+    care: Option<Result<CareStatus, String>>,
+    care_fetched_at: Option<Instant>,
+    /// What the last "지금 업데이트" did.
+    care_message: String,
 }
 
 /// Responsibility: Hold the editable copies of the three files and what they were when loaded
@@ -279,10 +304,17 @@ impl SettingsTab {
             new_key: String::new(),
             key_check: Arc::new(Mutex::new(String::new())),
             adding: HashMap::new(),
+            fix_now: Vec::new(),
+            care: None,
+            care_fetched_at: None,
+            care_message: String::new(),
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, protected: bool) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, protected: bool, lockdown: Option<&Lockdown>) {
+        self.fix_now = lockdown
+            .map(|lockdown| lockdown.fix_now.clone())
+            .unwrap_or_default();
         self.refresh();
         ui.heading("설정 보호(잠금)");
         if protected {
@@ -323,6 +355,7 @@ impl SettingsTab {
                 (Section::Rules, "AI 규칙"),
                 (Section::Blocking, "차단"),
                 (Section::Checks, "AI 검사"),
+                (Section::System, "시스템"),
             ] {
                 ui.selectable_value(&mut self.section, section, label);
             }
@@ -337,6 +370,7 @@ impl SettingsTab {
             Section::Rules => self.rules_ui(ui, &snapshot, protected),
             Section::Blocking => self.blocking_ui(ui, &snapshot, protected),
             Section::Checks => self.checks_ui(ui, &snapshot, protected),
+            Section::System => self.system_ui(ui, &snapshot, protected),
         }
         self.autosave(ui.ctx());
     }
@@ -781,6 +815,162 @@ impl SettingsTab {
 
     /// Under a group: what applying would do (in force now or scheduled), when the edits were
     /// saved, and the 저장 / 적용 / 고친 것 버리기 / 기본값으로 되돌리기 buttons.
+    // --- what the service does as administrator ----------------------------------------
+
+    fn system_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
+        if self
+            .care_fetched_at
+            .is_none_or(|fetched_at| fetched_at.elapsed() >= REFRESH)
+        {
+            self.care_fetched_at = Some(Instant::now());
+            self.care = Some(
+                call_value(self.session, "system_care_status", json!({})).and_then(|reply| {
+                    serde_json::from_value(reply).map_err(|error| error.to_string())
+                }),
+            );
+        }
+        let care = match &self.care {
+            Some(Ok(care)) => Some(care.clone()),
+            Some(Err(error)) => {
+                ui.colored_label(RED, error);
+                None
+            }
+            None => None,
+        };
+
+        ui.heading("프로그램 업데이트");
+        ui.small(
+            "카카오톡처럼 업데이트에 관리자 권한이 필요한 프로그램을 여기에 넣습니다. 사용자에게 \
+             관리자 권한을 주지 않고, 이 PC의 서비스(SYSTEM)가 화면 없이 winget으로 그 프로그램만 \
+             업데이트합니다. 지우기나 다른 명령은 하지 않습니다. 이름은 winget의 이름(id)으로 \
+             적습니다. 명령 프롬프트에서 winget search 카카오톡 처럼 찾으면 \"ID\" 칸에 나옵니다. \
+             예: Kakao.KakaoTalk. 넣기는 예약되고, 빼기는 바로 적용됩니다.",
+        );
+        if let Some(drafts) = &mut self.drafts {
+            names_ui(
+                ui,
+                "updatable_programs",
+                &mut drafts.ai_focus.updatable_programs,
+                &mut self.adding,
+                "예: Kakao.KakaoTalk",
+                false,
+            );
+            ui.checkbox(
+                &mut drafts.ai_focus.auto_update_programs,
+                format!(
+                    "하루 한 번 저절로 업데이트하기({}시 이후, PC가 켜져 있는 첫 때)",
+                    machine::system_care::AUTO_UPDATE_FROM_HOUR
+                ),
+            );
+        }
+        self.block_bar(ui, &PROGRAM_UPDATES, snapshot, protected);
+        if let Some(care) = &care {
+            ui.add_space(4.0);
+            ui.strong("지금 업데이트하기");
+            if care.programs.is_empty() {
+                ui.small("적용된 목록이 비어 있습니다.");
+            }
+            for program in &care.programs {
+                ui.horizontal(|ui| {
+                    ui.label(program);
+                    let waiting = care
+                        .pending
+                        .iter()
+                        .any(|request| &request.program == program)
+                        || care.state.running.as_deref() == Some(program.as_str());
+                    if waiting {
+                        ui.spinner();
+                        ui.small("업데이트 중이거나 기다리는 중");
+                    } else if ui.button("지금 업데이트").clicked() {
+                        self.care_message = match call_value(
+                            self.session,
+                            "program_update",
+                            json!({ "program": program }),
+                        ) {
+                            Ok(_) => format!(
+                                "{program}의 업데이트를 서비스에 맡겼습니다. 몇 초 뒤에 시작됩니다."
+                            ),
+                            Err(error) => error,
+                        };
+                        self.care_fetched_at = None;
+                    }
+                });
+            }
+            if !self.care_message.is_empty() {
+                ui.small(&self.care_message);
+            }
+            if !care.state.runs.is_empty() {
+                ui.small("최근 업데이트:");
+            }
+            for run in care.state.runs.iter().rev().take(8) {
+                let (color, outcome) = match run.outcome {
+                    UpdateOutcome::Updated => (GREEN, "업데이트함"),
+                    UpdateOutcome::AlreadyUpToDate => (GREEN, "이미 최신"),
+                    UpdateOutcome::NotInstalled => (YELLOW, "설치되어 있지 않음"),
+                    UpdateOutcome::Failed => (RED, "실패"),
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.small(local(run.finished_at));
+                    ui.small(if run.automatic {
+                        "(저절로)"
+                    } else {
+                        "(요청)"
+                    });
+                    ui.label(&run.program);
+                    ui.colored_label(color, outcome);
+                    if !run.message.is_empty() {
+                        ui.small(&run.message);
+                    }
+                });
+            }
+        }
+
+        ui.separator();
+        ui.heading("시간대 지키기");
+        ui.small(
+            "표준 사용자도 Windows의 시간대는 바꿀 수 있습니다. 시간대를 바꾸면 생활 규칙의 시각(예: \
+             \"18시 전에는\")을 피할 수 있으므로, 서비스가 몇 초 안에 아래 시간대로 되돌립니다. 이 \
+             칸이 비어 있으면 서비스가 처음 돌 때 그때의 시간대를 적습니다. 여행 등으로 시간대를 \
+             바꿔야 하면 여기서 고칩니다. 바꾸기는 예약됩니다.",
+        );
+        if let Some(drafts) = &mut self.drafts {
+            ui.horizontal(|ui| {
+                ui.label("지킬 시간대:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut drafts.ai_focus.time_zone)
+                        .hint_text("예: Korea Standard Time")
+                        .desired_width(240.0),
+                );
+                if let Some(care) = &care {
+                    if !care.time_zone_now.is_empty()
+                        && ui.button("지금 PC의 시간대로 채우기").clicked()
+                    {
+                        drafts.ai_focus.time_zone = care.time_zone_now.clone();
+                    }
+                }
+            });
+        }
+        if let Some(care) = &care {
+            if !care.time_zone_now.is_empty() {
+                ui.small(format!("지금 PC의 시간대: {}", care.time_zone_now));
+            }
+            if !care.state.time_zone_error.is_empty() {
+                ui.colored_label(RED, &care.state.time_zone_error);
+            }
+        }
+        self.block_bar(ui, &TIME_ZONE, snapshot, protected);
+        if let Some(care) = &care {
+            for reset in care.state.time_zone_resets.iter().rev().take(5) {
+                ui.small(format!(
+                    "{} 시간대가 {}(으)로 바뀌어 {}(으)로 되돌렸습니다.",
+                    local(reset.at),
+                    reset.from,
+                    reset.to
+                ));
+            }
+        }
+    }
+
     fn block_bar(
         &mut self,
         ui: &mut egui::Ui,
@@ -809,8 +999,15 @@ impl SettingsTab {
                 .unwrap_or(Value::Null);
             let in_force = machine::settings::normalize(block.file, &in_force).unwrap_or(in_force);
             for edit in &edits {
+                let fixes_the_lockdown = block.file == "ai_focus"
+                    && self
+                        .fix_now
+                        .iter()
+                        .any(|path| edit.path().starts_with(path.as_slice()));
                 let (color, when) = if !protected {
                     (GREEN, "적용하면 바로")
+                } else if fixes_the_lockdown {
+                    (GREEN, "적용하면 바로(잠금을 풀기 위한 변경)")
                 } else {
                     match setting_edits::direction(block.file, edit, &in_force) {
                         Direction::Looser => (YELLOW, "적용하면 예약"),
@@ -1300,6 +1497,18 @@ fn set_ui(
     adding: &mut HashMap<&'static str, String>,
     hint: &str,
 ) {
+    names_ui(ui, list, names, adding, hint, true);
+}
+
+/// [`set_ui`]; `lowercase` false keeps the case as typed (winget ids).
+fn names_ui(
+    ui: &mut egui::Ui,
+    list: &'static str,
+    names: &mut BTreeSet<String>,
+    adding: &mut HashMap<&'static str, String>,
+    hint: &str,
+    lowercase: bool,
+) {
     let mut remove = None;
     ui.horizontal_wrapped(|ui| {
         for name in names.iter() {
@@ -1325,7 +1534,12 @@ fn set_ui(
             .add_enabled(!text.trim().is_empty(), egui::Button::new("추가"))
             .clicked()
         {
-            names.insert(text.trim().to_lowercase());
+            let name = text.trim();
+            names.insert(if lowercase {
+                name.to_lowercase()
+            } else {
+                name.to_string()
+            });
             text.clear();
         }
     });

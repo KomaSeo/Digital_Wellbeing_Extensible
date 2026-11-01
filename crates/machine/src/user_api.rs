@@ -27,6 +27,8 @@
 //! | `settings_answer` | `{ "id": "…", "approve": true\|false }` (once the question is due) | [`crate::settings::AnswerOutcome`] |
 //! | `settings_withdraw` | `{ "id": "…" }`                        | `{ "ok": true }` |
 //! | `settings_protect` | `{}` (one way)                         | [`crate::settings::Protection`] |
+//! | `program_update` | `{ "program": "Kakao.KakaoTalk" }` (listed in `updatable_programs`) | [`crate::system_care::CareStatus`] |
+//! | `system_care_status` | `{}`                                 | [`crate::system_care::CareStatus`] |
 //!
 //! The `settings_*` methods let a standard user edit the admin settings: during setup an
 //! edit takes effect at once; once protected it is scheduled and takes effect only after
@@ -123,6 +125,9 @@ pub struct Status {
     pub ai_cost_today_usd: Option<f64>,
     #[serde(default)]
     pub daily_budget_usd: f64,
+    /// Every app is locked: the settings are protected and the AI connection is broken.
+    #[serde(default)]
+    pub lockdown: Option<crate::lockdown::Lockdown>,
 }
 
 /// Responsibility: Hold what the agent exposes (focus monitor, optional planner) and tell
@@ -177,7 +182,16 @@ fn status(api: &AgentApi) -> Status {
         settings_questions_due: crate::settings::questions_due(&crate::data_dir(), Utc::now()),
         ai_cost_today_usd: monitor.usage().map(|usage| usage.today_cost()),
         daily_budget_usd: config.daily_budget_usd,
+        lockdown: lockdown_now(),
     }
+}
+
+/// The lockdown in force now (see [`crate::lockdown`]).
+pub fn lockdown_now() -> Option<crate::lockdown::Lockdown> {
+    crate::lockdown::lockdown(
+        crate::settings::is_protected(&crate::data_dir()),
+        &ai_focus_rule::connection::current().0,
+    )
 }
 
 /// The settings edits that write `writes` to `planner.json`.
@@ -233,8 +247,18 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
         "settings_put" => {
             let name = params["name"].as_str().ok_or("params.name required")?;
             let via = params["via"].as_str().unwrap_or("settings tab");
-            let outcome =
-                crate::settings::put(&data_directory, Utc::now(), name, &params["content"], via)?;
+            // While a broken AI connection locks every app, fixing the key works at once.
+            let fix_now = lockdown_now()
+                .map(|lockdown| lockdown.fix_now)
+                .unwrap_or_default();
+            let outcome = crate::settings::put(
+                &data_directory,
+                Utc::now(),
+                name,
+                &params["content"],
+                via,
+                &fix_now,
+            )?;
             if !outcome.applied.is_empty() {
                 tracing::info!(
                     "settings '{name}' via {via}: in force now: {}",
@@ -265,6 +289,29 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             crate::settings::withdraw(&data_directory, Utc::now(), id)?;
             tracing::info!("settings update {id} withdrawn");
             return Ok(json!({ "ok": true }));
+        }
+        "program_update" => {
+            let program = params["program"]
+                .as_str()
+                .ok_or("params.program required")?;
+            let config = api.monitor.store().get();
+            let user = crate::session::session_user(crate::session::current_session_id())
+                .unwrap_or_default();
+            let request = crate::system_care::request_update(
+                &data_directory,
+                &config,
+                program,
+                &user,
+                Utc::now(),
+            )?;
+            tracing::info!("update of {} requested by {user}", request.program);
+            return serde_json::to_value(crate::system_care::status(&data_directory, &config))
+                .map_err(|error| error.to_string());
+        }
+        "system_care_status" => {
+            let config = api.monitor.store().get();
+            return serde_json::to_value(crate::system_care::status(&data_directory, &config))
+                .map_err(|error| error.to_string());
         }
         "settings_protect" => {
             let protection = crate::settings::protect(&data_directory, Utc::now())?;

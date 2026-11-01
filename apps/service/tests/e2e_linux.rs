@@ -120,6 +120,7 @@ fn end_to_end(real_key: Option<String>) {
             .env("DW_DATA_DIR", &data)
             .env("DW_PORT_BASE", port_base.to_string())
             .env("DW_SETTINGS_CONFIRM_INTERVAL_SECONDS", "2")
+            .env("DW_CONNECTION_CHECK_SECONDS", "2")
             .env("DISPLAY", &display)
             .env("RUST_LOG", "debug,ureq=info,rustls=info")
             .spawn()
@@ -479,6 +480,40 @@ fn end_to_end(real_key: Option<String>) {
             json!({ "id": rejected.id })
         )
         .is_err());
+
+        // 7. Lockdown: the stand-in refuses every key, as the API does for a revoked one. With
+        // the settings protected, the agent locks every app; a new key takes effect at once
+        // (not scheduled), and the lock ends once the key works again.
+        common::REJECT_EVERY_KEY.store(true, Ordering::SeqCst);
+        let locked = wait_for(Duration::from_secs(20), || {
+            call(session, "status", json!({})).ok()?.lockdown
+        })
+        .expect("a refused key locks every app");
+        assert_eq!(
+            locked.problem,
+            ai_focus_rule::connection::KeyProblem::Rejected
+        );
+        assert_eq!(locked.fix_now, vec![vec!["api_key".to_string()]]);
+        let mut ai_focus =
+            call_value(session, "settings_get", json!({})).unwrap()["files"]["ai_focus"].clone();
+        ai_focus["api_key"] = json!("a-new-key");
+        let outcome = call_value(
+            session,
+            "settings_put",
+            json!({ "name": "ai_focus", "content": ai_focus, "via": "e2e" }),
+        )
+        .unwrap();
+        assert!(
+            outcome["applied"].to_string().contains("api_key"),
+            "{outcome}"
+        );
+        assert!(outcome["scheduled"].is_null(), "{outcome}");
+        common::REJECT_EVERY_KEY.store(false, Ordering::SeqCst);
+        wait_for(Duration::from_secs(20), || {
+            let status = call(session, "status", json!({})).ok()?;
+            status.lockdown.is_none().then_some(())
+        })
+        .expect("a working key ends the lockdown");
     }
 
     let _ = std::fs::remove_dir_all(&data);

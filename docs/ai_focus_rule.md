@@ -495,6 +495,37 @@ Other open windows (title only; judge each in `others`):
 
 ---
 
+### 5.13 AI 연결이 끊겼을 때 모든 앱 잠그기 (`machine::lockdown`, `connection.rs`)
+
+이 절에서 **AI 연결**은 설정의 API 키와 모델로 Claude API를 부를 수 있는 상태를 말합니다. **잠금(lockdown)**은 AI 연결이 끊긴 동안 agent가 거의 모든 앱과 웹사이트를 막는 상태를 말합니다.
+
+**왜 필요한가.** AI가 없으면 AI 검사는 아무것도 막지 못합니다. 그래서 검사를 피하고 싶은 사용자는 키를 망가뜨릴 수 있습니다. 예를 들어 사용자는 Anthropic 웹사이트에서 키를 취소하거나, 계정의 크레딧을 비우거나, 사용 한도를 0으로 낮출 수 있습니다. 설정이 보호된 뒤에 이렇게 하면 AI 검사가 꺼지는 대신 거의 모든 앱이 잠기므로, 키를 망가뜨려서 얻는 것이 없습니다.
+
+**AI 연결의 상태(`ai_focus_rule::connection`).** agent는 Claude를 부를 때마다 결과를 기록합니다.
+- 키가 없으면(`NoKey`), API가 키를 거부하면(401·403, `Rejected`), 계정의 크레딧이나 한도가 없으면(400 "credit balance" 등, `Billing`), API가 설정의 모델을 모르면(404, `UnknownModel`) 연결이 **끊긴** 것으로 기록합니다.
+- 네트워크 오류, 과부하(429·529) 같은 오류는 키에 대해 알려 주는 것이 없으므로 상태를 바꾸지 않습니다. 그래서 인터넷이 끊겨도 잠기지 않습니다.
+- 메시지 호출이 한 번이라도 성공하면 연결이 **동작하는** 것으로 기록합니다.
+
+**정기 확인.** AI 검사가 꺼져 있으면 Claude를 부르지 않으므로, agent는 따로 연결을 확인합니다(`apps/service/src/agent.rs`의 `connection_probe_loop`).
+- 5분마다, 그리고 키나 모델이 바뀌면 3초 안에, 모델 목록 API(`ClaudeClient::check`, 비용 없음)로 키와 모델을 확인합니다. 연결이 끊긴 동안에는 30초마다 확인합니다.
+- 모델 목록 API는 크레딧이 없어도 답합니다. 그래서 크레딧 문제(`Billing`)로 끊긴 동안에는 가장 짧은 메시지(`ClaudeClient::ping`, 출력 16토큰 이하)를 보내 확인합니다.
+
+**잠그는 조건과 막는 것.** 설정이 보호되어 있고 AI 연결이 끊겼으면 잠급니다(`lockdown::lockdown`). 설정 단계에서는 잠그지 않습니다.
+- Enforcer의 규칙 `LockdownRule`이 사용자 세션의 프로그램을 모두 끕니다. 다음 프로그램만 남깁니다.
+  - Windows가 돌아가는 데 꼭 필요한 프로그램과 이 앱(Enforcer의 `never_terminate`).
+  - Windows 폴더(`C:\Windows`) 아래의 프로그램.
+  - Claude Desktop(`claude.exe`), Windows 설정(`systemsettings.exe`, 네트워크를 고칠 때), 웹 보기(`msedgewebview2.exe`), 보안 도우미, 작업 관리자(`LOCKDOWN_KEEPS`).
+  - 설정의 "검사하지 않는 앱"(`always_allow`)과 브라우저 목록(`browsers`)의 프로그램.
+- 브라우저는 끄지 않는 대신, 모니터가 Claude와 Anthropic 페이지가 아닌 탭을 모두 닫습니다(`close_always_blocked_sites`, `lockdown_allows_page`). 남기는 탭은 제목에 "Claude"나 "Anthropic"이 든 탭, 빈 새 탭(주소를 적기 위해), Google 로그인 페이지(Claude에 로그인하기 위해)입니다. 뒤쪽 창의 다른 탭은 최소화합니다.
+- 소유자가 Claude 웹사이트와 Claude Desktop을 예외로 하라고 했습니다. 키를 다시 연결하려면 Claude Console에서 새 키를 만들어야 하기 때문입니다.
+- Linux에서는 agent의 "세션"이 사용자의 모든 프로세스(개발 도구 포함)이므로 프로그램을 끄지 않고, 상태와 탭 닫기만 동작합니다.
+
+**잠금에서 벗어나는 법.** 잠긴 동안에는 API 키의 변경이 예약되지 않고 바로 적용됩니다(`settings::put`의 `fix_now`). 모델이 문제(`UnknownModel`)이면 모델의 변경도 바로 적용됩니다. 사용자는 Focus 앱의 설정 탭 → AI 연결에서 동작하는 키를 넣고 **적용**을 누릅니다. agent는 3초 안에 새 키를 확인하고, 키가 동작하면 잠금을 풉니다. 크레딧 문제는 Anthropic 웹사이트에서 크레딧을 채우면 30초 안에 풀립니다.
+
+**Focus 앱.** 상태(`Status.lockdown`)에 잠금이 있으면, Focus 앱의 모든 탭 맨 위에 빨간 글로 이유와 푸는 방법이 나옵니다. 설정 탭은 키 변경 옆에 "적용하면 바로(잠금을 풀기 위한 변경)"라고 보여 줍니다.
+
+**한계.** 탭은 제목으로 판단하므로, 제목에 "Claude"가 든 다른 페이지는 열린 채로 남습니다. 네트워크를 끊는 것은 막지 않습니다. 대신 네트워크가 끊기면 대부분의 웹사이트도 쓸 수 없습니다.
+
 ## 6. Claude 호출 (`judge.rs`, `claude.rs`)
 
 ### 6.1 `Judge` 트레이트

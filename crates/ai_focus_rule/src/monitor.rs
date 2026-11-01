@@ -662,6 +662,9 @@ pub struct FocusMonitor {
     /// Token usage of this process's Claude calls (see `usage.rs`); with a daily
     /// budget, focus checks stop once it is spent.
     usage: Option<Arc<UsageRecorder>>,
+    /// Every app is locked (a broken AI connection while the settings are protected): browser
+    /// tabs other than Claude and Anthropic pages are closed. See `machine::lockdown`.
+    lockdown: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     running: AtomicBool,
 }
 
@@ -678,6 +681,7 @@ impl FocusMonitor {
             access_busy: Mutex::new(()),
             blocks: JsonStore::in_memory(SavedBlocks::default()),
             usage: None,
+            lockdown: None,
             running: AtomicBool::new(false),
         }
     }
@@ -735,6 +739,12 @@ impl FocusMonitor {
         self
     }
 
+    /// Close browser tabs other than Claude and Anthropic pages while `locked` says so.
+    pub fn with_lockdown(mut self, locked: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.lockdown = Some(locked);
+        self
+    }
+
     pub fn usage(&self) -> Option<&Arc<UsageRecorder>> {
         self.usage.as_ref()
     }
@@ -783,7 +793,8 @@ impl FocusMonitor {
     /// One sample; asks the judge too when a check is due.
     pub fn step(&self, now: DateTime<Utc>) {
         let config = self.store.get();
-        // Always-blocked websites: closed whether or not daily wellbeing is on, without the AI.
+        // Always-blocked websites (and, during a lockdown, every website but Claude's): closed
+        // whether or not daily wellbeing is on, without the AI.
         if self.close_always_blocked_sites(now, &config) {
             return;
         }
@@ -946,13 +957,23 @@ impl FocusMonitor {
     /// browser windows that show one (they are closed once they come to the front). Returns
     /// whether a tab was closed.
     fn close_always_blocked_sites(&self, now: DateTime<Utc>, config: &AiFocusConfig) -> bool {
-        if config.always_blocked_sites.is_empty() {
+        let locked = self.lockdown.as_ref().is_some_and(|locked| locked());
+        if config.always_blocked_sites.is_empty() && !locked {
             return false;
         }
-        let foreground = self.desktop.foreground();
-        let shows_blocked = |process_name: &str, title: &str| {
-            config.is_browser(process_name) && config.always_blocked_site(title).is_some()
+        let blocked_reason = |process_name: &str, title: &str| -> Option<String> {
+            if !config.is_browser(process_name) {
+                return None;
+            }
+            if let Some(pattern) = config.always_blocked_site(title) {
+                return Some(format!("항상 막을 웹사이트(\"{pattern}\")"));
+            }
+            (locked && !crate::config::lockdown_allows_page(title))
+                .then(|| "AI 연결이 끊겨 Claude와 Anthropic 사이트만 열 수 있습니다".to_string())
         };
+        let foreground = self.desktop.foreground();
+        let shows_blocked =
+            |process_name: &str, title: &str| blocked_reason(process_name, title).is_some();
         for open_window in self.desktop.open_windows() {
             let in_front = foreground
                 .as_ref()
@@ -967,15 +988,12 @@ impl FocusMonitor {
         let Some(foreground) = foreground else {
             return false;
         };
-        let Some(pattern) = config.always_blocked_site(&foreground.title) else {
+        let Some(reason) = blocked_reason(&foreground.process_name, &foreground.title) else {
             return false;
         };
-        if !config.is_browser(&foreground.process_name) {
-            return false;
-        }
         let closed = self.desktop.close_active_tab(&foreground);
         info!(
-            "always-blocked website \"{pattern}\": {} tab \"{}\"",
+            "{reason}: {} tab \"{}\"",
             if closed { "closed" } else { "could not close" },
             foreground.title
         );
@@ -989,7 +1007,7 @@ impl FocusMonitor {
                 process_name: foreground.process_name.clone(),
                 title: truncate(&foreground.title, MAX_TITLE_CHARS),
                 verdict: Verdict::OffTask,
-                reason: format!("항상 막을 웹사이트(\"{pattern}\")"),
+                reason,
                 action: "tab closed".to_string(),
             });
         }

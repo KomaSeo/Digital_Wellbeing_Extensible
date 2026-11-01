@@ -76,6 +76,10 @@ pub fn wait_for<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> Opt
 /// mentions cats are off task, everything else is on task, and every request is approved
 /// unless it says "please reject".
 /// Returns its base URL and a call counter.
+/// The stand-in refuses every key (401) while this is set, as the API does for a revoked key.
+pub static REJECT_EVERY_KEY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub fn fake_claude(address: &str) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind(address).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -100,6 +104,19 @@ pub fn fake_claude(address: &str) -> (String, Arc<AtomicUsize>) {
             let _ = reader.read_exact(&mut body);
             let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let answer = answer(&request);
+            if REJECT_EVERY_KEY.load(Ordering::SeqCst) {
+                let refusal = json!({ "type": "error", "error": {
+                    "type": "authentication_error", "message": "invalid x-api-key" } })
+                .to_string();
+                let mut stream = reader.into_inner();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    refusal.len(),
+                    refusal
+                );
+                continue;
+            }
             let reply = json!({
                 "model": "claude-opus-5-5",
                 "stop_reason": "end_turn",

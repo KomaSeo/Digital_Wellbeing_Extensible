@@ -11,7 +11,10 @@
 //! 3. a focus session starts; the off-task window is enforced (Ctrl+W when it is in front,
 //!    minimized when it is behind), and both windows are judged by title;
 //! 4. the verdicts, the block and the token usage show in the status;
-//! 5. a to-do proposal goes through the AI; after `settings_protect`, a saved edit is
+//! 5. the service keeps the time zone (it records the PC's one, and puts it back after this
+//!    test changes it), and runs a requested program update through winget as SYSTEM (the
+//!    program is not installed on the runner: the run must only end and be recorded);
+//! 6. a to-do proposal goes through the AI; after `settings_protect`, a saved edit is
 //!    scheduled instead of taking effect, cannot be confirmed before its question is due,
 //!    and can be withdrawn.
 #![cfg(windows)]
@@ -46,8 +49,8 @@ fn installed_agent_end_to_end() {
     };
     // A test that hangs would hold the CI job for hours; end it with a message instead.
     thread::spawn(|| {
-        thread::sleep(Duration::from_secs(300));
-        eprintln!("the end-to-end test took more than 5 minutes; giving up");
+        thread::sleep(Duration::from_secs(480));
+        eprintln!("the end-to-end test took more than 8 minutes; giving up");
         std::process::exit(2);
     });
     let (_, claude_calls) = fake_claude(&address);
@@ -78,6 +81,8 @@ fn installed_agent_end_to_end() {
         "model": "claude-opus-5-5",
         "send_screenshot": false,
         "browsers": [browser],
+        "updatable_programs": ["Kakao.KakaoTalk"],
+        "auto_update_programs": false,
     });
     call_value(
         session,
@@ -153,7 +158,65 @@ fn installed_agent_end_to_end() {
     assert!(status.ai_cost_today_usd.unwrap_or(0.0) > 0.0);
     assert!(claude_calls.load(Ordering::SeqCst) >= 1);
 
-    // 5. A proposal, then the lock.
+    // 5. What the service does as administrator: keep the time zone, update a listed program.
+    let recorded = desktop
+        .wait(Duration::from_secs(30), || {
+            let settings = call_value(session, "settings_get", json!({})).ok()?;
+            let zone = settings["files"]["ai_focus"]["time_zone"]
+                .as_str()?
+                .to_string();
+            (!zone.is_empty()).then_some(zone)
+        })
+        .expect("the service recorded the time zone in the settings");
+    println!("time zone kept: {recorded}");
+    let other = if recorded.starts_with("Korea Standard Time") {
+        "UTC"
+    } else {
+        "Korea Standard Time"
+    };
+    let changed = std::process::Command::new("tzutil")
+        .args(["/s", other])
+        .status()
+        .unwrap();
+    assert!(changed.success(), "tzutil /s {other}");
+    let care = desktop
+        .wait(Duration::from_secs(40), || {
+            let care: machine::system_care::CareStatus =
+                serde_json::from_value(call_value(session, "system_care_status", json!({})).ok()?)
+                    .ok()?;
+            (!care.state.time_zone_resets.is_empty() && care.time_zone_now == recorded)
+                .then_some(care)
+        })
+        .expect("the service put the time zone back");
+    println!("time zone reset: {:?}", care.state.time_zone_resets);
+
+    let refused = call_value(
+        session,
+        "program_update",
+        json!({ "program": "Valve.Steam" }),
+    )
+    .unwrap_err();
+    assert!(refused.contains("목록에 없"), "{refused}");
+    call_value(
+        session,
+        "program_update",
+        json!({ "program": "Kakao.KakaoTalk" }),
+    )
+    .unwrap();
+    let run = desktop
+        .wait(Duration::from_secs(200), || {
+            let care: machine::system_care::CareStatus =
+                serde_json::from_value(call_value(session, "system_care_status", json!({})).ok()?)
+                    .ok()?;
+            care.state
+                .runs
+                .into_iter()
+                .find(|run| run.program == "Kakao.KakaoTalk" && !run.automatic)
+        })
+        .expect("the service ran the requested update");
+    println!("update run: {:?} {}", run.outcome, run.message);
+
+    // 6. A proposal, then the lock.
     let proposed = call(
         session,
         "propose_todo",
@@ -168,15 +231,16 @@ fn installed_agent_end_to_end() {
     // pausing the AI checks is a change request the AI reviews.
     assert!(call(session, "stop_session", json!({})).is_err());
     // The agent's own loop may be picking a task this very moment ("busy"): try again.
-    let paused = desktop.wait(Duration::from_secs(30), || {
-        call(
-            session,
-            "request_change",
-            json!({ "request": { "kind": "end" }, "reason": "the end-to-end test is done" }),
-        )
-        .ok()
-    })
-    .expect("the pause request was answered");
+    let paused = desktop
+        .wait(Duration::from_secs(30), || {
+            call(
+                session,
+                "request_change",
+                json!({ "request": { "kind": "end" }, "reason": "the end-to-end test is done" }),
+            )
+            .ok()
+        })
+        .expect("the pause request was answered");
     assert!(paused
         .last_decision
         .as_ref()

@@ -76,6 +76,17 @@ pub struct AiFocusConfig {
     /// in browser tab titles (an invalid pattern is matched as plain text). A matching tab is
     /// closed whether or not daily wellbeing is on, without asking the AI.
     pub always_blocked_sites: BTreeSet<String>,
+    /// Programs the service may update as administrator, by their winget id
+    /// (`Kakao.KakaoTalk`). The user asks in the Focus app, or the service updates them once
+    /// a day; the user never gets administrator rights. See `machine::system_care`.
+    pub updatable_programs: BTreeSet<String>,
+    /// Update [`Self::updatable_programs`] once a day without being asked.
+    pub auto_update_programs: bool,
+    /// The Windows time zone the service keeps (`Korea Standard Time`, with `_dstoff` when
+    /// daylight saving is off). A standard user may change the time zone; the service puts
+    /// this one back within seconds, so the life rules' hours cannot be shifted. Empty: the
+    /// service writes the PC's time zone here the first time it runs.
+    pub time_zone: String,
 }
 
 impl Default for AiFocusConfig {
@@ -113,6 +124,9 @@ impl Default for AiFocusConfig {
             revoked_grants: BTreeSet::new(),
             unblocked: BTreeSet::new(),
             always_blocked_sites: BTreeSet::new(),
+            updatable_programs: BTreeSet::new(),
+            auto_update_programs: true,
+            time_zone: String::new(),
         }
     }
 }
@@ -140,6 +154,27 @@ fn without_browser_name(title: &str) -> &str {
         }
     }
     title
+}
+
+/// Pages a browser may keep open while a broken AI connection locks every app: Claude and
+/// Anthropic pages (to get or fix a key), an empty new tab (to type their address), and the
+/// Google sign-in page (to log in to Claude). Judged by the tab title, like every website.
+pub fn lockdown_allows_page(title: &str) -> bool {
+    let page = without_browser_name(title).trim().to_lowercase();
+    page.is_empty()
+        || ["claude", "anthropic", "google accounts", "google 계정"]
+            .iter()
+            .any(|allowed| page.contains(allowed))
+        || [
+            "new tab",
+            "새 탭",
+            "새 탭 페이지",
+            "about:blank",
+            "untitled",
+            "start page",
+        ]
+        .iter()
+        .any(|empty| page == *empty || page.starts_with(&format!("{empty} - ")))
 }
 
 impl AiFocusConfig {
@@ -315,6 +350,19 @@ fn listed(list: &BTreeSet<String>, process_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lockdown_keeps_only_claude_pages_and_new_tabs() {
+        assert!(lockdown_allows_page("Claude - Google Chrome"));
+        assert!(lockdown_allows_page(
+            "API keys - Claude Console - Microsoft\u{200b} Edge"
+        ));
+        assert!(lockdown_allows_page("Anthropic"));
+        assert!(lockdown_allows_page("새 탭 - Chrome"));
+        assert!(lockdown_allows_page("New Tab"));
+        assert!(!lockdown_allows_page("YouTube - Google Chrome"));
+        assert!(!lockdown_allows_page("Gmail - Mozilla Firefox"));
+    }
 
     #[test]
     fn lists_match_names_in_any_spelling() {

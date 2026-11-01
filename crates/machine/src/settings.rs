@@ -291,13 +291,16 @@ pub fn questions_due(data_directory: &Path, now: DateTime<Utc>) -> usize {
 /// protected, the edits that make the rules stricter take effect at once and the looser ones
 /// become a scheduled update (replacing the earlier scheduled update of this file, whose
 /// answers are lost, unless it holds exactly the same edits). Refused when `content` does not
-/// parse as that file's settings.
+/// parse as that file's settings. Edits of the settings in `fix_now` (paths of keys; the API
+/// key while a broken AI connection locks every app, see [`crate::lockdown`]) take effect at
+/// once like stricter ones.
 pub fn put(
     data_directory: &Path,
     now: DateTime<Utc>,
     name: &str,
     content: &Value,
     via: &str,
+    fix_now: &[Vec<String>],
 ) -> Result<PutOutcome, String> {
     let _write = write_lock();
     let file = file_of(name)?;
@@ -313,9 +316,13 @@ pub fn put(
             scheduled: None,
         });
     }
-    let (stricter, looser): (Vec<Edit>, Vec<Edit>) = edits
-        .into_iter()
-        .partition(|edit| setting_edits::direction(name, edit, &in_force) != Direction::Looser);
+    let (stricter, looser): (Vec<Edit>, Vec<Edit>) = edits.into_iter().partition(|edit| {
+        setting_edits::direction(name, edit, &in_force) != Direction::Looser
+            || (name == "ai_focus"
+                && fix_now
+                    .iter()
+                    .any(|path| edit.path().starts_with(path.as_slice())))
+    });
     if !stricter.is_empty() {
         apply_edits(data_directory, name, &stricter)?;
     }
@@ -734,11 +741,54 @@ mod tests {
 
     /// Save `content`; return the id of the scheduled update it made.
     fn schedule_file(data_directory: &Path, at: DateTime<Utc>, content: Value) -> String {
-        put(data_directory, at, "planner", &content, "settings tab")
+        put(data_directory, at, "planner", &content, "settings tab", &[])
             .unwrap()
             .scheduled
             .expect("a scheduled update")
             .id
+    }
+
+    #[test]
+    fn during_a_lockdown_a_new_key_takes_effect_at_once() {
+        let data_directory = temp_dir("lockdown_key");
+        let now = Utc::now();
+        put(
+            &data_directory,
+            now,
+            "ai_focus",
+            &json!({ "api_key": "old" }),
+            "",
+            &[],
+        )
+        .unwrap();
+        protect(&data_directory, now).unwrap();
+        let new_key = json!({ "api_key": "new", "model": "other-model" });
+        let fix_now = vec![vec!["api_key".to_string()]];
+        let outcome = put(
+            &data_directory,
+            now,
+            "ai_focus",
+            &new_key,
+            "settings tab",
+            &fix_now,
+        )
+        .unwrap();
+        assert_eq!(outcome.applied.len(), 1, "{outcome:?}");
+        assert!(outcome.applied[0].starts_with("api_key"), "{outcome:?}");
+        // The model is not part of the fix: still scheduled.
+        assert!(outcome.scheduled.is_some());
+        assert_eq!(in_force(&data_directory, "ai_focus")["api_key"], "new");
+        // Without a lockdown the key is scheduled as usual.
+        let outcome = put(
+            &data_directory,
+            now,
+            "ai_focus",
+            &json!({ "api_key": "third" }),
+            "",
+            &[],
+        )
+        .unwrap();
+        assert!(outcome.applied.is_empty(), "{outcome:?}");
     }
 
     #[test]
@@ -751,6 +801,7 @@ mod tests {
             "planner",
             &json!({ "enabled": true, "todos": [] }),
             "settings tab",
+            &[],
         )
         .unwrap();
         assert!(outcome.scheduled.is_none());
@@ -772,10 +823,11 @@ mod tests {
             now,
             "planner",
             &json!({ "enabled": "yes" }),
-            ""
+            "",
+            &[]
         )
         .is_err());
-        assert!(put(&data_directory, now, "machine", &json!({}), "").is_err());
+        assert!(put(&data_directory, now, "machine", &json!({}), "", &[]).is_err());
     }
 
     #[test]
@@ -783,12 +835,20 @@ mod tests {
         let data_directory = temp_dir("split");
         let start = Utc::now();
         let ai_focus = json!({ "always_allow": ["a.exe"], "strikes_to_block": 2, "model": "m" });
-        put(&data_directory, start, "ai_focus", &ai_focus, "").unwrap();
+        put(&data_directory, start, "ai_focus", &ai_focus, "", &[]).unwrap();
         protect(&data_directory, start).unwrap();
 
         // Stricter (fewer strikes, a.exe no longer allowed) and looser (another model).
         let saved = json!({ "always_allow": [], "strikes_to_block": 1, "model": "cheap" });
-        let outcome = put(&data_directory, start, "ai_focus", &saved, "settings tab").unwrap();
+        let outcome = put(
+            &data_directory,
+            start,
+            "ai_focus",
+            &saved,
+            "settings tab",
+            &[],
+        )
+        .unwrap();
         assert_eq!(outcome.applied.len(), 2, "{outcome:?}");
         let scheduled = outcome.scheduled.expect("the model change is scheduled");
         assert_eq!(scheduled.edits, ["model = cheap"]);
@@ -813,6 +873,7 @@ mod tests {
             "ai_focus",
             &resaved,
             "",
+            &[],
         )
         .unwrap();
         assert_eq!(outcome.scheduled.unwrap().id, scheduled.id);
@@ -865,6 +926,7 @@ mod tests {
             "ai_focus",
             &serde_json::to_value(&full).unwrap(),
             "settings tab",
+            &[],
         )
         .unwrap();
         assert_eq!(outcome.applied, ["send_screenshot = true"]);
@@ -885,6 +947,7 @@ mod tests {
             "planner",
             &json!({ "life_rules": "no games" }),
             "",
+            &[],
         )
         .unwrap();
         protect(&data_directory, start).unwrap();
@@ -895,6 +958,7 @@ mod tests {
             "planner",
             &json!({ "life_rules": "games ok" }),
             "claude desktop",
+            &[],
         )
         .unwrap();
         let scheduled = outcome.scheduled.expect("life rules are scheduled");
@@ -964,6 +1028,7 @@ mod tests {
             "planner",
             &json!({ "life_rules": "no games" }),
             "",
+            &[],
         )
         .unwrap();
         protect(&data_directory, start).unwrap();
@@ -1026,6 +1091,7 @@ mod tests {
             "planner",
             &json!({ "life_rules": "no games" }),
             "",
+            &[],
         )
         .unwrap();
         assert!(snapshot(&data_directory)
@@ -1057,6 +1123,7 @@ mod tests {
             "planner",
             &json!({ "todos": [] }),
             "",
+            &[],
         )
         .unwrap();
         protect(&data_directory, start).unwrap();

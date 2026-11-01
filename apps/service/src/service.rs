@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
 use std::time::Duration;
 use tracing::{error, info, warn};
 use windows_service::service::{
@@ -62,6 +63,8 @@ fn run_service() -> anyhow::Result<()> {
     ))?;
     info!("service running");
 
+    thread::spawn(|| care_loop(CareJob::TimeZone));
+    thread::spawn(|| care_loop(CareJob::Updates));
     let mut supervisor = Supervisor::new(std::env::current_exe()?);
     loop {
         supervisor.tick();
@@ -74,6 +77,49 @@ fn run_service() -> anyhow::Result<()> {
     info!("service stopped");
     status.set_service_status(report(ServiceState::Stopped, ServiceControlAccept::empty()))?;
     Ok(())
+}
+
+/// Responsibility: Name the administrator jobs the service does for the user.
+#[derive(Clone, Copy)]
+enum CareJob {
+    /// Put the time zone of the settings back when it changed.
+    TimeZone,
+    /// Run requested and daily program updates (each may take minutes).
+    Updates,
+}
+
+/// How often each care job looks again.
+const CARE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Do `job` forever (see `machine::system_care`); the jobs run on their own threads so a long
+/// update does not delay putting the time zone back.
+fn care_loop(job: CareJob) {
+    use machine::system_care;
+    let data_directory = machine::data_dir();
+    loop {
+        let config: ai_focus_rule::AiFocusConfig =
+            std::fs::read_to_string(machine::ai_focus_path())
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+        match job {
+            CareJob::TimeZone => {
+                system_care::guard_time_zone(
+                    &data_directory,
+                    &config,
+                    system_care::current_time_zone(),
+                    &system_care::set_time_zone,
+                );
+            }
+            CareJob::Updates => system_care::run_updates(
+                &data_directory,
+                &config,
+                chrono::Local::now(),
+                &system_care::winget_upgrade,
+            ),
+        }
+        thread::sleep(CARE_INTERVAL);
+    }
 }
 
 /// Responsibility: Track the agent of each session: start missing ones, restart dead ones, stop

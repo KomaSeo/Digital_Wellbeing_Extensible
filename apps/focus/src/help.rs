@@ -20,6 +20,57 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) {
     egui::CollapsingHeader::new("Claude Desktop으로 이 프로그램 쓰기")
         .default_open(true)
         .show(ui, claude_desktop_guide);
+    egui::CollapsingHeader::new("모든 앱이 잠겼을 때 (AI 연결이 끊겼을 때)")
+        .default_open(false)
+        .show(ui, lockdown_guide);
+    egui::CollapsingHeader::new("카카오톡처럼 관리자 권한이 필요한 프로그램 업데이트하기")
+        .default_open(false)
+        .show(ui, updates_guide);
+}
+
+fn lockdown_guide(ui: &mut egui::Ui) {
+    paragraph(
+        ui,
+        "설정이 보호된 뒤에 AI 연결이 끊기면(키가 없거나, 취소되었거나, 크레딧이 없을 때), 이 \
+         프로그램은 연결될 때까지 거의 모든 앱과 웹사이트를 막습니다. 키를 망가뜨려 AI 검사를 끄는 \
+         길을 막기 위해서입니다. 인터넷이 끊긴 것만으로는 잠기지 않습니다.",
+    );
+    for line in [
+        "열어 둘 수 있는 것: Claude Desktop, 브라우저의 Claude·Anthropic 페이지와 빈 새 탭과 Google \
+         로그인 페이지, Windows 설정, 이 앱. 다른 탭은 닫히고 다른 앱은 꺼집니다.",
+        "푸는 방법: 브라우저에서 Claude Console(platform.claude.com 또는 console.anthropic.com)에 들어가 새 키를 만들거나 \
+         크레딧을 채웁니다. 새 키는 설정 탭 → AI 연결에 붙여 넣고 \"적용\"을 누릅니다. 잠긴 동안에는 \
+         키 변경이 예약되지 않고 바로 적용되고, 몇 초 안에 잠금이 풀립니다.",
+        "크레딧을 채운 경우에는 30초쯤 뒤에 저절로 풀립니다.",
+    ] {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("•");
+            paragraph(ui, line);
+        });
+    }
+}
+
+fn updates_guide(ui: &mut egui::Ui) {
+    paragraph(
+        ui,
+        "작업 계정에는 관리자 권한이 없으므로, 업데이트에 관리자 권한이 필요한 프로그램은 이 \
+         프로그램의 서비스가 대신 업데이트합니다. 사용자에게 관리자 권한을 주지는 않습니다.",
+    );
+    for line in [
+        "1) 명령 프롬프트에서 winget search 카카오톡 처럼 찾아 \"ID\" 칸의 이름(예: Kakao.KakaoTalk)을 \
+         확인합니다.",
+        "2) 설정 탭 → 시스템 → 프로그램 업데이트에 그 이름을 넣고 \"적용\"을 누릅니다. 설정이 보호되어 \
+         있으면 넣기는 예약되어 세 번 확인한 뒤에 적용됩니다.",
+        "3) 적용된 뒤에는 그 아래의 \"지금 업데이트\"를 누르면 됩니다. 하루 한 번 저절로 업데이트하기가 \
+         켜져 있으면, 새벽 4시 이후 PC가 켜져 있는 첫 때에 저절로 업데이트합니다.",
+        "프로그램이 스스로 업데이트하려고 관리자 비밀번호 창을 띄우면, 그 창은 취소하고 위의 \"지금 \
+         업데이트\"를 쓰세요.",
+    ] {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("•");
+            paragraph(ui, line);
+        });
+    }
 }
 
 fn claude_desktop_guide(ui: &mut egui::Ui) {

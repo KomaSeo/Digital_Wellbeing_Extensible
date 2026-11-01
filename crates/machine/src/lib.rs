@@ -21,9 +21,11 @@
 //!     logs\
 //! ```
 
+pub mod lockdown;
 pub mod session;
 pub mod setting_edits;
 pub mod settings;
+pub mod system_care;
 pub mod user_api;
 
 use serde::{Deserialize, Serialize};
