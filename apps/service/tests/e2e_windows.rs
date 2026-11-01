@@ -164,7 +164,23 @@ fn installed_agent_end_to_end() {
         .last_proposal
         .as_ref()
         .is_some_and(|proposal| proposal.approved));
-    call(session, "stop_session", json!({})).unwrap();
+    // With a to-do on the list the planner is on (always): plain "stop" is refused, and
+    // pausing the AI checks is a change request the AI reviews.
+    assert!(call(session, "stop_session", json!({})).is_err());
+    // The agent's own loop may be picking a task this very moment ("busy"): try again.
+    let paused = desktop.wait(Duration::from_secs(30), || {
+        call(
+            session,
+            "request_change",
+            json!({ "request": { "kind": "end" }, "reason": "the end-to-end test is done" }),
+        )
+        .ok()
+    })
+    .expect("the pause request was answered");
+    assert!(paused
+        .last_decision
+        .as_ref()
+        .is_some_and(|decision| decision.approved));
     common::check_protected_edits_are_scheduled(session);
 }
 
