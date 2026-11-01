@@ -58,11 +58,16 @@ struct TodoForm {
 }
 
 impl TodoForm {
+    /// The deadline as written ("이틀 뒤", "금요일", "11/5", "2026-11-05"), read as a date.
+    fn deadline_date(&self) -> Option<NaiveDate> {
+        task_planner::parse_deadline(&self.deadline, Local::now().date_naive())
+    }
+
     fn draft(&self) -> serde_json::Value {
         json!({
             "title": self.title.trim(),
             "notes": self.notes.trim(),
-            "deadline": NaiveDate::parse_from_str(self.deadline.trim(), "%Y-%m-%d").ok(),
+            "deadline": self.deadline_date(),
             "priority": (self.priority > 0).then_some(self.priority),
             "estimate_minutes": (self.estimate_minutes > 0).then_some(self.estimate_minutes),
         })
@@ -79,6 +84,20 @@ impl FocusApp {
                     "A scheduled update is waiting for your answer: is it really right?",
                 );
                 if ui.link("Answer in the Settings tab").clicked() {
+                    self.tab = Tab::Settings;
+                }
+            });
+            ui.separator();
+        }
+        if !status.settings_protected {
+            // Setup: anyone can change anything at once until the settings are protected.
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    YELLOW,
+                    "Setup: the settings are not protected (locked) yet, so any change takes \
+                     effect at once.",
+                );
+                if ui.link("Protect them in the Settings tab").clicked() {
                     self.tab = Tab::Settings;
                 }
             });
@@ -668,11 +687,17 @@ impl FocusApp {
                 );
                 ui.end_row();
                 ui.label("Deadline");
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.deadline)
-                        .desired_width(120.0)
-                        .hint_text("YYYY-MM-DD"),
-                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.deadline)
+                            .desired_width(160.0)
+                            .hint_text("이틀 뒤, 금요일, 11/5 …"),
+                    );
+                    // The date the words were read as, so a misreading shows at once.
+                    if let Some(deadline) = form.deadline_date() {
+                        ui.label(format!("→ {}", deadline.format("%Y-%m-%d (%a)")));
+                    }
+                });
                 ui.end_row();
                 ui.label("Priority");
                 ui.horizontal(|ui| {
@@ -698,10 +723,13 @@ impl FocusApp {
                 );
                 ui.end_row();
             });
-            let bad_deadline = !form.deadline.trim().is_empty()
-                && NaiveDate::parse_from_str(form.deadline.trim(), "%Y-%m-%d").is_err();
+            let bad_deadline = !form.deadline.trim().is_empty() && form.deadline_date().is_none();
             if bad_deadline {
-                ui.colored_label(RED, "Write the deadline as YYYY-MM-DD.");
+                ui.colored_label(
+                    RED,
+                    "The deadline could not be read. Write it like 오늘, 내일, 이틀 뒤, 금요일, \
+                     다음 주 수요일, 월말, 11/5 or 2026-11-05.",
+                );
             }
             let ready = idle
                 && !bad_deadline

@@ -110,6 +110,7 @@ impl SettingsTab {
 
     pub fn ui(&mut self, ui: &mut egui::Ui, protected: bool) {
         self.refresh();
+        ui.heading("Protection (lock)");
         if protected {
             ui.label(format!(
                 "The settings are protected. A change that makes the rules stricter takes effect \

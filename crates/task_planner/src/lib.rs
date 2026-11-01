@@ -15,6 +15,7 @@
 
 mod admin_ui;
 mod advisor;
+mod deadline;
 mod model;
 mod planner;
 
@@ -25,6 +26,7 @@ pub use advisor::{
     DAY_PLAN_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT,
 };
 pub use ai_focus_rule::store::JsonStore;
+pub use deadline::parse_deadline;
 pub use model::{
     Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, DayPlan, DayPlanItem,
     DoneRecord, Evidence, PlannerConfig, PlannerInstructions, PlannerState, PlannerStatus,

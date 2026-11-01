@@ -260,7 +260,7 @@ cd <저장소 폴더>\target\release
    **Save**를 누르면 Focus 앱이 바뀐 파일을 agent에게 보내고, agent가 진짜 설정 파일을 씁니다. 모든 agent는 바뀐 설정을 3초 안에 다시 읽습니다. **Discard**를 누르면 고친 내용을 버립니다.
    화면 위쪽에 "policy.json: in force now."처럼 저장 결과가 나옵니다. 설정이 보호된 뒤에 느슨한 변경을 저장하면 "planner.json: 1 in force now, the rest scheduled; first question 2026-11-02 14:05."처럼 나옵니다.
    설정 단계에서는 Settings 탭 위쪽에 "Setup: changes take effect at once, and anyone using this PC can make them."라는 노란 안내가 보입니다.
-6. 설정을 다 고쳤으면, 사용자는 Settings 탭 위쪽에서 "I understand that nothing in the program turns the protection off."를 체크한 뒤 **Protect the settings**를 누릅니다.
+6. 설정을 다 고쳤으면, 사용자는 Settings 탭 맨 위의 **Protection (lock)** 영역에서 "I understand that nothing in the program turns the protection off."를 체크한 뒤 **Protect the settings**를 누릅니다. 설정 단계 동안에는 To-do 탭 맨 위에도 노란 줄과 이 영역으로 가는 링크(**Protect them in the Settings tab**)가 나옵니다. 설정을 보호한 뒤에는 이 영역에 버튼 대신 "The settings are protected. …"라는 설명만 남습니다.
    **보호는 끌 수 없습니다.** 보호한 뒤에 규칙을 느슨하게 바꾸는 설정은 빨라도 6일 뒤에 적용됩니다(이틀 간격의 확인 질문 세 개). 그래서 사용자는 보호하기 전에 설정이 원하는 대로 동작하는지 며칠 써 보며 확인하는 편이 안전합니다(6.4절).
 
 ### 4.4 우회를 막는 추가 설정 (관리자 계정에서, 권장)

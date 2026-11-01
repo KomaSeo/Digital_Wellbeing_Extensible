@@ -554,6 +554,8 @@ Focus 앱은 요청을 화면과 다른 스레드에서 보내므로, 기다리�
 탭의 제목은 **Daily wellbeing**입니다. 확인 질문에 답할 때가 된 예약된 업데이트가 있으면, 맨 위에 빨간 줄 "A scheduled update is waiting for your answer: is it really right?"과 **Answer in the Settings tab** 링크가 나옵니다.
 차단된 것이 있으면 "… blocked now."와 Blocking 탭으로 가는 링크도 나옵니다.
 
+**설정 단계일 때**(설정이 아직 보호되지 않았을 때), To-do 탭 맨 위에 노란 줄 "Setup: the settings are not protected (locked) yet, …"과 **Protect them in the Settings tab** 링크가 나옵니다. 링크를 누르면 Settings 탭이 열리고, 그 탭 맨 위의 **Protection (lock)** 영역에서 설정을 보호합니다.
+
 **플래너가 켜져 있지 않을 때**, 사용자는 지금 하는 일을 직접 적습니다("What are you doing now? …").
 AI 검사가 멈춰 있으면 "paused"와 **Start** 버튼이 나옵니다. AI 검사가 켜져 있으면 초록 "on", **Change what I do**(적은 일로 바꾸기), **Pause the AI checks**(AI 검사 멈추기) 버튼이 나옵니다.
 
@@ -587,8 +589,12 @@ AI 검사가 멈춰 있으면 "paused"와 **Start** 버튼이 나옵니다. AI �
   - **Work on this instead**: "Ask to change"에서 `Another to-do`와 이 할 일을 고르고, 이유 칸에 "I want to switch because: "를 넣습니다. 할당이 있고 이 할 일이 지금 할 일이 아닐 때만 보입니다.
   - **Edit**: 아래의 할 일 양식을 이 할 일의 값으로 채워 엽니다. 사용자가 고친 칸만 바뀌고, 이유를 적어야 합니다. AI가 심사합니다.
   - **Remove**: 이유 칸("why remove it? the AI decides")을 엽니다. 사용자가 이유를 4글자 이상 적고 **Ask to remove**를 누르면, 지우기 요청이 AI에게 갑니다.
-- **+ Add a to-do**를 누르면 추가 양식("Add a to-do — leave a field empty and the AI fills it in")이 열립니다. 칸은 Title, Notes, Deadline(`YYYY-MM-DD`), Priority, Estimate (min), Reason입니다.
-  제목 말고는 비워 두어도 됩니다. 중요도와 예상 시간을 0으로 두면 AI가 정합니다. 마감을 날짜 형식에 맞지 않게 적으면 "Write the deadline as YYYY-MM-DD."가 나오고 보낼 수 없습니다. 이유는 추가할 때는 적지 않아도 됩니다.
+- **+ Add a to-do**를 누르면 추가 양식("Add a to-do — leave a field empty and the AI fills it in")이 열립니다. 칸은 Title, Notes, Deadline, Priority, Estimate (min), Reason입니다.
+  제목 말고는 비워 두어도 됩니다. 중요도와 예상 시간을 0으로 두면 AI가 정합니다. 이유는 추가할 때는 적지 않아도 됩니다.
+  - **마감은 일상의 말로 적을 수 있습니다.** Focus 앱은 적은 말을 날짜로 읽고, 칸 옆에 "→ 2026-11-03 (Tue)"처럼 읽은 날짜를 보여 줍니다. 그래서 사용자는 보내기 전에 잘못 읽었는지 바로 압니다. 고치기 양식도 같습니다.
+  - 읽을 수 있는 말의 예: 오늘, 내일, 모레, 글피, 이틀 뒤, 3일 후, 보름 뒤, 일주일 뒤, 2주 후, 한 달 뒤, 3개월 후, 다음 주, 금요일(또는 금), 이번 주 금요일, 다음 주 수요일, 다다음 주 월요일, 주말, 월말, 다음 달 말, 다음 달 5일, 5일, 11월 5일, 11/5, 2026-11-05. 영어(tomorrow, in 3 days, next friday, end of month)도 읽습니다. 끝에 붙은 "까지"는 무시합니다.
+  - 한 주는 월요일부터 일요일까지입니다. 요일만 적으면 오늘부터 가장 가까운 그 요일(오늘 포함)입니다. "이번 주 ○요일"이 이미 지났으면 다음 주의 그 요일입니다. "다음 주 ○요일"은 다음 주(월~일)의 그 요일입니다. 연도 없이 적은 날짜가 이미 지났으면 내년의 그 날짜이고, "5일"처럼 날만 적은 것이 지났으면 다음 달의 그 날입니다.
+  - 읽을 수 없는 말이면 "The deadline could not be read. …"와 예가 나오고 보낼 수 없습니다.
   사용자가 **Send to the AI**를 누르면 할 일 변경(`todo_change`)이 AI에게 갑니다(4.6절).
 - 목록 아래에는 마지막 할 일 변경의 결과가 나옵니다. 초록 "approved", 빨간 "rejected", 노란 "not reviewed"(AI가 답하지 못함) 중 하나와 변경 내용, AI의 답입니다.
   승인되지 않은 변경이면 **Do it without the AI (confirm 3 times, 2 hours apart)** 버튼이 나옵니다(4.6절). 이미 예약했으면 "Scheduled: the Settings tab asks you about it three times, two hours apart."가 나옵니다.
@@ -678,6 +684,7 @@ Settings 탭의 **Rules for the AI** 영역에 플래너 설정이 있습니다.
 | `without_an_estimate_only_this_assignment_counts_for_improving` | 예상 시간이 없는 할 일은 이번 할당의 계획된 시간에서 이번 할당이 이어진 시간만 빼서 다듬기 시간을 정한다. |
 | `decisive_or_nearly_full_work_leaves_no_improve_todo` | 결과가 분명한 일이거나, 남은 시간이 10분보다 적으면 Improve 할 일이 생기지 않는다. |
 | `improve_todos_are_dropped_after_two_weeks` | 14일이 지난 Improve 할 일은 목록에 나오지 않고, 다음에 할당이 바뀔 때 상태에서도 지워진다. |
+| `everyday_korean_deadlines_are_read`, `everyday_english_deadlines_are_read`, `unreadable_text_gives_no_date` (`deadline.rs`) | "이틀 뒤", "다음 주 수요일", "월말", "11/5", "in 3 days" 같은 말이 기준일(일요일인 2026-11-01)에서 맞는 날짜로 읽히고, "언젠가" 같은 말은 날짜가 되지 않는다. |
 | `a_day_plan_keeps_only_open_todos_and_sensible_lengths` | 하루 계획에는 남은 할 일만 남고 시간이 480분을 넘지 않는다. 하루 계획 기본 지시문이 AI에게 가고, 계획이 상태에 저장된다. |
 | `change_kind_json_shape` | Focus 앱과 agent가 주고받는 변경 요청의 JSON 모양이 바뀌지 않았다. |
 | `free_task_and_stop_are_refused_while_planner_is_active` (`machine` 모듈) | 플래너가 켜져 있으면, agent가 직접 입력한 할 일과 그냥 멈추기를 거부한다. AI 호출이 실패하면 아무것도 바뀌지 않는다. |
