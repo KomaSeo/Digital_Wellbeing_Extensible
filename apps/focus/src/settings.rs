@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use task_planner::{PlannerConfig, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT};
+use task_planner::{PlannerConfig, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT};
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
 const RED: egui::Color32 = egui::Color32::from_rgb(200, 80, 80);
@@ -106,6 +106,12 @@ const PROPOSAL_INSTRUCTION: Block = Block {
     paths: &[&["instructions", "proposal_review"]],
     has_default: true,
 };
+const WEEK_PLAN_INSTRUCTION: Block = Block {
+    id: "instruction_week_plan",
+    file: "planner",
+    paths: &[&["instructions", "week_plan"]],
+    has_default: true,
+};
 const BLACKLIST: Block = Block {
     id: "blacklist",
     file: "policy",
@@ -166,7 +172,7 @@ const BROWSERS: Block = Block {
     has_default: true,
 };
 /// Every group; an edit outside them (such as a timestamp) is not the user's.
-const BLOCKS: [&Block; 16] = [
+const BLOCKS: [&Block; 17] = [
     &API_KEY,
     &MODEL,
     &BUDGET,
@@ -174,6 +180,7 @@ const BLOCKS: [&Block; 16] = [
     &PICK_INSTRUCTION,
     &REVIEW_INSTRUCTION,
     &PROPOSAL_INSTRUCTION,
+    &WEEK_PLAN_INSTRUCTION,
     &BLACKLIST,
     &BLOCKED_SITES,
     &UNBLOCK,
@@ -504,7 +511,8 @@ impl SettingsTab {
     fn rules_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
         ui.heading("생활 규칙");
         ui.label(
-            "AI의 모든 결정(지금 할 일 고르기, 변경 요청 심사, 할 일 변경 심사)이 따르는 규칙입니다.",
+            "AI의 모든 결정(지금 할 일 고르기, 변경 요청 심사, 할 일 변경 심사, 앞으로 7일 계획)이 따르는 \
+             규칙입니다.",
         );
         if let Some(drafts) = &mut self.drafts {
             ui.add(
@@ -525,7 +533,7 @@ impl SettingsTab {
              영어로 씁니다. 비어 있으면 프로그램에 들어 있는 기본 지시문을 씁니다.",
         );
         type Accessor = fn(&mut PlannerConfig) -> &mut String;
-        let instructions: [(&str, Accessor, &str, &'static Block); 3] = [
+        let instructions: [(&str, Accessor, &str, &'static Block); 4] = [
             (
                 "지금 할 일과 시간 고르기",
                 |planner| &mut planner.instructions.pick,
@@ -543,6 +551,12 @@ impl SettingsTab {
                 |planner| &mut planner.instructions.proposal_review,
                 PROPOSAL_PROMPT,
                 &PROPOSAL_INSTRUCTION,
+            ),
+            (
+                "앞으로 7일 계획(날마다 일에 써야 할 시간과 여유)",
+                |planner| &mut planner.instructions.week_plan,
+                WEEK_PLAN_PROMPT,
+                &WEEK_PLAN_INSTRUCTION,
             ),
         ];
         for (label, accessor, built_in, block) in instructions {

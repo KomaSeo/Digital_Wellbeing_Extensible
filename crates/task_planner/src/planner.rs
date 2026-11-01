@@ -10,11 +10,12 @@
 
 use crate::advisor::{
     AdvisorProvider, PickRequest, Review, ReviewRequest, ReviewedTodo, TodoChangeRequest,
+    WeekPlanAnswer, WeekPlanRequest,
 };
 use crate::model::{
     Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, Evidence,
     PlannerConfig, PlannerState, PlannerStatus, PolishItem, ProposalInput, TaskNotes, TodoChange,
-    TodoChangeRecord, TodoItem, TodoListWrite, WhenTimeIsUp,
+    TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -222,6 +223,7 @@ impl TaskPlanner {
                 .filter(|(todo_id, _)| open_todos.iter().any(|todo| &todo.id == *todo_id))
                 .map(|(todo_id, notes)| (todo_id.clone(), notes.clone()))
                 .collect(),
+            week_plan: state.week_plan.clone(),
             open_todos,
         }
     }
@@ -242,6 +244,52 @@ impl TaskPlanner {
             planner_state.task_notes.insert(todo_id.to_string(), notes);
         })?;
         Ok(())
+    }
+
+    /// Ask the AI how much work each of the next seven days needs and how much free time is
+    /// left (one AI call), keep the answer and return it. An overview, not a timetable: the
+    /// planner still assigns one to-do at a time.
+    pub fn plan_week(&self, now: DateTime<Utc>) -> Result<WeekPlan, PlannerError> {
+        let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
+        let open = self.open_todos();
+        if open.is_empty() {
+            return Err(PlannerError::NotActive);
+        }
+        let state = self.state.get();
+        let config = self.config.get();
+        // A rolling week (today and the next six days), so that on a Sunday the overview
+        // still covers a whole week.
+        let today = now.with_timezone(&Local).date_naive();
+        let days_left: Vec<NaiveDate> = (0..7)
+            .map(|offset| today + Duration::days(offset))
+            .collect();
+        let with_spent: Vec<(TodoItem, i64)> = open
+            .iter()
+            .map(|todo| (todo.clone(), self.minutes_spent_on(&todo.id, now)))
+            .collect();
+        let worked_this_week: Vec<(NaiveDate, i64)> = (0..7)
+            .rev()
+            .map(|days_ago| {
+                let day = today - Duration::days(days_ago);
+                (day, minutes_on_day(&state, day, now))
+            })
+            .collect();
+        let recently_done: Vec<DoneRecord> = state.done.iter().rev().take(10).cloned().collect();
+        let now_local = local_now_text();
+        let advisor = (self.advisor)(&self.focus.store().get())?;
+        let answer = advisor.plan_week(&WeekPlanRequest {
+            instructions: config.instructions.week_plan_or_default(),
+            now_local: &now_local,
+            life_rules: &config.life_rules,
+            days_left: &days_left,
+            open: &with_spent,
+            worked_this_week: &worked_this_week,
+            recently_done: &recently_done,
+        })?;
+        let plan = checked_week_plan(now, answer, &days_left, &open);
+        self.state
+            .update(|planner_state| planner_state.week_plan = Some(plan.clone()))?;
+        Ok(plan)
     }
 
     /// The user asks to add, edit or remove a to-do (from the Focus app or their AI
@@ -887,6 +935,84 @@ fn close_span(planner_state: &mut PlannerState, ended: DateTime<Utc>) {
             started: current.at,
             ended: ended.max(current.at),
         });
+    }
+}
+
+/// Minutes of assignments (the running one included) on the local day `day`.
+fn minutes_on_day(state: &PlannerState, day: NaiveDate, now: DateTime<Utc>) -> i64 {
+    let Some(start) = day
+        .and_hms_opt(0, 0, 0)
+        .and_then(|midnight| midnight.and_local_timezone(Local).earliest())
+        .map(|midnight| midnight.with_timezone(&Utc))
+    else {
+        return 0;
+    };
+    let end = start + Duration::days(1);
+    let running = state
+        .assignment
+        .as_ref()
+        .map(|assignment| (assignment.at, now));
+    state
+        .assignment_log
+        .iter()
+        .map(|span| (span.started, span.ended))
+        .chain(running)
+        .map(|(started, ended)| (ended.min(end) - started.max(start)).num_minutes().max(0))
+        .sum()
+}
+
+/// The AI's week answer, kept to what can be trusted: the seven days asked about only (each once), to-dos
+/// from the list only, minutes within a day, totals summed here.
+fn checked_week_plan(
+    now: DateTime<Utc>,
+    answer: WeekPlanAnswer,
+    days_left: &[NaiveDate],
+    open: &[TodoItem],
+) -> WeekPlan {
+    const MINUTES_PER_DAY: i64 = 24 * 60;
+    let mut days: Vec<WeekPlanDay> = Vec::new();
+    for answer_day in answer.days {
+        let Ok(date) = answer_day.date.trim().parse::<NaiveDate>() else {
+            continue;
+        };
+        if !days_left.contains(&date) || days.iter().any(|day| day.date == Some(date)) {
+            continue;
+        }
+        let todos = answer_day
+            .todos
+            .into_iter()
+            .filter(|planned| open.iter().any(|todo| todo.id == planned.todo_id))
+            .map(|planned| WeekPlanTodo {
+                todo_id: planned.todo_id,
+                minutes: planned.minutes.clamp(0, MINUTES_PER_DAY) as u32,
+            })
+            .collect();
+        let work_minutes = answer_day.work_minutes.clamp(0, MINUTES_PER_DAY);
+        let free_minutes = answer_day
+            .free_minutes
+            .clamp(0, MINUTES_PER_DAY - work_minutes);
+        days.push(WeekPlanDay {
+            date: Some(date),
+            work_minutes: work_minutes as u32,
+            free_minutes: free_minutes as u32,
+            todos,
+            note: answer_day.note.trim().chars().take(300).collect(),
+        });
+    }
+    days.sort_by_key(|day| day.date);
+    WeekPlan {
+        at: Some(now),
+        work_minutes_total: days.iter().map(|day| day.work_minutes).sum(),
+        free_minutes_total: days.iter().map(|day| day.free_minutes).sum(),
+        days,
+        summary: answer.summary.trim().chars().take(1000).collect(),
+        warnings: answer
+            .warnings
+            .into_iter()
+            .map(|warning| warning.trim().chars().take(300).collect::<String>())
+            .filter(|warning| !warning.is_empty())
+            .take(10)
+            .collect(),
     }
 }
 

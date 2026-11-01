@@ -152,6 +152,19 @@ fn answer(request: &Value) -> Value {
             })
             .collect();
         json!({ "verdict": verdict(front), "reason": "test", "channel": "", "others": others })
+    } else if system.contains("overview of the coming week") {
+        // Today, as the question lists it first: "Days to plan: 2026-11-06 Friday, …".
+        let today = text
+            .split("Days to plan: ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .unwrap_or_default();
+        json!({
+            "days": [{ "date": today, "work_minutes": 180, "free_minutes": 240, "todos": [],
+                       "note": "stand-in" }],
+            "summary": "a calm week",
+            "warnings": [],
+        })
     } else if system.contains("You assign the user's next piece of work") {
         // The first open to-do, as the list shows it: `"id": "..."`.
         let first_id = text

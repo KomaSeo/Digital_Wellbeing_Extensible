@@ -302,6 +302,7 @@ fn end_to_end(real_key: Option<String>) {
         );
         injection_attempts_are_rejected(session);
         early_finish_is_judged_by_its_kind(session);
+        the_week_plan_is_an_overview_of_this_week(session);
     } else {
         // "I finished it" with a proof screenshot taken a second later.
         assign(
@@ -309,6 +310,15 @@ fn end_to_end(real_key: Option<String>) {
             &[todo("p-mail", "Mail the signed form", "", Some(0), 3)],
             "",
         );
+        // The overview of this week is kept and shown with the status.
+        let planned = call(session, "plan_week", json!({})).unwrap();
+        let week = planned
+            .planner
+            .and_then(|planner| planner.week_plan)
+            .expect("a week plan");
+        assert_eq!(week.summary, "a calm week");
+        assert_eq!(week.days.len(), 1, "{week:?}");
+        assert_eq!(week.work_minutes_total, 180);
         let status = call(
             session,
             "request_change",
@@ -539,6 +549,54 @@ fn injection_attempts_are_rejected(session: u32) {
 }
 
 /// A to-do due in `due_in_days` (None: no deadline).
+/// Real AI: the overview of the next seven days gives each day a number of work and free
+/// minutes, enough work for what is due within them, and no clock times.
+fn the_week_plan_is_an_overview_of_this_week(session: u32) {
+    let mut thesis = todo(
+        "w-thesis",
+        "Finish thesis chapter 3",
+        "About 10 pages left to write and edit.",
+        Some(2),
+        5,
+    );
+    thesis["estimate_minutes"] = json!(600);
+    let mut slides = todo("w-slides", "Lab meeting slides", "", Some(1), 4);
+    slides["estimate_minutes"] = json!(120);
+    let mut walk = todo("w-walk", "Take a 30-minute walk", "Rest.", None, 2);
+    walk["estimate_minutes"] = json!(30);
+    assign(
+        session,
+        &[thesis, slides, walk],
+        "Sleep from 23:00 to 7:00. At most 6 hours of focused work a day.",
+    );
+    let planned = call(session, "plan_week", json!({})).unwrap();
+    let week = planned
+        .planner
+        .and_then(|planner| planner.week_plan)
+        .expect("a week plan");
+    println!("week plan: {}", week.summary);
+    for warning in &week.warnings {
+        println!("  warning: {warning}");
+    }
+    for day in &week.days {
+        println!(
+            "  {:?}: work {} min, free {} min, {:?} — {}",
+            day.date, day.work_minutes, day.free_minutes, day.todos, day.note
+        );
+    }
+    let today = chrono::Local::now().date_naive();
+    assert!(!week.days.is_empty());
+    assert!(week.days.iter().all(|day| day
+        .date
+        .is_some_and(|date| date >= today && date <= today + chrono::Duration::days(6))));
+    // The thesis and slides need 12 hours, due within two days.
+    assert!(week.work_minutes_total >= 600, "{week:?}");
+    assert!(week
+        .days
+        .iter()
+        .all(|day| day.work_minutes + day.free_minutes <= 24 * 60));
+}
+
 /// Real AI: a finished to-do with a provable result needs proof; work that can always be
 /// improved is accepted, and the planned time left comes back as an "Improve: …" to-do.
 fn early_finish_is_judged_by_its_kind(session: u32) {

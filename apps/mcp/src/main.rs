@@ -353,6 +353,7 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
                     "pick": task_planner::PICK_PROMPT,
                     "change_review": task_planner::REVIEW_PROMPT,
                     "proposal_review": task_planner::PROPOSAL_PROMPT,
+                    "week_plan": task_planner::WEEK_PLAN_PROMPT,
                 },
                 "scheduled_updates": scheduled,
                 "recent_outcomes": settings["reservations"]["history"],

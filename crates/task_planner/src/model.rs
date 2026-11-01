@@ -84,6 +84,8 @@ pub struct PlannerInstructions {
     pub change_review: String,
     /// Whether a to-do change (add, edit, remove) is approved; fills in a new to-do.
     pub proposal_review: String,
+    /// How much work each of the next seven days needs, and how much free time is left.
+    pub week_plan: String,
 }
 
 impl PlannerInstructions {
@@ -97,6 +99,10 @@ impl PlannerInstructions {
 
     pub fn proposal_review_or_default(&self) -> &str {
         or_default(&self.proposal_review, crate::advisor::PROPOSAL_PROMPT)
+    }
+
+    pub fn week_plan_or_default(&self) -> &str {
+        or_default(&self.week_plan, crate::advisor::WEEK_PLAN_PROMPT)
     }
 }
 
@@ -338,6 +344,49 @@ pub struct TaskStep {
     pub done: bool,
 }
 
+/// Responsibility: Hold the AI's overview of the coming week (today and the next six days):
+/// for each day, how much work it
+/// needs so that every to-do is done by its deadline, and how much free time is left. It
+/// sets no clock times; the planner still assigns one to-do at a time.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WeekPlan {
+    /// When it was made.
+    pub at: Option<DateTime<Utc>>,
+    /// Today first, then the six days after it.
+    pub days: Vec<WeekPlanDay>,
+    /// Sums over `days`.
+    pub work_minutes_total: u32,
+    pub free_minutes_total: u32,
+    /// Two or three sentences: how much work the week needs, how much slack is left.
+    pub summary: String,
+    /// Deadlines at risk, days with more work than fits.
+    pub warnings: Vec<String>,
+}
+
+/// Responsibility: Hold one day of a [`WeekPlan`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WeekPlanDay {
+    pub date: Option<NaiveDate>,
+    /// Work the day needs.
+    pub work_minutes: u32,
+    /// Waking time left after that work, following the life rules.
+    pub free_minutes: u32,
+    /// Which to-dos the work is for.
+    pub todos: Vec<WeekPlanTodo>,
+    /// One short sentence.
+    pub note: String,
+}
+
+/// Responsibility: Name a to-do and the minutes a day of the week plan gives it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WeekPlanTodo {
+    pub todo_id: String,
+    pub minutes: u32,
+}
+
 /// Responsibility: Record that a to-do was finished.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoneRecord {
@@ -374,6 +423,9 @@ pub struct PlannerState {
     /// Open-ended to-dos finished early, by to-do id, with the time left to improve them.
     #[serde(default)]
     pub polish: BTreeMap<String, PolishItem>,
+    /// The last overview of this week the user asked for.
+    #[serde(default)]
+    pub week_plan: Option<WeekPlan>,
 }
 
 impl PlannerState {
@@ -411,4 +463,7 @@ pub struct PlannerStatus {
     /// The user's notes and steps of the open to-dos.
     #[serde(default)]
     pub task_notes: BTreeMap<String, TaskNotes>,
+    /// The last overview of this week.
+    #[serde(default)]
+    pub week_plan: Option<WeekPlan>,
 }

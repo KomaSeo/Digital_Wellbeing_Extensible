@@ -48,6 +48,43 @@ impl Advisor for FakeAdvisor {
         })
     }
 
+    fn plan_week(&self, request: &WeekPlanRequest) -> Result<WeekPlanAnswer, JudgeError> {
+        *self.saw_instructions.lock() = request.instructions.to_string();
+        let today = request.days_left[0].to_string();
+        let todo = |todo_id: &str, minutes: i64| WeekPlanAnswerTodo {
+            todo_id: todo_id.into(),
+            minutes,
+        };
+        Ok(WeekPlanAnswer {
+            days: vec![
+                WeekPlanAnswerDay {
+                    date: today.clone(),
+                    work_minutes: 3000,
+                    free_minutes: 600,
+                    todos: vec![todo("a", 120), todo("not on the list", 60)],
+                    note: "busy".into(),
+                },
+                // Twice the same day, a day outside this week, and nonsense: dropped.
+                WeekPlanAnswerDay {
+                    date: today,
+                    work_minutes: 60,
+                    ..Default::default()
+                },
+                WeekPlanAnswerDay {
+                    date: "2099-01-01".into(),
+                    work_minutes: 60,
+                    ..Default::default()
+                },
+                WeekPlanAnswerDay {
+                    date: "someday".into(),
+                    ..Default::default()
+                },
+            ],
+            summary: "a full week".into(),
+            warnings: vec!["  ".into(), "a is at risk".into()],
+        })
+    }
+
     fn review_todo_change(&self, request: &TodoChangeRequest) -> Result<TodoReview, JudgeError> {
         self.reviews.fetch_add(1, Ordering::SeqCst);
         *self.saw_rules.lock() = request.life_rules.to_string();
@@ -1186,4 +1223,43 @@ fn repick_lets_the_ai_choose_what_comes_next() {
         fixture.planner.status().assignment.unwrap().at,
         assignment.at
     );
+}
+
+#[test]
+fn the_week_plan_keeps_the_seven_days_and_listed_todos_only() {
+    let fixture = harness(true, &["a", "b"]);
+    let plan = fixture.planner.plan_week(Utc::now()).unwrap();
+    assert_eq!(
+        *fixture.advisor.saw_instructions.lock(),
+        crate::advisor::WEEK_PLAN_PROMPT
+    );
+    assert_eq!(plan.days.len(), 1, "{plan:?}");
+    let today = &plan.days[0];
+    assert_eq!(today.date, Some(chrono::Local::now().date_naive()));
+    // A day has 24 hours: the work is cut to that, and no free time is left.
+    assert_eq!((today.work_minutes, today.free_minutes), (1440, 0));
+    let planned: Vec<_> = today
+        .todos
+        .iter()
+        .map(|todo| todo.todo_id.as_str())
+        .collect();
+    assert_eq!(planned, ["a"]);
+    assert_eq!(plan.work_minutes_total, 1440);
+    assert_eq!(plan.warnings, ["a is at risk"]);
+    assert_eq!(
+        fixture.planner.status().week_plan.unwrap().summary,
+        "a full week"
+    );
+    // The question names each day with its weekday.
+    let text = crate::advisor::week_plan_text(&WeekPlanRequest {
+        instructions: "",
+        now_local: "now",
+        life_rules: "",
+        days_left: &[chrono::NaiveDate::from_ymd_opt(2026, 11, 6).unwrap()],
+        open: &[(todo("a"), 30)],
+        worked_this_week: &[],
+        recently_done: &[],
+    });
+    assert!(text.contains("2026-11-06 Friday"), "{text}");
+    assert!(text.contains("\"minutes_spent\": 30"), "{text}");
 }
