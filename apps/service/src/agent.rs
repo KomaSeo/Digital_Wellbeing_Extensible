@@ -112,6 +112,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     let api = Arc::new(AgentApi {
         monitor: Arc::clone(&monitor),
         planner: Some(planner),
+        assistant: Default::default(),
     });
     thread::spawn(move || {
         if let Err(error) = machine::user_api::serve(api, session) {

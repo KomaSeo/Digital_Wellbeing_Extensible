@@ -97,16 +97,28 @@ impl ClaudeClient {
         schema: Value,
         effort: &str,
     ) -> Result<T, JudgeError> {
+        let response = self.send(purpose, &self.body(system, content, schema, effort))?;
+        parse_structured(&response)
+    }
+
+    /// The model every request of this client uses.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Send a whole Messages API request `body` and return the response as it came, after
+    /// recording its token usage under `purpose`. The caller checks the stop reason.
+    pub fn send(&self, purpose: &str, body: &Value) -> Result<Value, JudgeError> {
         let mut call = self
             .agent
             .post(&format!("{}/v1/messages", api_base()))
             .set("x-api-key", &self.api_key)
             .set("anthropic-version", API_VERSION)
             .set("content-type", "application/json");
-        if supports_server_fallback(&self.model) {
+        if body.get("fallbacks").is_some() {
             call = call.set("anthropic-beta", FALLBACK_BETA);
         }
-        let response: Value = match call.send_json(self.body(system, content, schema, effort)) {
+        let response: Value = match call.send_json(body) {
             Ok(http_response) => http_response
                 .into_json()
                 .map_err(|error| JudgeError::BadResponse(error.to_string()))?,
@@ -118,7 +130,7 @@ impl ClaudeClient {
         };
         // Before parsing: a refused or cut-off reply is billed too.
         crate::usage::record(purpose, &self.model, &response);
-        parse_structured(&response)
+        Ok(response)
     }
 }
 
@@ -138,7 +150,7 @@ pub fn jpeg_block(jpeg: &[u8]) -> Value {
 }
 
 /// Models that accept `fallbacks: "default"` on the Claude API.
-fn supports_server_fallback(model: &str) -> bool {
+pub fn supports_server_fallback(model: &str) -> bool {
     [
         "claude-fable-5-1",
         "claude-opus-5-5",
