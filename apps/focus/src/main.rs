@@ -140,8 +140,6 @@ struct FocusApp {
     /// A request is in flight (the AI may take tens of seconds).
     pending: Arc<AtomicBool>,
     // free mode
-    task_input: String,
-    task_loaded: bool,
     // planner mode
     choice: ChangeChoice,
     reason: String,
@@ -190,8 +188,6 @@ impl FocusApp {
             context,
             shared,
             pending: Arc::new(AtomicBool::new(false)),
-            task_input: String::new(),
-            task_loaded: false,
             choice: ChangeChoice::Done,
             reason: String::new(),
             evidence: String::new(),

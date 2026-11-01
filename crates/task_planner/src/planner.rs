@@ -49,7 +49,7 @@ const MAX_TASK_STEPS: usize = 50;
 /// Responsibility: Report why an assignment or a change request was refused.
 #[derive(Debug, Error)]
 pub enum PlannerError {
-    #[error("플래너가 꺼져 있거나 할 일을 모두 끝냈습니다")]
+    #[error("할 일 목록이 비어 있습니다. 먼저 할 일을 추가하세요")]
     NotActive,
     #[error("다른 요청을 아직 처리하고 있습니다")]
     Busy,
@@ -156,13 +156,14 @@ impl TaskPlanner {
         finished + running
     }
 
-    /// Enabled and something left to do: the user cannot type a task freely.
+    /// Something left to do: the user cannot type a task freely.
     pub fn is_active(&self) -> bool {
         self.is_active_with(&self.open_todos())
     }
 
+    /// The planner is always on; it has nothing to do only when no to-do is open.
     fn is_active_with(&self, open: &[TodoItem]) -> bool {
-        self.config.get().enabled && !open.is_empty()
+        !open.is_empty()
     }
 
     pub fn status(&self) -> PlannerStatus {
@@ -435,7 +436,8 @@ impl TaskPlanner {
 
     /// Start (or resume) the session with an assigned task.
     pub fn assign(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
-        let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
+        // Waits for a pick already running (the agent's own loop, say), then resumes it.
+        let _busy = self.busy.lock();
         if !self.is_active() {
             return Err(PlannerError::NotActive);
         }

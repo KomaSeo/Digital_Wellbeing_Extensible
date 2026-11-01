@@ -53,8 +53,8 @@ impl TodoItem {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlannerConfig {
-    /// When on and open to-dos exist, the user cannot type a task freely:
-    /// the planner assigns one, and changing it needs an approved reason.
+    /// Ignored: the planner is always on, so the AI (never the user) decides what to do.
+    /// Kept so files written by versions with an on/off switch still load.
     pub enabled: bool,
     pub todos: Vec<TodoItem>,
     /// The owner's standing rules for how time is spent ("no leisure before

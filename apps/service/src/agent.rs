@@ -139,7 +139,10 @@ fn planner_loop(planner: Arc<TaskPlanner>, monitor: Arc<FocusMonitor>) {
             continue;
         }
         let now = chrono::Utc::now();
-        let result = if monitor.store().get().session_active {
+        // A task typed before the planner was always on (no assignment) is replaced by one
+        // the AI picks.
+        let typed_task = planner.status().assignment.is_none();
+        let result = if monitor.store().get().session_active && !typed_task {
             planner.reassign_if_time_is_up(now).map(|assignment| {
                 if let Some(assignment) = assignment {
                     info!("time was up; next assignment: {}", assignment.task);

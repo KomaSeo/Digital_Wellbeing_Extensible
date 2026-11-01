@@ -106,7 +106,7 @@ impl FocusApp {
         let planner = status.planner.clone();
         match planner.clone().filter(|planner| planner.active) {
             Some(planner) => self.now_ui(ui, status, &planner),
-            None => self.free_mode_ui(ui, status),
+            None => self.empty_list_ui(ui, status),
         }
         if !status.blocked.is_empty() {
             ui.horizontal(|ui| {
@@ -126,48 +126,27 @@ impl FocusApp {
         self.list_ui(ui, &planner);
     }
 
-    /// Without the planner the user types what they do; the AI judges every app against it.
-    fn free_mode_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
-        if !self.task_loaded {
-            self.task_input = status.task.clone();
-            self.task_loaded = true;
-        }
+    /// Nothing on the to-do list: the AI has nothing to pick from. The user adds to-dos; they
+    /// never type what to do themselves.
+    fn empty_list_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
         ui.label(
-            "지금 무엇을 하나요? 구체적으로 적으세요. AI는 모든 앱을 이 글에 비추어 판정합니다.",
+            "할 일 목록이 비어 있습니다. 아래의 \"+ 할 일 추가\"로 할 일을 넣으세요. 쉬기와 놀기도 할 일로 \
+             넣을 수 있습니다. 할 일이 생기면 AI가 생활 규칙에 맞춰 지금 할 일을 고릅니다.",
         );
-        ui.add(
-            egui::TextEdit::multiline(&mut self.task_input)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY)
-                .hint_text("예: 졸업논문 3장 작성 — Overleaf, 논문 PDF, Google Scholar 필요"),
-        );
-        let has_task = !self.task_input.trim().is_empty();
-        let idle = !self.pending.load(Ordering::SeqCst);
-        ui.horizontal(|ui| {
-            if status.session_active {
-                ui.colored_label(GREEN, "켜짐");
-                if ui
-                    .add_enabled(has_task && idle, egui::Button::new("하는 일 바꾸기"))
-                    .clicked()
-                {
-                    self.send("start_session", json!({ "task": self.task_input }));
-                }
+        // A task typed in an older version may still be running.
+        if status.session_active && !status.task.trim().is_empty() {
+            let idle = !self.pending.load(Ordering::SeqCst);
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(GREEN, "AI 검사 켜짐");
+                ui.label(format!("지금 하는 일: {}", status.task));
                 if ui
                     .add_enabled(idle, egui::Button::new("AI 검사 멈추기"))
                     .clicked()
                 {
                     self.send("stop_session", json!({}));
                 }
-            } else {
-                ui.label("멈춤");
-                if ui
-                    .add_enabled(has_task && idle, egui::Button::new("시작"))
-                    .clicked()
-                {
-                    self.send("start_session", json!({ "task": self.task_input }));
-                }
-            }
-        });
+            });
+        }
     }
 
     /// What the planner assigned, its progress, notes and steps, and asking for a change.

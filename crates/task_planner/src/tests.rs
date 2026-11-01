@@ -141,10 +141,11 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
 }
 
 #[test]
-fn inactive_when_disabled_or_empty() {
-    assert!(!harness(false, &["a"]).planner.is_active());
+fn always_on_and_inactive_only_when_the_list_is_empty() {
+    // The old on/off switch is ignored: the AI always decides.
+    assert!(harness(false, &["a"]).planner.is_active());
     assert!(!harness(true, &[]).planner.is_active());
-    let fixture = harness(false, &["a"]);
+    let fixture = harness(true, &[]);
     assert!(matches!(
         fixture.planner.assign(Utc::now()),
         Err(PlannerError::NotActive)

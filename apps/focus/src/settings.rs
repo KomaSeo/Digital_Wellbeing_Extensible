@@ -82,12 +82,6 @@ const BUDGET: Block = Block {
     paths: &[&["daily_budget_usd"]],
     has_default: true,
 };
-const PLANNER_ON: Block = Block {
-    id: "planner_on",
-    file: "planner",
-    paths: &[&["enabled"]],
-    has_default: false,
-};
 const LIFE_RULES: Block = Block {
     id: "life_rules",
     file: "planner",
@@ -172,11 +166,10 @@ const BROWSERS: Block = Block {
     has_default: true,
 };
 /// Every group; an edit outside them (such as a timestamp) is not the user's.
-const BLOCKS: [&Block; 17] = [
+const BLOCKS: [&Block; 16] = [
     &API_KEY,
     &MODEL,
     &BUDGET,
-    &PLANNER_ON,
     &LIFE_RULES,
     &PICK_INSTRUCTION,
     &REVIEW_INSTRUCTION,
@@ -509,20 +502,6 @@ impl SettingsTab {
     // --- rules for the AI ---------------------------------------------------------------
 
     fn rules_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
-        ui.heading("플래너");
-        if let Some(drafts) = &mut self.drafts {
-            ui.checkbox(
-                &mut drafts.planner.enabled,
-                "AI가 할 일 목록에서 지금 할 일을 고른다(플래너)",
-            );
-            ui.small(
-                "끄면 지금 하는 일을 직접 적고, AI는 그 일에 비추어 창을 판정합니다. 켜기는 바로 \
-                 적용되고, 끄기는 예약됩니다.",
-            );
-        }
-        self.block_bar(ui, &PLANNER_ON, snapshot, protected);
-
-        ui.separator();
         ui.heading("생활 규칙");
         ui.label(
             "AI의 모든 결정(지금 할 일 고르기, 변경 요청 심사, 할 일 변경 심사)이 따르는 규칙입니다.",
