@@ -78,8 +78,8 @@ Code walkthrough (Korean): [`docs/ai_focus_rule.md`](docs/ai_focus_rule.md).
 ## Machine install (standard work account; administrator only to install)
 
 **Easiest:** download `DigitalWellbeing-Setup-<version>.exe` from the GitHub
-Releases page and run it; it asks for the work account and registers the
-service. (Releases are built by `.github/workflows/release.yml` when a `v*`
+Releases page and run it; it registers the service for every Windows account,
+the administrators included (it no longer asks for a work account). (Releases are built by `.github/workflows/release.yml` when a `v*`
 tag is pushed, or when a branch push changes `installer/RELEASE_VERSION` — the
 workflow then creates the `v<version>` tag itself.)
 

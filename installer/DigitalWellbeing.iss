@@ -1,6 +1,7 @@
 ; Responsibility: Build DigitalWellbeing-Setup-<version>.exe (Inno Setup 6): copy
-; the three executables to Program Files, ask which Windows account to manage,
-; and run `digital-wellbeing-service.exe install`; uninstall runs `uninstall`.
+; the three executables to Program Files and run
+; `digital-wellbeing-service.exe install --manage-all` (every Windows account is managed,
+; the administrators included: the owner's choice); uninstall runs `uninstall`.
 ;
 ; Built by .github/workflows/release.yml:  ISCC.exe installer\DigitalWellbeing.iss
 ; The version comes from the APP_VERSION environment variable.
@@ -45,20 +46,6 @@ Name: "{autoprograms}\Digital Wellbeing\Guide (Korean)"; Filename: "{app}\docs\m
 Filename: "{app}\digital-wellbeing-service.exe"; Parameters: "uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "UninstallService"
 
 [Code]
-var
-  UserPage: TInputQueryWizardPage;
-
-procedure InitializeWizard;
-begin
-  UserPage := CreateInputQueryPage(wpWelcome,
-    'Work account', 'Which Windows account should be managed?',
-    'Enter the user name of the standard (non-administrator) account you work in, ' +
-    'for example the part after the backslash in "whoami". ' +
-    'Leave it empty to manage every account, including administrators.' + #13#10#13#10 +
-    'The work account must be a standard user, or it could switch the blocking off.');
-  UserPage.Add('User name:', False);
-end;
-
 { Stop a running service first, so its executable can be replaced. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
@@ -78,12 +65,8 @@ var
 begin
   if CurStep <> ssPostInstall then
     exit;
-  Params := 'install';
-  { Empty means every account, also on an upgrade (plain "install" would keep the old list). }
-  if Trim(UserPage.Values[0]) <> '' then
-    Params := Params + ' --manage "' + Trim(UserPage.Values[0]) + '"'
-  else
-    Params := Params + ' --manage-all';
+  { Every account, also on an upgrade (plain "install" would keep an older list). }
+  Params := 'install --manage-all';
   WizardForm.StatusLabel.Caption := 'Registering the Digital Wellbeing service...';
   if not Exec(ExpandConstant('{app}\digital-wellbeing-service.exe'), Params, ExpandConstant('{app}'),
       SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
