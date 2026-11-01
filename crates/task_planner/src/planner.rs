@@ -98,6 +98,10 @@ pub enum PlannerError {
     AppointmentOverlaps(String),
     #[error("없는 약속입니다('{0}')")]
     UnknownAppointment(String),
+    #[error(
+        "사용을 멈춘 동안에는 AI를 쓰는 일을 하지 않습니다. 먼저 \"다시 사용하기\"를 누르세요"
+    )]
+    Stopped,
     #[error("AI: {0}")]
     Ai(#[from] JudgeError),
     #[error("저장하지 못했습니다: {0}")]
@@ -197,6 +201,41 @@ impl TaskPlanner {
             .collect();
         appointments.sort_by_key(|appointment| appointment.start);
         appointments
+    }
+
+    /// The user stopped using the computer ("사용 중지"): every app is locked, and nothing
+    /// but the blocking runs (no AI checks, no picks, no appointments starting).
+    pub fn stopped(&self) -> bool {
+        self.state.get().stopped_at.is_some()
+    }
+
+    /// "사용 중지": end the current task (its to-do stays on the list, as if not finished)
+    /// and stop everything but the blocking until [`Self::resume_use`].
+    pub fn stop_use(&self, now: DateTime<Utc>) -> Result<(), PlannerError> {
+        let _busy = self.busy.lock();
+        if let Some(appointment_id) = self
+            .state
+            .get()
+            .assignment
+            .and_then(|assignment| assignment.appointment_id)
+        {
+            self.state.update(|planner_state| {
+                planner_state.ended_appointments.insert(appointment_id);
+            })?;
+        }
+        self.end(now)?;
+        self.state
+            .update(|planner_state| planner_state.stopped_at = Some(now))?;
+        info!("the user stopped using the computer");
+        Ok(())
+    }
+
+    /// "다시 사용하기": the stop ends; the next task comes when the user asks for it.
+    pub fn resume_use(&self) -> Result<(), PlannerError> {
+        self.state
+            .update(|planner_state| planner_state.stopped_at = None)?;
+        info!("the user uses the computer again");
+        Ok(())
     }
 
     /// The task when it is done away from the computer: the agent locks every app meanwhile.
@@ -345,6 +384,7 @@ impl TaskPlanner {
             }
         }
         PlannerStatus {
+            stopped_at: state.stopped_at,
             active: self.is_active_with(&open_todos),
             assignment: state.assignment.clone(),
             recent_requests: state.requests.iter().rev().take(10).cloned().collect(),
@@ -399,6 +439,9 @@ impl TaskPlanner {
     /// planner still assigns one to-do at a time.
     pub fn plan_week(&self, now: DateTime<Utc>) -> Result<WeekPlan, PlannerError> {
         let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
+        if self.stopped() {
+            return Err(PlannerError::Stopped);
+        }
         let open = self.open_todos();
         if open.is_empty() {
             return Err(PlannerError::NotActive);
@@ -455,6 +498,9 @@ impl TaskPlanner {
         via: &str,
     ) -> Result<TodoChangeRecord, PlannerError> {
         let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
+        if self.stopped() {
+            return Err(PlannerError::Stopped);
+        }
         let reason = reason
             .trim()
             .chars()
@@ -769,6 +815,11 @@ impl TaskPlanner {
     /// one the AI picks. A task whose time is up must be reported first.
     pub fn assign(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
         let _busy = self.busy.lock();
+        // Asking for a task ends a stop.
+        if self.stopped() {
+            self.state
+                .update(|planner_state| planner_state.stopped_at = None)?;
+        }
         if let Some(appointment) = self.keep_appointments(now)? {
             self.start_focus(&appointment)?;
             return Ok(appointment);
@@ -801,6 +852,9 @@ impl TaskPlanner {
         let Some(_busy) = self.busy.try_lock() else {
             return Ok(());
         };
+        if self.stopped() {
+            return Ok(());
+        }
         self.keep_appointments(now)?;
         if let Some(current) = self.state.get().assignment {
             if !self.focus.store().get().session_active {

@@ -520,6 +520,10 @@ pub struct PlannerState {
     /// Appointments the user ended early ("done"): they do not start again.
     #[serde(default)]
     pub ended_appointments: BTreeSet<String>,
+    /// The user pressed "사용 중지" (stop using the computer): every app is locked and
+    /// nothing runs but the blocking, until they press "다시 사용하기".
+    #[serde(default)]
+    pub stopped_at: Option<DateTime<Utc>>,
 }
 
 impl PlannerState {
@@ -569,4 +573,7 @@ pub struct PlannerStatus {
     /// Appointments that have not ended, soonest first.
     #[serde(default)]
     pub appointments: Vec<Appointment>,
+    /// The user stopped using the computer ("사용 중지") at this time.
+    #[serde(default)]
+    pub stopped_at: Option<DateTime<Utc>>,
 }

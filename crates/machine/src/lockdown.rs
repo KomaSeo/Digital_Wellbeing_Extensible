@@ -34,6 +34,8 @@ pub enum LockdownCause {
     NoTask,
     /// The task is done away from the computer (sleep, exercise, an appointment).
     AwayFromComputer,
+    /// The user pressed "사용 중지".
+    Stopped,
 }
 
 /// Responsibility: Say why the planner wants every app locked.
@@ -43,6 +45,9 @@ pub enum TaskLock {
     WaitingForTask,
     /// The task (named) is done away from the computer.
     AwayFromComputer { task: String },
+    /// The user stopped using the computer ("사용 중지"). Locks even during setup: the user
+    /// asked for it, and one button undoes it.
+    Stopped,
 }
 
 /// Responsibility: Describe a lockdown in force for the Focus app and the settings.
@@ -66,6 +71,15 @@ pub fn lockdown(
     connection: &Connection,
     task_lock: Option<TaskLock>,
 ) -> Option<Lockdown> {
+    if task_lock == Some(TaskLock::Stopped) {
+        return Some(Lockdown {
+            cause: LockdownCause::Stopped,
+            reason: "사용을 멈췄습니다. 다시 쓰려면 할 일 탭에서 \"다시 사용하기\"를 누르세요"
+                .to_string(),
+            fix_now: Vec::new(),
+            browsers_allowed: false,
+        });
+    }
     if !protected {
         return None;
     }
@@ -98,6 +112,7 @@ pub fn lockdown(
             LockdownCause::NoTask,
             "지금 할 일이 없습니다. 준비되면 \"할 일 받기\"를 누르세요".to_string(),
         ),
+        TaskLock::Stopped => unreachable!("handled first"),
         TaskLock::AwayFromComputer { task } => (
             LockdownCause::AwayFromComputer,
             format!(
@@ -244,6 +259,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(away.cause, LockdownCause::AwayFromComputer);
+        // Stopping locks even during setup and before a broken connection.
+        let stopped = lockdown(false, &broken, Some(TaskLock::Stopped)).unwrap();
+        assert_eq!(stopped.cause, LockdownCause::Stopped);
+        assert!(!stopped.browsers_allowed);
         assert!(away.reason.contains("잠자기"));
         assert!(!away.browsers_allowed);
     }

@@ -14,6 +14,8 @@
 //! | `status`         | `{}`                                     | [`Status`] |
 //! | `start_session`  | `{ "task": "..." }` (planner inactive)   | [`Status`] |
 //! | `stop_session`   | `{}` (planner inactive)                  | [`Status`] |
+//! | `stop_use`       | `{}` ("사용 중지": end the task, lock every app, stop all but blocking) | [`Status`] |
+//! | `resume_use`     | `{}` ("다시 사용하기")                    | [`Status`] |
 //! | `assign`         | `{}` (planner active)                    | [`Status`] |
 //! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
 //! | `request_access` | `{ "target": GrantTarget, "duration": GrantDuration, "purpose": "…" }` | [`Status`], `last_access` set |
@@ -202,7 +204,9 @@ pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lo
         crate::settings::is_protected(&crate::data_dir()),
         &ai_focus_rule::connection::current().0,
         planner.and_then(|planner| {
-            if let Some(task) = planner.away_from_computer_task() {
+            if planner.stopped() {
+                Some(crate::lockdown::TaskLock::Stopped)
+            } else if let Some(task) = planner.away_from_computer_task() {
                 Some(crate::lockdown::TaskLock::AwayFromComputer { task })
             } else {
                 planner
@@ -409,6 +413,16 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .assign(Utc::now())
                 .map_err(|error| error.to_string())?;
         }
+        "stop_use" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            planner
+                .stop_use(Utc::now())
+                .map_err(|error| error.to_string())?;
+        }
+        "resume_use" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            planner.resume_use().map_err(|error| error.to_string())?;
+        }
         "request_change" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
             let request: ChangeKind = serde_json::from_value(params["request"].clone())
@@ -555,6 +569,16 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
 pub fn dispatch_shared(api: &Arc<AgentApi>, method: &str, params: &Value) -> Result<Value, String> {
     if method != "assistant_send" {
         return dispatch(api, method, params);
+    }
+    if api
+        .planner
+        .as_ref()
+        .is_some_and(|planner| planner.stopped())
+    {
+        return Err(
+            "사용을 멈춘 동안에는 AI 비서를 쓸 수 없습니다. 먼저 \"다시 사용하기\"를 누르세요"
+                .into(),
+        );
     }
     let text = params["text"]
         .as_str()

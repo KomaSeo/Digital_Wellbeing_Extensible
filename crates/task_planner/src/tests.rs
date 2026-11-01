@@ -1530,3 +1530,50 @@ fn an_appointment_left_early_does_not_start_again() {
         .unwrap();
     assert!(next.appointment_id.is_none());
 }
+
+#[test]
+fn stopping_ends_the_task_and_holds_everything_until_resumed() {
+    let fixture = harness(true, &["a"]);
+    let now = Utc::now();
+    fixture.planner.assign(now).unwrap();
+    // An appointment soon after.
+    add_appointment(
+        &fixture,
+        now,
+        appointment_change("call", now + chrono::Duration::minutes(5), 30, Some(false)),
+    )
+    .unwrap();
+    fixture.planner.stop_use(now).unwrap();
+    assert!(fixture.planner.stopped());
+    assert!(fixture.planner.status().assignment.is_none());
+    assert!(!fixture.focus.store().get().session_active);
+    assert_eq!(fixture.planner.open_todos().len(), 1, "the to-do stays");
+    // Nothing starts and nothing calls the AI while stopped.
+    fixture
+        .planner
+        .resume(now + chrono::Duration::minutes(10))
+        .unwrap();
+    assert!(fixture.planner.status().assignment.is_none());
+    assert!(matches!(
+        fixture
+            .planner
+            .review_todo_change(now, add("x"), "", "to-do tab"),
+        Err(PlannerError::Stopped)
+    ));
+    assert!(matches!(
+        fixture.planner.plan_week(now),
+        Err(PlannerError::Stopped)
+    ));
+    // "다시 사용하기": the appointment that runs now starts again with the agent's loop.
+    fixture.planner.resume_use().unwrap();
+    assert!(!fixture.planner.stopped());
+    fixture
+        .planner
+        .resume(now + chrono::Duration::minutes(10))
+        .unwrap();
+    assert!(fixture
+        .planner
+        .status()
+        .assignment
+        .is_some_and(|assignment| assignment.appointment_id.is_some()));
+}

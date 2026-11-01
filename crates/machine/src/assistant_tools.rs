@@ -551,6 +551,7 @@ pub fn summary(status: &Status) -> Value {
             "away_from_computer": appointment.away_from_computer,
         })).collect::<Vec<_>>()),
         "report_due": planner.is_some_and(|planner| planner.report_due),
+        "stopped_using": planner.is_some_and(|planner| planner.stopped_at.is_some()),
         "all_apps_locked": status.lockdown.as_ref().map(|lockdown| &lockdown.reason),
         "open_todos": planner.map(|planner| planner.open_todos.iter().map(|todo| json!({
             "id": todo.id,

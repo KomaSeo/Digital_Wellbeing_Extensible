@@ -49,6 +49,8 @@ pub struct TodoUiState {
     new_step: String,
     appointment_form: AppointmentForm,
     appointment_form_open: bool,
+    /// "사용 중지" was pressed once: ask to confirm.
+    confirm_stop: bool,
 }
 
 /// Responsibility: Hold the fields of an appointment as the user types them.
@@ -192,8 +194,17 @@ impl FocusApp {
             });
             ui.separator();
         }
-        ui.heading("데일리 웰빙");
         let planner = status.planner.clone();
+        if let Some(stopped_at) = planner.as_ref().and_then(|planner| planner.stopped_at) {
+            self.stopped_ui(ui, stopped_at);
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.heading("데일리 웰빙");
+            if planner.is_some() {
+                self.stop_button_ui(ui);
+            }
+        });
         // An appointment runs even when the list is empty.
         match planner
             .clone()
@@ -220,6 +231,61 @@ impl FocusApp {
         self.list_ui(ui, &planner);
         ui.separator();
         self.appointments_ui(ui, &planner);
+    }
+
+    /// "사용 중지": asks once to confirm, then ends the task and locks every app.
+    fn stop_button_ui(&mut self, ui: &mut egui::Ui) {
+        let idle = !self.pending.load(Ordering::SeqCst);
+        if !self.todo_ui.confirm_stop {
+            if ui
+                .add_enabled(idle, egui::Button::new("⏻ 사용 중지"))
+                .on_hover_text(
+                    "컴퓨터를 그만 쓸 때 누릅니다. 모든 앱과 웹사이트가 잠기고, 차단 말고는 아무것도 \
+                     하지 않습니다(AI도 부르지 않습니다).",
+                )
+                .clicked()
+            {
+                self.todo_ui.confirm_stop = true;
+            }
+            return;
+        }
+        ui.colored_label(
+            RED,
+            "지금 할 일은 목록에 남고, 모든 앱과 웹사이트가 잠깁니다.",
+        );
+        if ui.button("멈추기").clicked() {
+            self.todo_ui.confirm_stop = false;
+            self.send("stop_use", json!({}));
+        }
+        if ui.button("취소").clicked() {
+            self.todo_ui.confirm_stop = false;
+        }
+    }
+
+    /// After "사용 중지": everything is locked until "다시 사용하기".
+    fn stopped_ui(&mut self, ui: &mut egui::Ui, stopped_at: DateTime<Utc>) {
+        let idle = !self.pending.load(Ordering::SeqCst);
+        ui.heading("사용 중지");
+        ui.label(format!(
+            "{}에 사용을 멈췄습니다. 이 앱과 Windows 말고는 모든 앱과 웹사이트가 잠겨 있고, 차단 말고는 \
+             아무것도 하지 않습니다. AI 검사, 할 일 고르기, AI 비서, 약속 시작도 멈춥니다.",
+            stopped_at.with_timezone(&Local).format("%m-%d %H:%M")
+        ));
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    idle,
+                    egui::Button::new(egui::RichText::new("다시 사용하기").strong()),
+                )
+                .clicked()
+            {
+                self.send("resume_use", json!({}));
+            }
+            if !idle {
+                ui.spinner();
+            }
+        });
+        ui.small("다시 사용하면 \"할 일 받기\"를 눌러 다음 할 일을 받습니다.");
     }
 
     /// Nothing on the to-do list: the AI has nothing to pick from. The user adds to-dos; they
