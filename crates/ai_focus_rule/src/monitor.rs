@@ -603,19 +603,19 @@ const MIN_PURPOSE_CHARS: usize = 4;
 /// Responsibility: Report why an access request was refused before or during the AI review.
 #[derive(Debug, Error)]
 pub enum AccessError {
-    #[error("start a focus session first")]
+    #[error("먼저 데일리 웰빙(AI 검사)을 시작하세요")]
     NoSession,
-    #[error("name the app or site")]
+    #[error("앱이나 사이트의 이름을 적으세요")]
     EmptyTarget,
-    #[error("say what you need it for (at least {MIN_PURPOSE_CHARS} characters)")]
+    #[error("무엇에 쓸지 적으세요({MIN_PURPOSE_CHARS}글자 이상)")]
     PurposeTooShort,
-    #[error("the admin does not allow permanent access")]
+    #[error("설정에서 취소할 때까지 가는 허용을 막아 두었습니다")]
     PermanentNotAllowed,
-    #[error("another request is still being processed")]
+    #[error("다른 요청을 아직 처리하고 있습니다")]
     Busy,
     #[error("AI: {0}")]
     Ai(#[from] JudgeError),
-    #[error("could not save: {0}")]
+    #[error("저장하지 못했습니다: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -1134,7 +1134,7 @@ impl FocusMonitor {
         let foreground = self
             .desktop
             .foreground()
-            .ok_or("no window is in front to take the proof screenshot of")?;
+            .ok_or("맨 앞에 창이 없어서 증거 화면을 찍지 못했습니다")?;
         let private_on_screen = config.is_private(&foreground.process_name)
             || (!config.private_apps.is_empty()
                 && self
@@ -1144,15 +1144,15 @@ impl FocusMonitor {
                     .any(|name| config.is_private(name)));
         if private_on_screen {
             return Err(
-                "a private app is on screen, so no proof screenshot was taken; \
-                        close it or send the request without a screenshot"
+                "비공개 앱이 화면에 보여서 증거 화면을 찍지 않았습니다. 그 앱을 닫거나 화면 캡처 \
+                        없이 보내세요"
                     .into(),
             );
         }
         self.desktop
             .screenshot(&foreground)
             .and_then(encode_jpeg)
-            .ok_or_else(|| "the proof screenshot could not be taken".into())
+            .ok_or_else(|| "증거 화면을 찍지 못했습니다".into())
     }
 
     fn run_judge(
@@ -2218,7 +2218,7 @@ mod tests {
             .state()
             .last_error
             .as_deref()
-            .is_some_and(|error| error.contains("budget")));
+            .is_some_and(|error| error.contains("예산")));
         // A failed call is not retried at every sample, only after the interval.
         let first = monitor.state().last_check;
         monitor.step(Utc::now() + ChronoDuration::seconds(3));

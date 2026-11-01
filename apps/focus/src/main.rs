@@ -20,6 +20,7 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod help;
 mod settings;
 mod todo;
 mod tray;
@@ -104,8 +105,8 @@ impl Default for AccessForm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChangeChoice {
     Done,
-    OtherTodo,
-    Free,
+    /// Something else, picked by the AI; the user only gives the reason.
+    Repick,
     End,
     /// Keep the task past its planned end; only show a notice (the AI decides).
     NotifyWhenTimeIsUp,
@@ -121,6 +122,7 @@ enum Tab {
     Todo,
     Blocking,
     Settings,
+    Help,
 }
 
 /// Responsibility: Draw the Focus window, keep the form inputs, and send requests to the agent
@@ -140,8 +142,6 @@ struct FocusApp {
     task_loaded: bool,
     // planner mode
     choice: ChangeChoice,
-    other_todo: Option<String>,
-    free_task: String,
     reason: String,
     /// Proof that a finished to-do is really done, sent with "I finished it".
     evidence: String,
@@ -191,8 +191,6 @@ impl FocusApp {
             task_input: String::new(),
             task_loaded: false,
             choice: ChangeChoice::Done,
-            other_todo: None,
-            free_task: String::new(),
             reason: String::new(),
             evidence: String::new(),
             proof_screenshot: false,
@@ -271,48 +269,48 @@ impl FocusApp {
     }
 
     fn access_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
-        ui.heading("Need an app or website?");
+        ui.heading("앱이나 웹사이트가 필요한가요?");
         if !status.session_active {
-            ui.label("The AI checks are paused; nothing needs asking for.");
+            ui.label("AI 검사가 멈춰 있으므로 따로 요청할 것이 없습니다.");
             return;
         }
         ui.label(
-            "Ask for access and say what it is for. The AI decides. While access is granted, \
-             the AI keeps checking that you use it for that purpose; other use ends the access.",
+            "접근을 요청하고 무엇에 쓸지 적으세요. AI가 정합니다. 허용된 동안에도 AI는 그 목적으로 \
+             쓰는지 계속 확인하고, 다른 용도로 쓰면 허용이 끝납니다.",
         );
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.access.site, true, "Website");
-            ui.radio_value(&mut self.access.site, false, "App");
+            ui.radio_value(&mut self.access.site, true, "웹사이트");
+            ui.radio_value(&mut self.access.site, false, "앱");
             let hint = if self.access.site {
-                "word in the tab title, e.g. YouTube"
+                "탭 제목에 들어 있는 말, 예: YouTube"
             } else {
-                "program, e.g. spotify.exe"
+                "프로그램, 예: spotify.exe"
             };
             ui.add(egui::TextEdit::singleline(&mut self.access.target).hint_text(hint));
         });
         ui.horizontal(|ui| {
-            ui.label("for");
+            ui.label("기간");
             for minutes in [15, 30, 60, 120] {
                 ui.radio_value(
                     &mut self.access.minutes,
                     Some(minutes),
-                    format!("{minutes} min"),
+                    format!("{minutes}분"),
                 );
             }
-            ui.radio_value(&mut self.access.minutes, None, "permanently");
+            ui.radio_value(&mut self.access.minutes, None, "취소할 때까지");
         });
         ui.add(
             egui::TextEdit::multiline(&mut self.access.purpose)
                 .desired_rows(2)
                 .desired_width(f32::INFINITY)
-                .hint_text("what you will use it for, e.g. Rust async 강의 영상 시청"),
+                .hint_text("무엇에 쓸지, 예: Rust async 강의 영상 시청"),
         );
         let idle = !self.pending.load(Ordering::SeqCst);
         let ready = idle
             && !self.access.target.trim().is_empty()
             && self.access.purpose.trim().chars().count() >= 4;
         ui.horizontal(|ui| {
-            if ui.add_enabled(ready, egui::Button::new("Ask")).clicked() {
+            if ui.add_enabled(ready, egui::Button::new("요청하기")).clicked() {
                 let target = if self.access.site {
                     json!({ "kind": "site", "keyword": self.access.target.trim() })
                 } else {
@@ -335,9 +333,9 @@ impl FocusApp {
         if let Some(entry) = &self.shared.lock().access {
             let approved = matches!(entry.event, GrantEvent::Requested { approved: true, .. });
             let (color, label) = if approved {
-                (GREEN, "granted")
+                (GREEN, "허용됨")
             } else {
-                (RED, "refused")
+                (RED, "거절됨")
             };
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(color, label);
@@ -346,18 +344,13 @@ impl FocusApp {
         }
 
         if !status.grants.is_empty() {
-            ui.label("Access you have now (still observed):");
+            ui.label("지금 받은 접근 허용(AI가 계속 지켜봅니다):");
         }
         for grant in &status.grants {
             let until = grant
                 .until
-                .map(|expiry| {
-                    expiry
-                        .with_timezone(&Local)
-                        .format("until %H:%M")
-                        .to_string()
-                })
-                .unwrap_or_else(|| "permanent".into());
+                .map(|expiry| expiry.with_timezone(&Local).format("%H:%M까지").to_string())
+                .unwrap_or_else(|| "취소할 때까지".into());
             ui.label(format!(
                 "• {} ({until}) — {}",
                 grant.target.label(),
@@ -373,7 +366,7 @@ impl FocusApp {
             ui.colored_label(
                 RED,
                 format!(
-                    "Access to {} was revoked at {}: {}",
+                    "{}의 접근 허용이 {}에 취소되었습니다: {}",
                     revoked.target.label(),
                     revoked.at.with_timezone(&Local).format("%H:%M"),
                     revoked.message
@@ -386,41 +379,41 @@ impl FocusApp {
 impl FocusApp {
     /// The Blocking tab: what the AI checks, what is blocked, and asking for access.
     fn blocking_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
-        ui.heading("AI checks");
+        ui.heading("AI 검사");
         if status.session_active {
             match status.last_check {
                 Some(at) => ui.label(format!(
-                    "Last AI check {} (new apps and sites are checked at once)",
+                    "마지막 AI 검사 {} (새 앱과 사이트는 바로 검사합니다)",
                     at.with_timezone(&Local).format("%H:%M:%S"),
                 )),
-                None => ui.label("First AI check in a moment…"),
+                None => ui.label("곧 첫 AI 검사를 합니다…"),
             };
         } else {
-            ui.label("The AI checks are paused (the blacklist still applies).");
+            ui.label("AI 검사가 멈춰 있습니다(항상 막을 프로그램과 웹사이트는 그대로 막습니다).");
         }
         if let Some(error) = &status.last_error {
-            ui.colored_label(RED, format!("AI check failed: {error}"));
+            ui.colored_label(RED, format!("AI 검사가 실패했습니다: {error}"));
         }
         if let Some(cost) = status.ai_cost_today_usd {
             ui.small(if status.daily_budget_usd > 0.0 {
                 format!(
-                    "AI cost today (estimate): ${cost:.2} of ${:.2}",
+                    "오늘의 AI 비용(추정): ${cost:.2} / 예산 ${:.2}",
                     status.daily_budget_usd
                 )
             } else {
-                format!("AI cost today (estimate): ${cost:.2}")
+                format!("오늘의 AI 비용(추정): ${cost:.2}")
             });
         }
 
         ui.separator();
-        ui.heading("Blocked now");
+        ui.heading("지금 걸린 차단");
         if status.blocked.is_empty() {
-            ui.label("Nothing.");
+            ui.label("없습니다.");
         }
         for blocked_entry in &status.blocked {
             ui.horizontal_wrapped(|ui| {
                 ui.label(format!("{} — {}", blocked_entry.key, blocked_entry.reason));
-                if ui.small_button("Ask for access").clicked() {
+                if ui.small_button("접근 요청").clicked() {
                     self.prefill_access(&blocked_entry.key);
                 }
             });
@@ -430,7 +423,7 @@ impl FocusApp {
         self.access_ui(ui, status);
 
         ui.separator();
-        ui.heading("Recent AI checks");
+        ui.heading("최근 AI 판정");
         for verdict_record in &status.verdicts {
             let color = match verdict_record.verdict {
                 Verdict::OnTask => GREEN,
@@ -445,7 +438,14 @@ impl FocusApp {
                         .format("%H:%M")
                         .to_string(),
                 );
-                ui.colored_label(color, format!("{:?}", verdict_record.verdict));
+                ui.colored_label(
+                    color,
+                    match verdict_record.verdict {
+                        Verdict::OnTask => "할 일에 맞음",
+                        Verdict::OffTask => "딴짓",
+                        Verdict::Unsure => "애매함",
+                    },
+                );
                 ui.label(format!(
                     "{} — {}",
                     verdict_record.process_name, verdict_record.reason
@@ -484,9 +484,10 @@ impl eframe::App for FocusApp {
         }
         egui::TopBottomPanel::top("tabs").show(context, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Todo, "To-do");
-                ui.selectable_value(&mut self.tab, Tab::Blocking, "Blocking");
-                ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
+                ui.selectable_value(&mut self.tab, Tab::Todo, "할 일");
+                ui.selectable_value(&mut self.tab, Tab::Blocking, "차단");
+                ui.selectable_value(&mut self.tab, Tab::Settings, "설정");
+                ui.selectable_value(&mut self.tab, Tab::Help, "도움말");
             });
         });
         egui::CentralPanel::default().show(context, |ui| {
@@ -495,11 +496,11 @@ impl eframe::App for FocusApp {
                     Some(Ok(status)) => status,
                     Some(Err(error)) => {
                         ui.colored_label(RED, error);
-                        ui.label("Blocking rules are enforced by the service either way.");
+                        ui.label("차단 규칙은 이와 상관없이 서비스가 계속 지킵니다.");
                         return;
                     }
                     None => {
-                        ui.label("connecting…");
+                        ui.label("agent에 연결하는 중…");
                         return;
                     }
                 };
@@ -511,6 +512,7 @@ impl eframe::App for FocusApp {
                     Tab::Todo => self.todo_tab(ui, &status),
                     Tab::Blocking => self.blocking_tab(ui, &status),
                     Tab::Settings => self.settings.ui(ui, status.settings_protected),
+                    Tab::Help => help::help_tab(ui),
                 }
             });
         });

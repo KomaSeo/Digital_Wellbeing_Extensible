@@ -187,10 +187,10 @@ mod imp {
         if menu.is_null() {
             return;
         }
-        AppendMenuW(menu, MF_STRING, ID_OPEN, wide("Open").as_ptr());
-        AppendMenuW(menu, MF_STRING, ID_SETTINGS, wide("Settings").as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_OPEN, wide("열기").as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_SETTINGS, wide("설정").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
-        AppendMenuW(menu, MF_STRING, ID_QUIT, wide("Quit").as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_QUIT, wide("끝내기").as_ptr());
         let mut point = POINT { x: 0, y: 0 };
         GetCursorPos(&mut point);
         // Without this the menu stays open when the user clicks elsewhere.

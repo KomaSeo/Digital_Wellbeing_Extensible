@@ -102,7 +102,7 @@ pub struct JudgeRequest<'a> {
 /// Responsibility: Report why a Claude call failed (shared by every Claude-backed module).
 #[derive(Debug, Error)]
 pub enum JudgeError {
-    #[error("no API key: an administrator saves one in Digital Wellbeing settings, AI focus tab")]
+    #[error("API 키가 없습니다. 설정 탭의 AI 연결에서 키를 넣고 적용하세요")]
     NoApiKey,
     #[error("API error {status}: {body}")]
     Api { status: u16, body: String },
@@ -115,7 +115,7 @@ pub enum JudgeError {
     #[error("unexpected response: {0}")]
     BadResponse(String),
     #[error(
-        "today's AI budget is spent (${spent:.2} of ${limit:.2}); focus checks resume tomorrow"
+        "오늘의 AI 예산을 다 썼습니다(${spent:.2} / ${limit:.2}). AI 검사는 내일 다시 시작합니다"
     )]
     BudgetReached { spent: f64, limit: f64 },
 }

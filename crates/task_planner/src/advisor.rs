@@ -181,6 +181,9 @@ pub struct PickRequest<'a> {
     pub recently_done: &'a [DoneRecord],
     pub previous: Option<&'a Assignment>,
     pub history: &'a str,
+    /// Set when the user asked for something other than the previous assignment and the
+    /// review approved it: their reason.
+    pub repick_reason: Option<&'a str>,
 }
 
 /// Responsibility: Carry what the AI sees when reviewing a change request.
@@ -432,7 +435,8 @@ fn pick_text(request: &PickRequest) -> String {
         .collect();
     format!(
         "Now: {now}\n\n{rules}Open to-dos:\n{todos}\n\nRecently finished:\n{done}\n\n\
-         Previous assignment: {prev}\n\nRecent foreground activity (oldest first):\n{history}",
+         Previous assignment: {prev}\n{repick}\nRecent foreground activity (oldest first):\n\
+         {history}",
         now = request.now_local,
         rules = rules_text(request.life_rules),
         todos = todos_json(request.open),
@@ -442,6 +446,14 @@ fn pick_text(request: &PickRequest) -> String {
             .map(|assignment| assignment_text(assignment, Utc::now()))
             .unwrap_or_else(|| "(none)".into()),
         history = or_none(request.history),
+        repick = request.repick_reason.map_or(String::new(), |reason| {
+            format!(
+                "The user asked to stop the previous assignment and get something else, and \
+                 the review approved it. Their reason: \"{reason}\". Pick what fits that \
+                 reason (for example a rest to-do when they need a break, another to-do when \
+                 they are stuck); pick the previous one again only if nothing else fits.\n"
+            )
+        }),
     )
 }
 
@@ -455,6 +467,9 @@ fn describe(request: &ChangeKind, target_title: Option<&str>) -> String {
         ChangeKind::SwitchFree { task } => {
             format!("switch to something not on the list: \"{task}\"")
         }
+        ChangeKind::Repick => "stop the current task and have the AI pick something else (the \
+                               user does not choose what)"
+            .into(),
         ChangeKind::End => "end the focus session".into(),
         ChangeKind::SetWhenTimeIsUp {
             action: WhenTimeIsUp::NotifyOnly,

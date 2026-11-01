@@ -27,7 +27,10 @@ from a to-do list and blocks apps and websites the assigned task does not need. 
 tools can show the list and the current task, propose a to-do, ask to change the \
 current task, and schedule an update of the settings. The app's own AI decides every \
 proposal and change request against rules the account owner set. When a proposal or \
-request is rejected, tell the user the reason; do not retry it in other words. A \
+request is rejected, tell the user the reason; do not retry it in other words. The \
+user never chooses what to work on next, not even through you: the app's AI does. When \
+they want to stop the current task, send request_change with change \"repick\" and their \
+reason, not a task of your or their choosing. A \
 scheduled settings update takes effect only after the user confirms it in the app three \
 times, two days apart; tell the user that, and never press them to confirm.";
 
@@ -160,13 +163,11 @@ fn tools() -> Value {
         },
         {
             "name": "request_change",
-            "description": "Ask to change the assigned task: it is done, switch to another open to-do, switch to something not on the list, or pause the AI checks (end). Every task runs until a planned end (\"until\" in get_status) and then the app's AI picks the next one; notify_when_time_is_up asks to keep the current task past that end and only be notified, reassign_when_time_is_up goes back to a new pick. The app's AI approves or rejects the reason (going back to reassign needs no approval).",
+            "description": "Ask to change the assigned task: it is done, get something else (repick: the app's AI picks what comes next; the user only gives the reason and never chooses the next task), or pause the AI checks (end). Every task runs until a planned end (\"until\" in get_status) and then the app's AI picks the next one; notify_when_time_is_up asks to keep the current task past that end and only be notified, reassign_when_time_is_up goes back to a new pick. The app's AI approves or rejects the reason (going back to reassign needs no approval).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "change": { "type": "string", "enum": ["done", "switch_todo", "switch_free", "end", "notify_when_time_is_up", "reassign_when_time_is_up"] },
-                    "todo_id": { "type": "string", "description": "For switch_todo: id from get_status" },
-                    "task": { "type": "string", "description": "For switch_free: what to do instead" },
+                    "change": { "type": "string", "enum": ["done", "repick", "end", "notify_when_time_is_up", "reassign_when_time_is_up"] },
                     "reason": { "type": "string", "description": "The user's reason, in their words" },
                     "evidence": { "type": "string", "description": "For done: proof of the result in the user's words (what was sent, to whom, an order number). The app's AI asks for proof when the result is a fact like a sent mail or an order; work that can always be improved (a report, practice) is accepted and the planned time left comes back later as an \"Improve: ...\" to-do." }
                 },
@@ -278,14 +279,7 @@ fn call_tool(name: &str, arguments: &Value, agent: Agent) -> Result<String, Stri
                 "reassign_when_time_is_up" => {
                     json!({ "kind": "set_when_time_is_up", "action": "reassign" })
                 }
-                "switch_todo" => json!({
-                    "kind": "switch_todo",
-                    "todo_id": arguments["todo_id"].as_str().ok_or("todo_id is required for switch_todo")?,
-                }),
-                "switch_free" => json!({
-                    "kind": "switch_free",
-                    "task": arguments["task"].as_str().ok_or("task is required for switch_free")?,
-                }),
+                "repick" => json!({ "kind": "repick" }),
                 other => return Err(format!("unknown change '{other}'")),
             };
             let reason = arguments["reason"].as_str().unwrap_or_default();
@@ -532,16 +526,22 @@ mod tests {
         handle(
             &json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
                 "name": "request_change",
-                "arguments": { "change": "switch_todo", "todo_id": "t1", "reason": "blocked on data" }
+                "arguments": { "change": "repick", "reason": "blocked on data" }
             }}),
             &agent,
         );
         let (method, params) = seen.borrow()[1].clone();
         assert_eq!(method, "request_change");
-        assert_eq!(
-            params["request"],
-            json!({ "kind": "switch_todo", "todo_id": "t1" })
+        assert_eq!(params["request"], json!({ "kind": "repick" }));
+        // Choosing the next task is not offered.
+        let refused = handle(
+            &json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {
+                "name": "request_change",
+                "arguments": { "change": "switch_todo", "todo_id": "t1", "reason": "blocked on data" }
+            }}),
+            &agent,
         );
+        assert!(refused.unwrap().to_string().contains("unknown change"));
 
         // No tool reaches anything else (unblocking, rules, the admin's list).
         let unknown = handle(

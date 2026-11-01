@@ -217,7 +217,8 @@ fn todo_list_edits(writes: &[TodoListWrite]) -> Vec<crate::setting_edits::Edit> 
 
 /// Handle one request.
 pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, String> {
-    const PLANNER_ON: &str = "the task planner is on: use assign / request_change (needs a reason)";
+    const PLANNER_ON: &str =
+        "플래너가 켜져 있습니다. 할 일 받기나 변경 요청(이유 필요)을 쓰세요 (assign / request_change)";
     let mut last_decision = None;
     let mut last_access = None;
     let mut last_proposal = None;
@@ -406,10 +407,10 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .todo_change(id)
                 .ok_or_else(|| format!("no to-do change '{id}'"))?;
             if record.approved {
-                return Err("the AI approved this change; it is already in force".into());
+                return Err("AI가 이미 승인해서 적용된 변경입니다".into());
             }
             if record.scheduled_update.is_some() {
-                return Err("this change is already scheduled".into());
+                return Err("이미 예약된 변경입니다".into());
             }
             let note = format!(
                 "{} — reason: {} — AI: {}",

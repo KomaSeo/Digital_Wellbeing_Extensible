@@ -19,6 +19,8 @@ struct FakeAdvisor {
     saw_rules: parking_lot::Mutex<String>,
     /// System instruction the last question carried.
     saw_instructions: parking_lot::Mutex<String>,
+    /// The repick reason the last pick carried.
+    saw_repick_reason: parking_lot::Mutex<Option<String>>,
     /// What the next done review says about the result: decisive, open_ended or not_applicable.
     outcome: parking_lot::Mutex<String>,
     /// Proof text and whether a screenshot came with the last review.
@@ -30,6 +32,7 @@ struct FakeAdvisor {
 impl Advisor for FakeAdvisor {
     fn pick(&self, request: &PickRequest) -> Result<Pick, JudgeError> {
         self.picks.fetch_add(1, Ordering::SeqCst);
+        *self.saw_repick_reason.lock() = request.repick_reason.map(str::to_string);
         *self.saw_rules.lock() = request.life_rules.to_string();
         *self.saw_instructions.lock() = request.instructions.to_string();
         let todo_id = if self.bogus_pick.load(Ordering::SeqCst) {
@@ -114,6 +117,7 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
         reviews: AtomicUsize::new(0),
         saw_rules: parking_lot::Mutex::new(String::new()),
         saw_instructions: parking_lot::Mutex::new(String::new()),
+        saw_repick_reason: parking_lot::Mutex::new(None),
         outcome: parking_lot::Mutex::new("not_applicable".into()),
         saw_evidence: parking_lot::Mutex::new((String::new(), false)),
         saw_minutes: parking_lot::Mutex::new((None, 0, 0)),
@@ -1136,4 +1140,49 @@ fn improve_todos_are_dropped_after_two_weeks() {
         .into_keys()
         .collect();
     assert_eq!(kept, ["c"]);
+}
+
+#[test]
+fn repick_lets_the_ai_choose_what_comes_next() {
+    let fixture = harness(true, &["a", "b"]);
+    let start = Utc::now() - chrono::Duration::minutes(20);
+    fixture.planner.assign(start).unwrap();
+    assert_eq!(*fixture.advisor.saw_repick_reason.lock(), None);
+    let picks = fixture.advisor.picks.load(Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .request_change(
+            Utc::now(),
+            ChangeKind::Repick,
+            "waiting for the data from the lab",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert!(record.approved);
+    // The AI was asked again, with the reason; the user named no task.
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), picks + 1);
+    assert_eq!(
+        fixture.advisor.saw_repick_reason.lock().as_deref(),
+        Some("waiting for the data from the lab")
+    );
+    let assignment = fixture.planner.status().assignment.unwrap();
+    assert_eq!(assignment.source, AssignmentSource::Planner);
+    // A rejected repick changes nothing and asks the AI for no pick.
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let picks = fixture.advisor.picks.load(Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .request_change(
+            Utc::now(),
+            ChangeKind::Repick,
+            "bored of it",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert!(!record.approved);
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), picks);
+    assert_eq!(
+        fixture.planner.status().assignment.unwrap().at,
+        assignment.at
+    );
 }

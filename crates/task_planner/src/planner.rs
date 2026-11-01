@@ -49,29 +49,29 @@ const MAX_TASK_STEPS: usize = 50;
 /// Responsibility: Report why an assignment or a change request was refused.
 #[derive(Debug, Error)]
 pub enum PlannerError {
-    #[error("the planner is off or every to-do is done")]
+    #[error("플래너가 꺼져 있거나 할 일을 모두 끝냈습니다")]
     NotActive,
-    #[error("another request is still being processed")]
+    #[error("다른 요청을 아직 처리하고 있습니다")]
     Busy,
-    #[error("unknown or finished to-do '{0}'")]
+    #[error("없거나 이미 끝낸 할 일입니다('{0}')")]
     UnknownTodo(String),
-    #[error("please give a reason (at least {MIN_REASON_CHARS} characters)")]
+    #[error("이유를 적어 주세요({MIN_REASON_CHARS}글자 이상)")]
     ReasonTooShort,
-    #[error("the new task is empty")]
+    #[error("새로 할 일이 비어 있습니다")]
     EmptyTask,
-    #[error("the AI picked a to-do that is not open ('{0}')")]
+    #[error("AI가 목록에 없는 할 일을 골랐습니다('{0}')")]
     BadPick(String),
-    #[error("give the to-do a title (at most {MAX_TITLE_CHARS} characters; notes at most {MAX_NOTES_CHARS})")]
+    #[error("할 일에 제목을 적어 주세요(제목은 {MAX_TITLE_CHARS}글자, 메모는 {MAX_NOTES_CHARS}글자까지)")]
     BadProposal,
-    #[error("\"{0}\" is already on the list")]
+    #[error("\"{0}\"은(는) 이미 목록에 있습니다")]
     Duplicate(String),
-    #[error("too many proposals: at most {PROPOSALS_PER_DAY} a day and {MAX_OPEN_PROPOSED} open")]
+    #[error("할 일 변경이 너무 많습니다: 하루 {PROPOSALS_PER_DAY}개, 남은 추가 할 일 {MAX_OPEN_PROPOSED}개까지입니다")]
     TooManyProposals,
-    #[error("\"{0}\" was made by the app from a to-do finished early; it goes away when it is done or its time is used up")]
+    #[error("\"{0}\"은(는) 일찍 끝낸 일을 다듬도록 앱이 만든 할 일입니다. 끝내거나 다듬기 시간을 다 쓰면 없어집니다")]
     MadeByTheApp(String),
     #[error("AI: {0}")]
     Ai(#[from] JudgeError),
-    #[error("io: {0}")]
+    #[error("저장하지 못했습니다: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -453,7 +453,7 @@ impl TaskPlanner {
                 return Ok(previous);
             }
         }
-        self.pick_and_apply(now)
+        self.pick_and_apply(now, None)
     }
 
     /// When the current assignment's time is up (and the user did not get "notify only"
@@ -474,7 +474,7 @@ impl TaskPlanner {
         if !due || !self.is_active() {
             return Ok(None);
         }
-        self.pick_and_apply(now).map(Some)
+        self.pick_and_apply(now, None).map(Some)
     }
 
     /// The user asks to change the assignment. Returns the AI's decision;
@@ -640,7 +640,7 @@ impl TaskPlanner {
             review.reply
         );
         if review.approved {
-            self.apply_change(now, &request, &review, open)?;
+            self.apply_change(now, &request, reason, &review, open)?;
         }
         Ok(record)
     }
@@ -649,6 +649,7 @@ impl TaskPlanner {
         &self,
         now: DateTime<Utc>,
         request: &ChangeKind,
+        reason: &str,
         review: &Review,
         open: &[TodoItem],
     ) -> Result<(), PlannerError> {
@@ -709,7 +710,7 @@ impl TaskPlanner {
                 // (AI or network error), do not stay on the finished to-do:
                 // end the session so "Get my task" can be used again.
                 if self.is_active() {
-                    if let Err(error) = self.pick_and_apply(now) {
+                    if let Err(error) = self.pick_and_apply(now, None) {
                         tracing::warn!("could not pick the next to-do: {error}");
                         self.end(now)?;
                     }
@@ -758,6 +759,12 @@ impl TaskPlanner {
                     when_time_is_up: WhenTimeIsUp::Reassign,
                 })?;
             }
+            ChangeKind::Repick => {
+                if let Err(error) = self.pick_and_apply(now, Some(reason)) {
+                    tracing::warn!("could not pick another task: {error}");
+                    return Err(error);
+                }
+            }
             ChangeKind::End => self.end(now)?,
             ChangeKind::SetWhenTimeIsUp { action } => {
                 self.state.update(|planner_state| {
@@ -770,7 +777,13 @@ impl TaskPlanner {
         Ok(())
     }
 
-    fn pick_and_apply(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
+    /// Ask the AI for the next task and assign it; `repick_reason` is set when the user asked
+    /// for something else.
+    fn pick_and_apply(
+        &self,
+        now: DateTime<Utc>,
+        repick_reason: Option<&str>,
+    ) -> Result<Assignment, PlannerError> {
         let open = self.open_todos();
         let state = self.state.get();
         let recently_done: Vec<DoneRecord> = state.done.iter().rev().take(10).cloned().collect();
@@ -786,6 +799,7 @@ impl TaskPlanner {
             recently_done: &recently_done,
             previous: state.assignment.as_ref(),
             history: &history,
+            repick_reason,
         })?;
         if !open.iter().any(|todo| todo.id == pick.todo_id) {
             return Err(PlannerError::BadPick(pick.todo_id));

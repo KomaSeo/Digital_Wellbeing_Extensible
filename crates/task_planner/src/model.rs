@@ -170,6 +170,9 @@ pub enum ChangeKind {
     SwitchTodo { todo_id: String },
     /// Work on something that is not on the list.
     SwitchFree { task: String },
+    /// Drop the current task and let the AI pick another one; the user gives the reason
+    /// but does not choose what comes next (choosing it themselves makes them lazy).
+    Repick,
     /// Stop the focus session altogether.
     End,
     /// Change what happens when the current task's time is up. Asking for `NotifyOnly`

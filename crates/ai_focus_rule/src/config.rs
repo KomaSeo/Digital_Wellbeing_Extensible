@@ -72,6 +72,10 @@ pub struct AiFocusConfig {
     /// them here and each agent drops them from its own blocks file. The panel
     /// forgets an id once no blocks file holds it any more.
     pub unblocked: BTreeSet<String>,
+    /// Websites that are always blocked, as case-insensitive regular expressions searched
+    /// in browser tab titles (an invalid pattern is matched as plain text). A matching tab is
+    /// closed whether or not daily wellbeing is on, without asking the AI.
+    pub always_blocked_sites: BTreeSet<String>,
 }
 
 impl Default for AiFocusConfig {
@@ -108,6 +112,7 @@ impl Default for AiFocusConfig {
             daily_budget_usd: 0.0,
             revoked_grants: BTreeSet::new(),
             unblocked: BTreeSet::new(),
+            always_blocked_sites: BTreeSet::new(),
         }
     }
 }
