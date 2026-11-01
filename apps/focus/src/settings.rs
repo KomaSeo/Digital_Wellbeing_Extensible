@@ -537,7 +537,50 @@ impl SettingsTab {
         ui.separator();
         ui.heading("모델");
         if let Some(drafts) = &mut self.drafts {
-            ui.add(egui::TextEdit::singleline(&mut drafts.ai_focus.model).desired_width(240.0));
+            // A choice, not a typed name: no typos, no made-up model. The agent refreshes the
+            // list from the Models API once a week, and checks a new model before applying.
+            let catalog = &snapshot.models;
+            let label_of = |model_id: &str| {
+                catalog
+                    .models
+                    .iter()
+                    .find(|model| model.id == model_id)
+                    .filter(|model| !model.display_name.is_empty())
+                    .map_or(model_id.to_string(), |model| {
+                        format!("{} ({})", model.display_name, model.id)
+                    })
+            };
+            let current = drafts.ai_focus.model.clone();
+            egui::ComboBox::from_id_salt("model_choice")
+                .width(320.0)
+                .selected_text(label_of(&current))
+                .show_ui(ui, |ui| {
+                    for model_id in catalog.choices(&current) {
+                        let label = label_of(&model_id);
+                        ui.selectable_value(&mut drafts.ai_focus.model, model_id, label);
+                    }
+                });
+            match (catalog.fetched_at, catalog.error.is_empty()) {
+                (Some(fetched_at), _) => {
+                    ui.small(format!(
+                        "모델 목록은 Anthropic의 모델 API에서 {}에 받았습니다. 일주일마다 다시 받습니다. \
+                         적용하면 그 모델이 있는지 먼저 확인합니다.",
+                        fetched_at.with_timezone(&chrono::Local).format("%Y-%m-%d")
+                    ));
+                }
+                (None, true) => {
+                    ui.small(
+                        "아직 모델 목록을 받지 못해서 기본 목록을 보여 줍니다. API 키가 동작하면 몇 분 안에 \
+                         목록을 받습니다.",
+                    );
+                }
+                (None, false) => {
+                    ui.small(format!(
+                        "모델 목록을 받지 못해서 기본 목록을 보여 줍니다({}).",
+                        catalog.error
+                    ));
+                }
+            }
         }
         self.block_bar(ui, &MODEL, snapshot, protected);
 

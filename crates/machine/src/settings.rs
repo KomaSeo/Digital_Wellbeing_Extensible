@@ -234,6 +234,9 @@ pub struct SettingsSnapshot {
     pub blocks: BTreeMap<String, Value>,
     /// Every user's token usage file (see `ai_focus_rule::usage`).
     pub usage: BTreeMap<String, Value>,
+    /// The models the key can use, for the model choice.
+    #[serde(default)]
+    pub models: crate::model_catalog::ModelCatalog,
 }
 
 /// Setup is over (or an older version had locked the settings).
@@ -275,6 +278,7 @@ pub fn snapshot(data_directory: &Path) -> Result<SettingsSnapshot, String> {
         grants: read_folder(&data_directory.join("grants")),
         blocks: read_folder(&data_directory.join("blocks")),
         usage: read_folder(&data_directory.join("usage")),
+        models: crate::model_catalog::load(data_directory),
     })
 }
 

@@ -23,6 +23,14 @@ fn api_base() -> String {
 const API_VERSION: &str = "2026-10-21";
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 
+/// Responsibility: Name one model the Models API lists.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+}
+
 /// Responsibility: Hold the HTTP agent, API key and model; build request bodies and send them.
 pub struct ClaudeClient {
     agent: ureq::Agent,
@@ -45,6 +53,79 @@ impl ClaudeClient {
             agent,
             api_key,
             model,
+        }
+    }
+
+    /// The models the key can use (the Models API, free), newest first. Changes nothing
+    /// about the connection's state.
+    pub fn list_models(&self) -> Result<Vec<ModelInfo>, JudgeError> {
+        let mut models = Vec::new();
+        let mut after: Option<String> = None;
+        // A few pages of 100 at most.
+        for _ in 0..5 {
+            let mut request = self
+                .agent
+                .get(&format!("{}/v1/models", api_base()))
+                .query("limit", "100")
+                .set("x-api-key", &self.api_key)
+                .set("anthropic-version", API_VERSION);
+            if let Some(last_id) = &after {
+                request = request.query("after_id", last_id);
+            }
+            let page: Value = match request.call() {
+                Ok(response) => response
+                    .into_json()
+                    .map_err(|error| JudgeError::BadResponse(error.to_string()))?,
+                Err(ureq::Error::Status(status, response)) => {
+                    return Err(JudgeError::Api {
+                        status,
+                        body: response.into_string().unwrap_or_default(),
+                    })
+                }
+                Err(error) => return Err(JudgeError::Transport(error.to_string())),
+            };
+            models.extend(
+                page["data"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|model| {
+                        Some(ModelInfo {
+                            id: model["id"].as_str()?.to_string(),
+                            display_name: model["display_name"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        })
+                    }),
+            );
+            match (page["has_more"].as_bool(), page["last_id"].as_str()) {
+                (Some(true), Some(last_id)) => after = Some(last_id.to_string()),
+                _ => break,
+            }
+        }
+        Ok(models)
+    }
+
+    /// Whether the API knows `model` (the Models API, free): `Ok(false)` for 404. Changes
+    /// nothing about the connection's state, so a candidate model can be checked before it
+    /// is in force.
+    pub fn model_exists(&self, model: &str) -> Result<bool, JudgeError> {
+        let url = format!("{}/v1/models/{}", api_base(), model);
+        match self
+            .agent
+            .get(&url)
+            .set("x-api-key", &self.api_key)
+            .set("anthropic-version", API_VERSION)
+            .call()
+        {
+            Ok(_) => Ok(true),
+            Err(ureq::Error::Status(404, _)) => Ok(false),
+            Err(ureq::Error::Status(status, response)) => Err(JudgeError::Api {
+                status,
+                body: response.into_string().unwrap_or_default(),
+            }),
+            Err(error) => Err(JudgeError::Transport(error.to_string())),
         }
     }
 

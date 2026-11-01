@@ -182,6 +182,12 @@ fn connection_probe_loop(ai_store: AiFocusStore) {
             match key {
                 None => connection::report_error(&JudgeError::NoApiKey),
                 Some(key) => {
+                    // The model choice of the Settings tab: refreshed once a week.
+                    machine::model_catalog::refresh_if_due(
+                        &machine::data_dir(),
+                        &key,
+                        chrono::Utc::now(),
+                    );
                     let client = ClaudeClient::new(key, config.model.clone());
                     let billing = matches!(
                         connection::current().0,

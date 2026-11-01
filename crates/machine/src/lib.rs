@@ -24,6 +24,7 @@
 pub mod assistant;
 pub mod assistant_tools;
 pub mod lockdown;
+pub mod model_catalog;
 pub mod session;
 pub mod setting_edits;
 pub mod settings;

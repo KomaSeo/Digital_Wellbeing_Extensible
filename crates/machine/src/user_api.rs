@@ -280,6 +280,20 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let fix_now = lockdown_now(api.planner.as_deref())
                 .map(|lockdown| lockdown.fix_now)
                 .unwrap_or_default();
+            // A new model is put in force (or scheduled) only once the API knows it.
+            if name == "ai_focus" {
+                let in_force = api.monitor.store().get();
+                if let Some(model) = params["content"]["model"].as_str() {
+                    if model.trim() != in_force.model {
+                        let edited: ai_focus_rule::AiFocusConfig =
+                            serde_json::from_value(params["content"].clone()).unwrap_or_default();
+                        let key = edited
+                            .resolve_api_key()
+                            .or_else(|| in_force.resolve_api_key());
+                        crate::model_catalog::check(key, model)?;
+                    }
+                }
+            }
             let outcome = crate::settings::put(
                 &data_directory,
                 Utc::now(),
