@@ -791,7 +791,17 @@ impl SettingsTab {
                         .chain(set.tabs.iter())
                         .map(move |(key, entry)| (scope.clone(), key, entry))
                 });
-                for (scope, key, entry) in current.chain(others) {
+                // Parsed anew every frame into hash maps, whose order changes each time:
+                // sort, so the list stays still (the current to-do's blocks first).
+                let mut rows: Vec<_> = current.chain(others).collect();
+                rows.sort_by(|left, right| {
+                    (left.0 != blocks.scope, &left.0, left.1).cmp(&(
+                        right.0 != blocks.scope,
+                        &right.0,
+                        right.1,
+                    ))
+                });
+                for (scope, key, entry) in rows {
                     any = true;
                     let unblocking = drafts.ai_focus.unblocked.contains(&entry.id);
                     ui.horizontal_wrapped(|ui| {

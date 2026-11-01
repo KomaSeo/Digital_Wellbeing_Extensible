@@ -19,6 +19,12 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
     ui.label("이 탭은 이 프로그램을 쓰는 방법을 주제마다 설명합니다. 제목을 누르면 펼쳐집니다.");
     ui.separator();
     let mut open_settings = false;
+    egui::CollapsingHeader::new("설치하기와 업데이트하기")
+        .default_open(false)
+        .show(ui, install_guide);
+    egui::CollapsingHeader::new("우회 막기 (이 프로그램이 막는 것과 관리자가 할 일)")
+        .default_open(false)
+        .show(ui, bypass_guide);
     egui::CollapsingHeader::new("설정 잠그기 (설정 보호)")
         .default_open(true)
         .show(ui, |ui| open_settings = protection_guide(ui));
@@ -38,6 +44,104 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
         .default_open(false)
         .show(ui, updates_guide);
     open_settings
+}
+
+/// How to install and update the app.
+fn install_guide(ui: &mut egui::Ui) {
+    paragraph(
+        ui,
+        "이 프로그램은 Windows 서비스로 설치됩니다. 서비스는 관리자 권한(SYSTEM)으로 돌기 때문에, 일반 \
+         계정은 서비스를 끄거나 설정 파일을 직접 고치지 못합니다. 설치에는 관리자 비밀번호가 필요합니다.",
+    );
+    ui.horizontal_wrapped(|ui| {
+        ui.label("1. 설치 파일은 GitHub의 릴리스 페이지에 있습니다:");
+        ui.hyperlink_to(
+            "릴리스 페이지 열기",
+            "https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases",
+        );
+    });
+    paragraph(
+        ui,
+        "2. 작업에 쓰는 Windows 계정을 표준 사용자로 바꿉니다(Windows 설정 → 계정 → 가족 및 기타 사용자 → \
+         계정 유형 변경). 작업 계정이 관리자이면 이 프로그램의 보호를 모두 풀 수 있습니다.",
+    );
+    paragraph(
+        ui,
+        "3. DigitalWellbeing-Setup-….exe를 내려받아 실행하고, 관리자 비밀번호를 넣습니다. 설치 프로그램은 \
+         계정을 묻지 않고, 관리자 계정을 포함한 이 PC의 모든 계정을 관리합니다.",
+    );
+    paragraph(
+        ui,
+        "4. 작업 계정으로 로그인하면 이 앱(Focus 앱)이 뜹니다. 설정 탭의 AI 연결에서 Anthropic API 키를 \
+         넣고 적용하고, 모델, 생활 규칙, 약속 규칙, 항상 막을 프로그램과 웹사이트를 정합니다. 할 일은 할 일 \
+         탭에서 넣습니다. 설치 직후는 설정 단계라서 적용한 설정이 바로 효력을 가집니다.",
+    );
+    paragraph(
+        ui,
+        "5. 며칠 써 보고 설정이 원하는 대로 동작하면, 설정 탭 맨 위에서 설정을 보호합니다(아래 \"설정 \
+         잠그기\"). 보호는 되돌릴 수 없습니다.",
+    );
+    paragraph(
+        ui,
+        "업데이트: 새 버전의 설치 파일을 그냥 실행하면 됩니다. 설정, API 키, 설정 보호, 걸린 차단은 그대로 \
+         남습니다. 프로그램을 지웠다가 다시 설치해도, 예전 설치가 잠가 둔 설정 폴더는 그대로 씁니다.",
+    );
+    paragraph(
+        ui,
+        "설치 프로그램 없이 쓰려면 …-windows-x64.zip을 풀고, 그 안의 install.cmd를 관리자 권한으로 \
+         실행합니다. 자세한 설명은 설치 폴더(C:\\Program Files\\DigitalWellbeing)의 \
+         docs\\multi_account.md 4장에 있습니다.",
+    );
+}
+
+/// What the app does against getting around it, and what the administrator must do.
+fn bypass_guide(ui: &mut egui::Ui) {
+    paragraph(ui, "이 프로그램이 스스로 막는 것:");
+    for line in [
+        "• 서비스와 agent는 SYSTEM 권한으로 돌므로, 작업 관리자나 서비스 창에서 끌 수 없습니다. agent가 \
+         꺼지면 서비스가 2초 안에 다시 띄웁니다. 다시 로그인하거나 컴퓨터를 다시 켜도 차단은 이어집니다.",
+        "• 설정 폴더(C:\\ProgramData\\DigitalWellbeing)는 SYSTEM과 관리자만 열 수 있고, 프로그램 \
+         폴더(C:\\Program Files\\DigitalWellbeing)는 관리자만 고치거나 지울 수 있습니다.",
+        "• 설정을 보호한 뒤에는 규칙을 느슨하게 만드는 변경이 바로 적용되지 않습니다. 이틀 간격으로 세 번 \
+         \"예\"라고 답해야 하므로 빨라도 6일 뒤에 적용됩니다. 순간적인 충동으로 바꿔도 얻는 것이 없습니다.",
+        "• 지금 할 일은 AI가 정하고, 할 일 목록의 변경, 다른 일 받기, 접근 요청, 약속도 AI가 생활 규칙과 \
+         약속 규칙에 따라 심사합니다.",
+        "• 설정이 보호된 동안 API 키가 동작하지 않으면(키를 지우거나 취소하거나 크레딧을 비우면), Claude와 \
+         이 앱 말고는 모든 앱과 웹사이트가 잠깁니다. 모델도 목록에서만 고를 수 있고, 적용하기 전에 모델이 \
+         있는지 확인합니다.",
+        "• 할 일이 없을 때, 컴퓨터 없이 하는 일(잠자기, 운동)을 하는 동안, \"사용 중지\"를 누른 뒤에는 모든 \
+         앱과 웹사이트가 잠깁니다.",
+        "• 시간대를 바꿔 시간을 속이는 것을 막습니다. 시간대가 바뀌면 서비스가 설정의 시간대로 되돌립니다. \
+         시계 자체를 바꾸는 데는 관리자 권한이 필요합니다.",
+        "• 관리자 권한이 필요한 프로그램 업데이트(예: 카카오톡)는 설정의 목록에 있는 프로그램만 서비스가 \
+         대신 합니다. 사용자는 관리자 권한을 받지 않습니다.",
+    ] {
+        paragraph(ui, line);
+    }
+    ui.add_space(6.0);
+    paragraph(
+        ui,
+        "관리자가 직접 해야 하는 것(이 프로그램은 Windows가 정상으로 켜진 뒤에만 동작합니다):",
+    );
+    for line in [
+        "• 작업 계정은 표준 사용자로 두고, 관리자 비밀번호는 길게 만들어 쉽게 꺼낼 수 없는 곳(다른 사람)에 \
+         맡깁니다.",
+        "• BIOS(UEFI)에 관리자 비밀번호를 걸고, USB와 네트워크 부팅을 끄고, Secure Boot를 켭니다. 디스크를 \
+         빼서 읽는 것까지 막으려면 BitLocker로 암호화합니다.",
+        "• 안전 모드로 들어가는 길(Shift+다시 시작의 고급 시작 옵션)을 끕니다. 관리자 PowerShell에서 \
+         reagentc /disable과 bcdedit 명령을 실행합니다. 명령은 docs\\multi_account.md 4.4절에 있습니다.",
+        "• Microsoft 계정의 가족 기능이나 공유기에서 다른 기기(휴대폰)의 사용을 따로 막습니다. 이 프로그램은 \
+         이 PC만 지킵니다.",
+    ] {
+        paragraph(ui, line);
+    }
+    ui.add_space(6.0);
+    paragraph(
+        ui,
+        "남는 한계: 웹사이트는 탭 제목으로 판단하므로, 제목에 \"Claude\"가 든 다른 페이지는 잠금 중에도 \
+         열릴 수 있습니다. 네트워크를 끄는 것은 막지 않지만, 네트워크가 끊기면 대부분의 웹사이트도 쓸 수 \
+         없습니다. 작업 계정은 설정 탭에서 API 키를 볼 수 있습니다.",
+    );
 }
 
 /// How a to-do is given, reported and repeated, and why everything locks while none is given.
