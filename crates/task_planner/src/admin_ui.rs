@@ -404,6 +404,7 @@ pub(crate) fn request_label(request: &ChangeKind) -> String {
         ChangeKind::SwitchFree { task } => format!("switch to \"{task}\""),
         ChangeKind::Repick => "something else (the AI picks)".into(),
         ChangeKind::End => "end session".into(),
+        ChangeKind::NotFinished => "not finished (report)".into(),
         ChangeKind::SetWhenTimeIsUp {
             action: WhenTimeIsUp::NotifyOnly,
         } => "only notify when time is up".into(),

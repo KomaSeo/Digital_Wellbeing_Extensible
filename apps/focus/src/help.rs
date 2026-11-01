@@ -22,6 +22,9 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
     egui::CollapsingHeader::new("설정 잠그기 (설정 보호)")
         .default_open(true)
         .show(ui, |ui| open_settings = protection_guide(ui));
+    egui::CollapsingHeader::new("할 일 받기와 완료 보고 (할 일이 없을 때 잠기는 이유)")
+        .default_open(false)
+        .show(ui, task_flow_guide);
     egui::CollapsingHeader::new("AI 비서 탭으로 말로 쓰기")
         .default_open(false)
         .show(ui, assistant_guide);
@@ -35,6 +38,41 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
         .default_open(false)
         .show(ui, updates_guide);
     open_settings
+}
+
+/// How a to-do is given, reported and repeated, and why everything locks while none is given.
+fn task_flow_guide(ui: &mut egui::Ui) {
+    paragraph(
+        ui,
+        "1. 할 일 받기: 할 일 탭의 \"할 일 받기\" 버튼을 누르면, 이 프로그램의 AI가 생활 규칙과 할 일 \
+         목록을 보고 지금 할 일과 그 할 일을 할 시간(10분~12시간)을 정합니다. 시간은 예상 시간에 묶이지 \
+         않고 AI가 판단해서 짧게도 길게도 정합니다.",
+    );
+    paragraph(
+        ui,
+        "2. 할 일이 없을 때의 잠금: 설정이 보호되어 있고 맡은 할 일이 없으면, 이 프로그램은 모든 앱과 \
+         웹사이트를 잠그고 사용자가 \"할 일 받기\"를 누르기를 기다립니다. 할 일을 받는 순간부터 시간이 \
+         흐르므로, 자리를 비운 동안 시간이 지나가 버리지 않습니다. 이 잠금에서도 Claude Desktop과 이 앱은 \
+         열 수 있습니다.",
+    );
+    paragraph(
+        ui,
+        "3. 완료 보고: 정해진 시간이 끝나면 할 일 탭에 \"완료 보고\"가 나옵니다. 사용자는 \"끝냈다\"(AI가 \
+         심사합니다) 또는 \"다 못 했다\"(심사 없이 받아들여지고 할 일은 목록에 남습니다) 중 하나를 \
+         보고해야 합니다. 보고하기 전에는 다른 일을 받거나 할 일을 그만둘 수 없습니다. 보고한 뒤에는 다시 \
+         \"할 일 받기\"를 누를 때까지 할 일이 없습니다.",
+    );
+    paragraph(
+        ui,
+        "4. 반복하는 할 일: 잠자기, 출근 준비, 운동처럼 되풀이하는 일은 할 일을 추가할 때 \"반복하는 할 \
+         일\"에 표시하세요. 반복하는 할 일은 끝내도 목록에서 사라지지 않습니다. 할 일 목록은 할 일마다 \
+         지금까지 쓴 시간과 예상 시간을 함께 보여 줍니다.",
+    );
+    paragraph(
+        ui,
+        "5. 할 일별 차단: AI가 건 차단은 그 차단을 건 할 일에 속합니다. 할 일이 바뀌면 차단 목록도 그 할 \
+         일의 것으로 바뀌고, 예전 할 일로 돌아오면 그 할 일의 차단이 다시 적용됩니다.",
+    );
 }
 
 /// How to protect (lock) the settings; `true` when "설정 탭 열기" was pressed.
@@ -254,9 +292,9 @@ fn claude_desktop_guide(ui: &mut egui::Ui) {
              여유를 계산하고, 그 계획은 통계 탭에도 보입니다.",
         ),
         (
-            "\"공부 자료 보려고 유튜브 30분만 열어 줘\"",
+            "\"공부 자료 보려고 유튜브 열어 줘\"",
             "Claude가 그 목적으로 접근을 요청합니다. 이 프로그램의 AI가 지금 할 일과 생활 규칙에 비추어 \
-             심사합니다. 항상 막을 프로그램과 웹사이트는 풀리지 않습니다.",
+             심사하고, 허용할 시간도 정합니다. 항상 막을 프로그램과 웹사이트는 풀리지 않습니다.",
         ),
         (
             "\"생활 규칙에 '일요일 오후에는 운동이나 쉬기만 한다'를 넣어 줘.\"",

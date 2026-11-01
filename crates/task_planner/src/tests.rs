@@ -280,8 +280,13 @@ fn rejected_request_is_logged_and_changes_nothing() {
 }
 
 #[test]
-fn approved_done_moves_to_next_and_ends_after_the_last() {
+fn approved_done_waits_for_the_next_request_and_routines_stay() {
     let fixture = harness(true, &["a", "b"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.todos[1].repeat = true)
+        .unwrap();
     fixture.planner.assign(Utc::now()).unwrap();
     fixture
         .planner
@@ -292,21 +297,31 @@ fn approved_done_moves_to_next_and_ends_after_the_last() {
             Evidence::default(),
         )
         .unwrap();
-    assert_eq!(fixture.focus.store().get().task, "work on b");
+    // Nothing is assigned until the user asks; no pick happened.
+    assert!(fixture.planner.status().assignment.is_none());
+    assert!(!fixture.focus.store().get().session_active);
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.planner.status().open_todos.len(), 1);
 
+    // The routine "b" is done but stays on the list.
+    fixture.planner.assign(Utc::now()).unwrap();
+    assert_eq!(fixture.focus.store().get().task, "work on b");
     fixture
         .planner
         .request_change(
             Utc::now(),
             ChangeKind::Done,
-            "4장도 끝냄",
+            "운동 마침",
             Evidence::default(),
         )
         .unwrap();
-    assert!(!fixture.planner.is_active());
-    assert!(fixture.planner.status().assignment.is_none());
-    assert!(!fixture.focus.store().get().session_active);
+    let status = fixture.planner.status();
+    assert!(status.assignment.is_none());
+    assert_eq!(status.open_todos.len(), 1);
+    assert!(status.open_todos[0].repeat);
+    assert!(status.recent_done.iter().any(|done| done.todo_id == "b"));
+    // Its time counts again from the finish.
+    assert_eq!(status.minutes_this_round.get("b"), Some(&0));
 }
 
 #[test]
@@ -369,27 +384,6 @@ fn change_kind_json_shape() {
     );
     let done: ChangeKind = serde_json::from_value(serde_json::json!({ "kind": "done" })).unwrap();
     assert_eq!(done, ChangeKind::Done);
-}
-
-#[test]
-fn approved_done_with_a_failing_pick_ends_the_session() {
-    let fixture = harness(true, &["a", "b"]);
-    fixture.planner.assign(Utc::now()).unwrap();
-    fixture.advisor.bogus_pick.store(true, Ordering::SeqCst);
-    let record = fixture
-        .planner
-        .request_change(
-            Utc::now(),
-            ChangeKind::Done,
-            "3장 초안 제출함",
-            Evidence::default(),
-        )
-        .unwrap();
-    assert!(record.approved);
-    assert!(fixture.planner.status().assignment.is_none());
-    assert!(!fixture.focus.store().get().session_active);
-    // "a" is done; "b" is still open, so the planner stays active.
-    assert!(fixture.planner.is_active());
 }
 
 fn proposal(title: &str) -> ProposalInput {
@@ -674,7 +668,7 @@ fn the_todo_change_question_carries_the_rules_and_the_item() {
 }
 
 #[test]
-fn an_assignment_runs_for_the_time_the_ai_gave_it_then_a_new_one_is_picked() {
+fn when_the_time_is_up_the_task_stays_until_the_user_reports() {
     let fixture = harness(true, &["a", "b"]);
     let start = Utc::now();
     let assignment = fixture.planner.assign(start).unwrap();
@@ -682,101 +676,67 @@ fn an_assignment_runs_for_the_time_the_ai_gave_it_then_a_new_one_is_picked() {
         assignment.until,
         Some(start + chrono::Duration::minutes(45))
     );
-    assert_eq!(assignment.when_time_is_up, WhenTimeIsUp::Reassign);
-
-    // Before the end: nothing happens and the AI is not asked.
     let before_end = start + chrono::Duration::minutes(44);
-    assert!(fixture
-        .planner
-        .reassign_if_time_is_up(before_end)
-        .unwrap()
-        .is_none());
-    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 1);
-
-    // At the end: the AI picks again (here the same to-do) with a new end.
     let at_end = start + chrono::Duration::minutes(45);
-    let next = fixture
-        .planner
-        .reassign_if_time_is_up(at_end)
-        .unwrap()
-        .expect("a new assignment");
-    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 2);
-    assert_eq!(next.until, Some(at_end + chrono::Duration::minutes(45)));
-
-    // A restart after the time is up picks again instead of resuming.
-    let later = at_end + chrono::Duration::minutes(50);
-    fixture.planner.assign(later).unwrap();
-    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 3);
-}
-
-#[test]
-fn notify_only_needs_the_ai_and_keeps_the_task_past_its_end() {
-    let fixture = harness(true, &["a", "b"]);
-    let start = Utc::now();
-    fixture.planner.assign(start).unwrap();
-    let notify_only = ChangeKind::SetWhenTimeIsUp {
-        action: WhenTimeIsUp::NotifyOnly,
-    };
-
-    // Rejected: nothing changes, and the task is replaced when its time is up.
-    fixture.advisor.approve.store(false, Ordering::SeqCst);
-    let record = fixture
-        .planner
-        .request_change(
-            start,
-            notify_only.clone(),
-            "almost done with the proof",
-            Evidence::default(),
-        )
-        .unwrap();
-    assert!(!record.approved);
-    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 1);
-    let assignment = fixture.planner.status().assignment.unwrap();
-    assert_eq!(assignment.when_time_is_up, WhenTimeIsUp::Reassign);
-
-    // Approved: the task stays after its end, also across a restart.
-    fixture.advisor.approve.store(true, Ordering::SeqCst);
-    assert!(
+    let report = |now, kind: ChangeKind| {
         fixture
             .planner
-            .request_change(
-                start,
-                notify_only,
-                "almost done with the proof",
-                Evidence::default()
-            )
-            .unwrap()
-            .approved
-    );
-    let after_end = start + chrono::Duration::minutes(60);
-    assert!(fixture
-        .planner
-        .reassign_if_time_is_up(after_end)
-        .unwrap()
-        .is_none());
-    let resumed = fixture.planner.assign(after_end).unwrap();
-    assert_eq!(resumed.when_time_is_up, WhenTimeIsUp::NotifyOnly);
-    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 1);
+            .request_change(now, kind, "보고합니다 진행 상황", Evidence::default())
+    };
 
-    // Going back to "a new task when time is up" is stricter: no AI call.
-    let record = fixture
-        .planner
-        .request_change(
-            after_end,
+    // "Not finished" only once the time is up.
+    assert!(matches!(
+        report(before_end, ChangeKind::NotFinished),
+        Err(PlannerError::NotTimeYet)
+    ));
+    // Once it is up, nothing but a report: no new task, no repick.
+    assert!(matches!(
+        fixture.planner.assign(at_end),
+        Err(PlannerError::ReportFirst)
+    ));
+    assert!(matches!(
+        report(at_end, ChangeKind::Repick),
+        Err(PlannerError::ReportFirst)
+    ));
+    assert!(matches!(
+        report(
+            at_end,
             ChangeKind::SetWhenTimeIsUp {
-                action: WhenTimeIsUp::Reassign,
-            },
-            "back to the plan",
-            Evidence::default(),
-        )
-        .unwrap();
+                action: WhenTimeIsUp::NotifyOnly
+            }
+        ),
+        Err(PlannerError::NoLongerUsed)
+    ));
+    assert_eq!(
+        fixture
+            .planner
+            .status()
+            .assignment
+            .unwrap()
+            .todo_id
+            .as_deref(),
+        Some("a")
+    );
+
+    // "Not finished": no AI review, the to-do stays, nothing is assigned.
+    let record = report(at_end, ChangeKind::NotFinished).unwrap();
     assert!(record.approved);
-    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 2);
-    assert!(fixture
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+    let status = fixture.planner.status();
+    assert!(status.assignment.is_none());
+    assert_eq!(status.open_todos.len(), 2);
+    assert!(!fixture.focus.store().get().session_active);
+    assert!(matches!(
+        report(at_end, ChangeKind::Done),
+        Err(PlannerError::NothingAssigned)
+    ));
+
+    // The next task comes when the user asks for it.
+    fixture
         .planner
-        .reassign_if_time_is_up(after_end)
-        .unwrap()
-        .is_some());
+        .assign(at_end + chrono::Duration::minutes(5))
+        .unwrap();
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -922,7 +882,7 @@ fn open_ended_work_finished_early_keeps_the_time_left_for_improving_it() {
         .config_store()
         .update(|config| config.todos[0].estimate_minutes = Some(240))
         .unwrap();
-    let start = Utc::now() - chrono::Duration::minutes(90);
+    let start = Utc::now() - chrono::Duration::minutes(50);
     fixture.planner.assign(start).unwrap();
     *fixture.advisor.outcome.lock() = "open_ended".into();
     // 30 minutes on a report the AI judged needs 240.
@@ -959,7 +919,7 @@ fn open_ended_work_finished_early_keeps_the_time_left_for_improving_it() {
     assert_eq!(improve.title, "Improve: title a");
     assert_eq!(improve.estimate_minutes, Some(210));
 
-    // 60 minutes improving it come off the time left.
+    // 25 minutes improving it come off the time left (within the switch's 30 minutes).
     *fixture.advisor.outcome.lock() = "not_applicable".into();
     let improving_from = finished_at + chrono::Duration::minutes(5);
     fixture
@@ -976,7 +936,7 @@ fn open_ended_work_finished_early_keeps_the_time_left_for_improving_it() {
     fixture
         .planner
         .request_change(
-            improving_from + chrono::Duration::minutes(60),
+            improving_from + chrono::Duration::minutes(25),
             ChangeKind::SwitchTodo {
                 todo_id: "b".into(),
             },
@@ -986,7 +946,7 @@ fn open_ended_work_finished_early_keeps_the_time_left_for_improving_it() {
         .unwrap();
     assert_eq!(
         fixture.planner.state_store_for_tests().get().polish["a"].minutes_left,
-        150
+        185
     );
 
     // Finishing the improvement removes it.
@@ -1095,13 +1055,13 @@ fn improve_todos_cannot_be_edited_or_removed() {
 #[test]
 fn without_an_estimate_only_this_assignment_counts_for_improving() {
     let fixture = harness(true, &["a", "b"]);
-    // An earlier hour on a, then a new 45-minute assignment finished after 10 minutes.
+    // An earlier 40 minutes on a, then a new 30-minute assignment finished after 10 minutes.
     let start = Utc::now() - chrono::Duration::minutes(70);
     fixture.planner.assign(start).unwrap();
     fixture
         .planner
         .request_change(
-            start + chrono::Duration::minutes(60),
+            start + chrono::Duration::minutes(40),
             ChangeKind::SwitchTodo {
                 todo_id: "a".into(),
             },
@@ -1113,7 +1073,7 @@ fn without_an_estimate_only_this_assignment_counts_for_improving() {
     fixture
         .planner
         .request_change(
-            start + chrono::Duration::minutes(70),
+            start + chrono::Duration::minutes(50),
             ChangeKind::Done,
             "the draft is usable",
             Evidence::default(),

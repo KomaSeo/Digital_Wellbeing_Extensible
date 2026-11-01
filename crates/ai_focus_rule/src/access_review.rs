@@ -22,8 +22,11 @@ reference site). Reject vague purposes, purposes the recent activity \
 contradicts, and requests for something that was recently revoked for misuse \
 unless the user gives new information.
 
-For a timed request you may grant fewer minutes than asked if the purpose \
-needs less; never more. Grant permanent access only for a standing work need \
+When the user left the length to you, set `minutes` to what the stated purpose \
+needs, no more than the maximum given (a quick look: a few minutes; a lecture or a \
+call: its length); 0 (until revoked) only when that is offered and the need is a \
+standing one. For a timed request you may grant fewer minutes than asked if the \
+purpose needs less; never more. Grant permanent access only for a standing work need \
 (a tool or reference the user needs across their work), not for entertainment; \
 if a permanent request deserves only a timed grant, return the minutes.
 
@@ -44,6 +47,9 @@ pub struct AccessRequest<'a> {
     pub history: &'a str,
     /// Earlier grant events, newest first.
     pub recent: &'a [GrantLogEntry],
+    /// The settings' limits, for a length the AI decides.
+    pub max_minutes: u32,
+    pub permanent_allowed: bool,
 }
 
 /// Responsibility: Hold the AI's structured answer to an access request.
@@ -111,6 +117,15 @@ fn request_text(request: &AccessRequest) -> String {
     let duration = match request.duration {
         GrantDuration::Minutes { minutes } => format!("{minutes} minutes"),
         GrantDuration::Permanent => "permanent (until revoked)".into(),
+        GrantDuration::AiDecides => format!(
+            "not chosen by the user: decide the minutes yourself, at most {}{}",
+            request.max_minutes,
+            if request.permanent_allowed {
+                "; until revoked (0) is allowed for a standing need"
+            } else {
+                "; until revoked is not allowed"
+            }
+        ),
     };
     let recent: Vec<String> = request
         .recent
@@ -177,6 +192,11 @@ pub fn granted_length(
         // Permanent not allowed (0 = the AI agreed to permanent): give the cap.
         GrantDuration::Permanent if decision.minutes == 0 => Some(Some(cap)),
         GrantDuration::Permanent => Some(Some(decision.minutes.min(cap))),
+        GrantDuration::AiDecides if decision.minutes == 0 && config.allow_permanent_grants => {
+            Some(None)
+        }
+        GrantDuration::AiDecides if decision.minutes == 0 => Some(Some(cap)),
+        GrantDuration::AiDecides => Some(Some(decision.minutes.clamp(1, cap))),
     }
 }
 
@@ -214,6 +234,45 @@ mod tests {
         assert_eq!(
             granted_length(asked, &decision(true, 0), &config),
             Some(Some(30))
+        );
+    }
+
+    #[test]
+    fn the_ai_decides_the_length_within_the_settings() {
+        let config = AiFocusConfig {
+            max_grant_minutes: 60,
+            allow_permanent_grants: false,
+            ..AiFocusConfig::default()
+        };
+        let left_to_ai = GrantDuration::AiDecides;
+        assert_eq!(
+            granted_length(left_to_ai, &decision(true, 20), &config),
+            Some(Some(20))
+        );
+        assert_eq!(
+            granted_length(left_to_ai, &decision(true, 500), &config),
+            Some(Some(60))
+        );
+        // "Until revoked" only where the settings allow it.
+        assert_eq!(
+            granted_length(left_to_ai, &decision(true, 0), &config),
+            Some(Some(60))
+        );
+        let permanent_ok = AiFocusConfig {
+            allow_permanent_grants: true,
+            ..config.clone()
+        };
+        assert_eq!(
+            granted_length(left_to_ai, &decision(true, 0), &permanent_ok),
+            Some(None)
+        );
+        assert_eq!(
+            granted_length(left_to_ai, &decision(false, 20), &config),
+            None
+        );
+        assert_eq!(
+            serde_json::to_value(left_to_ai).unwrap(),
+            serde_json::json!({ "kind": "ai_decides" })
         );
     }
 

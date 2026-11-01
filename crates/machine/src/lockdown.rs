@@ -10,6 +10,10 @@
 //! model is the problem) takes effect at once instead of being scheduled.
 //!
 //! Network errors do not lock: they say nothing about the key.
+//!
+//! The same lock holds while there are to-dos but none is assigned (after a report, or
+//! before the first task of the day): the user starts the next task by asking for it, so
+//! the time the AI gives it is not spent away from the computer. Then browsers close too.
 //! Walkthrough (Korean): `docs/ai_focus_rule.md` 5.13.
 
 use ai_focus_rule::connection::{Connection, KeyProblem};
@@ -18,45 +22,69 @@ use enforcer::{normalize_process_name, BlockEvent, BlockRule, ProcessSnapshot};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Responsibility: Name why every app is locked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LockdownCause {
+    /// The AI connection is broken.
+    Connection { problem: KeyProblem },
+    /// There are to-dos but none is assigned: the user asks for their task ("할 일 받기").
+    NoTask,
+}
+
 /// Responsibility: Describe a lockdown in force for the Focus app and the settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lockdown {
-    pub problem: KeyProblem,
+    pub cause: LockdownCause,
     /// Why, in Korean, for the Focus app.
     pub reason: String,
     /// Settings (paths of keys in `ai_focus.json`) whose edits take effect at once while
     /// locked.
     pub fix_now: Vec<Vec<String>>,
+    /// Browsers stay open with Claude and Anthropic pages only (to fix the key); otherwise
+    /// they are closed like every other app.
+    pub browsers_allowed: bool,
 }
 
-/// The lockdown in force, if any.
-pub fn lockdown(protected: bool, connection: &Connection) -> Option<Lockdown> {
-    let Connection::Broken { problem, detail } = connection else {
-        return None;
-    };
+/// The lockdown in force, if any. Only once the settings are protected: during setup
+/// nothing locks. A broken connection comes first, since fixing it needs the browser.
+pub fn lockdown(
+    protected: bool,
+    connection: &Connection,
+    waiting_for_task: bool,
+) -> Option<Lockdown> {
     if !protected {
         return None;
     }
-    let what = match problem {
-        KeyProblem::NoKey => "API 키가 없습니다".to_string(),
-        KeyProblem::Rejected => {
-            "API가 키를 받아들이지 않습니다(틀렸거나, 취소되었거나, 꺼진 키)".to_string()
+    if let Connection::Broken { problem, detail } = connection {
+        let what = match problem {
+            KeyProblem::NoKey => "API 키가 없습니다".to_string(),
+            KeyProblem::Rejected => {
+                "API가 키를 받아들이지 않습니다(틀렸거나, 취소되었거나, 꺼진 키)".to_string()
+            }
+            KeyProblem::Billing => "API 계정의 크레딧이 없거나 사용 한도에 닿았습니다".to_string(),
+            KeyProblem::UnknownModel => "API가 설정의 모델을 모릅니다".to_string(),
+        };
+        let mut fix_now = vec![vec!["api_key".to_string()]];
+        if *problem == KeyProblem::UnknownModel {
+            fix_now.push(vec!["model".to_string()]);
         }
-        KeyProblem::Billing => "API 계정의 크레딧이 없거나 사용 한도에 닿았습니다".to_string(),
-        KeyProblem::UnknownModel => "API가 설정의 모델을 모릅니다".to_string(),
-    };
-    let mut fix_now = vec![vec!["api_key".to_string()]];
-    if *problem == KeyProblem::UnknownModel {
-        fix_now.push(vec!["model".to_string()]);
+        return Some(Lockdown {
+            cause: LockdownCause::Connection { problem: *problem },
+            reason: if *problem == KeyProblem::NoKey || detail.is_empty() {
+                what
+            } else {
+                format!("{what} ({detail})")
+            },
+            fix_now,
+            browsers_allowed: true,
+        });
     }
-    Some(Lockdown {
-        problem: *problem,
-        reason: if *problem == KeyProblem::NoKey || detail.is_empty() {
-            what
-        } else {
-            format!("{what} ({detail})")
-        },
-        fix_now,
+    waiting_for_task.then(|| Lockdown {
+        cause: LockdownCause::NoTask,
+        reason: "지금 할 일이 없습니다. 준비되면 \"할 일 받기\"를 누르세요".to_string(),
+        fix_now: Vec::new(),
+        browsers_allowed: false,
     })
 }
 
@@ -129,14 +157,12 @@ impl BlockRule for LockdownRule {
             .iter()
             .filter(|process| {
                 !spared(process, |name| {
-                    config.is_always_allowed(name) || config.is_browser(name)
+                    config.is_always_allowed(name)
+                        || (lockdown.browsers_allowed && config.is_browser(name))
                 })
             })
             .map(|process| {
-                BlockEvent::new(
-                    process,
-                    format!("AI 연결이 끊겨 모든 앱을 막는 중: {}", lockdown.reason),
-                )
+                BlockEvent::new(process, format!("모든 앱을 막는 중: {}", lockdown.reason))
             })
             .collect()
     }
@@ -161,20 +187,28 @@ mod tests {
             problem: KeyProblem::Rejected,
             detail: "401".into(),
         };
-        assert!(lockdown(false, &broken).is_none(), "setup never locks");
-        assert!(lockdown(true, &Connection::Working).is_none());
-        assert!(lockdown(true, &Connection::Unknown).is_none());
-        let locked = lockdown(true, &broken).unwrap();
+        assert!(
+            lockdown(false, &broken, true).is_none(),
+            "setup never locks"
+        );
+        assert!(lockdown(true, &Connection::Working, false).is_none());
+        assert!(lockdown(true, &Connection::Unknown, false).is_none());
+        let locked = lockdown(true, &broken, true).unwrap();
         assert_eq!(locked.fix_now, vec![vec!["api_key".to_string()]]);
+        assert!(locked.browsers_allowed, "the connection comes first");
         let model = lockdown(
             true,
             &Connection::Broken {
                 problem: KeyProblem::UnknownModel,
                 detail: "404".into(),
             },
+            false,
         )
         .unwrap();
         assert_eq!(model.fix_now.len(), 2);
+        let waiting = lockdown(true, &Connection::Working, true).unwrap();
+        assert_eq!(waiting.cause, LockdownCause::NoTask);
+        assert!(!waiting.browsers_allowed);
     }
 
     #[test]
@@ -187,6 +221,7 @@ mod tests {
                 problem: KeyProblem::NoKey,
                 detail: String::new(),
             },
+            false,
         );
         let rule = LockdownRule {
             active: Arc::new(move || locked.clone()),
@@ -225,6 +260,23 @@ mod tests {
             .collect();
         // Browsers stay; the monitor closes their tabs except Claude pages.
         assert_eq!(closed, ["steam.exe", "KakaoTalk.exe"]);
+
+        // Waiting for a task: browsers close too.
+        let waiting = lockdown(true, &Connection::Working, true);
+        let rule = LockdownRule {
+            active: Arc::new(move || waiting.clone()),
+            settings: AiFocusStore::in_memory(AiFocusConfig::default()),
+            closes_programs: true,
+        };
+        let closed: Vec<String> = rule
+            .evaluate(&processes)
+            .into_iter()
+            .map(|event| event.process_name)
+            .collect();
+        assert_eq!(
+            closed,
+            ["steam.exe", "chrome.exe", "KakaoTalk.exe", "KeePass.exe"]
+        );
 
         let off = LockdownRule {
             active: Arc::new(|| None),

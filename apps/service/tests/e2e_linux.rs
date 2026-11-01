@@ -260,22 +260,6 @@ fn end_to_end(real_key: Option<String>) {
             urgent, "a-thesis",
             "work due today comes before rest and play"
         );
-        // Asking the AI to keep this task past its planned end instead of a new pick.
-        let status = call(
-            session,
-            "request_change",
-            json!({
-                "request": { "kind": "set_when_time_is_up", "action": "notify_only" },
-                "reason": "I am in the middle of the final edits and it is due today; \
-                           stopping halfway would cost me the context.",
-            }),
-        )
-        .unwrap();
-        let decision = status.last_decision.expect("the AI decided");
-        println!(
-            "notify only when time is up: approved {} ({})",
-            decision.approved, decision.reply
-        );
         let rest = assign(
             session,
             &[
@@ -487,14 +471,21 @@ fn end_to_end(real_key: Option<String>) {
         // the settings protected, the agent locks every app; a new key takes effect at once
         // (not scheduled), and the lock ends once the key works again.
         common::REJECT_EVERY_KEY.store(true, Ordering::SeqCst);
+        use machine::lockdown::LockdownCause;
         let locked = wait_for(Duration::from_secs(20), || {
-            call(session, "status", json!({})).ok()?.lockdown
+            call(session, "status", json!({}))
+                .ok()?
+                .lockdown
+                .filter(|lockdown| matches!(lockdown.cause, LockdownCause::Connection { .. }))
         })
         .expect("a refused key locks every app");
         assert_eq!(
-            locked.problem,
-            ai_focus_rule::connection::KeyProblem::Rejected
+            locked.cause,
+            LockdownCause::Connection {
+                problem: ai_focus_rule::connection::KeyProblem::Rejected
+            }
         );
+        assert!(locked.browsers_allowed);
         assert_eq!(locked.fix_now, vec![vec!["api_key".to_string()]]);
         let mut ai_focus =
             call_value(session, "settings_get", json!({})).unwrap()["files"]["ai_focus"].clone();
@@ -513,9 +504,44 @@ fn end_to_end(real_key: Option<String>) {
         common::REJECT_EVERY_KEY.store(false, Ordering::SeqCst);
         wait_for(Duration::from_secs(20), || {
             let status = call(session, "status", json!({})).ok()?;
-            status.lockdown.is_none().then_some(())
+            (!status
+                .lockdown
+                .is_some_and(|lockdown| matches!(lockdown.cause, LockdownCause::Connection { .. })))
+            .then_some(())
         })
         .expect("a working key ends the lockdown");
+
+        // 8. Nothing assigned: after a report every app is locked (browsers too) until the
+        // user asks for the next task.
+        let has_task = |status: &Status| {
+            status
+                .planner
+                .as_ref()
+                .is_some_and(|planner| planner.assignment.is_some())
+        };
+        if !has_task(&call(session, "status", json!({})).unwrap()) {
+            call(session, "assign", json!({})).unwrap();
+        }
+        let reported = call(
+            session,
+            "request_change",
+            json!({ "request": { "kind": "done" }, "reason": "finished the stand-in task" }),
+        )
+        .unwrap();
+        assert!(reported
+            .last_decision
+            .as_ref()
+            .is_some_and(|decision| decision.approved));
+        assert!(!has_task(&reported), "a report leaves nothing assigned");
+        let waiting = wait_for(Duration::from_secs(10), || {
+            call(session, "status", json!({})).ok()?.lockdown
+        })
+        .expect("nothing assigned locks every app");
+        assert_eq!(waiting.cause, LockdownCause::NoTask);
+        assert!(!waiting.browsers_allowed);
+        let assigned = call(session, "assign", json!({})).unwrap();
+        assert!(has_task(&assigned));
+        assert!(assigned.lockdown.is_none(), "{:?}", assigned.lockdown);
     }
 
     let _ = std::fs::remove_dir_all(&data);
@@ -806,7 +832,7 @@ fn assign(session: u32, todos: &[Value], life_rules: &str) -> String {
         "rules: {life_rules}\n  -> {:?} for {minutes} min: {}\n     why: {}",
         assignment.todo_id, assignment.task, assignment.why
     );
-    assert!((10..=480).contains(&minutes), "{minutes} minutes");
+    assert!((10..=720).contains(&minutes), "{minutes} minutes");
     assert!(
         status.session_active,
         "the assignment starts a focus session"

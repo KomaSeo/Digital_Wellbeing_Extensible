@@ -35,6 +35,11 @@ pub struct AiFocusConfig {
     pub session_active: bool,
     /// What the user says they are working on right now.
     pub task: String,
+    /// Which to-do the task belongs to (its id; "free" for a task off the list; empty without
+    /// a planner). Blocks belong to it: when it changes, the blocks of the new one apply.
+    /// Runtime only, like `task` in the agent: never saved.
+    #[serde(skip)]
+    pub task_scope: String,
     /// Seconds after which a window judged unsure (or an app judged off_task that is
     /// still collecting strikes) is judged again; also the pause after a failed call.
     /// New windows are judged at once, whatever this says.
@@ -95,6 +100,7 @@ impl Default for AiFocusConfig {
         Self {
             session_active: false,
             task: String::new(),
+            task_scope: String::new(),
             check_interval_secs: 60,
             model: DEFAULT_MODEL.to_string(),
             api_key: String::new(),
@@ -273,6 +279,7 @@ impl AiFocusStore {
         let mut config = self.inner.write();
         fresh.session_active = config.session_active;
         fresh.task = std::mem::take(&mut config.task);
+        fresh.task_scope = std::mem::take(&mut config.task_scope);
         *config = fresh;
         Ok(())
     }

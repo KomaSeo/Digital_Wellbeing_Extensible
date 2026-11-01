@@ -88,6 +88,9 @@ pub enum GrantDuration {
     },
     /// Until revoked (by the admin, or by the monitor for misuse).
     Permanent,
+    /// The user does not choose: the AI grants what the purpose needs, within the settings'
+    /// limits. What the Focus app sends.
+    AiDecides,
 }
 
 /// Responsibility: Record one approved access (target, purpose, end time) and tell whether it

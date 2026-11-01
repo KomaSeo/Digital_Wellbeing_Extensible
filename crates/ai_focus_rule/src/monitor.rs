@@ -80,9 +80,25 @@ pub struct BlockedEntry {
 
 /// Responsibility: Hold the blocks in force, as saved to disk so that logging
 /// out and back in (which restarts the agent) does not lift them.
+///
+/// Blocks belong to the to-do they were made for (`scope`, see
+/// [`AiFocusConfig::task_scope`]): `processes` and `tabs` are those of the current to-do,
+/// `other_scopes` those of the others, which apply again when their to-do comes back.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedBlocks {
+    pub processes: HashMap<String, BlockedEntry>,
+    pub tabs: HashMap<String, BlockedEntry>,
+    /// The to-do `processes` and `tabs` belong to. Empty in files saved before blocks had
+    /// one, and without a planner.
+    pub scope: String,
+    pub other_scopes: HashMap<String, BlockSet>,
+}
+
+/// Responsibility: Hold the blocks of one to-do that is not the current one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlockSet {
     pub processes: HashMap<String, BlockedEntry>,
     pub tabs: HashMap<String, BlockedEntry>,
 }
@@ -106,6 +122,10 @@ pub struct MonitorState {
     /// Off-task verdicts in a row per app (or per grant of an app); see
     /// [`Self::apply_judgement`]. Browser tabs are blocked at the first one.
     strikes: HashMap<String, u32>,
+    /// The to-do the blocks below belong to (see [`SavedBlocks`]).
+    pub block_scope: String,
+    /// Blocks of the other to-dos, by to-do.
+    pub other_scopes: HashMap<String, BlockSet>,
     /// Normalized process name -> block.
     pub blocked_processes: HashMap<String, BlockedEntry>,
     /// Browser "process|site" -> block (see [`tab_key`]); on YouTube
@@ -130,18 +150,39 @@ pub struct MonitorState {
 
 impl MonitorState {
     /// Start over for a new task (or a stopped session). Strikes start from
-    /// zero; blocks stay, since they do not depend on the task: re-entering
-    /// the task (or stopping and starting) must not lift them.
+    /// zero; blocks stay with their to-do: re-entering the task (or stopping and starting)
+    /// must not lift them.
     pub fn reset(&mut self, task: &str) {
         *self = Self {
             task: task.to_string(),
             history: std::mem::take(&mut self.history),
             verdicts: std::mem::take(&mut self.verdicts),
             channels: std::mem::take(&mut self.channels),
+            block_scope: std::mem::take(&mut self.block_scope),
+            other_scopes: std::mem::take(&mut self.other_scopes),
             blocked_processes: std::mem::take(&mut self.blocked_processes),
             blocked_tabs: std::mem::take(&mut self.blocked_tabs),
             ..Default::default()
         };
+    }
+
+    /// Put away the blocks of the current to-do and bring back those of `scope`.
+    pub fn switch_block_scope(&mut self, scope: &str) {
+        if self.block_scope == scope {
+            return;
+        }
+        let leaving = BlockSet {
+            processes: std::mem::take(&mut self.blocked_processes),
+            tabs: std::mem::take(&mut self.blocked_tabs),
+        };
+        if !leaving.processes.is_empty() || !leaving.tabs.is_empty() {
+            self.other_scopes
+                .insert(std::mem::take(&mut self.block_scope), leaving);
+        }
+        let coming = self.other_scopes.remove(scope).unwrap_or_default();
+        self.blocked_processes = coming.processes;
+        self.blocked_tabs = coming.tabs;
+        self.block_scope = scope.to_string();
     }
 
     pub fn record(&mut self, now: DateTime<Utc>, foreground: &Foreground) {
@@ -360,7 +401,18 @@ impl MonitorState {
         };
         self.blocked_processes.retain(lifted);
         self.blocked_tabs.retain(lifted);
-        before != self.blocked_processes.len() + self.blocked_tabs.len()
+        let mut lifted_elsewhere = false;
+        for set in self.other_scopes.values_mut() {
+            let count = set.processes.len() + set.tabs.len();
+            set.processes
+                .retain(|_, block| !config.unblocked.contains(&block.id));
+            set.tabs
+                .retain(|_, block| !config.unblocked.contains(&block.id));
+            lifted_elsewhere |= count != set.processes.len() + set.tabs.len();
+        }
+        self.other_scopes
+            .retain(|_, set| !set.processes.is_empty() || !set.tabs.is_empty());
+        lifted_elsewhere || before != self.blocked_processes.len() + self.blocked_tabs.len()
     }
 
     /// Remember which channel a YouTube page belongs to.
@@ -693,11 +745,19 @@ impl FocusMonitor {
             let state = self.state.get_mut();
             state.blocked_processes = saved.processes;
             state.blocked_tabs = saved.tabs;
+            state.block_scope = saved.scope;
+            state.other_scopes = saved.other_scopes;
             let now = Utc::now();
             let mut missing: Vec<&mut BlockedEntry> = state
                 .blocked_processes
                 .values_mut()
                 .chain(state.blocked_tabs.values_mut())
+                .chain(
+                    state
+                        .other_scopes
+                        .values_mut()
+                        .flat_map(|set| set.processes.values_mut().chain(set.tabs.values_mut())),
+                )
                 .filter(|block| block.id.is_empty())
                 .collect();
             let ids: Vec<String> = (0..missing.len())
@@ -718,6 +778,8 @@ impl FocusMonitor {
             SavedBlocks {
                 processes: state.blocked_processes.clone(),
                 tabs: state.blocked_tabs.clone(),
+                scope: state.block_scope.clone(),
+                other_scopes: state.other_scopes.clone(),
             }
         };
         if current != self.blocks.get() {
@@ -798,6 +860,7 @@ impl FocusMonitor {
         if self.close_always_blocked_sites(now, &config) {
             return;
         }
+        let mut scope_switched = false;
         {
             let mut state = self.state.lock();
             // Before the session check: blocks apply without a session too.
@@ -807,12 +870,20 @@ impl FocusMonitor {
             } else {
                 ""
             };
+            // A new to-do brings its own blocks; without a session the last ones stay.
+            if config.session_active && state.block_scope != config.task_scope {
+                state.switch_block_scope(&config.task_scope);
+                scope_switched = true;
+            }
             if state.task != task {
                 state.reset(task);
             }
             if task.is_empty() {
                 return;
             }
+        }
+        if scope_switched {
+            self.save_blocks();
         }
 
         self.tidy_grants(now, &config);
@@ -1117,6 +1188,8 @@ impl FocusMonitor {
             purpose,
             history: &history,
             recent: &recent,
+            max_minutes: config.max_grant_minutes.max(1),
+            permanent_allowed: config.allow_permanent_grants,
         })?;
 
         let length = granted_length(duration, &decision, &config);
@@ -1735,6 +1808,47 @@ mod tests {
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
         assert_eq!(fixture.monitor.state().task, "play games");
         assert_eq!(fixture.monitor.state().blocked_processes.len(), 1);
+    }
+
+    #[test]
+    fn blocks_belong_to_the_todo_they_were_made_for() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        config.task_scope = "thesis-todo".into();
+        let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.monitor.state().blocked_processes.len(), 1);
+        // Another to-do (a break): its own blocks, none yet.
+        fixture
+            .monitor
+            .store()
+            .update(|stored_config| {
+                stored_config.task = "rest and play".into();
+                stored_config.task_scope = "rest-todo".into();
+            })
+            .unwrap();
+        *fixture.verdict.lock() = Verdict::OnTask;
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(1));
+        assert!(fixture.monitor.state().blocked_processes.is_empty());
+        // Back to the thesis: its block applies again.
+        fixture
+            .monitor
+            .store()
+            .update(|stored_config| {
+                stored_config.task = "thesis".into();
+                stored_config.task_scope = "thesis-todo".into();
+            })
+            .unwrap();
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(2));
+        assert_eq!(fixture.monitor.state().blocked_processes.len(), 1);
+        let saved = fixture.monitor.blocks.get();
+        assert_eq!(saved.scope, "thesis-todo");
+        assert_eq!(saved.processes.len(), 1);
     }
 
     #[test]

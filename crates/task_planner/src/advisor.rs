@@ -23,8 +23,9 @@ You assign the user's next piece of work from their own to-do list, inside a \
 personal focus app they set up to hold themselves to their plan.
 
 You get the current local time, the open to-dos (id, title, notes, deadline, \
-priority 1-5, estimate in minutes), what was finished recently, the previous \
-assignment and a log of recent foreground windows.
+priority 1-5, estimate in minutes, whether it is a routine), what was finished \
+recently, the previous assignment and a log of recent foreground windows. The \
+user asked for their next task just now and starts at once.
 
 Pick exactly one open to-do to work on now. Weigh deadlines first (overdue, \
 then due today or tomorrow), then priority, then fit with the time of day. \
@@ -35,14 +36,21 @@ improved; their estimate is the time left for that. When nothing is overdue or \
 due today, prefer them over rest and leisure (unless the life rules call for a \
 break now). To-dos marked \
 \"proposed\": true were added by the user and approved by an AI review against the \
-life rules; weigh them like any other.
+life rules; weigh them like any other. To-dos marked \"repeat\": true are routines \
+(sleep, getting ready, exercise, meals) that stay on the list after they are done: \
+use the recently finished list, the time of day and the life rules to judge whether \
+one is due now.
 
-Decide `minutes`: how long this session should run before you pick again \
-(15 to 240). Base it on the to-do's estimate, its deadline, the time of day and \
-the life rules (for example a break they require after a stretch of work); a \
-break or leisure to-do gets the time the rules allow. When the time is up you \
-are asked again, and you may pick the same to-do. If the previous assignment's \
-time is up and it is not finished, weigh continuing it against what else is due.
+Decide `minutes`: how long this session runs (10 to 720). It is your own \
+judgement, not a copy of the estimate: make it shorter than the estimate to split \
+long work into focused sessions or to fit a break or appointment the life rules \
+require soon, and as long as the activity needs when that is longer (a night's \
+sleep, a long exam). Base it on the estimate, the time already spent, the \
+deadline, the time of day and the life rules; a break or leisure to-do gets the \
+time the rules allow. When the time is up the user reports whether the to-do is \
+finished, and you are asked again only when they ask for their next task; you may \
+pick the same to-do again. If the previous assignment was not finished, weigh \
+continuing it against what else is due.
 
 Then write `task`: one or two sentences saying concretely what to do in this \
 session, naming the apps and websites it plausibly needs. A separate checker \
@@ -135,17 +143,13 @@ with having worked on it for a plausible time);
 - a real break after a long stretch of focused work.
 For a switch to another to-do or a free-form task, also judge whether it is a \
 sensible use of time compared with the open list and its deadlines, and when \
-approving set `minutes`: how long the new task should run before the next pick \
-(15 to 240). For other requests set `minutes` to 0.
+approving set `minutes`: how long the new task should run (10 to 720). For \
+other requests set `minutes` to 0.
 
-Each assignment has a planned end; by default a new task is picked then. The \
-user may ask to be only notified when the time is up instead, which means \
-keeping on with the current task past its planned end until they ask for a \
-change. Approve that when finishing in one go plausibly matters (deep work that \
-is nearly done, a deadline today, being in the middle of something that is \
-costly to resume) and the life rules allow it; reject it when it would skip a \
-break the life rules require, delay something more urgent, or the task is \
-leisure.
+Each assignment has a planned end. When it is up the user reports whether the \
+to-do is finished; only \"done\" reports come to you. A to-do marked as a routine \
+(\"repeat\") stays on the list when it is done, so judge only whether this \
+round of it was done.
 
 Finishing a to-do, especially before its planned time is up: first decide what \
 kind of result it has, and set `outcome`.
@@ -659,6 +663,9 @@ fn describe(request: &ChangeKind, target_title: Option<&str>) -> String {
                                user does not choose what)"
             .into(),
         ChangeKind::End => "end the focus session".into(),
+        ChangeKind::NotFinished => {
+            "report that the time is up and the to-do is not finished".into()
+        }
         ChangeKind::SetWhenTimeIsUp {
             action: WhenTimeIsUp::NotifyOnly,
         } => "when the current task's time is up, only be notified and keep on with it \

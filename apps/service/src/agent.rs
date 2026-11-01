@@ -30,7 +30,7 @@ use machine::lockdown::LockdownRule;
 use machine::session::{current_session_id, process_session_id};
 use machine::user_api::AgentApi;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use task_planner::{claude_advisor_provider, JsonStore, PlannerConfig, PlannerState, TaskPlanner};
@@ -40,7 +40,6 @@ const RELOAD_INTERVAL: Duration = Duration::from_secs(3);
 /// How often the planner loop looks for a missing session or an assignment whose time is
 /// up, and how long it waits after a failed AI call before trying again.
 const PLANNER_CHECK_INTERVAL: Duration = Duration::from_secs(15);
-const PLANNER_RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
 /// How often the AI connection is checked while it works, and while it is broken.
 const PROBE_WHILE_WORKING: Duration = Duration::from_secs(300);
 const PROBE_WHILE_BROKEN: Duration = Duration::from_secs(30);
@@ -81,6 +80,14 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         Some(machine::usage_dir()),
     ));
     ai_focus_rule::usage::install(Arc::clone(&usage));
+    // The planner is made after the monitor (it drives it); the lockdown asks it whether a
+    // task is assigned.
+    let planner_cell: Arc<OnceLock<Arc<TaskPlanner>>> = Arc::new(OnceLock::new());
+    let lockdown_planner = Arc::clone(&planner_cell);
+    let lockdown_now: Arc<dyn Fn() -> Option<machine::lockdown::Lockdown> + Send + Sync> =
+        Arc::new(move || {
+            machine::user_api::lockdown_now(lockdown_planner.get().map(|planner| planner.as_ref()))
+        });
     let monitor = Arc::new(
         FocusMonitor::new(
             ai_store.clone(),
@@ -90,7 +97,10 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         .with_grants(grants)
         .with_block_store(blocks)
         .with_usage(Arc::clone(&usage))
-        .with_lockdown(Arc::new(|| machine::user_api::lockdown_now().is_some())),
+        .with_lockdown({
+            let lockdown_now = Arc::clone(&lockdown_now);
+            Arc::new(move || lockdown_now().is_some_and(|lockdown| lockdown.browsers_allowed))
+        }),
     );
     let ai_rule = AiFocusRuleHandle::new(Arc::clone(&monitor));
 
@@ -103,7 +113,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     // Protected settings and a broken AI connection: every app but the browsers (Claude pages
     // only, see the monitor) and Claude Desktop is closed until the key works again.
     enforcer.register_rule(Arc::new(LockdownRule {
-        active: Arc::new(machine::user_api::lockdown_now),
+        active: Arc::clone(&lockdown_now),
         settings: ai_store.clone(),
         closes_programs: cfg!(windows),
     }));
@@ -122,9 +132,9 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         claude_advisor_provider(),
     ));
 
+    let _ = planner_cell.set(Arc::clone(&planner));
     let auto_planner = Arc::clone(&planner);
-    let auto_monitor = Arc::clone(&monitor);
-    thread::spawn(move || planner_loop(auto_planner, auto_monitor));
+    thread::spawn(move || planner_loop(auto_planner));
 
     let api = Arc::new(AgentApi {
         monitor: Arc::clone(&monitor),
@@ -143,38 +153,16 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// While the planner is on, a focus session is not optional: if none is
-/// running (after logon, or when the user simply never asks for a task),
-/// start one with the assigned task. A recent assignment is resumed without
-/// an AI call. When the current assignment's time is up, the AI picks the next
-/// one (unless the user got "notify only" approved). After a failed AI call
-/// (e.g. no network) wait a minute before trying again.
-fn planner_loop(planner: Arc<TaskPlanner>, monitor: Arc<FocusMonitor>) {
-    let mut next_attempt = Instant::now();
+/// After logon the assignment there is goes on (no AI call). Nothing is ever picked here:
+/// the user asks for their next task ("할 일 받기"), and until then every app is locked
+/// (see `machine::lockdown`). When an assignment's time is up it stays until the user
+/// reports whether it is finished.
+fn planner_loop(planner: Arc<TaskPlanner>) {
     loop {
-        thread::sleep(PLANNER_CHECK_INTERVAL);
-        if !planner.is_active() || Instant::now() < next_attempt {
-            continue;
-        }
-        let now = chrono::Utc::now();
-        // A task typed before the planner was always on (no assignment) is replaced by one
-        // the AI picks.
-        let typed_task = planner.status().assignment.is_none();
-        let result = if monitor.store().get().session_active && !typed_task {
-            planner.reassign_if_time_is_up(now).map(|assignment| {
-                if let Some(assignment) = assignment {
-                    info!("time was up; next assignment: {}", assignment.task);
-                }
-            })
-        } else {
-            planner
-                .assign(now)
-                .map(|assignment| info!("started focus session automatically: {}", assignment.task))
-        };
-        if let Err(error) = result {
+        if let Err(error) = planner.resume() {
             warn!("planner: {error}");
-            next_attempt = Instant::now() + PLANNER_RETRY_AFTER_FAILURE;
         }
+        thread::sleep(PLANNER_CHECK_INTERVAL);
     }
 }
 

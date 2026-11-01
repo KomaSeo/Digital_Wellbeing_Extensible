@@ -4,9 +4,11 @@
 //! It drives the AI focus session: an assignment becomes the focus monitor's
 //! task (and starts the session); an approved "end" stops it.
 //!
-//! Every assignment runs for the time the AI gave it (`until`). When that is up, the agent
-//! calls [`TaskPlanner::reassign_if_time_is_up`] and the AI picks again, unless the user got
-//! "only notify me" approved for that assignment.
+//! Every assignment runs for the time the AI gave it (`until`). When that is up, the task
+//! stays until the user reports whether it is finished ("done", reviewed by the AI, or "not
+//! finished", which keeps the to-do). After a report, or when nothing is assigned, the next
+//! task comes only when the user asks for it ([`TaskPlanner::assign`]); meanwhile the agent
+//! locks every app (`machine::lockdown`). Routines (`repeat`) stay on the list when finished.
 
 use crate::advisor::{
     AdvisorProvider, PickRequest, Review, ReviewRequest, ReviewedTodo, TodoChangeRequest,
@@ -35,12 +37,10 @@ const MAX_OPEN_PROPOSED: usize = 50;
 const MAX_TITLE_CHARS: usize = 120;
 const MAX_NOTES_CHARS: usize = 1000;
 const MIN_REASON_CHARS: usize = 4;
-/// An assignment older than this is not resumed after a restart; a new one is picked.
-const RESUME_WITHIN: Duration = Duration::hours(12);
 /// Bounds on the time the AI gives one assignment, and the time an approved switch gets
 /// when the AI names none.
 const MIN_ASSIGNMENT_MINUTES: u32 = 10;
-const MAX_ASSIGNMENT_MINUTES: u32 = 480;
+const MAX_ASSIGNMENT_MINUTES: u32 = 720;
 const DEFAULT_ASSIGNMENT_MINUTES: u32 = 60;
 /// Finished assignments kept for the time spent per to-do (a few weeks).
 const ASSIGNMENT_LOG_CAPACITY: usize = 1000;
@@ -70,6 +70,18 @@ pub enum PlannerError {
     TooManyProposals,
     #[error("\"{0}\"은(는) 일찍 끝낸 일을 다듬도록 앱이 만든 할 일입니다. 끝내거나 다듬기 시간을 다 쓰면 없어집니다")]
     MadeByTheApp(String),
+    #[error("할 일 시간이 다 됐습니다. 먼저 끝냈는지 보고하세요(끝냈다 또는 다 못 했다)")]
+    ReportFirst,
+    #[error(
+        "\"다 못 했다\"는 할 일 시간이 다 된 뒤에 보고합니다. 그 전에는 \"다른 일 받기\"를 쓰세요"
+    )]
+    NotTimeYet,
+    #[error(
+        "시간이 다 됐을 때의 동작은 더 이상 고르지 않습니다. 시간이 다 되면 완료 보고를 합니다"
+    )]
+    NoLongerUsed,
+    #[error("지금 할 일이 없습니다")]
+    NothingAssigned,
     #[error("AI: {0}")]
     Ai(#[from] JudgeError),
     #[error("저장하지 못했습니다: {0}")]
@@ -129,7 +141,7 @@ impl TaskPlanner {
                     .filter(|todo| !config.dismissed.contains(&todo.id))
                     .cloned(),
             )
-            .filter(|todo| !state.is_done(&todo.id))
+            .filter(|todo| todo.repeat || !state.is_done(&todo.id))
             .chain(
                 state
                     .polish
@@ -155,6 +167,12 @@ impl TaskPlanner {
             .filter(|assignment| assignment.todo_id.as_deref() == Some(todo_id))
             .map_or(0, |assignment| (now - assignment.at).num_minutes().max(0));
         finished + running
+    }
+
+    /// There are to-dos but none is assigned: the agent locks every app until the user asks
+    /// for their task.
+    pub fn waiting_for_task(&self) -> bool {
+        self.state.get().assignment.is_none() && self.is_active()
     }
 
     /// Something left to do: the user cannot type a task freely.
@@ -189,6 +207,30 @@ impl TaskPlanner {
             .unwrap_or(now - Duration::days(1));
         let mut minutes_today = BTreeMap::new();
         let mut minutes_total = BTreeMap::new();
+        // A routine counts again from its last finish.
+        let mut minutes_this_round: BTreeMap<String, i64> = BTreeMap::new();
+        for todo in &open_todos {
+            let last_done = todo.repeat.then(|| {
+                state
+                    .done
+                    .iter()
+                    .filter(|done| done.todo_id == todo.id)
+                    .map(|done| done.at)
+                    .max()
+            });
+            let spent: i64 = spans
+                .iter()
+                .filter(|span| span.todo_id.as_deref() == Some(todo.id.as_str()))
+                .map(|span| {
+                    let started = match last_done.flatten() {
+                        Some(done_at) => span.started.max(done_at),
+                        None => span.started,
+                    };
+                    (span.ended - started).num_minutes().max(0)
+                })
+                .sum();
+            minutes_this_round.insert(todo.id.clone(), spent);
+        }
         for span in &spans {
             let Some(todo_id) = &span.todo_id else {
                 continue;
@@ -224,6 +266,11 @@ impl TaskPlanner {
                 .map(|(todo_id, notes)| (todo_id.clone(), notes.clone()))
                 .collect(),
             week_plan: state.week_plan.clone(),
+            report_due: state
+                .assignment
+                .as_ref()
+                .is_some_and(|assignment| assignment.time_is_up(now)),
+            minutes_this_round,
             open_todos,
         }
     }
@@ -482,49 +529,42 @@ impl TaskPlanner {
         Ok(())
     }
 
-    /// Start (or resume) the session with an assigned task.
+    /// The user asks for their task ("할 일 받기"): the current one when there is one, or a new
+    /// one the AI picks. A task whose time is up must be reported first.
     pub fn assign(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
-        // Waits for a pick already running (the agent's own loop, say), then resumes it.
         let _busy = self.busy.lock();
         if !self.is_active() {
             return Err(PlannerError::NotActive);
         }
-        // Resume a recent assignment instead of asking again (e.g. after logon).
         if let Some(previous) = self.state.get().assignment {
             let still_open = previous
                 .todo_id
                 .as_deref()
                 .is_none_or(|id| self.open_todos().iter().any(|todo| todo.id == id));
-            if still_open
-                && now - previous.at < RESUME_WITHIN
-                && !previous.due_for_reassignment(now)
-            {
+            if still_open {
+                if previous.time_is_up(now) {
+                    return Err(PlannerError::ReportFirst);
+                }
                 self.start_focus(&previous)?;
                 return Ok(previous);
             }
+            // Its to-do left the list (removed, or finished elsewhere): pick anew.
+            self.end(now)?;
         }
         self.pick_and_apply(now, None)
     }
 
-    /// When the current assignment's time is up (and the user did not get "notify only"
-    /// approved for it), ask the AI for the next task. Returns the new assignment, or
-    /// `None` when nothing was due or another request is being handled.
-    pub fn reassign_if_time_is_up(
-        &self,
-        now: DateTime<Utc>,
-    ) -> Result<Option<Assignment>, PlannerError> {
+    /// After logon (an agent restart), go on with the assignment there is; never picks one.
+    pub fn resume(&self) -> Result<(), PlannerError> {
         let Some(_busy) = self.busy.try_lock() else {
-            return Ok(None);
+            return Ok(());
         };
-        let due = self
-            .state
-            .get()
-            .assignment
-            .is_some_and(|assignment| assignment.due_for_reassignment(now));
-        if !due || !self.is_active() {
-            return Ok(None);
+        if let Some(current) = self.state.get().assignment {
+            if !self.focus.store().get().session_active {
+                self.start_focus(&current)?;
+            }
         }
-        self.pick_and_apply(now, None).map(Some)
+        Ok(())
     }
 
     /// The user asks to change the assignment. Returns the AI's decision;
@@ -537,27 +577,23 @@ impl TaskPlanner {
         evidence: Evidence,
     ) -> Result<ChangeRecord, PlannerError> {
         let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
-        self.check_change(&request, reason)?;
+        self.check_change(now, &request, reason)?;
         let reason = reason.trim();
         let evidence_text: String = evidence.text.trim().chars().take(MAX_NOTES_CHARS).collect();
-        if request
-            == (ChangeKind::SetWhenTimeIsUp {
-                action: WhenTimeIsUp::Reassign,
-            })
-        {
-            // Stricter than the default it restores: no need to ask the AI.
+        if request == ChangeKind::NotFinished {
+            // Keeping the to-do on the list loosens nothing: no need to ask the AI.
             return self.record_and_apply(
                 now,
                 request,
                 reason,
                 Review {
                     approved: true,
-                    reply: "A new task will be picked when the time is up.".into(),
+                    reply: "할 일은 목록에 남습니다. 준비되면 \"할 일 받기\"를 누르세요.".into(),
                     minutes: 0,
                     outcome: String::new(),
                 },
                 &self.open_todos(),
-                (String::new(), false),
+                (evidence_text, false),
             );
         }
         let open = self.open_todos();
@@ -628,13 +664,35 @@ impl TaskPlanner {
     /// Refuse a change request that cannot be sent to the AI: the planner is off, the reason
     /// is too short, or the request names no open to-do or an empty task. Callers may check
     /// before doing slow work for the request (such as waiting for a proof screenshot).
-    pub fn check_change(&self, request: &ChangeKind, reason: &str) -> Result<(), PlannerError> {
+    pub fn check_change(
+        &self,
+        now: DateTime<Utc>,
+        request: &ChangeKind,
+        reason: &str,
+    ) -> Result<(), PlannerError> {
         let open = self.open_todos();
         if !self.is_active_with(&open) {
             return Err(PlannerError::NotActive);
         }
         if reason.trim().chars().count() < MIN_REASON_CHARS {
             return Err(PlannerError::ReasonTooShort);
+        }
+        let assignment = self.state.get().assignment;
+        let time_is_up = assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.time_is_up(now));
+        match request {
+            ChangeKind::SetWhenTimeIsUp { .. } => return Err(PlannerError::NoLongerUsed),
+            ChangeKind::Done | ChangeKind::NotFinished | ChangeKind::Repick | ChangeKind::End
+                if assignment.is_none() =>
+            {
+                return Err(PlannerError::NothingAssigned)
+            }
+            ChangeKind::NotFinished if !time_is_up => return Err(PlannerError::NotTimeYet),
+            // Nothing else before the report.
+            ChangeKind::Done | ChangeKind::NotFinished => {}
+            _ if time_is_up => return Err(PlannerError::ReportFirst),
+            _ => {}
         }
         match request {
             ChangeKind::SwitchTodo { todo_id } if !open.iter().any(|todo| &todo.id == todo_id) => {
@@ -721,24 +779,25 @@ impl TaskPlanner {
                     // to be spent improving it later.
                     // The to-do's estimate against all the time spent on it; without an
                     // estimate, this assignment's planned time against the time it ran.
-                    let polish_left = if review.outcome == "open_ended" && !is_polish(&todo.id) {
-                        match todo.estimate_minutes {
-                            Some(estimate) => {
-                                i64::from(estimate) - self.minutes_spent_on(&todo.id, now)
-                            }
-                            None => current
-                                .as_ref()
-                                .and_then(|assignment| {
-                                    assignment.until.map(|until| {
-                                        (until - assignment.at).num_minutes()
-                                            - (now - assignment.at).num_minutes().max(0)
+                    let polish_left =
+                        if review.outcome == "open_ended" && !is_polish(&todo.id) && !todo.repeat {
+                            match todo.estimate_minutes {
+                                Some(estimate) => {
+                                    i64::from(estimate) - self.minutes_spent_on(&todo.id, now)
+                                }
+                                None => current
+                                    .as_ref()
+                                    .and_then(|assignment| {
+                                        assignment.until.map(|until| {
+                                            (until - assignment.at).num_minutes()
+                                                - (now - assignment.at).num_minutes().max(0)
+                                        })
                                     })
-                                })
-                                .unwrap_or(0),
-                        }
-                    } else {
-                        0
-                    };
+                                    .unwrap_or(0),
+                            }
+                        } else {
+                            0
+                        };
                     let finished = todo.clone();
                     self.state.update(|planner_state| {
                         planner_state.done.push(record);
@@ -756,18 +815,10 @@ impl TaskPlanner {
                         }
                     })?;
                 }
-                // Next one, or stop when the list is empty. If picking fails
-                // (AI or network error), do not stay on the finished to-do:
-                // end the session so "Get my task" can be used again.
-                if self.is_active() {
-                    if let Err(error) = self.pick_and_apply(now, None) {
-                        tracing::warn!("could not pick the next to-do: {error}");
-                        self.end(now)?;
-                    }
-                } else {
-                    self.end(now)?;
-                }
+                // The next task comes when the user asks for it ("할 일 받기").
+                self.end(now)?;
             }
+            ChangeKind::NotFinished => self.end(now)?,
             ChangeKind::SwitchTodo { todo_id } => {
                 let todo = open
                     .iter()
@@ -883,10 +934,16 @@ impl TaskPlanner {
 
     fn start_focus(&self, assignment: &Assignment) -> Result<(), PlannerError> {
         let task = assignment.task.clone();
+        // Blocks belong to the to-do (see `SavedBlocks`).
+        let scope = assignment
+            .todo_id
+            .clone()
+            .unwrap_or_else(|| "free".to_string());
         self.focus
             .store()
             .update(|config| {
                 config.task = task;
+                config.task_scope = scope;
                 config.session_active = true;
             })
             .map_err(|error| PlannerError::Io(std::io::Error::other(error.to_string())))?;
@@ -1043,6 +1100,7 @@ fn polish_todo(todo_id: &str, polish: &PolishItem) -> TodoItem {
         priority: polish.todo.priority,
         estimate_minutes: u32::try_from(polish.minutes_left).ok(),
         proposed: polish.todo.proposed,
+        repeat: false,
     }
 }
 
@@ -1112,6 +1170,7 @@ fn completed_todo(
         priority,
         estimate_minutes,
         proposed: true,
+        repeat: draft.repeat.unwrap_or(false),
     }
 }
 
@@ -1145,6 +1204,9 @@ fn edited_fields(draft: &ProposalInput) -> Map<String, Value> {
             "estimate_minutes".into(),
             json!((minutes > 0).then_some(minutes.min(6000))),
         );
+    }
+    if let Some(repeat) = draft.repeat {
+        changed_fields.insert("repeat".into(), json!(repeat));
     }
     changed_fields
 }

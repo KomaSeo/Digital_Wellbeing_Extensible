@@ -49,6 +49,11 @@ evidence. When a request needs a reason and the user gave none, ask for it in on
 question.
 - When the app's AI rejects a proposal or a request, tell the user its reason plainly. \
 Do not send it again in other words, and do not talk the user out of the decision.
+- When the current task's time is up (report_due in get_status), the app accepts only a \
+report: request_change \"done\" (the app's AI reviews it) or \"not_finished\" (the to-do \
+stays). Ask the user which, if they did not say. After a report nothing is assigned until \
+the user asks for their next task (get_my_task), and meanwhile every app is locked.
+- For an access request, leave the length out: the app's AI decides it.
 - A scheduled settings update takes effect only after the user confirms it in the app's \
 Settings tab three times, two days apart. Tell the user that, and never press them to \
 confirm.
@@ -355,8 +360,7 @@ pub fn action_line(name: &str, input: &Value, outcome: &Result<String, String>) 
                 "done" => "끝냈다",
                 "repick" => "다른 일 받기",
                 "end" => "데일리 웰빙 멈추기",
-                "notify_when_time_is_up" => "시간이 다 되면 알리기만",
-                "reassign_when_time_is_up" => "시간이 다 되면 새로 정하기",
+                "not_finished" => "다 못 했다(보고)",
                 other => other,
             };
             format!("변경을 요청했습니다: {change}")

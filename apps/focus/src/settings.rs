@@ -664,17 +664,57 @@ impl SettingsTab {
         self.block_bar(ui, &BLOCKED_SITES, snapshot, protected);
 
         ui.separator();
-        ui.heading("지금 걸린 차단");
-        ui.small("차단 풀기는 예약됩니다. 바로 필요하면 차단 탭에서 접근을 요청하세요.");
+        ui.heading("걸린 차단");
+        ui.small(
+            "차단은 그 차단이 생긴 할 일에 붙어 있어서, 그 할 일을 받았을 때만 적용됩니다. 차단 풀기는 \
+             예약됩니다. 바로 필요하면 차단 탭에서 접근을 요청하세요.",
+        );
+        // A to-do's title from its id, for the blocks of each to-do.
+        let titles: HashMap<String, String> = snapshot
+            .files
+            .get("planner")
+            .and_then(|planner| planner["todos"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|todo| {
+                Some((
+                    todo["id"].as_str()?.to_string(),
+                    todo["title"].as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        let scope_label = |scope: &str| match scope {
+            "" => "할 일 없이".to_string(),
+            "free" => "목록 밖의 일".to_string(),
+            todo_id => format!(
+                "할 일 \"{}\"",
+                titles.get(todo_id).map_or(todo_id, String::as_str)
+            ),
+        };
         if let Some(drafts) = &mut self.drafts {
             let mut any = false;
             for (user, value) in &snapshot.blocks {
                 let blocks: SavedBlocks = from_value(value);
-                for (key, entry) in blocks.processes.iter().chain(blocks.tabs.iter()) {
+                let current = blocks
+                    .processes
+                    .iter()
+                    .chain(blocks.tabs.iter())
+                    .map(|(key, entry)| (blocks.scope.clone(), key, entry));
+                let others = blocks.other_scopes.iter().flat_map(|(scope, set)| {
+                    set.processes
+                        .iter()
+                        .chain(set.tabs.iter())
+                        .map(move |(key, entry)| (scope.clone(), key, entry))
+                });
+                for (scope, key, entry) in current.chain(others) {
                     any = true;
                     let unblocking = drafts.ai_focus.unblocked.contains(&entry.id);
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(format!("{user}: {key} — {}", entry.reason));
+                        ui.label(format!(
+                            "{user} · {}: {key} — {}",
+                            scope_label(&scope),
+                            entry.reason
+                        ));
                         if unblocking {
                             ui.colored_label(YELLOW, "풀기 대기 중");
                             if ui.small_button("계속 막기").clicked() {

@@ -17,7 +17,9 @@ proposal and change request against rules the account owner set. When a proposal
 request is rejected, tell the user the reason; do not retry it in other words. The \
 user never chooses what to work on next, not even through you: the app's AI does. When \
 they want to stop the current task, send request_change with change \"repick\" and their \
-reason, not a task of your or their choosing. A \
+reason, not a task of your or their choosing. When the task's time is up, the app \
+accepts only a report (request_change done or not_finished); the next task comes when \
+the user asks for it (get_my_task). A \
 scheduled settings update takes effect only after the user confirms it in the app three \
 times, two days apart; tell the user that, and never press them to confirm.";
 
@@ -47,6 +49,7 @@ pub fn tools() -> Value {
                     "deadline": { "type": "string", "description": "YYYY-MM-DD" },
                     "priority": { "type": "integer", "minimum": 1, "maximum": 5, "description": "1 low .. 5 urgent (default 3)" },
                     "estimate_minutes": { "type": "integer", "minimum": 1 },
+                    "repeat": { "type": "boolean", "description": "A routine (sleep, getting ready, exercise) that stays on the list when finished" },
                     "reason": { "type": "string", "description": "Why it belongs on the list (optional)" }
                 },
                 "required": ["title"]
@@ -65,6 +68,7 @@ pub fn tools() -> Value {
                     "deadline": { "type": "string", "description": "YYYY-MM-DD" },
                     "priority": { "type": "integer", "minimum": 1, "maximum": 5 },
                     "estimate_minutes": { "type": "integer", "minimum": 1 },
+                    "repeat": { "type": "boolean", "description": "Make it a routine (true) or a one-off (false)" },
                     "reason": { "type": "string", "description": "The user's reason, in their words" }
                 },
                 "required": ["todo_id", "reason"]
@@ -72,16 +76,16 @@ pub fn tools() -> Value {
         },
         {
             "name": "get_my_task",
-            "description": "Ask the app to assign the user's task now (the app's AI picks it from the list) and start the AI checks. Only works while the planner is on.",
+            "description": "The user's \"할 일 받기\": when nothing is assigned the app's AI picks the next task from the list and its time starts now; otherwise it returns the current task. Until the user asks, every app is locked (once the settings are protected). Refused when the current task's time is up and the user has not reported yet.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "request_change",
-            "description": "Ask to change the assigned task: it is done, get something else (repick: the app's AI picks what comes next; the user only gives the reason and never chooses the next task), or pause the AI checks (end). Every task runs until a planned end (\"until\" in get_status) and then the app's AI picks the next one; notify_when_time_is_up asks to keep the current task past that end and only be notified, reassign_when_time_is_up goes back to a new pick. The app's AI approves or rejects the reason (going back to reassign needs no approval).",
+            "description": "Ask to change the assigned task: it is done, get something else (repick: the app's AI picks what comes next; the user only gives the reason and never chooses the next task), or stop (end). Every task runs until a planned end (\"until\" in get_status); then (report_due in get_status) only a report is accepted: done (reviewed by the app's AI) or not_finished (the to-do stays on the list; no review). After a report or end, nothing is assigned until the user asks again (get_my_task). The app's AI approves or rejects the other requests.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "change": { "type": "string", "enum": ["done", "repick", "end", "notify_when_time_is_up", "reassign_when_time_is_up"] },
+                    "change": { "type": "string", "enum": ["done", "not_finished", "repick", "end"] },
                     "reason": { "type": "string", "description": "The user's reason, in their words" },
                     "evidence": { "type": "string", "description": "For done: proof of the result in the user's words (what was sent, to whom, an order number). The app's AI asks for proof when the result is a fact like a sent mail or an order; work that can always be improved (a report, practice) is accepted and the planned time left comes back later as an \"Improve: ...\" to-do." }
                 },
@@ -101,7 +105,7 @@ pub fn tools() -> Value {
                 "properties": {
                     "kind": { "type": "string", "enum": ["app", "site"] },
                     "target": { "type": "string", "description": "For app: the process name, e.g. \"spotify.exe\". For site: a word in the tab title, e.g. \"youtube\"" },
-                    "minutes": { "type": "integer", "minimum": 1, "description": "How long; leave out to ask until revoked (the settings may forbid that)" },
+                    "minutes": { "type": "integer", "minimum": 1, "description": "Leave out: the app's AI decides how long the purpose needs. Give it only when the user named a length" },
                     "purpose": { "type": "string", "description": "What the user will use it for, in their words" }
                 },
                 "required": ["kind", "target", "purpose"]
@@ -171,7 +175,13 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
         }
         "propose_todo" => {
             let mut todo = json!({ "title": arguments["title"].as_str().unwrap_or_default() });
-            for key in ["notes", "deadline", "priority", "estimate_minutes"] {
+            for key in [
+                "notes",
+                "deadline",
+                "priority",
+                "estimate_minutes",
+                "repeat",
+            ] {
                 if let Some(value) = arguments.get(key).filter(|value| !value.is_null()) {
                     todo[key] = value.clone();
                 }
@@ -193,7 +203,14 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                 json!({ "kind": "remove", "todo_id": todo_id })
             } else {
                 let mut todo = json!({});
-                for key in ["title", "notes", "deadline", "priority", "estimate_minutes"] {
+                for key in [
+                    "title",
+                    "notes",
+                    "deadline",
+                    "priority",
+                    "estimate_minutes",
+                    "repeat",
+                ] {
                     if let Some(value) = arguments.get(key).filter(|value| !value.is_null()) {
                         todo[key] = value.clone();
                     }
@@ -217,12 +234,7 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
             let request = match arguments["change"].as_str().unwrap_or_default() {
                 "done" => json!({ "kind": "done" }),
                 "end" => json!({ "kind": "end" }),
-                "notify_when_time_is_up" => {
-                    json!({ "kind": "set_when_time_is_up", "action": "notify_only" })
-                }
-                "reassign_when_time_is_up" => {
-                    json!({ "kind": "set_when_time_is_up", "action": "reassign" })
-                }
+                "not_finished" => json!({ "kind": "not_finished" }),
                 "repick" => json!({ "kind": "repick" }),
                 other => return Err(format!("unknown change '{other}'")),
             };
@@ -263,7 +275,7 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
             };
             let duration = match arguments["minutes"].as_u64() {
                 Some(minutes) => json!({ "kind": "minutes", "minutes": minutes }),
-                None => json!({ "kind": "permanent" }),
+                None => json!({ "kind": "ai_decides" }),
             };
             let status = status_from(
                 agent,
@@ -423,14 +435,18 @@ pub fn summary(status: &Status) -> Value {
             "todo_id": assignment.todo_id,
             "since": assignment.at,
             "until": assignment.until,
-            "when_time_is_up": assignment.when_time_is_up,
         })),
+        "report_due": planner.is_some_and(|planner| planner.report_due),
+        "all_apps_locked": status.lockdown.as_ref().map(|lockdown| &lockdown.reason),
         "open_todos": planner.map(|planner| planner.open_todos.iter().map(|todo| json!({
             "id": todo.id,
             "title": todo.title,
             "notes": todo.notes,
             "deadline": todo.deadline,
             "priority": todo.priority,
+            "estimate_minutes": todo.estimate_minutes,
+            "minutes_spent": planner.minutes_this_round.get(&todo.id),
+            "routine": todo.repeat,
             "proposed_by_user": todo.proposed,
         })).collect::<Vec<_>>()),
         "recent_todo_changes": planner.map(|planner| planner.recent_todo_changes.iter().map(|record| json!({

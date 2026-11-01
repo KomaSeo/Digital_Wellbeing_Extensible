@@ -25,6 +25,10 @@ pub struct TodoItem {
     /// approved by the AI, rather than written by the admin.
     #[serde(default)]
     pub proposed: bool,
+    /// A routine (sleep, getting ready, exercise): finishing it records it as done but keeps it
+    /// on the list, so the AI can assign it again.
+    #[serde(default)]
+    pub repeat: bool,
 }
 
 fn default_priority() -> u8 {
@@ -41,6 +45,7 @@ impl TodoItem {
             priority: default_priority(),
             estimate_minutes: None,
             proposed: false,
+            repeat: false,
         }
     }
 }
@@ -126,7 +131,11 @@ pub enum AssignmentSource {
     ApprovedChange,
 }
 
-/// Responsibility: Say what happens when an assignment's time is up.
+/// Responsibility: Say what happened when an assignment's time was up (older versions).
+///
+/// No longer used: when the time is up the task stays until the user reports whether it is
+/// finished ([`ChangeKind::Done`] or [`ChangeKind::NotFinished`]). Kept so older state files
+/// and requests still load.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WhenTimeIsUp {
@@ -157,10 +166,10 @@ pub struct Assignment {
 }
 
 impl Assignment {
-    /// The time is up and a new task should be picked now.
-    pub fn due_for_reassignment(&self, now: DateTime<Utc>) -> bool {
-        self.when_time_is_up == WhenTimeIsUp::Reassign
-            && self.until.is_some_and(|until| now >= until)
+    /// The time the AI gave is up: the user reports whether the to-do is finished before
+    /// anything else happens.
+    pub fn time_is_up(&self, now: DateTime<Utc>) -> bool {
+        self.until.is_some_and(|until| now >= until)
     }
 }
 
@@ -181,6 +190,9 @@ pub enum ChangeKind {
     Repick,
     /// Stop the focus session altogether.
     End,
+    /// The time is up and the to-do is not finished: it stays on the list, and the next task
+    /// comes when the user asks for one. Needs no AI review.
+    NotFinished,
     /// Change what happens when the current task's time is up. Asking for `NotifyOnly`
     /// (keep working past the planned end) needs the AI's approval; asking for `Reassign`
     /// is stricter and is approved without asking.
@@ -302,6 +314,8 @@ pub struct ProposalInput {
     /// 1 (low) ..= 5 (urgent); 3 when missing.
     pub priority: Option<u8>,
     pub estimate_minutes: Option<u32>,
+    /// A routine that stays on the list when finished.
+    pub repeat: Option<bool>,
 }
 
 /// Responsibility: Record one proposed to-do and the AI's decision.
@@ -466,4 +480,10 @@ pub struct PlannerStatus {
     /// The last overview of this week.
     #[serde(default)]
     pub week_plan: Option<WeekPlan>,
+    /// The current assignment's time is up: the user reports whether it is finished.
+    #[serde(default)]
+    pub report_due: bool,
+    /// Minutes spent per open to-do: in total, or since it was last finished for a routine.
+    #[serde(default)]
+    pub minutes_this_round: BTreeMap<String, i64>,
 }

@@ -87,8 +87,6 @@ struct Shared {
 struct AccessForm {
     site: bool,
     target: String,
-    /// `None` = permanent.
-    minutes: Option<u32>,
     purpose: String,
 }
 
@@ -97,7 +95,6 @@ impl Default for AccessForm {
         Self {
             site: true,
             target: String::new(),
-            minutes: Some(30),
             purpose: String::new(),
         }
     }
@@ -110,10 +107,8 @@ enum ChangeChoice {
     /// Something else, picked by the AI; the user only gives the reason.
     Repick,
     End,
-    /// Keep the task past its planned end; only show a notice (the AI decides).
-    NotifyWhenTimeIsUp,
-    /// Back to the default: a new task is picked when the time is up.
-    ReassignWhenTimeIsUp,
+    /// The time is up and the to-do is not finished (it stays on the list).
+    NotFinished,
 }
 
 /// Responsibility: Name the Focus window's tabs: what to do (the planner's assignment, the
@@ -290,17 +285,9 @@ impl FocusApp {
             };
             ui.add(egui::TextEdit::singleline(&mut self.access.target).hint_text(hint));
         });
-        ui.horizontal(|ui| {
-            ui.label("기간");
-            for minutes in [15, 30, 60, 120] {
-                ui.radio_value(
-                    &mut self.access.minutes,
-                    Some(minutes),
-                    format!("{minutes}분"),
-                );
-            }
-            ui.radio_value(&mut self.access.minutes, None, "취소할 때까지");
-        });
+        ui.small(
+            "기간은 고르지 않습니다. AI가 목적에 필요한 만큼(설정의 최대 길이 안에서) 정합니다.",
+        );
         ui.add(
             egui::TextEdit::multiline(&mut self.access.purpose)
                 .desired_rows(2)
@@ -318,10 +305,8 @@ impl FocusApp {
                 } else {
                     json!({ "kind": "app", "process": self.access.target.trim() })
                 };
-                let duration = match self.access.minutes {
-                    Some(minutes) => json!({ "kind": "minutes", "minutes": minutes }),
-                    None => json!({ "kind": "permanent" }),
-                };
+                // The AI decides how long (within the settings' limits).
+                let duration = json!({ "kind": "ai_decides" });
                 self.send(
                     "request_access",
                     json!({ "target": target, "duration": duration, "purpose": self.access.purpose }),
@@ -334,8 +319,17 @@ impl FocusApp {
         });
         if let Some(entry) = &self.shared.lock().access {
             let approved = matches!(entry.event, GrantEvent::Requested { approved: true, .. });
+            let granted = match entry.event {
+                GrantEvent::Requested {
+                    approved: true,
+                    granted_minutes: Some(minutes),
+                    ..
+                } => format!("허용됨({minutes}분)"),
+                GrantEvent::Requested { approved: true, .. } => "허용됨(취소할 때까지)".into(),
+                _ => "거절됨".to_string(),
+            };
             let (color, label) = if approved {
-                (GREEN, "허용됨")
+                (GREEN, granted.as_str())
             } else {
                 (RED, "거절됨")
             };

@@ -245,7 +245,25 @@ fn installed_agent_end_to_end() {
         .last_decision
         .as_ref()
         .is_some_and(|decision| decision.approved));
+    // Protected settings with to-dos but no task lock every app of this session (the runner's
+    // shell and this test included): empty the list first (still in setup, so at once).
+    call_value(
+        session,
+        "settings_put",
+        json!({ "name": "planner", "content": { "todos": [] }, "via": "e2e" }),
+    )
+    .unwrap();
+    let emptied = desktop.wait(Duration::from_secs(20), || {
+        let status: Status = call(session, "status", json!({})).ok()?;
+        status
+            .planner
+            .is_some_and(|planner| planner.open_todos.is_empty())
+            .then_some(())
+    });
+    assert!(emptied.is_some(), "the to-do list was emptied");
     common::check_protected_edits_are_scheduled(session);
+    let after: Status = call(session, "status", json!({})).unwrap();
+    assert!(after.lockdown.is_none(), "{:?}", after.lockdown);
 }
 
 /// Set by the message pump when a window gets Ctrl+W; read by the wait probe.

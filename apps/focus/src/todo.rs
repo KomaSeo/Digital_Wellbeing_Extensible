@@ -20,6 +20,11 @@ use task_planner::{
     WhenTimeIsUp,
 };
 
+/// Shown while there are to-dos but nothing is assigned.
+const WAITING_TEXT: &str =
+    "지금 할 일이 없습니다. 준비되면 \"할 일 받기\"를 누르세요. AI가 그때 할 일을 \
+                            고르고, 그때부터 시간이 갑니다.";
+
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
 /// Seconds between sending "I finished it" and the proof screenshot, to switch windows.
 const PROOF_SCREENSHOT_DELAY_SECONDS: u64 = 5;
@@ -54,6 +59,8 @@ struct TodoForm {
     priority: u8,
     /// 0 = let the AI decide (adding) / keep (editing).
     estimate_minutes: u32,
+    /// A routine: it stays on the list when finished.
+    repeat: bool,
     reason: String,
 }
 
@@ -70,6 +77,7 @@ impl TodoForm {
             "deadline": self.deadline_date(),
             "priority": (self.priority > 0).then_some(self.priority),
             "estimate_minutes": (self.estimate_minutes > 0).then_some(self.estimate_minutes),
+            "repeat": self.repeat,
         })
     }
 }
@@ -157,15 +165,31 @@ impl FocusApp {
             .as_ref()
             .filter(|_| status.session_active);
         let Some(assignment) = assignment else {
-            ui.label("AI가 할 일 목록에서 지금 할 일을 고릅니다.");
-            if ui
-                .add_enabled(idle, egui::Button::new("할 일 받기"))
-                .clicked()
-            {
-                self.send("assign", json!({}));
+            ui.label(WAITING_TEXT);
+            if status.settings_protected {
+                ui.colored_label(
+                    RED,
+                    "할 일을 받기 전까지는 이 앱과 Windows 말고는 모든 앱과 웹사이트가 잠깁니다.",
+                );
             }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        idle,
+                        egui::Button::new(egui::RichText::new("할 일 받기").strong()),
+                    )
+                    .clicked()
+                {
+                    self.send("assign", json!({}));
+                }
+                if !idle {
+                    ui.spinner();
+                    ui.label("AI가 고르는 중…");
+                }
+            });
             return;
         };
+        let report_due = planner.report_due;
 
         ui.group(|ui| {
             ui.set_width(ui.available_width());
@@ -190,22 +214,17 @@ impl FocusApp {
                         format!("{}에 시간이 다 되었습니다", local_time(until))
                     },
                 ));
-                match assignment.when_time_is_up {
-                    WhenTimeIsUp::Reassign if minutes_left >= 0 => {
-                        ui.small("시간이 다 되면 AI가 다음 할 일을 고릅니다.");
-                    }
-                    WhenTimeIsUp::Reassign => {
-                        ui.small("다음 할 일을 고르는 중…");
-                    }
-                    WhenTimeIsUp::NotifyOnly if minutes_left >= 0 => {
-                        ui.small("시간이 다 되어도 알림만 오고, 이 일을 계속합니다.");
-                    }
-                    WhenTimeIsUp::NotifyOnly => {
-                        ui.colored_label(
-                            RED,
-                            "시간이 다 되었습니다. 계속하거나, 끝났으면 변경을 요청하세요.",
-                        );
-                    }
+                if minutes_left >= 0 {
+                    ui.small(
+                        "시간이 다 되면 끝냈는지 보고합니다. 다음 할 일은 보고한 뒤 \"할 일 받기\"로 \
+                         받습니다.",
+                    );
+                } else {
+                    ui.colored_label(
+                        RED,
+                        "시간이 다 되었습니다. 아래 \"완료 보고\"에서 끝냈는지 알려 주세요. 보고하기 \
+                         전에는 다른 일로 넘어가지 않습니다.",
+                    );
                 }
             }
             if let Some(todo_id) = &assignment.todo_id {
@@ -228,16 +247,30 @@ impl FocusApp {
                 self.choice = ChangeChoice::Done;
                 self.reason = "끝낸 것: ".into();
             }
-            if ui.button("⛔ 막혔어요").clicked() {
-                self.choice = ChangeChoice::Repick;
-                self.reason = "막힌 까닭: ".into();
-            }
-            if ui.button("☕ 쉬고 싶어요").clicked() {
-                self.choice = ChangeChoice::Repick;
-                self.reason = "쉬어야 하는 까닭: ".into();
+            if report_due {
+                if ui.button("… 다 못 했어요").clicked() {
+                    self.choice = ChangeChoice::NotFinished;
+                    self.reason = "한 데까지: ".into();
+                }
+            } else {
+                if ui.button("⛔ 막혔어요").clicked() {
+                    self.choice = ChangeChoice::Repick;
+                    self.reason = "막힌 까닭: ".into();
+                }
+                if ui.button("☕ 쉬고 싶어요").clicked() {
+                    self.choice = ChangeChoice::Repick;
+                    self.reason = "쉬어야 하는 까닭: ".into();
+                }
             }
         });
-        self.change_ui(ui, assignment);
+        // Only a report once the time is up; "not finished" only then.
+        if report_due && !matches!(self.choice, ChangeChoice::Done | ChangeChoice::NotFinished) {
+            self.choice = ChangeChoice::Done;
+        }
+        if !report_due && self.choice == ChangeChoice::NotFinished {
+            self.choice = ChangeChoice::Done;
+        }
+        self.change_ui(ui, report_due);
     }
 
     /// The user's own notes and steps for the current to-do; the AI sees them when it
@@ -311,7 +344,7 @@ impl FocusApp {
     }
 
     /// Asking the AI to change what the planner assigned.
-    fn change_ui(&mut self, ui: &mut egui::Ui, assignment: &task_planner::Assignment) {
+    fn change_ui(&mut self, ui: &mut egui::Ui, report_due: bool) {
         let idle = !self.pending.load(Ordering::SeqCst);
         // The answer to the request sent last has come (or the request failed): an answer
         // clears the reason, an approval also the proof. After an error both stay.
@@ -332,28 +365,30 @@ impl FocusApp {
                 }
             }
         }
-        egui::CollapsingHeader::new("변경 요청")
+        egui::CollapsingHeader::new(if report_due {
+            "완료 보고"
+        } else {
+            "변경 요청"
+        })
             .id_salt("ask_to_change")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.radio_value(&mut self.choice, ChangeChoice::Done, "끝냈다");
-                    ui.radio_value(&mut self.choice, ChangeChoice::Repick, "다른 일 받기");
-                    ui.radio_value(&mut self.choice, ChangeChoice::End, "AI 검사 멈추기");
-                    match assignment.when_time_is_up {
-                        WhenTimeIsUp::Reassign => ui.radio_value(
-                            &mut self.choice,
-                            ChangeChoice::NotifyWhenTimeIsUp,
-                            "시간이 다 되어도 알림만 받기",
-                        ),
-                        WhenTimeIsUp::NotifyOnly => ui.radio_value(
-                            &mut self.choice,
-                            ChangeChoice::ReassignWhenTimeIsUp,
-                            "시간이 다 되면 새 할 일 받기",
-                        ),
-                    };
+                    if report_due {
+                        ui.radio_value(&mut self.choice, ChangeChoice::NotFinished, "다 못 했다");
+                    } else {
+                        ui.radio_value(&mut self.choice, ChangeChoice::Repick, "다른 일 받기");
+                        ui.radio_value(&mut self.choice, ChangeChoice::End, "AI 검사 멈추기");
+                    }
                 });
                 match self.choice {
+                    ChangeChoice::NotFinished => {
+                        ui.small(
+                            "할 일은 목록에 남습니다. 어디까지 했는지 적으세요. 보고한 뒤에는 \"할 일 \
+                             받기\"로 다음 할 일을 받습니다.",
+                        );
+                    }
                     ChangeChoice::Repick => {
                         ui.small(
                             "지금 할 일을 그만두고 다른 일을 받습니다. 무엇을 할지는 AI가 생활 규칙과 \
@@ -388,17 +423,7 @@ impl FocusApp {
                     ChangeChoice::Done => Some(ChangeKind::Done),
                     ChangeChoice::End => Some(ChangeKind::End),
                     ChangeChoice::Repick => Some(ChangeKind::Repick),
-                    // Offered only for the mode that is not in force.
-                    ChangeChoice::NotifyWhenTimeIsUp => (assignment.when_time_is_up
-                        == WhenTimeIsUp::Reassign)
-                        .then_some(ChangeKind::SetWhenTimeIsUp {
-                            action: WhenTimeIsUp::NotifyOnly,
-                        }),
-                    ChangeChoice::ReassignWhenTimeIsUp => (assignment.when_time_is_up
-                        == WhenTimeIsUp::NotifyOnly)
-                        .then_some(ChangeKind::SetWhenTimeIsUp {
-                            action: WhenTimeIsUp::Reassign,
-                        }),
+                    ChangeChoice::NotFinished => Some(ChangeKind::NotFinished),
                 };
                 let ready = idle && request.is_some() && self.reason.trim().chars().count() >= 4;
                 ui.horizontal(|ui| {
@@ -485,10 +510,22 @@ impl FocusApp {
                     None => {}
                 }
                 ui.label(format!("P{}", todo.priority));
-                if let Some(minutes) = todo.estimate_minutes {
-                    ui.small(minutes_text(minutes as i64));
-                }
+                // Time spent (since the last finish, for a routine) against the estimate.
+                let spent = planner
+                    .minutes_this_round
+                    .get(&todo.id)
+                    .copied()
+                    .unwrap_or(0);
+                ui.small(match todo.estimate_minutes {
+                    Some(minutes) => {
+                        format!("{} / {}", minutes_text(spent), minutes_text(minutes as i64))
+                    }
+                    None => format!("{} / 예상 없음", minutes_text(spent)),
+                });
                 ui.strong(&todo.title);
+                if todo.repeat {
+                    ui.small("(반복)");
+                }
                 if todo.proposed {
                     ui.small("(내가 추가)");
                 }
@@ -536,6 +573,7 @@ impl FocusApp {
                             .unwrap_or_default(),
                         priority: todo.priority,
                         estimate_minutes: todo.estimate_minutes.unwrap_or(0),
+                        repeat: todo.repeat,
                         reason: String::new(),
                     };
                     self.todo_ui.editing = Some(todo.id.clone());
@@ -640,6 +678,12 @@ impl FocusApp {
                     ui.add(egui::DragValue::new(&mut form.estimate_minutes).range(0..=6000));
                     ui.small("0 = AI가 정함");
                 });
+                ui.end_row();
+                ui.label("반복");
+                ui.checkbox(
+                    &mut form.repeat,
+                    "반복하는 할 일(잠자기, 출근 준비, 운동처럼 끝내도 목록에 남음)",
+                );
                 ui.end_row();
                 ui.label("이유");
                 ui.add(
@@ -889,6 +933,7 @@ fn task_planner_label(request: &ChangeKind) -> String {
         ChangeKind::SwitchFree { task } => format!("\"{task}\"(으)로 바꾸기"),
         ChangeKind::Repick => "다른 일 받기(AI가 고름)".into(),
         ChangeKind::End => "AI 검사 멈추기".into(),
+        ChangeKind::NotFinished => "다 못 했다(보고)".into(),
         ChangeKind::SetWhenTimeIsUp {
             action: WhenTimeIsUp::NotifyOnly,
         } => "시간이 다 되어도 알림만".into(),

@@ -154,10 +154,16 @@ AI, which reviews it against the life rules and fills in the fields of a new
 to-do the user left empty; an approved change is in force at once, even when
 the settings are protected. A rejected one can still be done by the user (not
 by Claude Desktop) after three confirmations two hours apart. The planner
-is always on (there is no switch and no mode where the user types the task): while
-any to-do is open, the AI picks the user's task from the list (the agent does so
-by itself every 15 s, or 「할 일 받기」) and that becomes the task the AI checks
-judge against. Finishing the task, getting something else or pausing the AI checks
+is always on (there is no switch and no mode where the user types the task): the AI
+picks the user's task from the list, and how long it runs (10 min to 12 h, its own
+judgement), only when the user presses 「할 일 받기」 (get a task); that becomes the
+task the AI checks judge against. While no task is given and the settings are
+protected, every app and site (browsers too) is locked until the user asks for one,
+so the clock does not run while the user is away. When the task's time is up, the
+user must report — done (AI-reviewed) or not finished (the to-do stays) — before
+anything else; then nothing is given until the next 「할 일 받기」. Routines (sleep,
+getting ready, exercise) are marked "repeat" and stay on the list when done. The
+blocks the AI makes belong to the to-do they were made for and change with it. Finishing the task, getting something else or pausing the AI checks
 needs a reason the AI approves; the user never chooses what comes next. "Something
 else" (「다른 일 받기」, change kind `repick`) carries only the reason, and once
 approved the AI picks the next task with that reason in view. The To-do tab shows
@@ -171,7 +177,8 @@ request, reviewing a to-do change) are settings: empty means the built-in text, 
 looser edit. Guide (Korean): [`docs/task_planner.md`](docs/task_planner.md).
 
 **Access requests**: from the Focus app the user can ask for an app or site
-the AI check blocks, for some minutes or permanently, stating the purpose.
+the AI check blocks, stating the purpose; the AI decides for how long (within the
+limits in the settings).
 If the AI approves, the block is lifted, but the app stays observed and is
 judged against that purpose; off-purpose use revokes the grant and blocks
 again. Blocks do not expire: an approved request lifts them, or the unblock

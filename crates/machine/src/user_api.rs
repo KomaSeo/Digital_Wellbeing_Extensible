@@ -191,15 +191,17 @@ fn status(api: &AgentApi) -> Status {
         settings_questions_due: crate::settings::questions_due(&crate::data_dir(), Utc::now()),
         ai_cost_today_usd: monitor.usage().map(|usage| usage.today_cost()),
         daily_budget_usd: config.daily_budget_usd,
-        lockdown: lockdown_now(),
+        lockdown: lockdown_now(api.planner.as_deref()),
     }
 }
 
-/// The lockdown in force now (see [`crate::lockdown`]).
-pub fn lockdown_now() -> Option<crate::lockdown::Lockdown> {
+/// The lockdown in force now (see [`crate::lockdown`]): a broken AI connection, or to-dos
+/// with none assigned.
+pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lockdown> {
     crate::lockdown::lockdown(
         crate::settings::is_protected(&crate::data_dir()),
         &ai_focus_rule::connection::current().0,
+        planner.is_some_and(TaskPlanner::waiting_for_task),
     )
 }
 
@@ -257,7 +259,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let name = params["name"].as_str().ok_or("params.name required")?;
             let via = params["via"].as_str().unwrap_or("settings tab");
             // While a broken AI connection locks every app, fixing the key works at once.
-            let fix_now = lockdown_now()
+            let fix_now = lockdown_now(api.planner.as_deref())
                 .map(|lockdown| lockdown.fix_now)
                 .unwrap_or_default();
             let outcome = crate::settings::put(
@@ -382,7 +384,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let reason = params["reason"].as_str().unwrap_or_default();
             // Refuse a request that cannot go to the AI before waiting for a screenshot.
             planner
-                .check_change(&request, reason)
+                .check_change(Utc::now(), &request, reason)
                 .map_err(|error| error.to_string())?;
             // A proof screenshot (for "done" only) is taken a few seconds later, so the user
             // can switch to the window that shows the result.
