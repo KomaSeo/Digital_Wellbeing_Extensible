@@ -231,6 +231,7 @@ cd <저장소 폴더>\target\release
 1. 이미 설치된 서비스가 있으면, 설치기는 그 서비스를 멈춥니다.
 2. 설치기는 실행 파일 3개(`digital-wellbeing-service.exe`, `digital-wellbeing-focus.exe`, `digital-wellbeing-mcp.exe`)를 `C:\Program Files\DigitalWellbeing\`에 복사합니다.
    예전 버전이 설치한 `digital-wellbeing.exe`가 그 폴더에 있으면, 설치기는 그 파일을 지웁니다.
+   그다음 설치기는 이 프로그램 폴더의 권한을 직접 정합니다. 폴더의 주인을 관리자 그룹으로 바꾸고, SYSTEM과 관리자는 모든 권한을, 일반 사용자(Users)는 읽기와 실행만 갖게 합니다. 위 폴더(Program Files)에서 물려받는 권한은 끊습니다. 그래서 작업 계정은 Focus 앱을 실행할 수는 있지만, 프로그램 파일을 지우거나 바꾸거나 권한을 고치지 못합니다. Program Files는 보통 이미 이렇게 되어 있지만, 물려받는 권한에 기대지 않으려고 설치할 때마다 다시 정합니다.
 3. 설치기는 `C:\ProgramData\DigitalWellbeing\` 폴더를 준비하고 잠급니다.
    - 처음 설치할 때 이 폴더가 이미 있으면, 설치기는 그 폴더의 주인과 권한을 봅니다.
      - 주인이 Administrators나 SYSTEM이고 그 밖의 누구도 폴더에 쓸 수 없으면, 그 폴더는 예전 설치가 잠가 둔 폴더입니다(프로그램을 지웠다가 다시 설치한 경우). 설치기는 그 폴더를 그대로 씁니다. 그래서 설정, API 키, 설정 보호가 그대로 남습니다.

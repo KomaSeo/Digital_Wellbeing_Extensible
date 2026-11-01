@@ -42,6 +42,7 @@ const RUN_VALUE: &str = "DigitalWellbeingFocus";
 /// Well-known SIDs, so this works on non-English Windows too.
 const SID_SYSTEM: &str = "*S-1-5-18";
 const SID_ADMINISTRATORS: &str = "*S-1-5-32-544";
+const SID_USERS: &str = "*S-1-5-32-545";
 
 fn service_access() -> ServiceAccess {
     ServiceAccess::QUERY_STATUS
@@ -128,6 +129,11 @@ fn install_steps(
             Err(error) => println!("warning: could not remove {}: {error}", legacy.display()),
         }
     }
+
+    // The program folder: users may run the programs, only administrators and SYSTEM may
+    // change or delete them. Program Files usually gives this already; set it explicitly so it
+    // does not depend on what the folder inherits.
+    lock_program_dir(&install_directory)?;
 
     // 3. data dir, locked down
     let data = machine::data_dir();
@@ -375,6 +381,46 @@ fn is_locked_down(path: &Path) -> bool {
     // SAFETY: allocated by GetNamedSecurityInfoW.
     unsafe { LocalFree(descriptor) };
     locked
+}
+
+/// Owner Administrators; SYSTEM and Administrators full control, Users read and run only;
+/// nothing inherited. Files inside (and `docs\`) inherit this.
+fn lock_program_dir(directory: &Path) -> anyhow::Result<()> {
+    run(Command::new("icacls").arg(directory).args([
+        "/setowner",
+        SID_ADMINISTRATORS,
+        "/T",
+        "/C",
+        "/L",
+        "/Q",
+    ]))
+    .context("set program folder owner")?;
+    run(Command::new("icacls").arg(directory).args([
+        "/inheritance:r",
+        "/grant:r",
+        &format!("{SID_SYSTEM}:(OI)(CI)F"),
+        "/grant:r",
+        &format!("{SID_ADMINISTRATORS}:(OI)(CI)F"),
+        "/grant:r",
+        &format!("{SID_USERS}:(OI)(CI)RX"),
+        "/L",
+        "/Q",
+    ]))
+    .context("restrict program folder")?;
+    if let Err(error) = run(Command::new("icacls")
+        .arg(directory.join("*"))
+        .args(["/reset", "/T", "/C", "/L", "/Q"]))
+    {
+        println!(
+            "warning: could not reset the ACLs inside {}: {error:#}",
+            directory.display()
+        );
+    }
+    println!(
+        "locked {}: users may run the programs, only administrators may change or delete them",
+        directory.display()
+    );
+    Ok(())
 }
 
 fn is_reparse_point(path: &Path) -> bool {

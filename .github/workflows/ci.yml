@@ -86,6 +86,20 @@ jobs:
           Write-Host $folder
           if ($folder -match "Users|Everyone|Authenticated") { throw "standard users can reach $data" }
 
+          Write-Host "== the program folder: users may only read and run"
+          $program = "C:\Program Files\DigitalWellbeing"
+          foreach ($item in @(Get-Item $program) + @(Get-ChildItem $program -Recurse)) {
+            foreach ($rule in (Get-Acl $item.FullName).Access) {
+              $who = $rule.IdentityReference.Value
+              if ($who -match "SYSTEM|Administrators|TrustedInstaller") { continue }
+              if ($rule.AccessControlType -ne "Allow") { continue }
+              if ($rule.FileSystemRights.ToString() -match "Write|Modify|FullControl|Delete|ChangePermissions|TakeOwnership") {
+                throw "$who may change $($item.FullName): $($rule.FileSystemRights)"
+              }
+            }
+          }
+          Write-Host (Get-Acl $program).AccessToString
+
           Write-Host "== service log after the upgrade"
           Get-Content "$data\logs\service.log" -Tail 20
           if (-not (Select-String -Path "$data\logs\service.log" -Pattern "service running" -Quiet)) {
