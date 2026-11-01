@@ -117,6 +117,31 @@ impl Default for AiFocusConfig {
     }
 }
 
+/// `title` without a trailing " - Google Chrome", " — Mozilla Firefox" and the like.
+fn without_browser_name(title: &str) -> &str {
+    const BROWSER_NAMES: [&str; 10] = [
+        "google chrome",
+        "chromium",
+        "microsoft edge",
+        "microsoft\u{200b} edge",
+        "mozilla firefox",
+        "firefox",
+        "whale",
+        "brave",
+        "opera",
+        "vivaldi",
+    ];
+    for separator in [" - ", " — ", " – "] {
+        if let Some((page, last)) = title.rsplit_once(separator) {
+            let last = last.trim().to_lowercase();
+            if BROWSER_NAMES.iter().any(|name| last.contains(name)) {
+                return page;
+            }
+        }
+    }
+    title
+}
+
 impl AiFocusConfig {
     pub fn is_always_allowed(&self, process_name: &str) -> bool {
         listed(&self.always_allow, process_name)
@@ -128,6 +153,17 @@ impl AiFocusConfig {
 
     pub fn is_browser(&self, process_name: &str) -> bool {
         listed(&self.browsers, process_name)
+    }
+
+    /// The always-blocked website pattern a browser tab title matches, if any. The browser's
+    /// own name at the end of the title ("… - Google Chrome") is left out, so a pattern such
+    /// as "google" does not match every tab.
+    pub fn always_blocked_site(&self, title: &str) -> Option<&str> {
+        let page = without_browser_name(title);
+        self.always_blocked_sites
+            .iter()
+            .find(|pattern| enforcer::pattern::matches_part(pattern, page))
+            .map(String::as_str)
     }
 
     /// API key from the environment, falling back to the saved one.

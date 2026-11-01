@@ -1,6 +1,7 @@
 //! Responsibility: Run the enforcement loop: snapshot processes, ask every registered
 //! BlockRule, and terminate what they block (never OS-critical or own processes).
 
+pub mod pattern;
 mod rule;
 
 pub use rule::{BlockEvent, BlockRule, ProcessSnapshot, RuleInfo};

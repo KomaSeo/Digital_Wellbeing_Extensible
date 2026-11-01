@@ -37,3 +37,20 @@ fn test_always_protected() {
         assert!(!config.should_block(protected));
     }
 }
+
+#[test]
+fn blacklist_entries_may_be_regular_expressions() {
+    let mut config = ListConfig::default();
+    config.blacklist.insert(".*Game.*".into());
+    config.blacklist.insert(r"(lol|valorant)\.exe".into());
+    config.blacklist.insert(".*".into());
+    config.sanitize();
+    // Kept as written (lower case), not turned into a file name.
+    assert!(config.blacklist.contains(".*game.*"));
+    assert!(config.blacklist.contains(r"(lol|valorant)\.exe"));
+    assert!(config.should_block("MyGame.exe"));
+    assert!(config.should_block("valorant.exe"));
+    // ".*" matches everything, but Windows essentials and this program are never blocked.
+    assert!(!config.should_block("explorer.exe"));
+    assert!(!config.should_block("digital-wellbeing-focus.exe"));
+}

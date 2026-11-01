@@ -341,6 +341,12 @@ impl SettingsTab {
         self.autosave(ui.ctx());
     }
 
+    /// The settings as last fetched (fetched again when due), for the Statistics tab.
+    pub(crate) fn latest_snapshot(&mut self) -> Option<SettingsSnapshot> {
+        self.refresh();
+        self.latest.clone()
+    }
+
     fn refresh(&mut self) {
         if self
             .fetched_at
@@ -356,7 +362,9 @@ impl SettingsTab {
                 // The files changed (an update applied, a to-do added, another program): go on
                 // from what is true now, keeping the user's own edits.
                 if let Some(drafts) = &self.drafts {
-                    if loaded_values(&snapshot) != drafts.loaded {
+                    if without_timestamps(loaded_values(&snapshot))
+                        != without_timestamps(drafts.loaded.clone())
+                    {
                         let edits = user_edits(drafts, true);
                         self.drafts = Some(drafts_from(&snapshot, &edits));
                     }
@@ -483,7 +491,7 @@ impl SettingsTab {
         self.block_bar(ui, &MODEL, snapshot, protected);
 
         ui.separator();
-        ui.heading("AI 사용량");
+        ui.heading("AI 하루 예산");
         if let Some(drafts) = &mut self.drafts {
             ui.horizontal(|ui| {
                 ui.label("AI 검사의 하루 예산(USD, 0 = 제한 없음)");
@@ -495,7 +503,7 @@ impl SettingsTab {
             });
         }
         self.block_bar(ui, &BUDGET, snapshot, protected);
-        usage_ui(ui, snapshot);
+        ui.small("지금까지 쓴 AI 사용량은 통계 탭에 있습니다.");
     }
 
     // --- rules for the AI ---------------------------------------------------------------
@@ -822,18 +830,24 @@ impl SettingsTab {
                 });
             }
             let secret = block.id == API_KEY.id;
-            let saved_line = match self.saved_at {
-                _ if secret => "키는 임시 저장하지 않습니다.".to_string(),
-                Some((saved_at, by_button)) if self.changed_at.is_none() => format!(
-                    "{} {} · 아직 적용 전입니다.",
-                    if by_button {
-                        "저장됨"
-                    } else {
-                        "자동으로 임시 저장됨"
-                    },
-                    saved_at.format("%H:%M:%S")
-                ),
-                _ => "임시 저장하는 중…".to_string(),
+            let saved_line = if secret {
+                "키는 임시 저장하지 않습니다.".to_string()
+            } else if self.changed_at.is_some() {
+                "임시 저장하는 중…".to_string()
+            } else {
+                match self.saved_at {
+                    Some((saved_at, by_button)) => format!(
+                        "{} {} · 아직 적용 전입니다.",
+                        if by_button {
+                            "저장됨"
+                        } else {
+                            "자동으로 임시 저장됨"
+                        },
+                        saved_at.format("%H:%M:%S")
+                    ),
+                    // Loaded from the drafts file when the app started.
+                    None => "임시 저장되어 있습니다 · 아직 적용 전입니다.".to_string(),
+                }
             };
             ui.small(saved_line);
         }
@@ -1142,6 +1156,16 @@ fn loaded_values(snapshot: &SettingsSnapshot) -> [Value; 3] {
     [to_value(&policy), to_value(&ai_focus), to_value(&planner)]
 }
 
+/// `values` without `updated_at`, which a file that lacks it gets anew on every read.
+fn without_timestamps(mut values: [Value; 3]) -> [Value; 3] {
+    for value in &mut values {
+        if let Some(fields) = value.as_object_mut() {
+            fields.remove("updated_at");
+        }
+    }
+    values
+}
+
 /// Editable copies of the three files as [`file_view`] shows them, with `pending` (the user's
 /// edits not yet applied) on top.
 fn drafts_from(snapshot: &SettingsSnapshot, pending: &PendingEdits) -> Drafts {
@@ -1315,7 +1339,7 @@ fn set_ui(
 }
 
 /// Calls and estimated cost today and this month, all users together.
-fn usage_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
+pub(crate) fn usage_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
     let today = Local::now().date_naive();
     let (mut today_calls, mut today_cost, mut month_calls, mut month_cost) = (0u64, 0.0, 0u64, 0.0);
     for value in snapshot.usage.values() {

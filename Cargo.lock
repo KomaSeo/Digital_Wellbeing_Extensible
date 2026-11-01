@@ -1261,6 +1261,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "parking_lot",
+ "regex",
  "serde",
  "sysinfo",
  "tracing",

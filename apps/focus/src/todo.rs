@@ -124,10 +124,6 @@ impl FocusApp {
         };
         ui.separator();
         self.list_ui(ui, &planner);
-        ui.separator();
-        self.today_ui(ui, status, &planner);
-        done_ui(ui, &planner);
-        log_ui(ui, &planner);
     }
 
     /// Without the planner the user types what they do; the AI judges every app against it.
@@ -761,9 +757,10 @@ impl FocusApp {
     }
 
     /// Today: what happened so far.
-    fn today_ui(&mut self, ui: &mut egui::Ui, status: &Status, planner: &PlannerStatus) {
+    pub(crate) fn today_ui(&mut self, ui: &mut egui::Ui, status: &Status, planner: &PlannerStatus) {
         egui::CollapsingHeader::new("오늘")
             .id_salt("today")
+            .default_open(true)
             .show(ui, |ui| {
                 let title_of = |todo_id: &str| {
                     planner
@@ -823,9 +820,10 @@ impl FocusApp {
 }
 
 /// Finished to-dos of the last seven days, with the time they took.
-fn done_ui(ui: &mut egui::Ui, planner: &PlannerStatus) {
+pub(crate) fn done_ui(ui: &mut egui::Ui, planner: &PlannerStatus) {
     egui::CollapsingHeader::new(format!("끝낸 일 ({})", planner.recent_done.len()))
         .id_salt("finished")
+        .default_open(true)
         .show(ui, |ui| {
             if planner.recent_done.is_empty() {
                 ui.label("지난 7일 동안 끝낸 일이 없습니다.");
@@ -846,9 +844,10 @@ fn done_ui(ui: &mut egui::Ui, planner: &PlannerStatus) {
 }
 
 /// Every change request and to-do change, newest first, with the AI's answers.
-fn log_ui(ui: &mut egui::Ui, planner: &PlannerStatus) {
+pub(crate) fn log_ui(ui: &mut egui::Ui, planner: &PlannerStatus) {
     egui::CollapsingHeader::new("요청과 AI의 답")
         .id_salt("request_log")
+        .default_open(true)
         .show(ui, |ui| {
             let mut lines: Vec<(DateTime<Utc>, bool, String)> = planner
                 .recent_requests

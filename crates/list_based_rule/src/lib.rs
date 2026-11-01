@@ -96,7 +96,15 @@ impl ListConfig {
         fn clean(set: &mut BTreeSet<String>) {
             *set = set
                 .iter()
-                .map(|name| ListConfig::normalize_name(name))
+                .map(|name| {
+                    // A regular expression is kept as written (lower case): normalizing would
+                    // append ".exe" or cut it at a backslash.
+                    if enforcer::pattern::is_regex(name) {
+                        name.trim().to_lowercase()
+                    } else {
+                        ListConfig::normalize_name(name)
+                    }
+                })
                 .filter(|name| !name.is_empty())
                 .collect();
         }
@@ -129,9 +137,17 @@ impl ListConfig {
         if Self::is_protected(&name) {
             return false;
         }
+        // An entry is a name, or a regular expression the whole name must match.
+        let listed = |list: &BTreeSet<String>| {
+            list.contains(&name)
+                || list
+                    .iter()
+                    .filter(|entry| enforcer::pattern::is_regex(entry))
+                    .any(|pattern| enforcer::pattern::matches_whole(pattern, &name))
+        };
         match self.mode {
-            ListMode::Blacklist => self.blacklist.contains(&name),
-            ListMode::Whitelist => !self.whitelist.contains(&name),
+            ListMode::Blacklist => listed(&self.blacklist),
+            ListMode::Whitelist => !listed(&self.whitelist),
         }
     }
 }

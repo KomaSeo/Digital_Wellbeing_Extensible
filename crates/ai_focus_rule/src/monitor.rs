@@ -783,6 +783,10 @@ impl FocusMonitor {
     /// One sample; asks the judge too when a check is due.
     pub fn step(&self, now: DateTime<Utc>) {
         let config = self.store.get();
+        // Always-blocked websites: closed whether or not daily wellbeing is on, without the AI.
+        if self.close_always_blocked_sites(now, &config) {
+            return;
+        }
         {
             let mut state = self.state.lock();
             // Before the session check: blocks apply without a session too.
@@ -936,6 +940,60 @@ impl FocusMonitor {
                 state.last_error = Some(error.to_string());
             }
         }
+    }
+
+    /// Close the front tab when its title matches an always-blocked website, and hide other
+    /// browser windows that show one (they are closed once they come to the front). Returns
+    /// whether a tab was closed.
+    fn close_always_blocked_sites(&self, now: DateTime<Utc>, config: &AiFocusConfig) -> bool {
+        if config.always_blocked_sites.is_empty() {
+            return false;
+        }
+        let foreground = self.desktop.foreground();
+        let shows_blocked = |process_name: &str, title: &str| {
+            config.is_browser(process_name) && config.always_blocked_site(title).is_some()
+        };
+        for open_window in self.desktop.open_windows() {
+            let in_front = foreground
+                .as_ref()
+                .is_some_and(|front| front.window == open_window.window);
+            if !in_front
+                && !open_window.minimized
+                && shows_blocked(&open_window.process_name, &open_window.title)
+            {
+                self.desktop.minimize(open_window.window);
+            }
+        }
+        let Some(foreground) = foreground else {
+            return false;
+        };
+        let Some(pattern) = config.always_blocked_site(&foreground.title) else {
+            return false;
+        };
+        if !config.is_browser(&foreground.process_name) {
+            return false;
+        }
+        let closed = self.desktop.close_active_tab(&foreground);
+        info!(
+            "always-blocked website \"{pattern}\": {} tab \"{}\"",
+            if closed { "closed" } else { "could not close" },
+            foreground.title
+        );
+        if closed {
+            let mut state = self.state.lock();
+            if state.verdicts.len() >= VERDICT_LOG_CAPACITY {
+                state.verdicts.pop_front();
+            }
+            state.verdicts.push_back(VerdictLogEntry {
+                at: now,
+                process_name: foreground.process_name.clone(),
+                title: truncate(&foreground.title, MAX_TITLE_CHARS),
+                verdict: Verdict::OffTask,
+                reason: format!("항상 막을 웹사이트(\"{pattern}\")"),
+                action: "tab closed".to_string(),
+            });
+        }
+        closed
     }
 
     /// Never judged: this program, Windows essentials, the admin's always-allow list.
@@ -1403,6 +1461,62 @@ mod tests {
             strikes_to_block: 2,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn always_blocked_websites_are_closed_without_the_ai_and_without_daily_wellbeing() {
+        let config = AiFocusConfig {
+            always_blocked_sites: ["youtube".to_string(), "reddit|twitter".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        // Daily wellbeing is off (no session).
+        let fixture = harness(
+            Verdict::OnTask,
+            foreground("chrome.exe", "Funny cats - YouTube - Google Chrome"),
+            config,
+        );
+        fixture.open.lock().push(OpenWindow {
+            window: 7,
+            pid: 99,
+            process_name: "msedge.exe".into(),
+            title: "Home / Twitter - Microsoft Edge".into(),
+            minimized: false,
+        });
+        fixture.monitor.step(Utc::now());
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.calls.load(Ordering::SeqCst),
+            0,
+            "the AI is not asked"
+        );
+        assert_eq!(
+            *fixture.minimized.lock(),
+            [7],
+            "a background window is hidden"
+        );
+        assert!(fixture
+            .monitor
+            .state()
+            .verdicts
+            .back()
+            .is_some_and(|entry| entry.action == "tab closed" && entry.reason.contains("youtube")));
+        // The browser's own name does not count: "google" does not match every Chrome tab.
+        *fixture.current.lock() = Some(foreground("chrome.exe", "Rust docs - Google Chrome"));
+        fixture
+            .monitor
+            .store()
+            .update(|stored| {
+                stored.always_blocked_sites.insert("google".into());
+            })
+            .unwrap();
+        fixture.monitor.step(Utc::now());
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
+        // Not a browser: never closed as a website.
+        *fixture.current.lock() = Some(foreground("code.exe", "youtube.rs - Visual Studio Code"));
+        fixture.monitor.step(Utc::now());
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
     }
 
     #[test]

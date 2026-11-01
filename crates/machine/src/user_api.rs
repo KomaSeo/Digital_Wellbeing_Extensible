@@ -625,7 +625,7 @@ mod tests {
             }),
         )
         .unwrap_err();
-        assert!(error.contains("focus session"));
+        assert!(error.contains("데일리 웰빙"));
         let status = call(session, "status", json!({})).unwrap();
         assert!(status.grants.is_empty());
     }
@@ -676,7 +676,7 @@ mod tests {
             planner: Some(planner),
         };
         let error = dispatch(&api, "start_session", &json!({ "task": "유튜브" })).unwrap_err();
-        assert!(error.contains("planner"));
+        assert!(error.contains("플래너"));
         assert!(dispatch(&api, "stop_session", &json!({})).is_err());
         let status = dispatch(&api, "status", &json!({})).unwrap();
         assert_eq!(status["planner"]["active"], true);

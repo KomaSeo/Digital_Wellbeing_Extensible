@@ -386,7 +386,7 @@ pub fn direction(name: &str, edit: &Edit, in_force: &Value) -> Direction {
             }
         }
         ("ai_focus", ["always_allow"] | ["private_apps"]) => removing_is_stricter(),
-        ("ai_focus", ["revoked_grants"]) => adding_is_stricter(),
+        ("ai_focus", ["revoked_grants"] | ["always_blocked_sites"]) => adding_is_stricter(),
         // An id no longer blocked is dropped from the list: that lifts nothing.
         ("ai_focus", ["unblocked"]) => removing_is_stricter(),
         ("planner", ["enabled"]) => true_is_stricter(),

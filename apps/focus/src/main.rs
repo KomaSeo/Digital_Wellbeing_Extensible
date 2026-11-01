@@ -22,6 +22,7 @@
 
 mod help;
 mod settings;
+mod statistics;
 mod todo;
 mod tray;
 
@@ -29,7 +30,7 @@ use chrono::{Local, Utc};
 use eframe::egui;
 use machine::session::current_session_id;
 use machine::user_api::grants::{GrantEvent, GrantLogEntry};
-use machine::user_api::{call, Status, Verdict};
+use machine::user_api::{call, Status};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,6 +123,7 @@ enum Tab {
     Todo,
     Blocking,
     Settings,
+    Statistics,
     Help,
 }
 
@@ -394,17 +396,6 @@ impl FocusApp {
         if let Some(error) = &status.last_error {
             ui.colored_label(RED, format!("AI 검사가 실패했습니다: {error}"));
         }
-        if let Some(cost) = status.ai_cost_today_usd {
-            ui.small(if status.daily_budget_usd > 0.0 {
-                format!(
-                    "오늘의 AI 비용(추정): ${cost:.2} / 예산 ${:.2}",
-                    status.daily_budget_usd
-                )
-            } else {
-                format!("오늘의 AI 비용(추정): ${cost:.2}")
-            });
-        }
-
         ui.separator();
         ui.heading("지금 걸린 차단");
         if status.blocked.is_empty() {
@@ -422,39 +413,7 @@ impl FocusApp {
         ui.separator();
         self.access_ui(ui, status);
 
-        ui.separator();
-        ui.heading("최근 AI 판정");
-        for verdict_record in &status.verdicts {
-            let color = match verdict_record.verdict {
-                Verdict::OnTask => GREEN,
-                Verdict::OffTask => RED,
-                Verdict::Unsure => egui::Color32::GRAY,
-            };
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    verdict_record
-                        .at
-                        .with_timezone(&Local)
-                        .format("%H:%M")
-                        .to_string(),
-                );
-                ui.colored_label(
-                    color,
-                    match verdict_record.verdict {
-                        Verdict::OnTask => "할 일에 맞음",
-                        Verdict::OffTask => "딴짓",
-                        Verdict::Unsure => "애매함",
-                    },
-                );
-                ui.label(format!(
-                    "{} — {}",
-                    verdict_record.process_name, verdict_record.reason
-                ));
-                if !verdict_record.action.is_empty() {
-                    ui.strong(format!("[{}]", verdict_record.action));
-                }
-            });
-        }
+        ui.small("지난 AI 판정과 비용은 통계 탭에 있습니다.");
     }
 }
 
@@ -487,6 +446,7 @@ impl eframe::App for FocusApp {
                 ui.selectable_value(&mut self.tab, Tab::Todo, "할 일");
                 ui.selectable_value(&mut self.tab, Tab::Blocking, "차단");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "설정");
+                ui.selectable_value(&mut self.tab, Tab::Statistics, "통계");
                 ui.selectable_value(&mut self.tab, Tab::Help, "도움말");
             });
         });
@@ -512,6 +472,7 @@ impl eframe::App for FocusApp {
                     Tab::Todo => self.todo_tab(ui, &status),
                     Tab::Blocking => self.blocking_tab(ui, &status),
                     Tab::Settings => self.settings.ui(ui, status.settings_protected),
+                    Tab::Statistics => self.statistics_tab(ui, &status),
                     Tab::Help => help::help_tab(ui),
                 }
             });
