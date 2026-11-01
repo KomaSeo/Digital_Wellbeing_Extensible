@@ -14,7 +14,7 @@
 //! Rules: `machine::settings`, `machine::setting_edits`; guide: `docs/multi_account.md` 6.4.
 
 use ai_focus_rule::grants::GrantState;
-use ai_focus_rule::usage::UsageLog;
+use ai_focus_rule::usage::{Totals, UsageLog};
 use ai_focus_rule::{AiFocusConfig, SavedBlocks};
 use chrono::{DateTime, Datelike, Local, Utc};
 use list_based_rule::ListConfig;
@@ -1671,19 +1671,59 @@ fn names_ui(
 }
 
 /// Calls and estimated cost today and this month, all users together.
+/// What each kind of AI call is for, in Korean: (name, what it does).
+fn purpose_label(purpose: &str) -> (&str, &str) {
+    match purpose {
+        "focus check" => (
+            "창 검사(AI 검사)",
+            "새 창이 보일 때와 다시 검사할 때마다 화면 캡처와 창 제목을 보냅니다",
+        ),
+        "access review" => ("접근 요청 심사", "차단 탭의 접근 요청"),
+        "planner pick" => ("할 일 고르기", "\"할 일 받기\"를 누를 때"),
+        "planner review" => ("변경 요청 심사", "끝냈다, 다른 일 받기, AI 검사 멈추기"),
+        "to-do change review" => ("할 일 변경 심사", "할 일 추가, 고치기, 지우기"),
+        "appointment review" => ("약속 심사", "약속 추가"),
+        "week plan" => ("7일 계획", "통계 탭의 앞으로 7일 계획"),
+        "assistant" => ("AI 비서", "AI 비서 탭의 대화(한 번에 여러 번 부를 수 있음)"),
+        "connection check" => (
+            "연결 확인",
+            "크레딧이 없을 때 30초마다 보내는 가장 짧은 메시지",
+        ),
+        other => (other, ""),
+    }
+}
+
+/// The AI usage of every user: in total, and per feature (today, the last seven days, this
+/// month), so the user can see which feature costs what.
 pub(crate) fn usage_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
     let today = Local::now().date_naive();
+    let week_start = today - chrono::Duration::days(6);
     let (mut today_calls, mut today_cost, mut month_calls, mut month_cost) = (0u64, 0.0, 0u64, 0.0);
+    // Per purpose: today, last seven days, this month.
+    let mut by_purpose: BTreeMap<String, [Totals; 3]> = BTreeMap::new();
     for value in snapshot.usage.values() {
         let log: UsageLog = from_value(value);
         for (date, day) in &log.days {
+            let this_month = date.year() == today.year() && date.month() == today.month();
             if *date == today {
                 today_calls += day.total.calls;
                 today_cost += day.total.cost_usd;
             }
-            if date.year() == today.year() && date.month() == today.month() {
+            if this_month {
                 month_calls += day.total.calls;
                 month_cost += day.total.cost_usd;
+            }
+            for (purpose, totals) in &day.by_purpose {
+                let entry = by_purpose.entry(purpose.clone()).or_default();
+                if *date == today {
+                    entry[0].merge(totals);
+                }
+                if *date >= week_start {
+                    entry[1].merge(totals);
+                }
+                if this_month {
+                    entry[2].merge(totals);
+                }
             }
         }
     }
@@ -1691,6 +1731,60 @@ pub(crate) fn usage_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
         "오늘: {today_calls}번 호출, 약 ${today_cost:.2} · 이번 달: {month_calls}번 호출, 약 \
          ${month_cost:.2}"
     ));
+    if by_purpose.is_empty() {
+        return;
+    }
+    ui.strong("기능별 AI 비용(추정)");
+    let mut rows: Vec<(String, [Totals; 3])> = by_purpose.into_iter().collect();
+    rows.sort_by(|left, right| right.1[2].cost_usd.total_cmp(&left.1[2].cost_usd));
+    egui::Grid::new("usage_by_purpose")
+        .striped(true)
+        .num_columns(7)
+        .show(ui, |ui| {
+            for heading in [
+                "기능",
+                "오늘",
+                "최근 7일",
+                "이번 달",
+                "한 번에 평균",
+                "이번 달 비중",
+                "토큰(이번 달, 입력/출력)",
+            ] {
+                ui.strong(heading);
+            }
+            ui.end_row();
+            for (purpose, [today_totals, week_totals, month_totals]) in &rows {
+                let (name, what) = purpose_label(purpose);
+                ui.label(name).on_hover_text(what);
+                let cell =
+                    |totals: &Totals| format!("${:.2} ({}번)", totals.cost_usd, totals.calls);
+                ui.label(cell(today_totals));
+                ui.label(cell(week_totals));
+                ui.label(cell(month_totals));
+                ui.label(if month_totals.calls > 0 {
+                    format!("${:.4}", month_totals.cost_usd / month_totals.calls as f64)
+                } else {
+                    "-".into()
+                });
+                ui.label(if month_cost > 0.0 {
+                    format!("{:.0}%", month_totals.cost_usd / month_cost * 100.0)
+                } else {
+                    "-".into()
+                });
+                ui.label(format!(
+                    "{} / {}",
+                    month_totals.input_tokens
+                        + month_totals.cache_read_tokens
+                        + month_totals.cache_write_tokens,
+                    month_totals.output_tokens
+                ));
+                ui.end_row();
+            }
+        });
+    ui.small(
+        "비용은 토큰 수와 가격표로 계산한 추정입니다. 실제 청구액은 Claude Console에서 확인하세요. 기능 \
+         이름 위에 마우스를 올리면 그 기능이 언제 AI를 부르는지 나옵니다.",
+    );
 }
 
 /// Where a scheduled update came from, in Korean.
