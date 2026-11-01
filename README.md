@@ -95,7 +95,9 @@ cargo build --release
 The service (LocalSystem) starts a SYSTEM agent inside each managed user's
 session; the agent enforces the rules and runs the AI check there. The user
 works in **Digital Wellbeing Focus** (starts at logon; Korean UI; tabs 할 일
-(to-do), 차단 (blocking), 설정 (settings), 통계 (statistics: AI usage, today,
+(to-do), AI 비서 (AI assistant: say what you want in your own words, e.g. "add
+these three to-dos", and Claude does it with the same tools Claude Desktop gets;
+see [`docs/assistant.md`](docs/assistant.md)), 차단 (blocking), 설정 (settings), 통계 (statistics: AI usage, today,
 finished to-dos, requests and answers, recent AI verdicts) and 도움말 (help,
 including a Claude Desktop guide); tray menu 열기 / 설정 / 끝내기). Settings are stored in `%ProgramData%\DigitalWellbeing`, which
 standard users cannot read or write directly. The settings the app needs (AI connection:

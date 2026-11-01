@@ -29,10 +29,17 @@
 //! | `settings_protect` | `{}` (one way)                         | [`crate::settings::Protection`] |
 //! | `program_update` | `{ "program": "Kakao.KakaoTalk" }` (listed in `updatable_programs`) | [`crate::system_care::CareStatus`] |
 //! | `system_care_status` | `{}`                                 | [`crate::system_care::CareStatus`] |
+//! | `assistant_send` | `{ "text": "…" }` (starts a turn and returns at once) | [`crate::assistant::AssistantView`] |
+//! | `assistant_view` | `{}`                                     | [`crate::assistant::AssistantView`] |
+//! | `assistant_reset` | `{}` (new conversation)                 | [`crate::assistant::AssistantView`] |
 //!
 //! The `settings_*` methods let a standard user edit the admin settings: during setup an
 //! edit takes effect at once; once protected it is scheduled and takes effect only after
 //! three "yes" answers two days apart; see [`crate::settings`].
+//!
+//! The `assistant_*` methods are the Focus app's AI assistant tab: Claude reads the user's
+//! words and acts through the same tools Claude Desktop gets ([`crate::assistant_tools`]),
+//! each a call to [`dispatch`]; see [`crate::assistant`].
 //!
 //! `propose_todo` asks the AI to add a to-do to the planner's list; it judges
 //! the proposal against the admin's life rules (see `task_planner`).
@@ -135,6 +142,8 @@ pub struct Status {
 pub struct AgentApi {
     pub monitor: Arc<FocusMonitor>,
     pub planner: Option<Arc<TaskPlanner>>,
+    /// The AI assistant tab's conversation.
+    pub assistant: crate::assistant::Assistant,
 }
 
 impl AgentApi {
@@ -312,6 +321,16 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let config = api.monitor.store().get();
             return serde_json::to_value(crate::system_care::status(&data_directory, &config))
                 .map_err(|error| error.to_string());
+        }
+        "assistant_view" => {
+            return serde_json::to_value(api.assistant.view()).map_err(|error| error.to_string());
+        }
+        "assistant_reset" => {
+            api.assistant.reset()?;
+            return serde_json::to_value(api.assistant.view()).map_err(|error| error.to_string());
+        }
+        "assistant_send" => {
+            return Err("assistant_send needs the shared agent (dispatch_shared)".into());
         }
         "settings_protect" => {
             let protection = crate::settings::protect(&data_directory, Utc::now())?;
@@ -497,6 +516,40 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     serde_json::to_value(status).map_err(|error| error.to_string())
 }
 
+/// Handle one request, including `assistant_send`, whose turn runs in its own thread with
+/// the agent shared.
+pub fn dispatch_shared(api: &Arc<AgentApi>, method: &str, params: &Value) -> Result<Value, String> {
+    if method != "assistant_send" {
+        return dispatch(api, method, params);
+    }
+    let text = params["text"]
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .ok_or("params.text required")?
+        .to_string();
+    if !api.assistant.try_begin() {
+        return Err("AI 비서가 아직 앞의 말에 답하는 중입니다".into());
+    }
+    let shared_api = Arc::clone(api);
+    let spawned = thread::Builder::new().spawn(move || {
+        let config = shared_api.monitor.store().get();
+        let now_local = chrono::Local::now().format("%Y-%m-%d %A %H:%M").to_string();
+        let agent = |method: &str, params: Value| dispatch(&shared_api, method, &params);
+        let run_tool = |name: &str, input: &Value| {
+            crate::assistant_tools::call_tool(name, input, &agent, "assistant")
+        };
+        shared_api
+            .assistant
+            .run_turn(&config, &text, &now_local, &run_tool);
+    });
+    if let Err(error) = spawned {
+        api.assistant.release();
+        return Err(format!("could not start the assistant: {error}"));
+    }
+    serde_json::to_value(api.assistant.view()).map_err(|error| error.to_string())
+}
+
 /// Serve forever on the port of `session` (blocking; run in a thread).
 pub fn serve(api: Arc<AgentApi>, session: u32) -> std::io::Result<()> {
     let port = port_for_session(session);
@@ -540,14 +593,14 @@ const MAX_CONNECTIONS: usize = 16;
 /// The whole request line must arrive within this time.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 
-fn handle(api: &AgentApi, mut stream: TcpStream) -> std::io::Result<()> {
+fn handle(api: &Arc<AgentApi>, mut stream: TcpStream) -> std::io::Result<()> {
     // Answers may wait for the AI, so the write timeout is generous.
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let response = match read_line(&mut stream) {
         Ok(line) => match serde_json::from_str::<Value>(&line) {
             Ok(request) => {
                 let method = request["method"].as_str().unwrap_or_default();
-                match dispatch(api, method, &request["params"]) {
+                match dispatch_shared(api, method, &request["params"]) {
                     Ok(result) => json!({ "result": result }),
                     Err(message) => json!({ "error": message }),
                 }
@@ -654,6 +707,7 @@ mod tests {
         let api = Arc::new(AgentApi {
             monitor,
             planner: None,
+            assistant: Default::default(),
         });
         // A session id far from real ones so the test port is free.
         let session = 900;
@@ -694,6 +748,7 @@ mod tests {
         let api = Arc::new(AgentApi {
             monitor,
             planner: None,
+            assistant: Default::default(),
         });
         let session = 901;
         thread::spawn(move || serve(api, session));
@@ -728,6 +783,7 @@ mod tests {
         let api = AgentApi {
             monitor,
             planner: Some(planner),
+            assistant: Default::default(),
         };
         let error = dispatch(&api, "start_session", &json!({ "task": "유튜브" })).unwrap_err();
         assert!(error.contains("플래너"));

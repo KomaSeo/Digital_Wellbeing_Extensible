@@ -21,6 +21,8 @@
 //!     logs\
 //! ```
 
+pub mod assistant;
+pub mod assistant_tools;
 pub mod lockdown;
 pub mod session;
 pub mod setting_edits;
