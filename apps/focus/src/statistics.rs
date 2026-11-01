@@ -73,6 +73,9 @@ impl FocusApp {
 
 /// What the monitor did, in Korean ("tab closed", "blocked", "strike 1/2").
 fn action_label(action: &str) -> String {
+    if let Some(rest) = action.strip_prefix("access revoked, ") {
+        return format!("접근 허용 취소, {}", action_label(rest));
+    }
     match action {
         "tab closed" => "탭 닫음".to_string(),
         "tab closed (already blocked)" => "탭 닫음(이미 차단된 탭)".to_string(),
