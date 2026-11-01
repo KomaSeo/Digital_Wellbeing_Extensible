@@ -21,18 +21,19 @@ mod planner;
 
 pub use admin_ui::PlannerAdminUi;
 pub use advisor::{
-    change_summary, claude_advisor_provider, Advisor, AdvisorProvider, ClaudeAdvisor, Pick,
-    PickRequest, Review, ReviewRequest, ReviewedTodo, TodoChangeRequest, TodoReview,
-    WeekPlanAnswer, WeekPlanAnswerDay, WeekPlanAnswerTodo, WeekPlanRequest, PICK_PROMPT,
-    PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
+    change_summary, claude_advisor_provider, Advisor, AdvisorProvider, AppointmentRequest,
+    AppointmentReview, ClaudeAdvisor, Pick, PickRequest, Review, ReviewRequest, ReviewedTodo,
+    TodoChangeRequest, TodoReview, WeekPlanAnswer, WeekPlanAnswerDay, WeekPlanAnswerTodo,
+    WeekPlanRequest, APPOINTMENT_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT,
+    WEEK_PLAN_PROMPT,
 };
 pub use ai_focus_rule::store::JsonStore;
 pub use deadline::parse_deadline;
 pub use model::{
-    Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, Evidence,
-    PlannerConfig, PlannerInstructions, PlannerState, PlannerStatus, PolishItem, ProposalInput,
-    ProposalRecord, TaskNotes, TaskStep, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite,
-    WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp,
+    Appointment, AppointmentInput, Assignment, AssignmentSource, AssignmentSpan, ChangeKind,
+    ChangeRecord, DoneRecord, Evidence, PlannerConfig, PlannerInstructions, PlannerState,
+    PlannerStatus, PolishItem, ProposalInput, ProposalRecord, TaskNotes, TaskStep, TodoChange,
+    TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp,
 };
 pub use planner::{PlannerError, TaskPlanner};
 

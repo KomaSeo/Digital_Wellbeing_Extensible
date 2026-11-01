@@ -35,7 +35,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use task_planner::{PlannerConfig, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT};
+use task_planner::{
+    PlannerConfig, APPOINTMENT_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT,
+    WEEK_PLAN_PROMPT,
+};
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
 const RED: egui::Color32 = egui::Color32::from_rgb(200, 80, 80);
@@ -108,6 +111,18 @@ const PROPOSAL_INSTRUCTION: Block = Block {
     id: "instruction_proposal_review",
     file: "planner",
     paths: &[&["instructions", "proposal_review"]],
+    has_default: true,
+};
+const APPOINTMENT_RULES: Block = Block {
+    id: "appointment_rules",
+    file: "planner",
+    paths: &[&["appointment_rules"]],
+    has_default: false,
+};
+const APPOINTMENT_INSTRUCTION: Block = Block {
+    id: "instruction_appointment_review",
+    file: "planner",
+    paths: &[&["instructions", "appointment_review"]],
     has_default: true,
 };
 const WEEK_PLAN_INSTRUCTION: Block = Block {
@@ -188,11 +203,13 @@ const TIME_ZONE: Block = Block {
     has_default: false,
 };
 /// Every group; an edit outside them (such as a timestamp) is not the user's.
-const BLOCKS: [&Block; 19] = [
+const BLOCKS: [&Block; 21] = [
     &API_KEY,
     &MODEL,
     &BUDGET,
     &LIFE_RULES,
+    &APPOINTMENT_RULES,
+    &APPOINTMENT_INSTRUCTION,
     &PICK_INSTRUCTION,
     &REVIEW_INSTRUCTION,
     &PROPOSAL_INSTRUCTION,
@@ -561,13 +578,32 @@ impl SettingsTab {
         self.block_bar(ui, &LIFE_RULES, snapshot, protected);
 
         ui.separator();
+        ui.heading("약속 규칙");
+        ui.label(
+            "약속은 정해진 시간에 하던 일을 밀어내고, 그동안 다른 일을 받지 않습니다. 그래서 일을 피하는 데 \
+             쓰일 수 있습니다. 사용자가 약속을 추가하면 AI가 이 규칙과 생활 규칙에 따라 받을지 정합니다.",
+        );
+        if let Some(drafts) = &mut self.drafts {
+            ui.add(
+                egui::TextEdit::multiline(&mut drafts.planner.appointment_rules)
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(
+                        "예: 게임이나 영상 보기는 약속으로 받지 않는다. 평일 18시 전의 약속은 수업, 병원, \
+                         일 관련만 받는다. 약속 하나는 3시간을 넘지 않는다.",
+                    ),
+            );
+        }
+        self.block_bar(ui, &APPOINTMENT_RULES, snapshot, protected);
+
+        ui.separator();
         ui.heading("AI 지시문");
         ui.label(
             "플래너의 AI에게 무엇을 어떤 기준으로 판단하라고 알려 주는 글입니다. 정확도를 위해 \
              영어로 씁니다. 비어 있으면 프로그램에 들어 있는 기본 지시문을 씁니다.",
         );
         type Accessor = fn(&mut PlannerConfig) -> &mut String;
-        let instructions: [(&str, Accessor, &str, &'static Block); 4] = [
+        let instructions: [(&str, Accessor, &str, &'static Block); 5] = [
             (
                 "지금 할 일과 시간 고르기",
                 |planner| &mut planner.instructions.pick,
@@ -591,6 +627,12 @@ impl SettingsTab {
                 |planner| &mut planner.instructions.week_plan,
                 WEEK_PLAN_PROMPT,
                 &WEEK_PLAN_INSTRUCTION,
+            ),
+            (
+                "약속을 받을지 심사",
+                |planner| &mut planner.instructions.appointment_review,
+                APPOINTMENT_PROMPT,
+                &APPOINTMENT_INSTRUCTION,
             ),
         ];
         for (label, accessor, built_in, block) in instructions {

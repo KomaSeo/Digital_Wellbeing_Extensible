@@ -29,6 +29,11 @@ pub struct TodoItem {
     /// on the list, so the AI can assign it again.
     #[serde(default)]
     pub repeat: bool,
+    /// Done away from the computer (sleep, exercise, a walk): while it is the task, every app
+    /// and website is locked, and changing it needs an urgent reason. `None` (to-dos made
+    /// before this existed): the AI judges it when it assigns the to-do.
+    #[serde(default)]
+    pub away_from_computer: Option<bool>,
 }
 
 fn default_priority() -> u8 {
@@ -46,8 +51,47 @@ impl TodoItem {
             estimate_minutes: None,
             proposed: false,
             repeat: false,
+            away_from_computer: None,
         }
     }
+}
+
+/// Responsibility: Describe one appointment: something fixed at a clock time (a meeting, a
+/// class, a doctor's visit). From its start to its end it is the user's task, whatever was
+/// assigned before, and nothing else is assigned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Appointment {
+    /// Stable id (`a<milliseconds>`).
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub notes: String,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    /// Away from the computer: every app and website is locked while it runs.
+    #[serde(default)]
+    pub away_from_computer: bool,
+}
+
+impl Appointment {
+    /// It runs at `now`.
+    pub fn runs_at(&self, now: DateTime<Utc>) -> bool {
+        self.start <= now && now < self.end
+    }
+}
+
+/// Responsibility: Carry an appointment the user asks to add, as it arrives over the agent
+/// API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppointmentInput {
+    pub title: String,
+    #[serde(default)]
+    pub notes: String,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    /// Left out: the AI judges it.
+    #[serde(default)]
+    pub away_from_computer: Option<bool>,
 }
 
 /// Responsibility: Hold the admin's planner settings and to-do list (planner.json).
@@ -62,6 +106,13 @@ pub struct PlannerConfig {
     /// Kept so files written by versions with an on/off switch still load.
     pub enabled: bool,
     pub todos: Vec<TodoItem>,
+    /// Appointments the AI accepted (past ones are dropped when the list changes).
+    pub appointments: Vec<Appointment>,
+    /// The owner's rules for which appointments the AI accepts ("no appointments for games",
+    /// "at most two evenings a week"). Appointments are fixed and replace the assigned task,
+    /// so they could be used to dodge work; like the life rules they change only in the
+    /// settings.
+    pub appointment_rules: String,
     /// The owner's standing rules for how time is spent ("no leisure before
     /// 18:00 on weekdays", "a 30-minute break after two hours of work"). Every
     /// AI decision of the planner follows them. They change only in the settings
@@ -91,6 +142,8 @@ pub struct PlannerInstructions {
     pub proposal_review: String,
     /// How much work each of the next seven days needs, and how much free time is left.
     pub week_plan: String,
+    /// Whether an appointment the user adds is accepted.
+    pub appointment_review: String,
 }
 
 impl PlannerInstructions {
@@ -108,6 +161,10 @@ impl PlannerInstructions {
 
     pub fn week_plan_or_default(&self) -> &str {
         or_default(&self.week_plan, crate::advisor::WEEK_PLAN_PROMPT)
+    }
+
+    pub fn appointment_review_or_default(&self) -> &str {
+        or_default(&self.appointment_review, crate::advisor::APPOINTMENT_PROMPT)
     }
 }
 
@@ -163,6 +220,13 @@ pub struct Assignment {
     pub until: Option<DateTime<Utc>>,
     #[serde(default)]
     pub when_time_is_up: WhenTimeIsUp,
+    /// Done away from the computer: every app and website is locked meanwhile, and changing
+    /// it needs an urgent reason.
+    #[serde(default)]
+    pub away_from_computer: bool,
+    /// Set for an appointment: it is fixed, ends by itself at `until`, and needs no report.
+    #[serde(default)]
+    pub appointment_id: Option<String>,
 }
 
 impl Assignment {
@@ -255,6 +319,10 @@ pub enum TodoChange {
     },
     /// Take an open to-do off the list.
     Remove { todo_id: String },
+    /// Add an appointment; the AI decides whether to accept it (owner's appointment rules).
+    AddAppointment { appointment: AppointmentInput },
+    /// Take an appointment off the list. Needs no AI review: it only frees time for to-dos.
+    RemoveAppointment { appointment_id: String },
 }
 
 /// Responsibility: Record one to-do change, the AI's decision, and what the list holds if
@@ -283,6 +351,9 @@ pub struct TodoChangeRecord {
     /// that applies it after three confirmations, two hours apart.
     #[serde(default)]
     pub scheduled_update: Option<String>,
+    /// The appointment added or removed.
+    #[serde(default)]
+    pub appointment: Option<Appointment>,
 }
 
 /// Responsibility: Name one write to the to-do list that applies a [`TodoChangeRecord`].
@@ -302,6 +373,10 @@ pub enum TodoListWrite {
     Remove(String),
     /// Hide a to-do an older version kept outside `planner.json` (a proposed one).
     Dismiss(String),
+    /// Put this appointment in `planner.json` (replacing the one with its id).
+    PutAppointment(Appointment),
+    /// Remove the appointment with this id from `planner.json`.
+    RemoveAppointment(String),
 }
 
 /// Responsibility: Carry a to-do the user proposes, as it arrives over the agent API.
@@ -316,6 +391,8 @@ pub struct ProposalInput {
     pub estimate_minutes: Option<u32>,
     /// A routine that stays on the list when finished.
     pub repeat: Option<bool>,
+    /// Done away from the computer; left out, the AI fills it in.
+    pub away_from_computer: Option<bool>,
 }
 
 /// Responsibility: Record one proposed to-do and the AI's decision.
@@ -440,6 +517,9 @@ pub struct PlannerState {
     /// The last overview of this week the user asked for.
     #[serde(default)]
     pub week_plan: Option<WeekPlan>,
+    /// Appointments the user ended early ("done"): they do not start again.
+    #[serde(default)]
+    pub ended_appointments: BTreeSet<String>,
 }
 
 impl PlannerState {
@@ -486,4 +566,7 @@ pub struct PlannerStatus {
     /// Minutes spent per open to-do: in total, or since it was last finished for a routine.
     #[serde(default)]
     pub minutes_this_round: BTreeMap<String, i64>,
+    /// Appointments that have not ended, soonest first.
+    #[serde(default)]
+    pub appointments: Vec<Appointment>,
 }

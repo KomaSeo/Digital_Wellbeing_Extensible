@@ -195,13 +195,21 @@ fn status(api: &AgentApi) -> Status {
     }
 }
 
-/// The lockdown in force now (see [`crate::lockdown`]): a broken AI connection, or to-dos
-/// with none assigned.
+/// The lockdown in force now (see [`crate::lockdown`]): a broken AI connection, to-dos with
+/// none assigned, or a task done away from the computer.
 pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lockdown> {
     crate::lockdown::lockdown(
         crate::settings::is_protected(&crate::data_dir()),
         &ai_focus_rule::connection::current().0,
-        planner.is_some_and(TaskPlanner::waiting_for_task),
+        planner.and_then(|planner| {
+            if let Some(task) = planner.away_from_computer_task() {
+                Some(crate::lockdown::TaskLock::AwayFromComputer { task })
+            } else {
+                planner
+                    .waiting_for_task()
+                    .then_some(crate::lockdown::TaskLock::WaitingForTask)
+            }
+        }),
     )
 }
 
@@ -236,6 +244,16 @@ fn todo_list_edits(writes: &[TodoListWrite]) -> Vec<crate::setting_edits::Edit> 
             TodoListWrite::Dismiss(todo_id) => Edit::AddItems {
                 path: vec!["dismissed".into()],
                 items: vec![Value::String(todo_id.clone())],
+            },
+            TodoListWrite::PutAppointment(appointment) => Edit::PutListItem {
+                path: vec!["appointments".into()],
+                id: appointment.id.clone(),
+                item: Some(serde_json::to_value(appointment).unwrap_or(Value::Null)),
+            },
+            TodoListWrite::RemoveAppointment(appointment_id) => Edit::PutListItem {
+                path: vec!["appointments".into()],
+                id: appointment_id.clone(),
+                item: None,
             },
         })
         .collect()

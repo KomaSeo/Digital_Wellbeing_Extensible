@@ -27,6 +27,14 @@ struct FakeAdvisor {
     saw_evidence: parking_lot::Mutex<(String, bool)>,
     /// Planned, elapsed and spent minutes the last review carried.
     saw_minutes: parking_lot::Mutex<(Option<i64>, i64, i64)>,
+    /// What the AI says about whether a picked session or an appointment is away from the
+    /// computer.
+    judges_away: AtomicBool,
+    /// The appointment rules and the upcoming appointments the last question carried.
+    saw_appointment_rules: parking_lot::Mutex<String>,
+    saw_appointments: parking_lot::Mutex<Vec<String>>,
+    /// The current assignment as the last change review saw it.
+    saw_current_away: AtomicBool,
 }
 
 impl Advisor for FakeAdvisor {
@@ -35,6 +43,11 @@ impl Advisor for FakeAdvisor {
         *self.saw_repick_reason.lock() = request.repick_reason.map(str::to_string);
         *self.saw_rules.lock() = request.life_rules.to_string();
         *self.saw_instructions.lock() = request.instructions.to_string();
+        *self.saw_appointments.lock() = request
+            .appointments
+            .iter()
+            .map(|appointment| appointment.title.clone())
+            .collect();
         let todo_id = if self.bogus_pick.load(Ordering::SeqCst) {
             "nope".into()
         } else {
@@ -45,6 +58,25 @@ impl Advisor for FakeAdvisor {
             todo_id,
             why: "deadline".into(),
             minutes: 45,
+            away_from_computer: self.judges_away.load(Ordering::SeqCst),
+        })
+    }
+
+    fn review_appointment(
+        &self,
+        request: &AppointmentRequest,
+    ) -> Result<AppointmentReview, JudgeError> {
+        self.reviews.fetch_add(1, Ordering::SeqCst);
+        *self.saw_appointment_rules.lock() = request.appointment_rules.to_string();
+        *self.saw_instructions.lock() = request.instructions.to_string();
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(JudgeError::NoApiKey);
+        }
+        let approved = self.approve.load(Ordering::SeqCst);
+        Ok(AppointmentReview {
+            approved,
+            reply: if approved { "ok" } else { "no" }.into(),
+            away_from_computer: self.judges_away.load(Ordering::SeqCst),
         })
     }
 
@@ -102,6 +134,7 @@ impl Advisor for FakeAdvisor {
                 deadline: "2030-01-01".into(),
                 priority: 2,
                 estimate_minutes: 30,
+                away_from_computer: self.judges_away.load(Ordering::SeqCst),
             },
         })
     }
@@ -111,6 +144,12 @@ impl Advisor for FakeAdvisor {
         *self.saw_rules.lock() = request.life_rules.to_string();
         *self.saw_instructions.lock() = request.instructions.to_string();
         *self.saw_evidence.lock() = (request.evidence.to_string(), request.screenshot.is_some());
+        self.saw_current_away.store(
+            request
+                .current
+                .is_some_and(|assignment| assignment.away_from_computer),
+            Ordering::SeqCst,
+        );
         *self.saw_minutes.lock() = (
             request.planned_minutes,
             request.elapsed_minutes,
@@ -158,6 +197,10 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
         outcome: parking_lot::Mutex::new("not_applicable".into()),
         saw_evidence: parking_lot::Mutex::new((String::new(), false)),
         saw_minutes: parking_lot::Mutex::new((None, 0, 0)),
+        judges_away: AtomicBool::new(false),
+        saw_appointment_rules: parking_lot::Mutex::new(String::new()),
+        saw_appointments: parking_lot::Mutex::new(Vec::new()),
+        saw_current_away: AtomicBool::new(false),
     });
     let provided = Arc::clone(&advisor);
     let planner = TaskPlanner::new(
@@ -430,6 +473,15 @@ fn apply_writes(fixture: &Harness, writes: Vec<TodoListWrite>) {
                     TodoListWrite::Dismiss(todo_id) => {
                         config.dismissed.insert(todo_id.clone());
                     }
+                    TodoListWrite::PutAppointment(appointment) => {
+                        config
+                            .appointments
+                            .retain(|existing| existing.id != appointment.id);
+                        config.appointments.push(appointment.clone());
+                    }
+                    TodoListWrite::RemoveAppointment(appointment_id) => config
+                        .appointments
+                        .retain(|existing| &existing.id != appointment_id),
                 }
             }
         })
@@ -1219,7 +1271,262 @@ fn the_week_plan_keeps_the_seven_days_and_listed_todos_only() {
         open: &[(todo("a"), 30)],
         worked_this_week: &[],
         recently_done: &[],
+        appointments: &[],
     });
     assert!(text.contains("2026-11-06 Friday"), "{text}");
     assert!(text.contains("\"minutes_spent\": 30"), "{text}");
+}
+
+fn appointment_change(
+    title: &str,
+    start: chrono::DateTime<Utc>,
+    minutes: i64,
+    away: Option<bool>,
+) -> TodoChange {
+    TodoChange::AddAppointment {
+        appointment: AppointmentInput {
+            title: title.into(),
+            notes: String::new(),
+            start,
+            end: start + chrono::Duration::minutes(minutes),
+            away_from_computer: away,
+        },
+    }
+}
+
+/// Add an appointment through the review, as the agent does, and return its record.
+fn add_appointment(
+    fixture: &Harness,
+    now: chrono::DateTime<Utc>,
+    change: TodoChange,
+) -> Result<TodoChangeRecord, PlannerError> {
+    let record = fixture
+        .planner
+        .review_todo_change(now, change, "", "to-do tab")?;
+    if record.approved {
+        apply_writes(fixture, fixture.planner.writes_for(&record));
+    }
+    Ok(record)
+}
+
+#[test]
+fn away_from_computer_tasks_are_marked_and_their_changes_say_so() {
+    let fixture = harness(true, &["sleep"]);
+    // The to-do does not say: the AI's judgement at the pick counts.
+    fixture.advisor.judges_away.store(true, Ordering::SeqCst);
+    let now = Utc::now();
+    fixture.planner.assign(now).unwrap();
+    assert!(fixture.planner.away_from_computer_task().is_some());
+    fixture
+        .planner
+        .request_change(
+            now,
+            ChangeKind::Repick,
+            "I want to play",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert!(fixture.advisor.saw_current_away.load(Ordering::SeqCst));
+    // The to-do's own flag wins over the AI.
+    let fixture = harness(true, &["mail"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.todos[0].away_from_computer = Some(false))
+        .unwrap();
+    fixture.advisor.judges_away.store(true, Ordering::SeqCst);
+    fixture.planner.assign(now).unwrap();
+    assert!(fixture.planner.away_from_computer_task().is_none());
+    // A new to-do gets the AI's judgement unless the user said.
+    fixture.advisor.judges_away.store(true, Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .review_todo_change(now, add("go running"), "", "to-do tab")
+        .unwrap();
+    assert_eq!(record.after.unwrap().away_from_computer, Some(true));
+    let record = fixture
+        .planner
+        .review_todo_change(
+            now + chrono::Duration::seconds(1),
+            TodoChange::Add {
+                todo: ProposalInput {
+                    title: "online class".into(),
+                    away_from_computer: Some(false),
+                    ..Default::default()
+                },
+            },
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    assert_eq!(record.after.unwrap().away_from_computer, Some(false));
+}
+
+#[test]
+fn appointments_are_reviewed_by_the_owners_rules_and_checked() {
+    let fixture = harness(true, &["a"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.appointment_rules = "No appointments for games.".into())
+        .unwrap();
+    let now = Utc::now();
+    let start = now + chrono::Duration::hours(2);
+    fixture.advisor.judges_away.store(true, Ordering::SeqCst);
+    let record = add_appointment(
+        &fixture,
+        now,
+        appointment_change("dentist", start, 60, None),
+    )
+    .unwrap();
+    assert!(record.approved);
+    assert_eq!(
+        *fixture.advisor.saw_appointment_rules.lock(),
+        "No appointments for games."
+    );
+    assert_eq!(
+        *fixture.advisor.saw_instructions.lock(),
+        crate::advisor::APPOINTMENT_PROMPT
+    );
+    let accepted = fixture.planner.appointments(now);
+    assert_eq!(accepted.len(), 1);
+    assert!(accepted[0].away_from_computer);
+    // Overlapping, past, too long, untitled: refused without asking the AI.
+    let reviews = fixture.advisor.reviews.load(Ordering::SeqCst);
+    let later = now + chrono::Duration::seconds(1);
+    assert!(matches!(
+        add_appointment(
+            &fixture,
+            later,
+            appointment_change("call", start + chrono::Duration::minutes(30), 60, None)
+        ),
+        Err(PlannerError::AppointmentOverlaps(_))
+    ));
+    for refused in [
+        appointment_change("old", now - chrono::Duration::hours(3), 60, None),
+        appointment_change("all week", start + chrono::Duration::hours(2), 3000, None),
+        appointment_change(" ", start + chrono::Duration::hours(2), 60, None),
+        appointment_change("backwards", start + chrono::Duration::hours(2), -5, None),
+    ] {
+        assert!(matches!(
+            add_appointment(&fixture, later, refused),
+            Err(PlannerError::BadAppointment)
+        ));
+    }
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), reviews);
+    // Rejected: nothing is added.
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let record = add_appointment(
+        &fixture,
+        later,
+        appointment_change(
+            "gaming night",
+            start + chrono::Duration::hours(3),
+            60,
+            Some(false),
+        ),
+    )
+    .unwrap();
+    assert!(!record.approved);
+    assert_eq!(fixture.planner.appointments(now).len(), 1);
+    // Removing needs no AI.
+    let reviews = fixture.advisor.reviews.load(Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .review_todo_change(
+            later + chrono::Duration::seconds(1),
+            TodoChange::RemoveAppointment {
+                appointment_id: accepted[0].id.clone(),
+            },
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(record.approved);
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    assert!(fixture.planner.appointments(now).is_empty());
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), reviews);
+}
+
+#[test]
+fn an_appointment_is_fixed_at_its_time_and_ends_by_itself() {
+    let fixture = harness(true, &["a", "b"]);
+    let now = Utc::now();
+    let start = now + chrono::Duration::minutes(20);
+    add_appointment(
+        &fixture,
+        now,
+        appointment_change("meeting", start, 60, Some(true)),
+    )
+    .unwrap();
+    // A task picked before it is cut off at its start, and the AI knows of it.
+    let assignment = fixture.planner.assign(now).unwrap();
+    assert_eq!(assignment.until, Some(start));
+    assert_eq!(*fixture.advisor.saw_appointments.lock(), ["meeting"]);
+    // At its start it replaces the task, without a report and without asking the user.
+    fixture
+        .planner
+        .resume(start + chrono::Duration::seconds(5))
+        .unwrap();
+    let current = fixture.planner.status().assignment.unwrap();
+    assert!(current.appointment_id.is_some());
+    assert!(current.away_from_computer);
+    assert!(fixture.planner.away_from_computer_task().is_some());
+    assert_eq!(fixture.focus.store().get().task, "meeting");
+    // "할 일 받기" during it gives the appointment, not a to-do.
+    let picks = fixture.advisor.picks.load(Ordering::SeqCst);
+    let again = fixture
+        .planner
+        .assign(start + chrono::Duration::minutes(10))
+        .unwrap();
+    assert!(again.appointment_id.is_some());
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), picks);
+    // At its end it ends by itself: the user asks for the next task.
+    fixture
+        .planner
+        .resume(start + chrono::Duration::minutes(61))
+        .unwrap();
+    assert!(fixture.planner.status().assignment.is_none());
+    assert!(fixture.planner.waiting_for_task());
+}
+
+#[test]
+fn an_appointment_left_early_does_not_start_again() {
+    let fixture = harness(true, &["a"]);
+    let now = Utc::now();
+    let start = now + chrono::Duration::minutes(5);
+    add_appointment(
+        &fixture,
+        now,
+        appointment_change("lecture", start, 90, Some(false)),
+    )
+    .unwrap();
+    let during = start + chrono::Duration::minutes(10);
+    fixture.planner.resume(during).unwrap();
+    assert!(fixture
+        .planner
+        .status()
+        .assignment
+        .unwrap()
+        .appointment_id
+        .is_some());
+    fixture
+        .planner
+        .request_change(
+            during,
+            ChangeKind::Done,
+            "the lecture was cancelled",
+            Evidence::default(),
+        )
+        .unwrap();
+    fixture
+        .planner
+        .resume(during + chrono::Duration::seconds(20))
+        .unwrap();
+    assert!(fixture.planner.status().assignment.is_none());
+    let next = fixture
+        .planner
+        .assign(during + chrono::Duration::minutes(1))
+        .unwrap();
+    assert!(next.appointment_id.is_none());
 }

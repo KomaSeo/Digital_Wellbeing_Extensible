@@ -542,6 +542,58 @@ fn end_to_end(real_key: Option<String>) {
         let assigned = call(session, "assign", json!({})).unwrap();
         assert!(has_task(&assigned));
         assert!(assigned.lockdown.is_none(), "{:?}", assigned.lockdown);
+
+        // 9. An appointment that runs now replaces the task by itself (the agent checks
+        // every 15 s); one away from the computer locks every app. Removing it ends it.
+        let now = chrono::Utc::now();
+        let added = call(
+            session,
+            "todo_change",
+            json!({
+                "change": { "kind": "add_appointment", "appointment": {
+                    "title": "dentist", "notes": "",
+                    "start": now - chrono::Duration::minutes(1),
+                    "end": now + chrono::Duration::minutes(30),
+                    "away_from_computer": true,
+                } },
+                "reason": "",
+                "via": "e2e",
+            }),
+        )
+        .unwrap();
+        let record = added.last_todo_change.clone().unwrap();
+        assert!(record.approved, "{}", record.reply);
+        let appointment_id = record.appointment.unwrap().id;
+        let running = wait_for(Duration::from_secs(25), || {
+            let status = call(session, "status", json!({})).ok()?;
+            let assignment = status.planner.as_ref()?.assignment.clone()?;
+            (assignment.appointment_id.as_deref() == Some(appointment_id.as_str()))
+                .then_some(status)
+        })
+        .expect("the appointment starts by itself");
+        assert_eq!(
+            running.lockdown.map(|lockdown| lockdown.cause),
+            Some(LockdownCause::AwayFromComputer)
+        );
+        call(
+            session,
+            "todo_change",
+            json!({
+                "change": { "kind": "remove_appointment", "appointment_id": appointment_id },
+                "reason": "",
+                "via": "e2e",
+            }),
+        )
+        .unwrap();
+        let ended = wait_for(Duration::from_secs(25), || {
+            let status = call(session, "status", json!({})).ok()?;
+            (!has_task(&status)).then_some(status)
+        })
+        .expect("a removed appointment ends");
+        assert!(ended
+            .planner
+            .as_ref()
+            .is_some_and(|planner| planner.appointments.is_empty()));
     }
 
     let _ = std::fs::remove_dir_all(&data);

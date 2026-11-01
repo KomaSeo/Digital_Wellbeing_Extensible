@@ -14,6 +14,8 @@
 //! The same lock holds while there are to-dos but none is assigned (after a report, or
 //! before the first task of the day): the user starts the next task by asking for it, so
 //! the time the AI gives it is not spent away from the computer. Then browsers close too.
+//! And while the task is done away from the computer (sleep, exercise, an appointment out of
+//! the house), everything locks the same way until the user reports or the appointment ends.
 //! Walkthrough (Korean): `docs/ai_focus_rule.md` 5.13.
 
 use ai_focus_rule::connection::{Connection, KeyProblem};
@@ -30,6 +32,17 @@ pub enum LockdownCause {
     Connection { problem: KeyProblem },
     /// There are to-dos but none is assigned: the user asks for their task ("할 일 받기").
     NoTask,
+    /// The task is done away from the computer (sleep, exercise, an appointment).
+    AwayFromComputer,
+}
+
+/// Responsibility: Say why the planner wants every app locked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskLock {
+    /// There are to-dos but none is assigned.
+    WaitingForTask,
+    /// The task (named) is done away from the computer.
+    AwayFromComputer { task: String },
 }
 
 /// Responsibility: Describe a lockdown in force for the Focus app and the settings.
@@ -51,7 +64,7 @@ pub struct Lockdown {
 pub fn lockdown(
     protected: bool,
     connection: &Connection,
-    waiting_for_task: bool,
+    task_lock: Option<TaskLock>,
 ) -> Option<Lockdown> {
     if !protected {
         return None;
@@ -80,9 +93,22 @@ pub fn lockdown(
             browsers_allowed: true,
         });
     }
-    waiting_for_task.then(|| Lockdown {
-        cause: LockdownCause::NoTask,
-        reason: "지금 할 일이 없습니다. 준비되면 \"할 일 받기\"를 누르세요".to_string(),
+    let (cause, reason) = match task_lock? {
+        TaskLock::WaitingForTask => (
+            LockdownCause::NoTask,
+            "지금 할 일이 없습니다. 준비되면 \"할 일 받기\"를 누르세요".to_string(),
+        ),
+        TaskLock::AwayFromComputer { task } => (
+            LockdownCause::AwayFromComputer,
+            format!(
+                "지금 할 일은 컴퓨터 없이 하는 일입니다({}). 끝나면 할 일 탭에서 보고하세요",
+                task.chars().take(80).collect::<String>()
+            ),
+        ),
+    };
+    Some(Lockdown {
+        cause,
+        reason,
         fix_now: Vec::new(),
         browsers_allowed: false,
     })
@@ -188,12 +214,12 @@ mod tests {
             detail: "401".into(),
         };
         assert!(
-            lockdown(false, &broken, true).is_none(),
+            lockdown(false, &broken, Some(TaskLock::WaitingForTask)).is_none(),
             "setup never locks"
         );
-        assert!(lockdown(true, &Connection::Working, false).is_none());
-        assert!(lockdown(true, &Connection::Unknown, false).is_none());
-        let locked = lockdown(true, &broken, true).unwrap();
+        assert!(lockdown(true, &Connection::Working, None).is_none());
+        assert!(lockdown(true, &Connection::Unknown, None).is_none());
+        let locked = lockdown(true, &broken, Some(TaskLock::WaitingForTask)).unwrap();
         assert_eq!(locked.fix_now, vec![vec!["api_key".to_string()]]);
         assert!(locked.browsers_allowed, "the connection comes first");
         let model = lockdown(
@@ -202,13 +228,24 @@ mod tests {
                 problem: KeyProblem::UnknownModel,
                 detail: "404".into(),
             },
-            false,
+            None,
         )
         .unwrap();
         assert_eq!(model.fix_now.len(), 2);
-        let waiting = lockdown(true, &Connection::Working, true).unwrap();
+        let waiting = lockdown(true, &Connection::Working, Some(TaskLock::WaitingForTask)).unwrap();
         assert_eq!(waiting.cause, LockdownCause::NoTask);
         assert!(!waiting.browsers_allowed);
+        let away = lockdown(
+            true,
+            &Connection::Working,
+            Some(TaskLock::AwayFromComputer {
+                task: "잠자기".into(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(away.cause, LockdownCause::AwayFromComputer);
+        assert!(away.reason.contains("잠자기"));
+        assert!(!away.browsers_allowed);
     }
 
     #[test]
@@ -221,7 +258,7 @@ mod tests {
                 problem: KeyProblem::NoKey,
                 detail: String::new(),
             },
-            false,
+            None,
         );
         let rule = LockdownRule {
             active: Arc::new(move || locked.clone()),
@@ -262,7 +299,7 @@ mod tests {
         assert_eq!(closed, ["steam.exe", "KakaoTalk.exe"]);
 
         // Waiting for a task: browsers close too.
-        let waiting = lockdown(true, &Connection::Working, true);
+        let waiting = lockdown(true, &Connection::Working, Some(TaskLock::WaitingForTask));
         let rule = LockdownRule {
             active: Arc::new(move || waiting.clone()),
             settings: AiFocusStore::in_memory(AiFocusConfig::default()),

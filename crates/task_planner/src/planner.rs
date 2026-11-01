@@ -9,15 +9,21 @@
 //! finished", which keeps the to-do). After a report, or when nothing is assigned, the next
 //! task comes only when the user asks for it ([`TaskPlanner::assign`]); meanwhile the agent
 //! locks every app (`machine::lockdown`). Routines (`repeat`) stay on the list when finished.
+//!
+//! Appointments (accepted by the AI under the owner's appointment rules) are fixed: from
+//! their start to their end they are the task, whatever ran before, and they end by
+//! themselves. A task done away from the computer (sleep, exercise; or such an appointment)
+//! locks every app too, and getting off it early needs an urgent reason.
 
 use crate::advisor::{
-    AdvisorProvider, PickRequest, Review, ReviewRequest, ReviewedTodo, TodoChangeRequest,
-    WeekPlanAnswer, WeekPlanRequest,
+    AdvisorProvider, AppointmentRequest, PickRequest, Review, ReviewRequest, ReviewedTodo,
+    TodoChangeRequest, WeekPlanAnswer, WeekPlanRequest,
 };
 use crate::model::{
-    Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, Evidence,
-    PlannerConfig, PlannerState, PlannerStatus, PolishItem, ProposalInput, TaskNotes, TodoChange,
-    TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp,
+    Appointment, Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord,
+    DoneRecord, Evidence, PlannerConfig, PlannerState, PlannerStatus, PolishItem, ProposalInput,
+    TaskNotes, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan, WeekPlanDay,
+    WeekPlanTodo, WhenTimeIsUp,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -46,6 +52,10 @@ const DEFAULT_ASSIGNMENT_MINUTES: u32 = 60;
 const ASSIGNMENT_LOG_CAPACITY: usize = 1000;
 const MAX_TASK_NOTES_CHARS: usize = 4000;
 const MAX_TASK_STEPS: usize = 50;
+/// The longest appointment.
+const MAX_APPOINTMENT_MINUTES: i64 = 24 * 60;
+/// Ended appointments stay in `planner.json` this long, then the next change drops them.
+const APPOINTMENTS_KEPT_FOR: Duration = Duration::days(7);
 
 /// Responsibility: Report why an assignment or a change request was refused.
 #[derive(Debug, Error)]
@@ -82,6 +92,12 @@ pub enum PlannerError {
     NoLongerUsed,
     #[error("지금 할 일이 없습니다")]
     NothingAssigned,
+    #[error("약속에 제목(2~{MAX_TITLE_CHARS}글자)과 시간을 적어 주세요. 끝은 시작보다 늦고 지금보다 뒤여야 하며, 약속은 24시간을 넘지 못합니다")]
+    BadAppointment,
+    #[error("\"{0}\" 약속과 시간이 겹칩니다")]
+    AppointmentOverlaps(String),
+    #[error("없는 약속입니다('{0}')")]
+    UnknownAppointment(String),
     #[error("AI: {0}")]
     Ai(#[from] JudgeError),
     #[error("저장하지 못했습니다: {0}")]
@@ -167,6 +183,90 @@ impl TaskPlanner {
             .filter(|assignment| assignment.todo_id.as_deref() == Some(todo_id))
             .map_or(0, |assignment| (now - assignment.at).num_minutes().max(0));
         finished + running
+    }
+
+    /// Appointments that have not ended (and were not ended early), soonest first.
+    pub fn appointments(&self, now: DateTime<Utc>) -> Vec<Appointment> {
+        let ended = self.state.get().ended_appointments;
+        let mut appointments: Vec<Appointment> = self
+            .config
+            .get()
+            .appointments
+            .into_iter()
+            .filter(|appointment| appointment.end > now && !ended.contains(&appointment.id))
+            .collect();
+        appointments.sort_by_key(|appointment| appointment.start);
+        appointments
+    }
+
+    /// The task when it is done away from the computer: the agent locks every app meanwhile.
+    pub fn away_from_computer_task(&self) -> Option<String> {
+        self.state
+            .get()
+            .assignment
+            .filter(|assignment| assignment.away_from_computer)
+            .map(|assignment| assignment.task)
+    }
+
+    /// An assignment that ends at `until`, cut off at the start of the next appointment.
+    fn cut_at_next_appointment(&self, now: DateTime<Utc>, until: DateTime<Utc>) -> DateTime<Utc> {
+        self.appointments(now)
+            .iter()
+            .map(|appointment| appointment.start)
+            .filter(|start| *start > now)
+            .min()
+            .map_or(until, |start| until.min(start))
+    }
+
+    /// Start the appointment that runs now, if it is not the task yet: it replaces whatever
+    /// runs (the replaced to-do stays on the list). Ends an appointment that is over or was
+    /// removed. Returns the appointment's assignment when one runs.
+    fn keep_appointments(&self, now: DateTime<Utc>) -> Result<Option<Assignment>, PlannerError> {
+        let appointments = self.appointments(now);
+        let current = self.state.get().assignment;
+        if let Some(appointment_id) = current
+            .as_ref()
+            .and_then(|assignment| assignment.appointment_id.as_ref())
+        {
+            if !appointments
+                .iter()
+                .any(|appointment| &appointment.id == appointment_id && appointment.runs_at(now))
+            {
+                info!("appointment {appointment_id} is over");
+                self.end(now)?;
+            }
+        }
+        let Some(running) = appointments
+            .into_iter()
+            .find(|appointment| appointment.runs_at(now))
+        else {
+            return Ok(None);
+        };
+        let current = self.state.get().assignment;
+        if let Some(current) = current
+            .filter(|assignment| assignment.appointment_id.as_deref() == Some(running.id.as_str()))
+        {
+            return Ok(Some(current));
+        }
+        let task = if running.notes.trim().is_empty() {
+            running.title.clone()
+        } else {
+            format!("{} — {}", running.title, running.notes.trim())
+        };
+        let assignment = Assignment {
+            todo_id: None,
+            task,
+            why: "약속 시간입니다".into(),
+            source: AssignmentSource::Planner,
+            at: now,
+            until: Some(running.end),
+            when_time_is_up: WhenTimeIsUp::Reassign,
+            away_from_computer: running.away_from_computer,
+            appointment_id: Some(running.id.clone()),
+        };
+        info!("appointment started: {}", running.title);
+        self.apply(assignment.clone())?;
+        Ok(Some(assignment))
     }
 
     /// There are to-dos but none is assigned: the agent locks every app until the user asks
@@ -271,6 +371,7 @@ impl TaskPlanner {
                 .as_ref()
                 .is_some_and(|assignment| assignment.time_is_up(now)),
             minutes_this_round,
+            appointments: self.appointments(now),
             open_todos,
         }
     }
@@ -332,6 +433,7 @@ impl TaskPlanner {
             open: &with_spent,
             worked_this_week: &worked_this_week,
             recently_done: &recently_done,
+            appointments: &self.appointments(now),
         })?;
         let plan = checked_week_plan(now, answer, &days_left, &open);
         self.state
@@ -368,7 +470,7 @@ impl TaskPlanner {
         if today >= PROPOSALS_PER_DAY {
             return Err(PlannerError::TooManyProposals);
         }
-        let change = clean_change(change)?;
+        let change = clean_change(change, now)?;
         let target = match &change {
             TodoChange::Add { todo } => {
                 if let Some(duplicate) = open
@@ -379,6 +481,26 @@ impl TaskPlanner {
                 }
                 if open.iter().filter(|existing| existing.proposed).count() >= MAX_OPEN_PROPOSED {
                     return Err(PlannerError::TooManyProposals);
+                }
+                None
+            }
+            TodoChange::AddAppointment { appointment } => {
+                if let Some(overlapping) = self.appointments(now).into_iter().find(|existing| {
+                    existing.start < appointment.end && appointment.start < existing.end
+                }) {
+                    return Err(PlannerError::AppointmentOverlaps(overlapping.title));
+                }
+                None
+            }
+            TodoChange::RemoveAppointment { appointment_id } => {
+                if !self
+                    .config
+                    .get()
+                    .appointments
+                    .iter()
+                    .any(|existing| &existing.id == appointment_id)
+                {
+                    return Err(PlannerError::UnknownAppointment(appointment_id.clone()));
                 }
                 None
             }
@@ -402,6 +524,12 @@ impl TaskPlanner {
         let history = self.focus.state().history_text();
         let now_local = local_now_text();
         let config = self.config.get();
+        if matches!(
+            change,
+            TodoChange::AddAppointment { .. } | TodoChange::RemoveAppointment { .. }
+        ) {
+            return self.review_appointment_change(now, change, reason, via, &open, &recent);
+        }
         let review = (self.advisor)(&self.focus.store().get()).and_then(|advisor| {
             advisor.review_todo_change(&TodoChangeRequest {
                 instructions: config.instructions.proposal_review_or_default(),
@@ -427,7 +555,7 @@ impl TaskPlanner {
         let after = match &change {
             TodoChange::Add { todo } => Some(completed_todo(now, todo, filled.as_ref())),
             TodoChange::Edit { todo, .. } => target.as_ref().map(|before| edited(before, todo)),
-            TodoChange::Remove { .. } => None,
+            _ => None,
         };
         let record = TodoChangeRecord {
             id: format!("c{}", now.timestamp_millis()),
@@ -441,7 +569,97 @@ impl TaskPlanner {
             before: target,
             after,
             scheduled_update: None,
+            appointment: None,
         };
+        self.log_todo_change(&record)?;
+        Ok(record)
+    }
+
+    /// The appointment half of [`Self::review_todo_change`]: the AI decides on an addition
+    /// by the owner's appointment rules; a removal only frees time and needs no AI.
+    fn review_appointment_change(
+        &self,
+        now: DateTime<Utc>,
+        change: TodoChange,
+        reason: String,
+        via: &str,
+        open: &[TodoItem],
+        recent: &[TodoChangeRecord],
+    ) -> Result<TodoChangeRecord, PlannerError> {
+        let config = self.config.get();
+        let (approved, reply, ai_failed, appointment) = match &change {
+            TodoChange::AddAppointment { appointment } => {
+                let now_local = local_now_text();
+                let state = self.state.get();
+                let review = (self.advisor)(&self.focus.store().get()).and_then(|advisor| {
+                    advisor.review_appointment(&AppointmentRequest {
+                        instructions: config.instructions.appointment_review_or_default(),
+                        now_local: &now_local,
+                        appointment_rules: &config.appointment_rules,
+                        life_rules: &config.life_rules,
+                        appointment,
+                        reason: &reason,
+                        appointments: &self.appointments(now),
+                        open,
+                        current: state.assignment.as_ref(),
+                        recent_changes: recent,
+                    })
+                });
+                let (approved, reply, ai_failed, judged_away) = match review {
+                    Ok(review) => (
+                        review.approved,
+                        review.reply,
+                        false,
+                        review.away_from_computer,
+                    ),
+                    Err(error) => (
+                        false,
+                        format!("The AI could not review this: {error}"),
+                        true,
+                        false,
+                    ),
+                };
+                let accepted = Appointment {
+                    id: format!("a{}", now.timestamp_millis()),
+                    title: appointment.title.clone(),
+                    notes: appointment.notes.clone(),
+                    start: appointment.start,
+                    end: appointment.end,
+                    away_from_computer: appointment.away_from_computer.unwrap_or(judged_away),
+                };
+                (approved, reply, ai_failed, Some(accepted))
+            }
+            TodoChange::RemoveAppointment { appointment_id } => (
+                true,
+                "약속을 지웠습니다.".to_string(),
+                false,
+                config
+                    .appointments
+                    .iter()
+                    .find(|existing| &existing.id == appointment_id)
+                    .cloned(),
+            ),
+            _ => unreachable!("only appointment changes come here"),
+        };
+        let record = TodoChangeRecord {
+            id: format!("c{}", now.timestamp_millis()),
+            at: now,
+            change,
+            reason,
+            via: via.trim().chars().take(40).collect(),
+            approved,
+            reply,
+            ai_failed,
+            before: None,
+            after: None,
+            scheduled_update: None,
+            appointment,
+        };
+        self.log_todo_change(&record)?;
+        Ok(record)
+    }
+
+    fn log_todo_change(&self, record: &TodoChangeRecord) -> Result<(), PlannerError> {
         self.state.update(|planner_state| {
             if planner_state.todo_changes.len() >= REQUEST_LOG_CAPACITY {
                 planner_state.todo_changes.pop_front();
@@ -461,7 +679,7 @@ impl TaskPlanner {
             },
             record.reply
         );
-        Ok(record)
+        Ok(())
     }
 
     /// A logged to-do change by id.
@@ -512,6 +730,24 @@ impl TaskPlanner {
                 TodoListWrite::Dismiss(todo_id.clone()),
                 TodoListWrite::Remove(todo_id.clone()),
             ],
+            // Long-past appointments go with the change.
+            TodoChange::AddAppointment { .. } => self
+                .config
+                .get()
+                .appointments
+                .iter()
+                .filter(|existing| record.at - existing.end > APPOINTMENTS_KEPT_FOR)
+                .map(|existing| TodoListWrite::RemoveAppointment(existing.id.clone()))
+                .chain(
+                    record
+                        .appointment
+                        .clone()
+                        .map(TodoListWrite::PutAppointment),
+                )
+                .collect(),
+            TodoChange::RemoveAppointment { appointment_id } => {
+                vec![TodoListWrite::RemoveAppointment(appointment_id.clone())]
+            }
         }
     }
 
@@ -533,6 +769,10 @@ impl TaskPlanner {
     /// one the AI picks. A task whose time is up must be reported first.
     pub fn assign(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
         let _busy = self.busy.lock();
+        if let Some(appointment) = self.keep_appointments(now)? {
+            self.start_focus(&appointment)?;
+            return Ok(appointment);
+        }
         if !self.is_active() {
             return Err(PlannerError::NotActive);
         }
@@ -554,11 +794,14 @@ impl TaskPlanner {
         self.pick_and_apply(now, None)
     }
 
-    /// After logon (an agent restart), go on with the assignment there is; never picks one.
-    pub fn resume(&self) -> Result<(), PlannerError> {
+    /// Run every few seconds by the agent: start an appointment whose time has come and end
+    /// one that is over, and after logon (an agent restart) go on with the assignment there
+    /// is. Never picks a to-do.
+    pub fn resume(&self, now: DateTime<Utc>) -> Result<(), PlannerError> {
         let Some(_busy) = self.busy.try_lock() else {
             return Ok(());
         };
+        self.keep_appointments(now)?;
         if let Some(current) = self.state.get().assignment {
             if !self.focus.store().get().session_active {
                 self.start_focus(&current)?;
@@ -671,13 +914,14 @@ impl TaskPlanner {
         reason: &str,
     ) -> Result<(), PlannerError> {
         let open = self.open_todos();
-        if !self.is_active_with(&open) {
+        let assignment = self.state.get().assignment;
+        // An appointment runs even with an empty list.
+        if !self.is_active_with(&open) && assignment.is_none() {
             return Err(PlannerError::NotActive);
         }
         if reason.trim().chars().count() < MIN_REASON_CHARS {
             return Err(PlannerError::ReasonTooShort);
         }
-        let assignment = self.state.get().assignment;
         let time_is_up = assignment
             .as_ref()
             .is_some_and(|assignment| assignment.time_is_up(now));
@@ -762,6 +1006,27 @@ impl TaskPlanner {
         open: &[TodoItem],
     ) -> Result<(), PlannerError> {
         let reply = review.reply.as_str();
+        // An appointment left early (approved) does not start again.
+        if let Some(appointment_id) = self
+            .state
+            .get()
+            .assignment
+            .and_then(|assignment| assignment.appointment_id)
+        {
+            self.state.update(|planner_state| {
+                planner_state.ended_appointments.insert(appointment_id);
+                let still_listed: Vec<String> = self
+                    .config
+                    .get()
+                    .appointments
+                    .iter()
+                    .map(|appointment| appointment.id.clone())
+                    .collect();
+                planner_state
+                    .ended_appointments
+                    .retain(|id| still_listed.contains(id));
+            })?;
+        }
         match request {
             ChangeKind::Done => {
                 let current = self.state.get().assignment;
@@ -840,8 +1105,10 @@ impl TaskPlanner {
                     why: reply.to_string(),
                     source: AssignmentSource::ApprovedChange,
                     at: now,
-                    until: Some(end_after(now, minutes)),
+                    until: Some(self.cut_at_next_appointment(now, end_after(now, minutes))),
                     when_time_is_up: WhenTimeIsUp::Reassign,
+                    away_from_computer: todo.away_from_computer.unwrap_or(false),
+                    appointment_id: None,
                 })?;
             }
             ChangeKind::SwitchFree { task } => {
@@ -856,8 +1123,10 @@ impl TaskPlanner {
                     why: reply.to_string(),
                     source: AssignmentSource::ApprovedChange,
                     at: now,
-                    until: Some(end_after(now, minutes)),
+                    until: Some(self.cut_at_next_appointment(now, end_after(now, minutes))),
                     when_time_is_up: WhenTimeIsUp::Reassign,
+                    away_from_computer: false,
+                    appointment_id: None,
                 })?;
             }
             ChangeKind::Repick => {
@@ -901,18 +1170,21 @@ impl TaskPlanner {
             previous: state.assignment.as_ref(),
             history: &history,
             repick_reason,
+            appointments: &self.appointments(now),
         })?;
-        if !open.iter().any(|todo| todo.id == pick.todo_id) {
+        let Some(picked) = open.iter().find(|todo| todo.id == pick.todo_id) else {
             return Err(PlannerError::BadPick(pick.todo_id));
-        }
+        };
         let assignment = Assignment {
+            away_from_computer: picked.away_from_computer.unwrap_or(pick.away_from_computer),
             todo_id: Some(pick.todo_id),
             task: pick.task,
             why: pick.why,
             source: AssignmentSource::Planner,
             at: now,
-            until: Some(end_after(now, pick.minutes)),
+            until: Some(self.cut_at_next_appointment(now, end_after(now, pick.minutes))),
             when_time_is_up: WhenTimeIsUp::Reassign,
+            appointment_id: None,
         };
         info!(
             "assigned for {} min: {}",
@@ -1101,6 +1373,7 @@ fn polish_todo(todo_id: &str, polish: &PolishItem) -> TodoItem {
         estimate_minutes: u32::try_from(polish.minutes_left).ok(),
         proposed: polish.todo.proposed,
         repeat: false,
+        away_from_computer: polish.todo.away_from_computer,
     }
 }
 
@@ -1110,7 +1383,7 @@ fn end_after(now: DateTime<Utc>, minutes: u32) -> DateTime<Utc> {
 }
 
 /// Trim the texts of a change and refuse an addition without a usable title.
-fn clean_change(change: TodoChange) -> Result<TodoChange, PlannerError> {
+fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, PlannerError> {
     let clean = |mut todo: ProposalInput| {
         todo.title = todo.title.split_whitespace().collect::<Vec<_>>().join(" ");
         todo.notes = todo.notes.trim().to_string();
@@ -1126,7 +1399,26 @@ fn clean_change(change: TodoChange) -> Result<TodoChange, PlannerError> {
             todo_id,
             todo: clean(todo),
         },
-        remove @ TodoChange::Remove { .. } => remove,
+        TodoChange::AddAppointment { mut appointment } => {
+            appointment.title = appointment
+                .title
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            appointment.notes = appointment.notes.trim().to_string();
+            let minutes = (appointment.end - appointment.start).num_minutes();
+            let title_length = appointment.title.chars().count();
+            if !(2..=MAX_TITLE_CHARS).contains(&title_length)
+                || appointment.notes.chars().count() > MAX_NOTES_CHARS
+                || minutes < 1
+                || minutes > MAX_APPOINTMENT_MINUTES
+                || appointment.end <= now
+            {
+                return Err(PlannerError::BadAppointment);
+            }
+            TodoChange::AddAppointment { appointment }
+        }
+        other @ (TodoChange::Remove { .. } | TodoChange::RemoveAppointment { .. }) => other,
     };
     match &change {
         TodoChange::Add { todo } if todo.title.chars().count() < 2 || !fits(todo) => {
@@ -1144,6 +1436,7 @@ fn completed_todo(
     draft: &ProposalInput,
     filled: Option<&ReviewedTodo>,
 ) -> TodoItem {
+    let judged_away = filled.map(|filled| filled.away_from_computer);
     let filled = filled.cloned().unwrap_or_default();
     let deadline = draft
         .deadline
@@ -1171,6 +1464,7 @@ fn completed_todo(
         estimate_minutes,
         proposed: true,
         repeat: draft.repeat.unwrap_or(false),
+        away_from_computer: draft.away_from_computer.or(judged_away),
     }
 }
 
@@ -1207,6 +1501,9 @@ fn edited_fields(draft: &ProposalInput) -> Map<String, Value> {
     }
     if let Some(repeat) = draft.repeat {
         changed_fields.insert("repeat".into(), json!(repeat));
+    }
+    if let Some(away) = draft.away_from_computer {
+        changed_fields.insert("away_from_computer".into(), json!(away));
     }
     changed_fields
 }

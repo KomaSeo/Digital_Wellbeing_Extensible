@@ -19,7 +19,10 @@ user never chooses what to work on next, not even through you: the app's AI does
 they want to stop the current task, send request_change with change \"repick\" and their \
 reason, not a task of your or their choosing. When the task's time is up, the app \
 accepts only a report (request_change done or not_finished); the next task comes when \
-the user asks for it (get_my_task). A \
+the user asks for it (get_my_task). Tasks done away from the computer (sleep, exercise) \
+lock every app until they are reported, and appointments (add_appointment; the app's AI \
+accepts them by the owner's appointment rules) replace the task at their time; leaving \
+either early needs an urgent reason. A \
 scheduled settings update takes effect only after the user confirms it in the app three \
 times, two days apart; tell the user that, and never press them to confirm.";
 
@@ -50,6 +53,7 @@ pub fn tools() -> Value {
                     "priority": { "type": "integer", "minimum": 1, "maximum": 5, "description": "1 low .. 5 urgent (default 3)" },
                     "estimate_minutes": { "type": "integer", "minimum": 1 },
                     "repeat": { "type": "boolean", "description": "A routine (sleep, getting ready, exercise) that stays on the list when finished" },
+                    "away_from_computer": { "type": "boolean", "description": "Done away from the computer (sleep, exercise): every app is locked while it is the task. Leave out unless the user said; the app's AI judges it" },
                     "reason": { "type": "string", "description": "Why it belongs on the list (optional)" }
                 },
                 "required": ["title"]
@@ -69,9 +73,35 @@ pub fn tools() -> Value {
                     "priority": { "type": "integer", "minimum": 1, "maximum": 5 },
                     "estimate_minutes": { "type": "integer", "minimum": 1 },
                     "repeat": { "type": "boolean", "description": "Make it a routine (true) or a one-off (false)" },
+                    "away_from_computer": { "type": "boolean", "description": "Done away from the computer (true) or at it (false)" },
                     "reason": { "type": "string", "description": "The user's reason, in their words" }
                 },
                 "required": ["todo_id", "reason"]
+            }
+        },
+        {
+            "name": "add_appointment",
+            "description": "Ask to add an appointment: something fixed at a clock time (meeting someone, a class, a doctor). From its start to its end it replaces whatever task runs, and nothing else is assigned. The app's AI accepts or rejects it by the owner's appointment rules; work or leisure that could happen any time belongs on the to-do list instead. Times are the user's local time (see now_local in get_status).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "start": { "type": "string", "description": "Local time, YYYY-MM-DD HH:MM" },
+                    "end": { "type": "string", "description": "Local time, YYYY-MM-DD HH:MM" },
+                    "notes": { "type": "string", "description": "With whom, where" },
+                    "away_from_computer": { "type": "boolean", "description": "Leave out unless the user said; the app's AI judges it" },
+                    "reason": { "type": "string", "description": "Optional" }
+                },
+                "required": ["title", "start", "end"]
+            }
+        },
+        {
+            "name": "remove_appointment",
+            "description": "Remove an appointment (ids from get_status). Needs no review.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "appointment_id": { "type": "string" } },
+                "required": ["appointment_id"]
             }
         },
         {
@@ -123,7 +153,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "get_settings",
-            "description": "Read the app's settings: whether they are protected, the files in force (policy: block lists; ai_focus: focus checks, without the API key; planner: to-dos, life_rules, and instructions for the planner's AI, where an empty text means the built-in one), the built-in instructions, and the scheduled updates with their confirmations.",
+            "description": "Read the app's settings: whether they are protected, the files in force (policy: block lists; ai_focus: focus checks, without the API key; planner: to-dos, appointments, life_rules, appointment_rules, and instructions for the planner's AI, where an empty text means the built-in one), the built-in instructions, and the scheduled updates with their confirmations.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -155,6 +185,36 @@ fn todo_change_answer(status: &Status) -> Result<String, String> {
     })))
 }
 
+/// The AI's decision on an appointment, for the assistant.
+fn appointment_answer(status: &Status) -> Result<String, String> {
+    let record = status
+        .last_todo_change
+        .as_ref()
+        .ok_or("the agent did not answer")?;
+    Ok(pretty(&json!({
+        "approved": record.approved,
+        "reply": record.reply,
+        "ai_could_not_review": record.ai_failed,
+        "appointment": record.appointment,
+    })))
+}
+
+/// `2026-11-05 14:00` in local time (or an RFC 3339 time) as UTC.
+fn local_time(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone;
+    let text = text.trim();
+    if let Ok(time) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Some(time.with_timezone(&chrono::Utc));
+    }
+    let naive = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M"))
+        .ok()?;
+    chrono::Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .map(|time| time.with_timezone(&chrono::Utc))
+}
+
 /// A scheduled update's edits as lines, leaving out any edit of the API key.
 fn changes_without_key(edits: &Value) -> Vec<String> {
     let edits: Vec<crate::setting_edits::Edit> =
@@ -181,6 +241,7 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                 "priority",
                 "estimate_minutes",
                 "repeat",
+                "away_from_computer",
             ] {
                 if let Some(value) = arguments.get(key).filter(|value| !value.is_null()) {
                     todo[key] = value.clone();
@@ -210,6 +271,7 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                     "priority",
                     "estimate_minutes",
                     "repeat",
+                    "away_from_computer",
                 ] {
                     if let Some(value) = arguments.get(key).filter(|value| !value.is_null()) {
                         todo[key] = value.clone();
@@ -227,6 +289,46 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                 }),
             )?;
             todo_change_answer(&status)
+        }
+        "add_appointment" => {
+            let time = |key: &str| {
+                local_time(arguments[key].as_str().unwrap_or_default())
+                    .ok_or_else(|| format!("{key}: write the local time as YYYY-MM-DD HH:MM"))
+            };
+            let status = status_from(
+                agent,
+                "todo_change",
+                json!({
+                    "change": {
+                        "kind": "add_appointment",
+                        "appointment": {
+                            "title": arguments["title"].as_str().unwrap_or_default(),
+                            "notes": arguments["notes"].as_str().unwrap_or_default(),
+                            "start": time("start")?,
+                            "end": time("end")?,
+                            "away_from_computer": arguments["away_from_computer"].as_bool(),
+                        },
+                    },
+                    "reason": arguments["reason"].as_str().unwrap_or_default(),
+                    "via": via,
+                }),
+            )?;
+            appointment_answer(&status)
+        }
+        "remove_appointment" => {
+            let appointment_id = arguments["appointment_id"]
+                .as_str()
+                .ok_or("appointment_id is required")?;
+            let status = status_from(
+                agent,
+                "todo_change",
+                json!({
+                    "change": { "kind": "remove_appointment", "appointment_id": appointment_id },
+                    "reason": "",
+                    "via": via,
+                }),
+            )?;
+            appointment_answer(&status)
         }
         "get_my_task" => status_from(agent, "assign", json!({}))
             .map(|status| pretty(&summary(&status)["assignment"])),
@@ -386,6 +488,7 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                     "change_review": task_planner::REVIEW_PROMPT,
                     "proposal_review": task_planner::PROPOSAL_PROMPT,
                     "week_plan": task_planner::WEEK_PLAN_PROMPT,
+                    "appointment_review": task_planner::APPOINTMENT_PROMPT,
                 },
                 "scheduled_updates": scheduled,
                 "recent_outcomes": settings["reservations"]["history"],
@@ -426,6 +529,7 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
 pub fn summary(status: &Status) -> Value {
     let planner = status.planner.as_ref();
     json!({
+        "now_local": chrono::Local::now().format("%Y-%m-%d %A %H:%M").to_string(),
         "daily_wellbeing_on": status.session_active,
         "focus_task": status.task,
         "planner_on": planner.is_some_and(|planner| planner.active),
@@ -435,7 +539,17 @@ pub fn summary(status: &Status) -> Value {
             "todo_id": assignment.todo_id,
             "since": assignment.at,
             "until": assignment.until,
+            "away_from_computer": assignment.away_from_computer,
+            "appointment": assignment.appointment_id.is_some(),
         })),
+        "appointments": planner.map(|planner| planner.appointments.iter().map(|appointment| json!({
+            "id": appointment.id,
+            "title": appointment.title,
+            "notes": appointment.notes,
+            "start_local": appointment.start.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string(),
+            "end_local": appointment.end.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string(),
+            "away_from_computer": appointment.away_from_computer,
+        })).collect::<Vec<_>>()),
         "report_due": planner.is_some_and(|planner| planner.report_due),
         "all_apps_locked": status.lockdown.as_ref().map(|lockdown| &lockdown.reason),
         "open_todos": planner.map(|planner| planner.open_todos.iter().map(|todo| json!({
@@ -447,6 +561,7 @@ pub fn summary(status: &Status) -> Value {
             "estimate_minutes": todo.estimate_minutes,
             "minutes_spent": planner.minutes_this_round.get(&todo.id),
             "routine": todo.repeat,
+            "away_from_computer": todo.away_from_computer,
             "proposed_by_user": todo.proposed,
         })).collect::<Vec<_>>()),
         "recent_todo_changes": planner.map(|planner| planner.recent_todo_changes.iter().map(|record| json!({

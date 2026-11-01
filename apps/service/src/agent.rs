@@ -159,7 +159,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
 /// reports whether it is finished.
 fn planner_loop(planner: Arc<TaskPlanner>) {
     loop {
-        if let Err(error) = planner.resume() {
+        if let Err(error) = planner.resume(chrono::Utc::now()) {
             warn!("planner: {error}");
         }
         thread::sleep(PLANNER_CHECK_INTERVAL);

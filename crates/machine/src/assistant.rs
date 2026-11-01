@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub const ASSISTANT_PROMPT: &str = "\
 You are the AI assistant inside the user's Digital Wellbeing app on their PC. The user \
 talks to you in natural language, usually Korean, to use the app: add to-dos, edit or \
-remove them, see the list and the current task, get a task assigned, report a task done, \
+remove them, add or remove appointments, see the list and the current task, get a task assigned, report a task done, \
 ask for a different task, get the overview of the next seven days, ask for access to a \
 blocked app or website, have the app's service update a listed program that needs \
 administrator rights, and read the settings or schedule an update of them. You act only \
@@ -54,6 +54,11 @@ report: request_change \"done\" (the app's AI reviews it) or \"not_finished\" (t
 stays). Ask the user which, if they did not say. After a report nothing is assigned until \
 the user asks for their next task (get_my_task), and meanwhile every app is locked.
 - For an access request, leave the length out: the app's AI decides it.
+- Something at a fixed clock time with others or at a set place (a meeting, a class, a \
+doctor) is an appointment: add it with add_appointment, giving local times. Work or \
+leisure that could happen any time is a to-do. The app's AI decides whether to accept an \
+appointment by the owner's appointment rules. Leave away_from_computer out unless the \
+user said; the app's AI judges it.
 - A scheduled settings update takes effect only after the user confirms it in the app's \
 Settings tab three times, two days apart. Tell the user that, and never press them to \
 confirm.
@@ -354,6 +359,10 @@ pub fn action_line(name: &str, input: &Value, outcome: &Result<String, String>) 
             format!("할 일 지우기를 요청했습니다 ({})", text_of("todo_id"))
         }
         "change_todo" => format!("할 일 고치기를 요청했습니다 ({})", text_of("todo_id")),
+        "add_appointment" => format!("약속 추가를 요청했습니다: {}", text_of("title")),
+        "remove_appointment" => {
+            format!("약속 지우기를 요청했습니다 ({})", text_of("appointment_id"))
+        }
         "get_my_task" => "지금 할 일을 받았습니다".to_string(),
         "request_change" => {
             let change = match input["change"].as_str().unwrap_or_default() {

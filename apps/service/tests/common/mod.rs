@@ -233,6 +233,20 @@ fn answer(request: &Value) -> Value {
             .and_then(|rest| rest.split('"').next())
             .unwrap_or_default();
         json!({ "todo_id": first_id, "task": "work on it", "why": "first", "minutes": 30 })
+    } else if system.contains("decide whether to accept this one") {
+        // An appointment review: the question also lists earlier changes, so only the
+        // appointment's own title can ask for a rejection.
+        let title = text
+            .split("- title: ")
+            .nth(1)
+            .and_then(|rest| rest.lines().next())
+            .unwrap_or_default();
+        let approved = !title.contains("please reject");
+        json!({
+            "approved": approved,
+            "reply": if approved { "ok" } else { "no" },
+            "away_from_computer": false,
+        })
     } else {
         // A change review or a to-do review; a to-do review also fills in the to-do.
         // "please reject" in the request makes it say no.

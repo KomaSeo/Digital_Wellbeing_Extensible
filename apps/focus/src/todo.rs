@@ -1,6 +1,7 @@
 //! Responsibility: Draw the To-do tab: what to do now (progress, notes and steps, asking for a
-//! change), the to-do list (details, adding, editing and removing through the AI), today's
-//! plan and summary, finished to-dos, and the log of requests.
+//! change), the to-do list (details, adding, editing and removing through the AI), the
+//! appointments (added through the AI, fixed at their time), today's plan and summary,
+//! finished to-dos, and the log of requests.
 //!
 //! The app runs all day; the user-facing name of the AI checks is "daily wellbeing".
 //! Every change of the list goes to the planner's AI (`todo_change`); when it says no or
@@ -9,7 +10,7 @@
 //! change nothing the rules depend on and are saved at once (`task_notes_put`).
 
 use crate::{ChangeChoice, FocusApp, Tab, GREEN, RED};
-use chrono::{DateTime, Local, NaiveDate, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveTime, Utc};
 use eframe::egui;
 use machine::user_api::{call, Status};
 use serde_json::json;
@@ -46,6 +47,84 @@ pub struct TodoUiState {
     notes_for: Option<String>,
     notes: TaskNotes,
     new_step: String,
+    appointment_form: AppointmentForm,
+    appointment_form_open: bool,
+}
+
+/// Responsibility: Hold the fields of an appointment as the user types them.
+#[derive(Default, Clone)]
+struct AppointmentForm {
+    title: String,
+    notes: String,
+    /// "오늘", "금요일", "11/5" (as for deadlines).
+    date: String,
+    /// "14:00", "오후 2시", "2시 30분".
+    start: String,
+    end: String,
+    /// `None` = let the AI decide.
+    away_from_computer: Option<bool>,
+    reason: String,
+}
+
+impl AppointmentForm {
+    /// Start and end in UTC; an end earlier than the start is on the next day.
+    fn times(&self) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        let date = task_planner::parse_deadline(&self.date, Local::now().date_naive())?;
+        let start = parse_clock(&self.start)?;
+        let end = parse_clock(&self.end)?;
+        let local = |time: NaiveTime, day: NaiveDate| {
+            day.and_time(time)
+                .and_local_timezone(Local)
+                .earliest()
+                .map(|local_time| local_time.with_timezone(&Utc))
+        };
+        let end_day = if end <= start { date.succ_opt()? } else { date };
+        Some((local(start, date)?, local(end, end_day)?))
+    }
+}
+
+/// A clock time as written: "14:00", "14시", "2시 30분", "오후 2시", "오전 9시 반".
+fn parse_clock(text: &str) -> Option<NaiveTime> {
+    let text = text.trim();
+    let (afternoon, rest) = if let Some(rest) = text.strip_prefix("오후") {
+        (true, rest.trim())
+    } else if let Some(rest) = text.strip_prefix("오전") {
+        (false, rest.trim())
+    } else {
+        (false, text)
+    };
+    let (hours, minutes) = if let Some((hours, minutes)) = rest.split_once(':') {
+        (
+            hours.trim().parse::<u32>().ok()?,
+            minutes.trim().parse::<u32>().ok()?,
+        )
+    } else {
+        let (hours, after) = rest.split_once('시')?;
+        let after = after.trim();
+        let minutes = if after.is_empty() {
+            0
+        } else if after == "반" {
+            30
+        } else {
+            after.strip_suffix('분')?.trim().parse::<u32>().ok()?
+        };
+        (hours.trim().parse::<u32>().ok()?, minutes)
+    };
+    let hours = if afternoon && hours < 12 {
+        hours + 12
+    } else {
+        hours
+    };
+    NaiveTime::from_hms_opt(hours, minutes, 0)
+}
+
+/// "AI가 정함" / "예" / "아니요" for whether something is done away from the computer.
+fn away_choice_ui(ui: &mut egui::Ui, value: &mut Option<bool>) {
+    ui.horizontal(|ui| {
+        ui.radio_value(value, None, "AI가 정함");
+        ui.radio_value(value, Some(true), "예");
+        ui.radio_value(value, Some(false), "아니요");
+    });
 }
 
 /// Responsibility: Hold the fields of a to-do as the user types them; empty ones are filled
@@ -61,6 +140,8 @@ struct TodoForm {
     estimate_minutes: u32,
     /// A routine: it stays on the list when finished.
     repeat: bool,
+    /// Done away from the computer; `None` = let the AI decide (adding) / keep (editing).
+    away_from_computer: Option<bool>,
     reason: String,
 }
 
@@ -78,6 +159,7 @@ impl TodoForm {
             "priority": (self.priority > 0).then_some(self.priority),
             "estimate_minutes": (self.estimate_minutes > 0).then_some(self.estimate_minutes),
             "repeat": self.repeat,
+            "away_from_computer": self.away_from_computer,
         })
     }
 }
@@ -112,7 +194,11 @@ impl FocusApp {
         }
         ui.heading("데일리 웰빙");
         let planner = status.planner.clone();
-        match planner.clone().filter(|planner| planner.active) {
+        // An appointment runs even when the list is empty.
+        match planner
+            .clone()
+            .filter(|planner| planner.active || planner.assignment.is_some())
+        {
             Some(planner) => self.now_ui(ui, status, &planner),
             None => self.empty_list_ui(ui, status),
         }
@@ -132,6 +218,8 @@ impl FocusApp {
         };
         ui.separator();
         self.list_ui(ui, &planner);
+        ui.separator();
+        self.appointments_ui(ui, &planner);
     }
 
     /// Nothing on the to-do list: the AI has nothing to pick from. The user adds to-dos; they
@@ -226,6 +314,20 @@ impl FocusApp {
                          전에는 다른 일로 넘어가지 않습니다.",
                     );
                 }
+            }
+            if assignment.appointment_id.is_some() {
+                ui.colored_label(
+                    YELLOW,
+                    "약속입니다. 정해진 시간에 저절로 시작했고, 끝나는 시각에 저절로 끝납니다. \
+                     일찍 끝나면 \"끝냈다\"를 보내세요. 다른 일로 바꾸려면 급한 이유가 필요합니다.",
+                );
+            }
+            if assignment.away_from_computer {
+                ui.colored_label(
+                    RED,
+                    "컴퓨터 없이 하는 일입니다. 설정이 보호되어 있으면 이 앱 말고는 모든 앱과 웹사이트가 \
+                     잠깁니다. 다른 일로 바꾸거나 멈추려면 급한 이유가 필요합니다.",
+                );
             }
             if let Some(todo_id) = &assignment.todo_id {
                 if let Some(minutes) = planner.minutes_today.get(todo_id) {
@@ -526,6 +628,9 @@ impl FocusApp {
                 if todo.repeat {
                     ui.small("(반복)");
                 }
+                if todo.away_from_computer == Some(true) {
+                    ui.small("(컴퓨터 없이)");
+                }
                 if todo.proposed {
                     ui.small("(내가 추가)");
                 }
@@ -574,6 +679,7 @@ impl FocusApp {
                         priority: todo.priority,
                         estimate_minutes: todo.estimate_minutes.unwrap_or(0),
                         repeat: todo.repeat,
+                        away_from_computer: todo.away_from_computer,
                         reason: String::new(),
                     };
                     self.todo_ui.editing = Some(todo.id.clone());
@@ -685,6 +791,12 @@ impl FocusApp {
                     "반복하는 할 일(잠자기, 출근 준비, 운동처럼 끝내도 목록에 남음)",
                 );
                 ui.end_row();
+                ui.label("컴퓨터 없이 하는 일");
+                ui.vertical(|ui| {
+                    away_choice_ui(ui, &mut form.away_from_computer);
+                    ui.small("잠자기, 운동처럼 컴퓨터 없이 하면, 그 일을 하는 동안 모든 앱과 웹사이트가 잠깁니다.");
+                });
+                ui.end_row();
                 ui.label("이유");
                 ui.add(
                     egui::TextEdit::singleline(&mut form.reason)
@@ -746,7 +858,7 @@ impl FocusApp {
             return;
         };
         let idle = !self.pending.load(Ordering::SeqCst);
-        let summary = change_summary_korean(&record.change, record.before.as_ref());
+        let summary = change_summary_korean(&record);
         ui.horizontal_wrapped(|ui| {
             let (color, label) = if record.approved {
                 (GREEN, "승인")
@@ -777,6 +889,164 @@ impl FocusApp {
                 }
             }
         }
+    }
+
+    /// The appointments: fixed at their time, they replace whatever runs. Adding one goes to
+    /// the AI (the owner's appointment rules); removing one needs no AI.
+    fn appointments_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
+        let idle = !self.pending.load(Ordering::SeqCst);
+        ui.heading(format!("약속 ({})", planner.appointments.len()));
+        ui.small(
+            "약속은 시간이 정해진 일(만남, 수업, 병원)입니다. 약속 시간이 되면 하던 일 대신 약속이 \
+             저절로 시작되고, 끝나는 시각에 저절로 끝납니다. 약속을 받을지는 AI가 설정의 약속 규칙에 \
+             따라 정합니다.",
+        );
+        for appointment in &planner.appointments {
+            ui.horizontal_wrapped(|ui| {
+                if planner
+                    .assignment
+                    .as_ref()
+                    .and_then(|assignment| assignment.appointment_id.as_deref())
+                    == Some(appointment.id.as_str())
+                {
+                    ui.colored_label(GREEN, "지금");
+                }
+                ui.label(appointment_time_text(appointment.start, appointment.end));
+                ui.strong(&appointment.title);
+                if appointment.away_from_computer {
+                    ui.small("(컴퓨터 없이)");
+                }
+                if !appointment.notes.is_empty() {
+                    ui.small(&appointment.notes);
+                }
+                if ui
+                    .add_enabled(idle, egui::Button::new("지우기").small())
+                    .clicked()
+                {
+                    self.send(
+                        "todo_change",
+                        json!({
+                            "change": { "kind": "remove_appointment", "appointment_id": appointment.id },
+                            "reason": "",
+                        }),
+                    );
+                }
+            });
+        }
+        if !self.todo_ui.appointment_form_open {
+            if ui.button("+ 약속 추가").clicked() {
+                self.todo_ui.appointment_form = AppointmentForm {
+                    date: "오늘".into(),
+                    ..Default::default()
+                };
+                self.todo_ui.appointment_form_open = true;
+            }
+            return;
+        }
+        let mut close = false;
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.strong("약속 추가 — AI가 약속 규칙에 따라 받을지 정합니다");
+            let form = &mut self.todo_ui.appointment_form;
+            egui::Grid::new("appointment_form")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("제목");
+                    ui.add(egui::TextEdit::singleline(&mut form.title).desired_width(320.0));
+                    ui.end_row();
+                    ui.label("날짜");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.date)
+                            .desired_width(160.0)
+                            .hint_text("오늘, 내일, 금요일, 11/5 …"),
+                    );
+                    ui.end_row();
+                    ui.label("시작");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.start)
+                            .desired_width(160.0)
+                            .hint_text("14:00, 오후 2시 …"),
+                    );
+                    ui.end_row();
+                    ui.label("끝");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.end)
+                            .desired_width(160.0)
+                            .hint_text("15:30, 오후 3시 반 …"),
+                    );
+                    ui.end_row();
+                    ui.label("메모");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.notes)
+                            .desired_width(320.0)
+                            .hint_text("누구와, 어디서"),
+                    );
+                    ui.end_row();
+                    ui.label("컴퓨터 없이 하는 약속");
+                    away_choice_ui(ui, &mut form.away_from_computer);
+                    ui.end_row();
+                    ui.label("이유");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.reason)
+                            .desired_width(320.0)
+                            .hint_text("선택"),
+                    );
+                    ui.end_row();
+                });
+            let times = form.times();
+            match times {
+                Some((start, end)) => {
+                    ui.label(format!("→ {}", appointment_time_text(start, end)));
+                }
+                None if !form.start.trim().is_empty() && !form.end.trim().is_empty() => {
+                    ui.colored_label(
+                        RED,
+                        "날짜나 시각을 읽지 못했습니다. 날짜는 오늘, 금요일, 11/5처럼, 시각은 14:00, 오후 2시, \
+                         2시 반처럼 적으세요.",
+                    );
+                }
+                None => {}
+            }
+            let ready = idle && times.is_some() && form.title.trim().chars().count() >= 2;
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(ready, egui::Button::new("AI에게 보내기"))
+                    .clicked()
+                {
+                    if let Some((start, end)) = times {
+                        let form = self.todo_ui.appointment_form.clone();
+                        self.send(
+                            "todo_change",
+                            json!({
+                                "change": {
+                                    "kind": "add_appointment",
+                                    "appointment": {
+                                        "title": form.title.trim(),
+                                        "notes": form.notes.trim(),
+                                        "start": start,
+                                        "end": end,
+                                        "away_from_computer": form.away_from_computer,
+                                    },
+                                },
+                                "reason": form.reason.trim(),
+                                "via": "to-do tab",
+                            }),
+                        );
+                        close = true;
+                    }
+                }
+                if ui.button("취소").clicked() {
+                    close = true;
+                }
+                if !idle {
+                    ui.spinner();
+                }
+            });
+        });
+        if close {
+            self.todo_ui.appointment_form_open = false;
+        }
+        self.last_change_ui(ui);
     }
 
     /// Today: what happened so far.
@@ -919,7 +1189,7 @@ fn todo_change_line(record: &TodoChangeRecord) -> String {
     };
     format!(
         "{}{} — \"{}\" → {}",
-        change_summary_korean(&record.change, record.before.as_ref()),
+        change_summary_korean(record),
         scheduled,
         record.reason,
         record.reply
@@ -944,16 +1214,59 @@ fn task_planner_label(request: &ChangeKind) -> String {
 }
 
 /// "\"제목\" 추가" and so on, for the To-do tab.
-fn change_summary_korean(change: &TodoChange, before: Option<&TodoItem>) -> String {
+fn change_summary_korean(record: &TodoChangeRecord) -> String {
     let title = |todo_id: &str| {
-        before
+        record
+            .before
+            .as_ref()
             .map(|todo| todo.title.clone())
             .unwrap_or_else(|| todo_id.to_string())
     };
-    match change {
+    let appointment_title = |fallback: &str| {
+        record
+            .appointment
+            .as_ref()
+            .map(|appointment| appointment.title.clone())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    match &record.change {
         TodoChange::Add { todo } => format!("\"{}\" 추가", todo.title),
         TodoChange::Edit { todo_id, .. } => format!("\"{}\" 고치기", title(todo_id)),
         TodoChange::Remove { todo_id } => format!("\"{}\" 지우기", title(todo_id)),
+        TodoChange::AddAppointment { appointment } => format!(
+            "약속 \"{}\"({}) 추가",
+            appointment.title,
+            appointment
+                .start
+                .with_timezone(&Local)
+                .format("%m-%d %H:%M")
+        ),
+        TodoChange::RemoveAppointment { appointment_id } => {
+            format!("약속 \"{}\" 지우기", appointment_title(appointment_id))
+        }
+    }
+}
+
+/// "11-05 (수) 14:00–15:00".
+fn appointment_time_text(start: DateTime<Utc>, end: DateTime<Utc>) -> String {
+    let start = start.with_timezone(&Local);
+    let end = end.with_timezone(&Local);
+    let weekday = ["월", "화", "수", "목", "금", "토", "일"]
+        [start.format("%u").to_string().parse::<usize>().unwrap_or(1) - 1];
+    if start.date_naive() == end.date_naive() {
+        format!(
+            "{} ({weekday}) {}–{}",
+            start.format("%m-%d"),
+            start.format("%H:%M"),
+            end.format("%H:%M")
+        )
+    } else {
+        format!(
+            "{} ({weekday}) {} – {}",
+            start.format("%m-%d"),
+            start.format("%H:%M"),
+            end.format("%m-%d %H:%M")
+        )
     }
 }
 
