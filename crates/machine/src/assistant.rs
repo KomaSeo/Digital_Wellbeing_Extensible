@@ -231,8 +231,11 @@ impl Assistant {
         run_tool: ToolRunner,
     ) -> Result<String, String> {
         for _ in 0..MAX_ROUNDS {
-            let response = (self.messenger)(config, &request_body(&config.model, messages))
-                .map_err(|error| format!("AI를 부르지 못했습니다: {error}"))?;
+            let response = (self.messenger)(
+                config,
+                &request_body(&config.model, config.decision_effort(), messages),
+            )
+            .map_err(|error| format!("AI를 부르지 못했습니다: {error}"))?;
             match response["stop_reason"].as_str() {
                 Some("refusal") => {
                     return Err(
@@ -295,7 +298,7 @@ fn push_capped(lines: &mut Vec<ChatLine>, role: ChatRole, text: String) {
 
 /// The request for the next model call: the constant system prompt and tools are cached,
 /// and top-level automatic caching covers the growing conversation.
-pub fn request_body(model: &str, messages: &[Value]) -> Value {
+pub fn request_body(model: &str, effort: &str, messages: &[Value]) -> Value {
     let tools: Vec<Value> = crate::assistant_tools::tools()
         .as_array()
         .cloned()
@@ -311,7 +314,7 @@ pub fn request_body(model: &str, messages: &[Value]) -> Value {
         .collect();
     let mut body = json!({
         "model": model,
-        "max_tokens": 8000,
+        "max_tokens": ai_focus_rule::claude::max_tokens_for(effort).max(8000),
         "system": [{
             "type": "text",
             "text": ASSISTANT_PROMPT,
@@ -319,7 +322,7 @@ pub fn request_body(model: &str, messages: &[Value]) -> Value {
         }],
         "tools": tools,
         "messages": messages,
-        "output_config": { "effort": "medium" },
+        "output_config": { "effort": effort },
         "cache_control": { "type": "ephemeral" },
     });
     if supports_server_fallback(model) {

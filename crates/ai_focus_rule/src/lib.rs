@@ -27,7 +27,7 @@ mod youtube;
 
 pub use config::{
     lockdown_allows_page, AiFocusConfig, AiFocusStore, ConfigError, DEFAULT_MODEL,
-    DEFAULT_RECHECK_MODEL,
+    DEFAULT_RECHECK_MODEL, EFFORT_LEVELS,
 };
 pub use judge::{ClaudeJudge, Judge, JudgeError, JudgeRequest, Judgement, Verdict};
 pub use monitor::{

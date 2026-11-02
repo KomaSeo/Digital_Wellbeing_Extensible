@@ -80,7 +80,12 @@ const API_KEY: Block = Block {
 const MODEL: Block = Block {
     id: "model",
     file: "ai_focus",
-    paths: &[&["model"], &["recheck_model"]],
+    paths: &[
+        &["model"],
+        &["recheck_model"],
+        &["check_effort"],
+        &["decision_effort"],
+    ],
     has_default: true,
 };
 const BUDGET: Block = Block {
@@ -609,6 +614,43 @@ impl SettingsTab {
                         }
                     });
             });
+            // How much the AI thinks: more thinking judges better, costs more and takes longer.
+            let effort_label = |level: &str| match level {
+                "low" => "low(가장 적게, 빠르고 쌈)".to_string(),
+                "medium" => "medium(보통)".to_string(),
+                "high" => "high(많이)".to_string(),
+                "xhigh" => "xhigh(아주 많이)".to_string(),
+                "max" => "max(최대, 가장 느리고 비쌈)".to_string(),
+                other => other.to_string(),
+            };
+            for (label, value, salt) in [
+                (
+                    "창 검사의 노력",
+                    &mut drafts.ai_focus.check_effort,
+                    "check_effort_choice",
+                ),
+                (
+                    "그 밖의 판단의 노력(할 일 고르기와 심사, 접근 요청, AI 비서)",
+                    &mut drafts.ai_focus.decision_effort,
+                    "decision_effort_choice",
+                ),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    egui::ComboBox::from_id_salt(salt)
+                        .selected_text(effort_label(value))
+                        .show_ui(ui, |ui| {
+                            for level in ai_focus_rule::EFFORT_LEVELS {
+                                ui.selectable_value(value, level.to_string(), effort_label(level));
+                            }
+                        });
+                });
+            }
+            ui.small(
+                "노력은 AI가 답하기 전에 얼마나 생각할지입니다. 높을수록 판단이 꼼꼼해지지만, 생각한 \
+                 만큼 출력 토큰 비용이 들고 답이 늦어집니다. 창 검사는 자주 일어나므로 낮게 두는 편이 \
+                 비용에 좋습니다.",
+            );
             ui.small(
                 "이미 판정한 창을 다시 검사할 때는 이 모델이 먼저 봅니다. 판정이 지난번과 같으면 그대로 \
                  두고, 바뀌면 기본 모델이 다시 확인해서 그 판정을 따릅니다. 처음 보는 창은 언제나 기본 \

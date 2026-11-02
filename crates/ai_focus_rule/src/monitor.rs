@@ -752,10 +752,11 @@ pub type JudgeProvider =
 /// is reused until the key or the model changes.
 pub fn claude_judge_provider() -> JudgeProvider {
     // One judge per (key, model): the main model and the recheck model alternate.
-    let cache: Mutex<HashMap<(String, String), Arc<dyn Judge>>> = Mutex::new(HashMap::new());
+    let cache: Mutex<HashMap<(String, String, String), Arc<dyn Judge>>> =
+        Mutex::new(HashMap::new());
     Arc::new(move |config: &AiFocusConfig| {
         let key = config.resolve_api_key().ok_or(JudgeError::NoApiKey)?;
-        let id = (key, config.model.clone());
+        let id = (key, config.model.clone(), config.check_effort().to_string());
         let mut cache = cache.lock();
         if let Some(judge) = cache.get(&id) {
             return Ok(Arc::clone(judge));
@@ -764,7 +765,8 @@ pub fn claude_judge_provider() -> JudgeProvider {
         if cache.len() >= 4 {
             cache.clear();
         }
-        let judge: Arc<dyn Judge> = Arc::new(ClaudeJudge::new(id.0.clone(), id.1.clone()));
+        let judge: Arc<dyn Judge> =
+            Arc::new(ClaudeJudge::new(id.0.clone(), id.1.clone(), id.2.clone()));
         cache.insert(id, Arc::clone(&judge));
         Ok(judge)
     })

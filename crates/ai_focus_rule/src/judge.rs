@@ -138,12 +138,15 @@ pub trait Judge: Send + Sync {
 /// content.
 pub struct ClaudeJudge {
     client: ClaudeClient,
+    /// The settings' effort for window checks.
+    effort: String,
 }
 
 impl ClaudeJudge {
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(api_key: String, model: String, effort: String) -> Self {
         Self {
             client: ClaudeClient::new(api_key, model),
+            effort,
         }
     }
 
@@ -170,7 +173,7 @@ impl Judge for ClaudeJudge {
             SYSTEM_PROMPT,
             Self::content(request),
             verdict_schema(),
-            "low",
+            &self.effort,
         )
     }
 }
