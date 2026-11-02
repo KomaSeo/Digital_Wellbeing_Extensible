@@ -1,7 +1,9 @@
-//! Responsibility: Ask the user what to do about a block the AI just made: it was a mistake,
-//! the app or site is needed (an access request), it belongs on the to-do list, or it is
-//! urgent and should become the current task. The window comes up by itself when the agent
-//! reports a new block (`Status::last_block`).
+//! Responsibility: Ask the user, the moment the AI closes an app or tab, whether the block
+//! was right: yes, or the app or site is needed (an access request, sent from this window),
+//! it belongs on the to-do list, or it is urgent and should become the current task. The
+//! window comes up by itself: the Focus app asks the agent for its newest block several
+//! times a second (`last_block`). A tab that access is granted for opens again
+//! (Ctrl+Shift+T in its browser window, `reopen.rs`).
 //!
 //! Every way out goes through the AI as before: access requests and to-do changes are reviewed
 //! as usual, and "urgent" is a change request to a task off the list (`switch_free`) that the
@@ -24,6 +26,12 @@ pub(crate) struct BlockPrompt {
     urgent_reason: String,
     /// When the urgent request was sent, to show its answer.
     sent_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The user said the block was wrong: show the access request.
+    asking_access: bool,
+    /// When the access request was sent, to show its answer.
+    access_sent_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether the closed tab was opened again after access was granted (`None`: not tried).
+    reopened: Option<bool>,
 }
 
 impl BlockPrompt {
@@ -35,6 +43,9 @@ impl BlockPrompt {
             urgent_task,
             urgent_reason: String::new(),
             sent_at: None,
+            asking_access: false,
+            access_sent_at: None,
+            reopened: None,
         }
     }
 }
@@ -59,7 +70,7 @@ impl FocusApp {
         };
         let idle = !self.pending.load(Ordering::SeqCst);
         let mut keep = true;
-        egui::Window::new("방금 차단했습니다")
+        egui::Window::new("방금 막았습니다. 맞는 차단인가요?")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -71,20 +82,27 @@ impl FocusApp {
                 });
                 ui.label(format!("AI가 본 까닭: {}", prompt.block.reason));
                 ui.small(if prompt.block.is_tab {
-                    "탭을 닫았습니다. 허용되면 브라우저에서 Ctrl+Shift+T로 닫힌 탭을 다시 열 수 있습니다."
+                    "탭을 닫았습니다. 접근이 허용되면 이 창이 그 탭을 다시 엽니다."
                 } else {
-                    "앱을 껐습니다. 허용되면 다시 켤 수 있습니다."
+                    "앱과 그 도우미 프로그램을 껐습니다. 접근이 허용되면 다시 켤 수 있습니다."
                 });
                 ui.separator();
+                if prompt.asking_access {
+                    self.block_access_ui(ui, &mut prompt, idle, &mut keep);
+                    return;
+                }
                 if !prompt.urgent {
-                    ui.label("어떻게 할까요?");
-                    if ui.button("실수였어요(창 닫기)").clicked() {
+                    ui.label("이 차단이 맞나요?");
+                    if ui.button("네, 딴짓이었어요(창 닫기)").clicked() {
                         keep = false;
                     }
-                    if ui.button("이게 필요해요: 접근 요청하기(AI가 정함)").clicked() {
+                    if ui
+                        .button("아니요, 지금 일에 필요해요: 접근 요청하기(AI가 정함)")
+                        .clicked()
+                    {
                         self.prefill_access(&prompt.block.key);
-                        self.tab = Tab::Blocking;
-                        keep = false;
+                        self.access.purpose.clear();
+                        prompt.asking_access = true;
                     }
                     if ui.button("나중에 할 일로 넣기(AI가 정함)").clicked() {
                         let title = what_it_is(&prompt.block);
@@ -159,6 +177,99 @@ impl FocusApp {
             });
         if keep {
             self.block_prompt = Some(prompt);
+        }
+    }
+}
+
+impl FocusApp {
+    /// The access request inside the check window, its answer, and opening the tab again once
+    /// it is granted.
+    fn block_access_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        prompt: &mut BlockPrompt,
+        idle: bool,
+        keep: &mut bool,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label(if self.access.site {
+                "웹사이트"
+            } else {
+                "앱"
+            });
+            ui.text_edit_singleline(&mut self.access.target);
+        });
+        ui.label("무엇에 쓰나요? AI가 지금 할 일에 필요한지 보고 정합니다");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.access.purpose)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .hint_text("예: 과제에 필요한 강의 영상을 봐야 합니다"),
+        );
+        let ready = idle
+            && prompt.access_sent_at.is_none()
+            && !self.access.target.trim().is_empty()
+            && self.access.purpose.trim().chars().count() >= 4;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(ready, egui::Button::new("AI에게 보내기"))
+                .clicked()
+            {
+                prompt.access_sent_at = Some(chrono::Utc::now());
+                self.send_access_request();
+            }
+            if prompt.access_sent_at.is_none() && ui.button("돌아가기").clicked() {
+                prompt.asking_access = false;
+            }
+            if !idle {
+                ui.spinner();
+            }
+        });
+        let answer = prompt.access_sent_at.and_then(|sent_at| {
+            self.shared
+                .lock()
+                .access
+                .clone()
+                .filter(|entry| entry.at >= sent_at)
+        });
+        if let Some(entry) = answer {
+            let approved = matches!(
+                entry.event,
+                ai_focus_rule::grants::GrantEvent::Requested { approved: true, .. }
+            );
+            ui.horizontal_wrapped(|ui| {
+                if approved {
+                    ui.colored_label(GREEN, "허용");
+                } else {
+                    ui.colored_label(RED, "거절");
+                }
+                ui.label(&entry.message);
+            });
+            if approved && prompt.block.is_tab {
+                let reopened = *prompt
+                    .reopened
+                    .get_or_insert_with(|| crate::reopen::reopen_closed_tab(prompt.block.window));
+                ui.small(if reopened {
+                    "닫힌 탭을 다시 열었습니다. 다른 탭이 열렸다면 그 브라우저에서 Ctrl+Shift+T를 \
+                     한 번 더 누르세요."
+                } else {
+                    "그 브라우저에서 Ctrl+Shift+T를 눌러 닫힌 탭을 다시 여세요."
+                });
+            } else if approved {
+                ui.small("이제 그 앱을 다시 켜면 됩니다.");
+            } else {
+                ui.small("차단은 그대로입니다. 까닭을 더 자세히 적어 다시 보낼 수 있습니다.");
+                if ui.button("다시 적기").clicked() {
+                    prompt.access_sent_at = None;
+                }
+            }
+            if ui.button("닫기").clicked() {
+                *keep = false;
+            }
+        }
+        let message = self.shared.lock().message.clone();
+        if !message.is_empty() {
+            ui.colored_label(RED, message);
         }
     }
 }

@@ -23,6 +23,7 @@
 mod assistant;
 mod block_prompt;
 mod help;
+mod reopen;
 mod settings;
 mod statistics;
 mod todo;
@@ -42,6 +43,8 @@ use std::time::Duration;
 use task_planner::{ChangeRecord, ProposalRecord, TodoChangeRecord};
 
 const POLL: Duration = Duration::from_secs(2);
+/// How often the Focus app asks for a new block (a cheap call).
+const BLOCK_POLL: Duration = Duration::from_millis(300);
 const TITLE: &str = "Digital Wellbeing Focus";
 const GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
 const RED: egui::Color32 = egui::Color32::from_rgb(200, 80, 80);
@@ -82,6 +85,9 @@ struct Shared {
     proposal: Option<ProposalRecord>,
     /// The AI's answer to the last to-do change.
     todo_change: Option<TodoChangeRecord>,
+    /// The block the agent made last, asked for several times a second (`last_block`), so
+    /// the check window opens as soon as an app or tab is closed. `None` until first known.
+    newest_block: Option<Option<ai_focus_rule::NewBlock>>,
 }
 
 /// Responsibility: Keep what the user types into the access request form.
@@ -184,6 +190,28 @@ impl FocusApp {
             poll.lock().status = Some(result);
             poll_context.request_repaint();
             thread::sleep(POLL);
+        });
+        let block_poll = Arc::clone(&shared);
+        let block_context = context.clone();
+        thread::spawn(move || loop {
+            if let Ok(value) = machine::user_api::call_value(session, "last_block", json!({})) {
+                let newest: Option<ai_focus_rule::NewBlock> =
+                    serde_json::from_value(value).ok().flatten();
+                let mut state = block_poll.lock();
+                let changed = state.newest_block.as_ref().is_some_and(|known| {
+                    known.as_ref().map(|block| &block.id) != newest.as_ref().map(|block| &block.id)
+                });
+                if changed || state.newest_block.is_none() {
+                    state.newest_block = Some(newest);
+                    drop(state);
+                    if changed {
+                        // A hidden window draws no frames: show it from here.
+                        tray::show_window(TITLE);
+                    }
+                    block_context.request_repaint();
+                }
+            }
+            thread::sleep(BLOCK_POLL);
         });
         let open_settings = Arc::new(AtomicBool::new(false));
         let (tray_context, tray_flag) = (context.clone(), Arc::clone(&open_settings));
@@ -305,6 +333,21 @@ impl FocusApp {
         }
     }
 
+    /// Send the access form as a request; the AI decides how long (within the settings'
+    /// limits).
+    fn send_access_request(&mut self) {
+        let target = if self.access.site {
+            json!({ "kind": "site", "keyword": self.access.target.trim() })
+        } else {
+            json!({ "kind": "app", "process": self.access.target.trim() })
+        };
+        let duration = json!({ "kind": "ai_decides" });
+        self.send(
+            "request_access",
+            json!({ "target": target, "duration": duration, "purpose": self.access.purpose }),
+        );
+    }
+
     fn access_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
         ui.heading("앱이나 웹사이트가 필요한가요?");
         if !status.session_active {
@@ -339,18 +382,11 @@ impl FocusApp {
             && !self.access.target.trim().is_empty()
             && self.access.purpose.trim().chars().count() >= 4;
         ui.horizontal(|ui| {
-            if ui.add_enabled(ready, egui::Button::new("요청하기")).clicked() {
-                let target = if self.access.site {
-                    json!({ "kind": "site", "keyword": self.access.target.trim() })
-                } else {
-                    json!({ "kind": "app", "process": self.access.target.trim() })
-                };
-                // The AI decides how long (within the settings' limits).
-                let duration = json!({ "kind": "ai_decides" });
-                self.send(
-                    "request_access",
-                    json!({ "target": target, "duration": duration, "purpose": self.access.purpose }),
-                );
+            if ui
+                .add_enabled(ready, egui::Button::new("요청하기"))
+                .clicked()
+            {
+                self.send_access_request();
                 self.access.purpose.clear();
             }
             if !idle {
@@ -505,15 +541,19 @@ impl eframe::App for FocusApp {
                 self.tab = Tab::Settings;
             }
             self.questions_due = current_status.settings_questions_due;
-            // A new block: bring the window up and ask what to do about it.
-            let newest = current_status
-                .last_block
-                .as_ref()
-                .map(|block| block.id.clone());
+            // A new block: bring the window up and ask whether it was right. The quick poll
+            // (`newest_block`) sees it first; the status is the fallback.
+            let latest_block = self
+                .shared
+                .lock()
+                .newest_block
+                .clone()
+                .unwrap_or_else(|| current_status.last_block.clone());
+            let newest = latest_block.as_ref().map(|block| block.id.clone());
             match &self.seen_block {
                 None => self.seen_block = Some(newest),
                 Some(seen) if *seen != newest => {
-                    if let Some(block) = current_status.last_block.clone() {
+                    if let Some(block) = latest_block.clone() {
                         self.block_prompt = Some(block_prompt::BlockPrompt::new(block));
                         tray::show_window(TITLE);
                         context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
