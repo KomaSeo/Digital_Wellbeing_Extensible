@@ -159,6 +159,8 @@ pub struct SyncStatus {
     pub last_error: Option<String>,
     /// Changes the server refused (e.g. turning the protection off), with the reason.
     pub refused: Vec<String>,
+    /// Other PCs on an older version (they wait for an update): "<device> (<version>)".
+    pub outdated_devices: Vec<String>,
 }
 
 /// Read from `sync.json` and `sync_state.json` (written by the service).
@@ -184,6 +186,21 @@ pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
                             "{} ({})",
                             refusal["name"].as_str().unwrap_or_default(),
                             refusal["reason"].as_str().unwrap_or_default()
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        outdated_devices: state["outdated_devices"]
+            .as_array()
+            .map(|devices| {
+                devices
+                    .iter()
+                    .map(|device| {
+                        format!(
+                            "{} ({})",
+                            device[0].as_str().unwrap_or_default(),
+                            device[1].as_str().filter(|version| !version.is_empty()).unwrap_or("버전 모름")
                         )
                     })
                     .collect()

@@ -16,6 +16,7 @@
 //!   the daily budget) counts every device. Those copies are never sent back.
 
 use crate::envelope::{self, Envelope};
+use crate::device_local::{shared_part, with_local_part};
 use crate::merge::merge;
 use crate::protocol::{Push, Rejected, SyncRequest, SyncResponse};
 use crate::server::{allowed_name, read_json, write_json, DEVICE_FOLDER, SHARED_DOCUMENTS, SHARED_FOLDERS};
@@ -65,6 +66,8 @@ pub struct SyncState {
     pub last_error: Option<String>,
     /// Pushes the server refused in the last sync (not conflicts), with the reason.
     pub refused: Vec<Rejected>,
+    /// Other devices that must be updated before they sync again: (device, its version).
+    pub outdated_devices: Vec<(String, String)>,
 }
 
 impl SyncState {
@@ -87,6 +90,7 @@ pub struct SyncReport {
     /// Documents where both sides had changed, merged.
     pub merged: Vec<String>,
     pub refused: Vec<Rejected>,
+    pub outdated_devices: Vec<(String, String)>,
 }
 
 /// Top-level values of a document that are never merged inside (one side's whole value wins).
@@ -198,7 +202,7 @@ impl SyncClient {
         local_documents(&self.data_directory, &self.config.device_id)
             .into_iter()
             .filter_map(|name| {
-                let local = read_value(&self.local_path(&name)?)?;
+                let local = shared_part(&name, &read_value(&self.local_path(&name)?)?);
                 let base = read_value(&self.base_path(&name));
                 (base.as_ref() != Some(&local)).then_some((name, local))
             })
@@ -212,14 +216,19 @@ impl SyncClient {
         let Some(path) = self.local_path(document_name) else {
             return Ok(false);
         };
-        let current = read_value(&path);
-        let next = match (&current, base) {
+        let current_whole = read_value(&path);
+        let current = current_whole
+            .as_ref()
+            .map(|whole| shared_part(document_name, whole));
+        let next_shared = match (&current, base) {
             (Some(local), Some(base)) if local != base => {
                 merge(base, local, remote, atomic_keys(document_name))
             }
             _ => remote.clone(),
         };
-        if current.as_ref() == Some(&next) {
+        // This device's own parts (its API key) stay as they are.
+        let next = with_local_part(document_name, &next_shared, current_whole.as_ref());
+        if current_whole.as_ref() == Some(&next) {
             return Ok(false);
         }
         write_json(&path, &next)?;
@@ -241,6 +250,7 @@ impl SyncClient {
                 state.last_success = state.last_attempt;
                 state.last_error = None;
                 state.refused = report.refused.clone();
+                state.outdated_devices = report.outdated_devices.clone();
             }
             Err(error) => state.last_error = Some(error.clone()),
         }
@@ -280,6 +290,7 @@ impl SyncClient {
                 counter: state.counter,
                 pushes: pushes.clone(),
                 known: state.revisions.clone(),
+                app_version: crate::protocol::app_version().to_string(),
             };
             let plaintext = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
             let sealed = envelope::seal(&self.config.device_id, &self.config.key, &plaintext)?;
@@ -291,6 +302,7 @@ impl SyncClient {
                 serde_json::from_slice(&envelope::open(&answer, &self.config.key)?)
                     .map_err(|error| format!("bad answer: {error}"))?;
 
+            report.outdated_devices = response.outdated_devices.clone();
             let mut conflicts = 0;
             for refusal in &response.rejected {
                 if refusal.reason == "conflict" {
@@ -333,7 +345,10 @@ impl SyncClient {
                 } else {
                     Some(read_value(&self.base_path(&document.name)).unwrap_or(Value::Null))
                 };
-                let local_before = self.local_path(&document.name).and_then(|path| read_value(&path));
+                let local_before = self
+                    .local_path(&document.name)
+                    .and_then(|path| read_value(&path))
+                    .map(|whole| shared_part(&document.name, &whole));
                 let had_local_changes = match (&local_before, &base) {
                     (Some(local), Some(base)) => local != base && local != &document.content,
                     _ => false,

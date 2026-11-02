@@ -7,12 +7,14 @@
 //!   data folder) can read or change what the server holds.
 //! - [`merge`]: when two devices change the same file between syncs, a three-way merge keeps
 //!   both changes where it can; where both changed the same value, the server's wins.
+//! - [`device_local`]: what stays on each device (its Anthropic API key).
 //! - [`server`]: the server's document store and request handling.
 //! - [`client`]: one device's side: which files sync, and one sync round.
 //!
 //! Walkthrough (Korean): `docs/sync.md`.
 
 pub mod client;
+pub mod device_local;
 pub mod envelope;
 pub mod merge;
 pub mod protocol;

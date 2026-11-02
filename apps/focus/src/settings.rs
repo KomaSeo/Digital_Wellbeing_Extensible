@@ -1986,4 +1986,16 @@ fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
     for refusal in &sync.refused {
         ui.colored_label(YELLOW, format!("서버가 받아들이지 않은 변경: {refusal}"));
     }
+    for device in &sync.outdated_devices {
+        ui.colored_label(
+            YELLOW,
+            format!("업데이트해야 다시 동기화하는 다른 PC: {device}"),
+        );
+    }
+    if !sync.outdated_devices.is_empty() || sync.last_error.as_deref().is_some_and(|error| error.contains("업데이트")) {
+        ui.hyperlink_to(
+            "새 버전 내려받기(릴리스 페이지)",
+            "https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases",
+        );
+    }
 }

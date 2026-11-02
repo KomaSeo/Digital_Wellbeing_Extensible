@@ -15,7 +15,8 @@
 
 use crate::envelope::{self, Envelope};
 use crate::protocol::{
-    Document, PairingCode, Rejected, SyncRequest, SyncResponse, MAX_CLOCK_SKEW_SECONDS,
+    version_order, Document, PairingCode, Rejected, SyncRequest, SyncResponse,
+    MAX_CLOCK_SKEW_SECONDS,
 };
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -54,6 +55,9 @@ pub struct Device {
     pub last_counter: u64,
     #[serde(default)]
     pub last_seen: Option<DateTime<Utc>>,
+    /// The program version the device last synced with.
+    #[serde(default)]
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -169,6 +173,7 @@ impl SyncServer {
             added_at: Utc::now(),
             last_counter: 0,
             last_seen: None,
+            version: String::new(),
         });
         self.save_devices(&devices)?;
         Ok(PairingCode { device_id: id, key })
@@ -241,9 +246,36 @@ impl SyncServer {
         }
         device.last_counter = request.counter;
         device.last_seen = Some(now);
+        device.version = request.app_version.clone();
         let device_id = device.id.clone();
         let key = device.key.clone();
         self.save_devices(&devices)?;
+
+        // Every device runs the newest version any of them runs: an older one would drop
+        // the settings it does not know when it writes a file.
+        let newest = devices
+            .devices
+            .iter()
+            .map(|device| device.version.as_str())
+            .max_by_key(|version| version_order(version))
+            .unwrap_or_default()
+            .to_string();
+        if version_order(&request.app_version) < version_order(&newest) {
+            return Err(format!(
+                "이 PC의 프로그램(버전 {})이 다른 PC(버전 {newest})보다 오래되어 동기화를 멈췄습니다. \
+                 이 PC를 {newest}로 업데이트하면 다시 동기화합니다",
+                if request.app_version.is_empty() { "알 수 없음" } else { &request.app_version }
+            ));
+        }
+        let outdated_devices: Vec<(String, String)> = devices
+            .devices
+            .iter()
+            .filter(|device| {
+                device.last_seen.is_some()
+                    && version_order(&device.version) < version_order(&newest)
+            })
+            .map(|device| (device.id.clone(), device.version.clone()))
+            .collect();
 
         let mut rejected = Vec::new();
         for push in &request.pushes {
@@ -275,6 +307,7 @@ impl SyncServer {
             server_time: now,
             documents,
             rejected,
+            outdated_devices,
         };
         let bytes = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
         envelope::seal(&device_id, &key, &bytes)
@@ -310,7 +343,8 @@ impl SyncServer {
             revision: revision + 1,
             written_by: device_id.to_string(),
             written_at: now,
-            content: push.content.clone(),
+            // Never kept here, whatever a device sends: each device has its own API key.
+            content: crate::device_local::shared_part(&push.name, &push.content),
         };
         write_json(&self.documents_folder().join(file_name(&push.name)), &stored)
     }

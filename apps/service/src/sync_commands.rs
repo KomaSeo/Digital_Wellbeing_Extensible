@@ -123,9 +123,10 @@ fn list_devices() -> anyhow::Result<()> {
     }
     for device in devices {
         println!(
-            "{}  ({})  paired {}  last sync {}",
+            "{}  ({})  version {}  paired {}  last sync {}",
             device.id,
             device.name,
+            if device.version.is_empty() { "?" } else { &device.version },
             device.added_at.format("%Y-%m-%d"),
             device
                 .last_seen
@@ -216,6 +217,9 @@ fn status(data_directory: &Path) -> anyhow::Result<()> {
     }
     for refusal in state.refused {
         println!("refused: {} ({})", refusal.name, refusal.reason);
+    }
+    for (device, version) in state.outdated_devices {
+        println!("needs an update before it syncs again: {device} ({version})");
     }
     Ok(())
 }

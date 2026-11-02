@@ -226,6 +226,7 @@ fn the_server_refuses_strangers_replays_old_requests_and_foreign_files() {
         counter,
         pushes,
         known: Default::default(),
+        app_version: sync::protocol::app_version().to_string(),
     };
 
     // A wrong key, or an unknown device.
@@ -315,4 +316,62 @@ fn a_sync_round_works_over_http() {
         .sync_once(&mut sync::client::http_transport(&config.server_url))
         .unwrap_err();
     assert!(error.contains("refused"), "{error}");
+}
+
+#[test]
+fn each_device_keeps_its_own_api_key() {
+    let setup = setup("api_key");
+    let (laptop_folder, laptop) = &setup.laptop;
+    let (desktop_folder, desktop) = &setup.desktop;
+    write(laptop_folder, "ai_focus.json", &json!({ "api_key": "sk-laptop", "model": "a" }));
+    write(desktop_folder, "ai_focus.json", &json!({ "api_key": "sk-desktop", "model": "b" }));
+    sync(&setup.server, laptop);
+    // Joining takes the server's settings, but not another device's key.
+    sync(&setup.server, desktop);
+    assert_eq!(
+        read(desktop_folder, "ai_focus.json").unwrap(),
+        json!({ "api_key": "sk-desktop", "model": "a" })
+    );
+
+    // A changed key is never sent; a changed model is.
+    write(desktop_folder, "ai_focus.json", &json!({ "api_key": "sk-desktop-2", "model": "c" }));
+    sync(&setup.server, desktop);
+    sync(&setup.server, laptop);
+    assert_eq!(
+        read(laptop_folder, "ai_focus.json").unwrap(),
+        json!({ "api_key": "sk-laptop", "model": "c" })
+    );
+    let stored = fs::read_to_string(
+        laptop_folder.parent().unwrap().join("server/documents/ai_focus.json"),
+    )
+    .unwrap();
+    assert!(!stored.contains("sk-"), "{stored}");
+}
+
+#[test]
+fn a_device_with_an_older_version_stops_syncing_until_it_is_updated() {
+    let root = temporary_folder("versions");
+    let server = SyncServer::new(root.join("server"), false);
+    let newer = server.add_device("laptop").unwrap();
+    let older = server.add_device("desktop").unwrap();
+    let request = |counter: u64, version: &str| SyncRequest {
+        sent_at: chrono::Utc::now(),
+        counter,
+        pushes: vec![],
+        known: Default::default(),
+        app_version: version.to_string(),
+    };
+    send_raw(&server, &older.device_id, &older.key, &request(1, "0.1.0-rc.30")).unwrap();
+    // The laptop is updated first.
+    let answer = send_raw(&server, &newer.device_id, &newer.key, &request(1, "0.1.0-rc.31")).unwrap();
+    assert_eq!(
+        answer.outdated_devices,
+        vec![("desktop".to_string(), "0.1.0-rc.30".to_string())]
+    );
+    let refused = send_raw(&server, &older.device_id, &older.key, &request(2, "0.1.0-rc.30"))
+        .unwrap_err();
+    assert!(refused.contains("0.1.0-rc.31"), "{refused}");
+    // Updated: it syncs again, and nobody is behind.
+    let answer = send_raw(&server, &older.device_id, &older.key, &request(3, "0.1.0-rc.31")).unwrap();
+    assert!(answer.outdated_devices.is_empty());
 }
