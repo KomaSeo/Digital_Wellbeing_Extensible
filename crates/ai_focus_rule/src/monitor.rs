@@ -133,7 +133,11 @@ fn blocks_by_scope(saved: &SavedBlocks) -> HashMap<String, BlockSet> {
 /// Three-way merge of block lists: `memory`'s changes since `last_saved` laid over `on_disk`
 /// (which another process changed). The scope stays `memory`'s (it follows this device's
 /// current to-do).
-fn merge_saved_blocks(last_saved: &SavedBlocks, memory: &SavedBlocks, on_disk: &SavedBlocks) -> SavedBlocks {
+fn merge_saved_blocks(
+    last_saved: &SavedBlocks,
+    memory: &SavedBlocks,
+    on_disk: &SavedBlocks,
+) -> SavedBlocks {
     fn merge_entries(
         last_saved: Option<&HashMap<String, BlockedEntry>>,
         memory: Option<&HashMap<String, BlockedEntry>>,
@@ -3005,15 +3009,21 @@ mod tests {
             scope: "thesis".into(),
             ..Default::default()
         };
-        last_saved.processes.insert("steam.exe".into(), entry("games"));
-        last_saved.processes.insert("discord.exe".into(), entry("chat"));
+        last_saved
+            .processes
+            .insert("steam.exe".into(), entry("games"));
+        last_saved
+            .processes
+            .insert("discord.exe".into(), entry("chat"));
         // Here: discord was unblocked, lol blocked.
         let mut memory = last_saved.clone();
         memory.processes.remove("discord.exe");
         memory.processes.insert("lol.exe".into(), entry("games"));
         // The other device: a tab blocked, and a block for another to-do.
         let mut on_disk = last_saved.clone();
-        on_disk.tabs.insert("chrome.exe|youtube.com".into(), entry("video"));
+        on_disk
+            .tabs
+            .insert("chrome.exe|youtube.com".into(), entry("video"));
         on_disk
             .other_scopes
             .entry("rest".into())
@@ -3025,7 +3035,9 @@ mod tests {
         processes.sort();
         assert_eq!(processes, ["lol.exe", "steam.exe"]);
         assert!(merged.tabs.contains_key("chrome.exe|youtube.com"));
-        assert!(merged.other_scopes["rest"].processes.contains_key("code.exe"));
+        assert!(merged.other_scopes["rest"]
+            .processes
+            .contains_key("code.exe"));
         assert_eq!(merged.scope, "thesis");
     }
 

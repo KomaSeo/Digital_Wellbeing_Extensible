@@ -405,7 +405,9 @@ pub fn install_sync_server(port: u16) -> anyhow::Result<()> {
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
     )
     .context("cannot open the service manager — run this from an administrator terminal")?;
-    let existing = manager.open_service(SYNC_SERVICE_NAME, service_access()).ok();
+    let existing = manager
+        .open_service(SYNC_SERVICE_NAME, service_access())
+        .ok();
     if let Some(existing) = &existing {
         println!("stopping the running sync server…");
         stop_and_wait(existing)?;
@@ -417,7 +419,8 @@ pub fn install_sync_server(port: u16) -> anyhow::Result<()> {
     let executable = program_folder.join(SERVICE_EXE);
     let current = std::env::current_exe()?;
     if !same_file(&current, &executable) {
-        replace_file(&current, &executable).with_context(|| format!("copy {}", executable.display()))?;
+        replace_file(&current, &executable)
+            .with_context(|| format!("copy {}", executable.display()))?;
     }
     lock_program_dir(&program_folder)?;
 
@@ -451,7 +454,9 @@ pub fn install_sync_server(port: u16) -> anyhow::Result<()> {
         }
         None => manager.create_service(&service_info, service_access())?,
     };
-    service.set_description("Keeps the settings, to-dos and tasks of every paired Digital Wellbeing device the same.")?;
+    service.set_description(
+        "Keeps the settings, to-dos and tasks of every paired Digital Wellbeing device the same.",
+    )?;
     let restart = ServiceAction {
         action_type: ServiceActionType::Restart,
         delay: Duration::from_secs(5),

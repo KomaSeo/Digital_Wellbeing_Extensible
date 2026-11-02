@@ -23,7 +23,9 @@ pub fn version_order(version: &str) -> (u64, u64, u64, u64) {
     };
     let mut parts = release.split('.').map(|part| part.parse::<u64>().ok());
     match (parts.next(), parts.next(), parts.next()) {
-        (Some(Some(major)), Some(Some(minor)), Some(Some(patch))) => (major, minor, patch, candidate),
+        (Some(Some(major)), Some(Some(minor)), Some(Some(patch))) => {
+            (major, minor, patch, candidate)
+        }
         _ => (0, 0, 0, 0),
     }
 }

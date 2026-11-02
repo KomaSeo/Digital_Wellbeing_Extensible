@@ -906,7 +906,8 @@ impl TaskPlanner {
         match self.state.get().assignment {
             Some(current) => {
                 let scope = current.todo_id.as_deref().unwrap_or("free");
-                if !focus.session_active || focus.task != current.task || focus.task_scope != scope {
+                if !focus.session_active || focus.task != current.task || focus.task_scope != scope
+                {
                     self.start_focus(&current)?;
                 }
             }

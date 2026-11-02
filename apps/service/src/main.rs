@@ -47,9 +47,8 @@ fn main() -> anyhow::Result<()> {
         #[cfg(windows)]
         Some("run") => service::run_dispatcher(),
         Some(command) if command.starts_with("sync-") => {
-            sync_commands::run_command(command, &arguments[1..]).unwrap_or_else(|| {
-                anyhow::bail!("unknown command '{command}' (see docs/sync.md)")
-            })
+            sync_commands::run_command(command, &arguments[1..])
+                .unwrap_or_else(|| anyhow::bail!("unknown command '{command}' (see docs/sync.md)"))
         }
         _ => {
             eprintln!(

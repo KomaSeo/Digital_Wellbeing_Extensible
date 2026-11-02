@@ -23,6 +23,7 @@
 mod assistant;
 mod block_prompt;
 mod help;
+mod login;
 mod settings;
 mod statistics;
 mod todo;
@@ -159,6 +160,7 @@ struct FocusApp {
     opened_for: Option<Option<String>>,
     time_up_prompt: Option<block_prompt::TimeUpPrompt>,
     access: AccessForm,
+    login: login::LoginForm,
     todo_ui: todo::TodoUiState,
     /// Settings questions due at the last status; more than before brings the window up.
     questions_due: usize,
@@ -216,6 +218,7 @@ impl FocusApp {
             opened_for: None,
             time_up_prompt: None,
             access: AccessForm::default(),
+            login: login::LoginForm::default(),
             todo_ui: todo::TodoUiState::default(),
             questions_due: 0,
             seen_block: None,
@@ -634,18 +637,25 @@ impl eframe::App for FocusApp {
                         ))
                         .strong(),
                     );
-                    ui.label(
-                        "설정이 보호된 상태에서 AI 연결이 끊기면, 연결될 때까지 Claude Desktop과 \
-                         Claude·Anthropic 웹사이트 말고는 모든 앱과 웹사이트를 막습니다. 설정 탭의 \
-                         AI 연결에서 동작하는 키를 넣고 \"적용\"을 누르면 몇 초 안에 풀립니다. 잠긴 \
-                         동안에는 키를 바꾸는 것이 예약되지 않고 바로 적용됩니다.",
+                    let connection = matches!(
+                        lockdown.cause,
+                        machine::lockdown::LockdownCause::Connection { .. }
                     );
-                    help::console_links(ui);
-                    if self.tab != Tab::Settings && ui.button("설정 탭 열기").clicked() {
-                        self.tab = Tab::Settings;
+                    if connection {
+                        ui.label(
+                            "설정이 보호된 상태에서 AI 연결이 끊기면, 연결될 때까지 Claude Desktop과 \
+                             Claude·Anthropic 웹사이트 말고는 모든 앱과 웹사이트를 막습니다. 설정 탭의 \
+                             AI 연결에서 동작하는 키를 넣고 \"적용\"을 누르면 몇 초 안에 풀립니다. 잠긴 \
+                             동안에는 키를 바꾸는 것이 예약되지 않고 바로 적용됩니다.",
+                        );
+                        help::console_links(ui);
+                        if self.tab != Tab::Settings && ui.button("설정 탭 열기").clicked() {
+                            self.tab = Tab::Settings;
+                        }
                     }
                     ui.separator();
                 }
+                self.login.prompt_ui(ui, self.session, &status.login);
                 // A refused or failed request from either tab.
                 if !message.is_empty() && self.tab != Tab::Settings {
                     ui.colored_label(RED, &message);
@@ -654,12 +664,15 @@ impl eframe::App for FocusApp {
                     Tab::Todo => self.todo_tab(ui, &status),
                     Tab::Assistant => self.assistant.ui(ui),
                     Tab::Blocking => self.blocking_tab(ui, &status),
-                    Tab::Settings => self.settings.ui(
-                        ui,
-                        status.settings_protected,
-                        status.lockdown.as_ref(),
-                        status.sync.as_ref(),
-                    ),
+                    Tab::Settings => {
+                        self.login.account_ui(ui, self.session, &status.login);
+                        self.settings.ui(
+                            ui,
+                            status.settings_protected,
+                            status.lockdown.as_ref(),
+                            status.sync.as_ref(),
+                        )
+                    }
                     Tab::Statistics => self.statistics_tab(ui, &status),
                     Tab::Help => {
                         if help::help_tab(ui) {

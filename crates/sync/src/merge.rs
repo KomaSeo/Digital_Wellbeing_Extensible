@@ -49,7 +49,11 @@ fn merge_objects(
     merged
 }
 
-fn merge_atomic(base: Option<&Value>, local: Option<&Value>, remote: Option<&Value>) -> Option<Value> {
+fn merge_atomic(
+    base: Option<&Value>,
+    local: Option<&Value>,
+    remote: Option<&Value>,
+) -> Option<Value> {
     if local == base {
         remote.cloned()
     } else if remote == base {
@@ -157,7 +161,8 @@ mod tests {
     #[test]
     fn changes_on_both_sides_are_kept() {
         let base = json!({ "life_rules": "a", "strikes": 2, "blacklist": ["steam.exe"] });
-        let local = json!({ "life_rules": "b", "strikes": 2, "blacklist": ["steam.exe", "lol.exe"] });
+        let local =
+            json!({ "life_rules": "b", "strikes": 2, "blacklist": ["steam.exe", "lol.exe"] });
         let remote = json!({ "life_rules": "a", "strikes": 1, "blacklist": [] });
         assert_eq!(
             merge(&base, &local, &remote, &[]),

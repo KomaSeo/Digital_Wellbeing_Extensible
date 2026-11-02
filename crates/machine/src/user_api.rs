@@ -147,6 +147,9 @@ pub struct Status {
     /// Multi-device sync of this PC (`None`: it does not sync). See `docs/sync.md`.
     #[serde(default)]
     pub sync: Option<SyncStatus>,
+    /// The login of this Windows account (sync logins; see `crate::login`).
+    #[serde(default)]
+    pub login: crate::login::LoginStatus,
 }
 
 /// Responsibility: Tell the Focus app how this PC's sync went.
@@ -174,7 +177,9 @@ pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
     Some(SyncStatus {
         server_url: text(&config["server_url"]).unwrap_or_default(),
         device_id: text(&config["device_id"]).unwrap_or_default(),
-        last_success: serde_json::from_value(state["last_success"].clone()).ok().flatten(),
+        last_success: serde_json::from_value(state["last_success"].clone())
+            .ok()
+            .flatten(),
         last_error: text(&state["last_error"]),
         refused: state["refused"]
             .as_array()
@@ -200,7 +205,10 @@ pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
                         format!(
                             "{} ({})",
                             device[0].as_str().unwrap_or_default(),
-                            device[1].as_str().filter(|version| !version.is_empty()).unwrap_or("버전 모름")
+                            device[1]
+                                .as_str()
+                                .filter(|version| !version.is_empty())
+                                .unwrap_or("버전 모름")
                         )
                     })
                     .collect()
@@ -273,11 +281,12 @@ fn status(api: &AgentApi) -> Status {
             .map(|enforcer| enforcer.recent_blocks(30))
             .unwrap_or_default(),
         sync: sync_status(&crate::data_dir()),
+        login: crate::login::status(&crate::data_dir()),
     }
 }
 
-/// The lockdown in force now (see [`crate::lockdown`]): a broken AI connection, to-dos with
-/// none assigned, or a task done away from the computer.
+/// The lockdown in force now (see [`crate::lockdown`]): a broken AI connection, a sync login
+/// not made yet, to-dos with none assigned, or a task done away from the computer.
 pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lockdown> {
     crate::lockdown::lockdown(
         crate::settings::is_protected(&crate::data_dir()),
@@ -285,6 +294,8 @@ pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lo
         planner.and_then(|planner| {
             if planner.stopped() {
                 Some(crate::lockdown::TaskLock::Stopped)
+            } else if crate::login::required(&crate::data_dir()) {
+                Some(crate::lockdown::TaskLock::LoginRequired)
             } else if let Some(task) = planner.away_from_computer_task() {
                 Some(crate::lockdown::TaskLock::AwayFromComputer { task })
             } else {
@@ -503,6 +514,20 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             planner
                 .assign(Utc::now())
                 .map_err(|error| error.to_string())?;
+        }
+        "login" => {
+            let user = crate::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;
+            let name = params["name"].as_str().unwrap_or_default();
+            let password = params["password"].as_str().unwrap_or_default();
+            let login = crate::login::log_in(&crate::data_dir(), &user, name, password)?;
+            tracing::info!("{user} logged in as {login}");
+            crate::login::changed();
+        }
+        "logout" => {
+            let user = crate::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;
+            crate::login::log_out(&crate::data_dir(), &user)?;
+            tracing::info!("{user} logged out");
+            crate::login::changed();
         }
         "stop_use" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;

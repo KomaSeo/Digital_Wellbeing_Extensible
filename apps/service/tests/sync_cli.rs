@@ -77,27 +77,60 @@ fn two_devices_sync_through_the_real_program() {
     );
     let started = Instant::now();
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(started.elapsed() < Duration::from_secs(20), "the server did not start");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the server did not start"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    fs::write(laptop.join("planner.json"), r#"{ "life_rules": "from the laptop" }"#).unwrap();
+    fs::write(
+        laptop.join("planner.json"),
+        r#"{ "life_rules": "from the laptop" }"#,
+    )
+    .unwrap();
     pair(&server_folder, &laptop, "laptop", port);
     let synced = run(&server_folder, &laptop, &["sync-now"]);
     assert!(synced.status.success(), "{}", text(&synced));
     assert!(text(&synced).contains("planner.json"), "{}", text(&synced));
+
+    // A login made on the server reaches the devices (with its password hashed).
+    let mut adding = Command::new(PROGRAM)
+        .args(["sync-add-user", "Me"])
+        .env("DW_SYNC_SERVER_DIR", &server_folder)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let mut input = adding.stdin.take().unwrap();
+        input.write_all(b"secret pass\nsecret pass\n").unwrap();
+    }
+    let added = adding.wait_with_output().unwrap();
+    assert!(added.status.success(), "{}", text(&added));
+    let users = text(&run(&server_folder, &laptop, &["sync-users"]));
+    assert!(users.contains("me"), "{users}");
 
     pair(&server_folder, &desktop, "desktop", port);
     let synced = run(&server_folder, &desktop, &["sync-now"]);
     assert!(synced.status.success(), "{}", text(&synced));
     let received = fs::read_to_string(desktop.join("planner.json")).unwrap();
     assert!(received.contains("from the laptop"), "{received}");
+    let logins = fs::read_to_string(desktop.join("users.json")).unwrap();
+    assert!(
+        logins.contains("\"me\"") && !logins.contains("secret"),
+        "{logins}"
+    );
 
     let status = text(&run(&server_folder, &desktop, &["sync-status"]));
     assert!(status.contains("device: desktop"), "{status}");
     assert!(!status.contains("last sync: never"), "{status}");
     let devices = text(&run(&server_folder, &desktop, &["sync-devices"]));
-    assert!(devices.contains("laptop") && devices.contains("desktop"), "{devices}");
+    assert!(
+        devices.contains("laptop") && devices.contains("desktop"),
+        "{devices}"
+    );
     // The keys never show in the list.
     let config = fs::read_to_string(desktop.join("sync.json")).unwrap();
     let key: serde_json::Value = serde_json::from_str(&config).unwrap();
@@ -108,7 +141,11 @@ fn two_devices_sync_through_the_real_program() {
     assert!(removed.status.success(), "{}", text(&removed));
     let refused = run(&server_folder, &desktop, &["sync-now"]);
     assert!(!refused.status.success());
-    assert!(text(&refused).contains("unknown device"), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("unknown device"),
+        "{}",
+        text(&refused)
+    );
 
     let left = run(&server_folder, &desktop, &["sync-leave"]);
     assert!(left.status.success());

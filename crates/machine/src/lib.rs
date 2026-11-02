@@ -28,6 +28,7 @@ pub const TEST_EDITION: bool = cfg!(feature = "test-edition");
 pub mod assistant;
 pub mod assistant_tools;
 pub mod lockdown;
+pub mod login;
 pub mod model_catalog;
 pub mod session;
 pub mod setting_edits;

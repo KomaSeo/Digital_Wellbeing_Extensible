@@ -96,7 +96,10 @@ mod tests {
     #[test]
     fn the_api_key_and_its_scheduled_changes_stay_on_the_device() {
         let settings = json!({ "api_key": "sk-laptop", "model": "m" });
-        assert_eq!(shared_part("ai_focus.json", &settings), json!({ "model": "m" }));
+        assert_eq!(
+            shared_part("ai_focus.json", &settings),
+            json!({ "model": "m" })
+        );
         let from_server = json!({ "model": "other" });
         assert_eq!(
             with_local_part("ai_focus.json", &from_server, Some(&settings)),

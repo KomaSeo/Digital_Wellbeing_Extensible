@@ -17,6 +17,7 @@ ai_focus_rule = { workspace = true }
 list_based_rule = { workspace = true }
 task_planner = { workspace = true }
 enforcer = { workspace = true }
+sync = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

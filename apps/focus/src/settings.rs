@@ -1976,7 +1976,8 @@ fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
     match sync.last_success {
         Some(time) => ui.label(format!(
             "마지막 동기화: {}",
-            time.with_timezone(&chrono::Local).format("%m월 %d일 %H:%M:%S")
+            time.with_timezone(&chrono::Local)
+                .format("%m월 %d일 %H:%M:%S")
         )),
         None => ui.label("아직 한 번도 동기화하지 못했습니다."),
     };
@@ -1992,7 +1993,12 @@ fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
             format!("업데이트해야 다시 동기화하는 다른 PC: {device}"),
         );
     }
-    if !sync.outdated_devices.is_empty() || sync.last_error.as_deref().is_some_and(|error| error.contains("업데이트")) {
+    if !sync.outdated_devices.is_empty()
+        || sync
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("업데이트"))
+    {
         ui.hyperlink_to(
             "새 버전 내려받기(릴리스 페이지)",
             "https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases",

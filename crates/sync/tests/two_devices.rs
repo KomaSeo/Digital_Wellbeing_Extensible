@@ -67,9 +67,21 @@ fn the_first_device_fills_the_server_and_a_joining_device_takes_its_state() {
     let setup = setup("join");
     let (laptop_folder, laptop) = &setup.laptop;
     let (desktop_folder, desktop) = &setup.desktop;
-    write(laptop_folder, "planner.json", &json!({ "life_rules": "sleep at 23" }));
-    write(laptop_folder, "planner_state.json", &json!({ "assignment": { "todo_id": "a" } }));
-    write(desktop_folder, "planner.json", &json!({ "life_rules": "old desktop rules" }));
+    write(
+        laptop_folder,
+        "planner.json",
+        &json!({ "life_rules": "sleep at 23" }),
+    );
+    write(
+        laptop_folder,
+        "planner_state.json",
+        &json!({ "assignment": { "todo_id": "a" } }),
+    );
+    write(
+        desktop_folder,
+        "planner.json",
+        &json!({ "life_rules": "old desktop rules" }),
+    );
     write(desktop_folder, "grants/me.json", &json!({ "grants": [] }));
 
     let report = sync(&setup.server, laptop);
@@ -88,7 +100,10 @@ fn the_first_device_fills_the_server_and_a_joining_device_takes_its_state() {
     );
     // What the server did not have yet is sent, and reaches the first device.
     sync(&setup.server, laptop);
-    assert_eq!(read(laptop_folder, "grants/me.json").unwrap(), json!({ "grants": [] }));
+    assert_eq!(
+        read(laptop_folder, "grants/me.json").unwrap(),
+        json!({ "grants": [] })
+    );
     // Nothing left to do: another sync changes nothing.
     let quiet = sync(&setup.server, laptop);
     assert!(quiet.pushed.is_empty() && quiet.pulled.is_empty());
@@ -136,7 +151,11 @@ fn two_devices_assigning_at_once_end_with_one_whole_assignment() {
     let setup = setup("assignment");
     let (laptop_folder, laptop) = &setup.laptop;
     let (desktop_folder, desktop) = &setup.desktop;
-    write(laptop_folder, "planner_state.json", &json!({ "assignment": null, "done": [] }));
+    write(
+        laptop_folder,
+        "planner_state.json",
+        &json!({ "assignment": null, "done": [] }),
+    );
     sync(&setup.server, laptop);
     sync(&setup.server, desktop);
 
@@ -158,8 +177,14 @@ fn two_devices_assigning_at_once_end_with_one_whole_assignment() {
     let desktop_state = read(desktop_folder, "planner_state.json").unwrap();
     assert_eq!(laptop_state, desktop_state);
     // The first to reach the server wins the whole assignment; both done records are kept.
-    assert_eq!(laptop_state["assignment"], json!({ "todo_id": "a", "until": "10:00" }));
-    assert_eq!(laptop_state["done"], json!([{ "todo_id": "x" }, { "todo_id": "y" }]));
+    assert_eq!(
+        laptop_state["assignment"],
+        json!({ "todo_id": "a", "until": "10:00" })
+    );
+    assert_eq!(
+        laptop_state["done"],
+        json!([{ "todo_id": "x" }, { "todo_id": "y" }])
+    );
 }
 
 #[test]
@@ -173,17 +198,35 @@ fn every_device_sees_every_devices_usage_but_sends_only_its_own() {
     sync(&setup.server, desktop);
     sync(&setup.server, laptop);
 
-    assert_eq!(read(laptop_folder, "usage/me.json").unwrap(), json!({ "calls": 1 }));
-    assert_eq!(read(laptop_folder, "usage/desktop~me.json").unwrap(), json!({ "calls": 2 }));
-    assert_eq!(read(desktop_folder, "usage/me.json").unwrap(), json!({ "calls": 2 }));
-    assert_eq!(read(desktop_folder, "usage/laptop~me.json").unwrap(), json!({ "calls": 1 }));
+    assert_eq!(
+        read(laptop_folder, "usage/me.json").unwrap(),
+        json!({ "calls": 1 })
+    );
+    assert_eq!(
+        read(laptop_folder, "usage/desktop~me.json").unwrap(),
+        json!({ "calls": 2 })
+    );
+    assert_eq!(
+        read(desktop_folder, "usage/me.json").unwrap(),
+        json!({ "calls": 2 })
+    );
+    assert_eq!(
+        read(desktop_folder, "usage/laptop~me.json").unwrap(),
+        json!({ "calls": 1 })
+    );
 
     // A later count on one device reaches the other.
     write(laptop_folder, "usage/me.json", &json!({ "calls": 5 }));
     sync(&setup.server, laptop);
     sync(&setup.server, desktop);
-    assert_eq!(read(desktop_folder, "usage/laptop~me.json").unwrap(), json!({ "calls": 5 }));
-    assert_eq!(read(desktop_folder, "usage/me.json").unwrap(), json!({ "calls": 2 }));
+    assert_eq!(
+        read(desktop_folder, "usage/laptop~me.json").unwrap(),
+        json!({ "calls": 5 })
+    );
+    assert_eq!(
+        read(desktop_folder, "usage/me.json").unwrap(),
+        json!({ "calls": 2 })
+    );
 }
 
 #[test]
@@ -195,13 +238,23 @@ fn protection_cannot_be_turned_off_through_sync() {
     write(laptop_folder, "settings_protection.json", &protected);
     sync(&setup.server, laptop);
     sync(&setup.server, desktop);
-    assert_eq!(read(desktop_folder, "settings_protection.json").unwrap(), protected);
+    assert_eq!(
+        read(desktop_folder, "settings_protection.json").unwrap(),
+        protected
+    );
 
-    write(desktop_folder, "settings_protection.json", &json!({ "protected_since": null }));
+    write(
+        desktop_folder,
+        "settings_protection.json",
+        &json!({ "protected_since": null }),
+    );
     let report = sync(&setup.server, desktop);
     assert_eq!(report.refused.len(), 1);
     // The device takes the server's (protected) version back.
-    assert_eq!(read(desktop_folder, "settings_protection.json").unwrap(), protected);
+    assert_eq!(
+        read(desktop_folder, "settings_protection.json").unwrap(),
+        protected
+    );
     assert_eq!(SyncState::load(desktop_folder).refused.len(), 1);
 }
 
@@ -292,7 +345,11 @@ fn a_sync_round_works_over_http() {
 
     let code = server.add_device("laptop").unwrap();
     let folder = root.join("laptop");
-    write(&folder, "planner.json", &json!({ "life_rules": "over http" }));
+    write(
+        &folder,
+        "planner.json",
+        &json!({ "life_rules": "over http" }),
+    );
     let config = ClientConfig {
         server_url: format!("http://127.0.0.1:{port}"),
         device_id: code.device_id,
@@ -323,8 +380,16 @@ fn each_device_keeps_its_own_api_key() {
     let setup = setup("api_key");
     let (laptop_folder, laptop) = &setup.laptop;
     let (desktop_folder, desktop) = &setup.desktop;
-    write(laptop_folder, "ai_focus.json", &json!({ "api_key": "sk-laptop", "model": "a" }));
-    write(desktop_folder, "ai_focus.json", &json!({ "api_key": "sk-desktop", "model": "b" }));
+    write(
+        laptop_folder,
+        "ai_focus.json",
+        &json!({ "api_key": "sk-laptop", "model": "a" }),
+    );
+    write(
+        desktop_folder,
+        "ai_focus.json",
+        &json!({ "api_key": "sk-desktop", "model": "b" }),
+    );
     sync(&setup.server, laptop);
     // Joining takes the server's settings, but not another device's key.
     sync(&setup.server, desktop);
@@ -334,7 +399,11 @@ fn each_device_keeps_its_own_api_key() {
     );
 
     // A changed key is never sent; a changed model is.
-    write(desktop_folder, "ai_focus.json", &json!({ "api_key": "sk-desktop-2", "model": "c" }));
+    write(
+        desktop_folder,
+        "ai_focus.json",
+        &json!({ "api_key": "sk-desktop-2", "model": "c" }),
+    );
     sync(&setup.server, desktop);
     sync(&setup.server, laptop);
     assert_eq!(
@@ -342,7 +411,10 @@ fn each_device_keeps_its_own_api_key() {
         json!({ "api_key": "sk-laptop", "model": "c" })
     );
     let stored = fs::read_to_string(
-        laptop_folder.parent().unwrap().join("server/documents/ai_focus.json"),
+        laptop_folder
+            .parent()
+            .unwrap()
+            .join("server/documents/ai_focus.json"),
     )
     .unwrap();
     assert!(!stored.contains("sk-"), "{stored}");
@@ -361,17 +433,40 @@ fn a_device_with_an_older_version_stops_syncing_until_it_is_updated() {
         known: Default::default(),
         app_version: version.to_string(),
     };
-    send_raw(&server, &older.device_id, &older.key, &request(1, "0.1.0-rc.30")).unwrap();
+    send_raw(
+        &server,
+        &older.device_id,
+        &older.key,
+        &request(1, "0.1.0-rc.30"),
+    )
+    .unwrap();
     // The laptop is updated first.
-    let answer = send_raw(&server, &newer.device_id, &newer.key, &request(1, "0.1.0-rc.31")).unwrap();
+    let answer = send_raw(
+        &server,
+        &newer.device_id,
+        &newer.key,
+        &request(1, "0.1.0-rc.31"),
+    )
+    .unwrap();
     assert_eq!(
         answer.outdated_devices,
         vec![("desktop".to_string(), "0.1.0-rc.30".to_string())]
     );
-    let refused = send_raw(&server, &older.device_id, &older.key, &request(2, "0.1.0-rc.30"))
-        .unwrap_err();
+    let refused = send_raw(
+        &server,
+        &older.device_id,
+        &older.key,
+        &request(2, "0.1.0-rc.30"),
+    )
+    .unwrap_err();
     assert!(refused.contains("0.1.0-rc.31"), "{refused}");
     // Updated: it syncs again, and nobody is behind.
-    let answer = send_raw(&server, &older.device_id, &older.key, &request(3, "0.1.0-rc.31")).unwrap();
+    let answer = send_raw(
+        &server,
+        &older.device_id,
+        &older.key,
+        &request(3, "0.1.0-rc.31"),
+    )
+    .unwrap();
     assert!(answer.outdated_devices.is_empty());
 }

@@ -15,11 +15,14 @@
 //!   is kept as `usage/<device>~<user>.json`, so everything that adds up `usage\` (statistics,
 //!   the daily budget) counts every device. Those copies are never sent back.
 
-use crate::envelope::{self, Envelope};
 use crate::device_local::{shared_part, with_local_part};
+use crate::envelope::{self, Envelope};
 use crate::merge::merge;
 use crate::protocol::{Push, Rejected, SyncRequest, SyncResponse};
-use crate::server::{allowed_name, read_json, write_json, DEVICE_FOLDER, SHARED_DOCUMENTS, SHARED_FOLDERS};
+use crate::server::{
+    allowed_name, read_json, write_json, DEVICE_FOLDER, SERVER_DOCUMENTS, SHARED_DOCUMENTS,
+    SHARED_FOLDERS,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -104,7 +107,11 @@ pub fn atomic_keys(document_name: &str) -> &'static [&'static str] {
 }
 
 /// The local file of `document_name`, or `None` for a name this device does not keep.
-pub fn local_path_for(data_directory: &Path, device_id: &str, document_name: &str) -> Option<PathBuf> {
+pub fn local_path_for(
+    data_directory: &Path,
+    device_id: &str,
+    document_name: &str,
+) -> Option<PathBuf> {
     if !allowed_name(document_name, None) {
         return None;
     }
@@ -154,7 +161,11 @@ pub fn local_documents(data_directory: &Path, device_id: &str) -> Vec<String> {
         files
     };
     for folder in SHARED_FOLDERS {
-        names.extend(json_files(folder).into_iter().map(|file| format!("{folder}/{file}")));
+        names.extend(
+            json_files(folder)
+                .into_iter()
+                .map(|file| format!("{folder}/{file}")),
+        );
     }
     names.extend(
         json_files(DEVICE_FOLDER)
@@ -212,7 +223,12 @@ impl SyncClient {
     /// Write `content` as the local file of `document_name` unless the file already says the
     /// same. Re-reads just before writing, so a change the agent saved meanwhile is merged in
     /// rather than lost.
-    fn write_local(&self, document_name: &str, base: Option<&Value>, remote: &Value) -> Result<bool, String> {
+    fn write_local(
+        &self,
+        document_name: &str,
+        base: Option<&Value>,
+        remote: &Value,
+    ) -> Result<bool, String> {
         let Some(path) = self.local_path(document_name) else {
             return Ok(false);
         };
@@ -314,7 +330,8 @@ impl SyncClient {
                     }
                 }
             }
-            let rejected = |name: &str| response.rejected.iter().any(|refusal| refusal.name == name);
+            let rejected =
+                |name: &str| response.rejected.iter().any(|refusal| refusal.name == name);
             for push in &pushes {
                 if !rejected(&push.name) && !report.pushed.contains(&push.name) {
                     report.pushed.push(push.name.clone());
@@ -325,18 +342,23 @@ impl SyncClient {
                 if pushed_here.is_some_and(|push| push.content == document.content) {
                     // The server took this device's version: it is the new base.
                     write_json(&self.base_path(&document.name), &document.content)?;
-                    state.revisions.insert(document.name.clone(), document.revision);
+                    state
+                        .revisions
+                        .insert(document.name.clone(), document.revision);
                     continue;
                 }
                 // Another device's file, or a push the server refused for a rule: the server's
                 // version is taken as it is.
                 if belongs_to_another_device(&self.config.device_id, &document.name)
+                    || SERVER_DOCUMENTS.contains(&document.name.as_str())
                     || refused_names.contains(&document.name)
                 {
                     if self.write_local(&document.name, None, &document.content)? {
                         report.pulled.push(document.name.clone());
                     }
-                    state.revisions.insert(document.name.clone(), document.revision);
+                    state
+                        .revisions
+                        .insert(document.name.clone(), document.revision);
                     continue;
                 }
                 let base = if joining {
@@ -360,7 +382,9 @@ impl SyncClient {
                     report.merged.push(document.name.clone());
                 }
                 write_json(&self.base_path(&document.name), &document.content)?;
-                state.revisions.insert(document.name.clone(), document.revision);
+                state
+                    .revisions
+                    .insert(document.name.clone(), document.revision);
             }
             state.save(&self.data_directory)?;
             let was_joining = joining;
@@ -387,16 +411,14 @@ pub fn http_transport(server_url: &str) -> impl FnMut(&Envelope) -> Result<Envel
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(60))
         .build();
-    move |sealed: &Envelope| {
-        match agent.post(&url).send_json(sealed) {
-            Ok(response) => response
-                .into_json::<Envelope>()
-                .map_err(|error| format!("bad answer from the server: {error}")),
-            Err(ureq::Error::Status(code, response)) => Err(format!(
-                "the server refused ({code}): {}",
-                response.into_string().unwrap_or_default()
-            )),
-            Err(error) => Err(format!("could not reach the server: {error}")),
-        }
+    move |sealed: &Envelope| match agent.post(&url).send_json(sealed) {
+        Ok(response) => response
+            .into_json::<Envelope>()
+            .map_err(|error| format!("bad answer from the server: {error}")),
+        Err(ureq::Error::Status(code, response)) => Err(format!(
+            "the server refused ({code}): {}",
+            response.into_string().unwrap_or_default()
+        )),
+        Err(error) => Err(format!("could not reach the server: {error}")),
     }
 }

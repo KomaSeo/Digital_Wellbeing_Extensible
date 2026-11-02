@@ -8,6 +8,8 @@
 //! | `sync-add-device <name>`             | the server, administrator | pair a device; prints its code once  |
 //! | `sync-devices`                       | the server, administrator | list the paired devices              |
 //! | `sync-remove-device <id>`            | the server, administrator | unpair a device                      |
+//! | `sync-add-user <name>`               | the server, administrator | make a login (asks for its password) or give it a new password |
+//! | `sync-users` / `sync-remove-user <name>` | the server, administrator | list / remove logins          |
 //! | `sync-join <server address> <code>`  | a device, administrator   | sync this device from now on         |
 //! | `sync-leave`                         | a device, administrator   | stop syncing this device             |
 //! | `sync-status`                        | a device                  | show the last sync                   |
@@ -69,6 +71,9 @@ pub fn run_command(command: &str, arguments: &[String]) -> Option<anyhow::Result
         #[cfg(windows)]
         "sync-service" => crate::service::run_sync_dispatcher(),
         "sync-add-device" => add_device(arguments),
+        "sync-add-user" => add_user(arguments),
+        "sync-remove-user" => remove_user(arguments),
+        "sync-users" => list_users(),
         "sync-devices" => list_devices(),
         "sync-remove-device" => remove_device(arguments),
         "sync-join" => join(&machine::data_dir(), arguments),
@@ -107,12 +112,67 @@ fn add_device(arguments: &[String]) -> anyhow::Result<()> {
         bail!("usage: sync-add-device <a name for the device, e.g. laptop>");
     }
     let code = server().add_device(&name).map_err(anyhow::Error::msg)?;
-    println!("paired '{}'. On that device, from an administrator terminal:", code.device_id);
+    println!(
+        "paired '{}'. On that device, from an administrator terminal:",
+        code.device_id
+    );
     println!(
         "  digital-wellbeing-service sync-join http://<this server's address>:{DEFAULT_PORT} {}",
         code.to_line()
     );
     println!("The code is shown only this once; anyone with it can sync as that device.");
+    Ok(())
+}
+
+/// A password typed without showing it; from standard input when there is no terminal
+/// (tests pipe it in).
+fn read_password(prompt: &str) -> anyhow::Result<String> {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        return Ok(rpassword::prompt_password(prompt)?);
+    }
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn add_user(arguments: &[String]) -> anyhow::Result<()> {
+    let name = arguments
+        .first()
+        .context("usage: sync-add-user <login name, e.g. me>")?;
+    let password = read_password("password: ")?;
+    let again = read_password("the same password again: ")?;
+    if password != again {
+        bail!("the two passwords differ");
+    }
+    server()
+        .set_user(name, &password)
+        .map_err(anyhow::Error::msg)?;
+    println!(
+        "login '{}' saved. Every paired device gets it at its next sync; each Windows account \
+         logs in once in the Focus app.",
+        name.trim().to_lowercase()
+    );
+    Ok(())
+}
+
+fn remove_user(arguments: &[String]) -> anyhow::Result<()> {
+    let name = arguments
+        .first()
+        .context("usage: sync-remove-user <login name>")?;
+    server().remove_user(name).map_err(anyhow::Error::msg)?;
+    println!("login '{name}' removed; accounts that used it must log in again");
+    Ok(())
+}
+
+fn list_users() -> anyhow::Result<()> {
+    let users = server().users();
+    if users.is_empty() {
+        println!("no logins (sync-add-user <name> makes one)");
+    }
+    for user in users {
+        println!("{user}");
+    }
     Ok(())
 }
 
@@ -126,7 +186,11 @@ fn list_devices() -> anyhow::Result<()> {
             "{}  ({})  version {}  paired {}  last sync {}",
             device.id,
             device.name,
-            if device.version.is_empty() { "?" } else { &device.version },
+            if device.version.is_empty() {
+                "?"
+            } else {
+                &device.version
+            },
             device.added_at.format("%Y-%m-%d"),
             device
                 .last_seen
@@ -138,7 +202,9 @@ fn list_devices() -> anyhow::Result<()> {
 }
 
 fn remove_device(arguments: &[String]) -> anyhow::Result<()> {
-    let id = arguments.first().context("usage: sync-remove-device <device id>")?;
+    let id = arguments
+        .first()
+        .context("usage: sync-remove-device <device id>")?;
     server().remove_device(id).map_err(anyhow::Error::msg)?;
     println!("'{id}' can no longer sync");
     Ok(())
@@ -204,7 +270,10 @@ fn status(data_directory: &Path) -> anyhow::Result<()> {
         return Ok(());
     };
     let state = SyncState::load(data_directory);
-    println!("server: {}  device: {}", config.server_url, config.device_id);
+    println!(
+        "server: {}  device: {}",
+        config.server_url, config.device_id
+    );
     println!(
         "last sync: {}",
         state
@@ -255,7 +324,10 @@ pub fn sync_loop(data_directory: PathBuf) {
                         );
                     }
                     for refusal in &report.refused {
-                        warn!("sync: the server refused {} ({})", refusal.name, refusal.reason);
+                        warn!(
+                            "sync: the server refused {} ({})",
+                            refusal.name, refusal.reason
+                        );
                     }
                     last_error = None;
                 }

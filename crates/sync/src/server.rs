@@ -37,7 +37,9 @@ pub const SHARED_DOCUMENTS: [&str; 6] = [
     "settings_reservations.json",
     "planner_state.json",
 ];
-/// Folders whose files every device shares (one file per Windows user).
+/// Documents only the server writes; devices take them as they are.
+pub const SERVER_DOCUMENTS: [&str; 1] = [crate::users::USERS_DOCUMENT];
+/// Folders whose files every device shares (one file per login or Windows user).
 pub const SHARED_FOLDERS: [&str; 2] = ["grants", "blocks"];
 /// The folder of per-device files (`usage/<device>/<user>.json`), summed for the statistics.
 pub const DEVICE_FOLDER: &str = "usage";
@@ -86,6 +88,9 @@ pub fn allowed_name(name: &str, device_id: Option<&str>) -> bool {
     };
     if SHARED_DOCUMENTS.contains(&name) {
         return true;
+    }
+    if SERVER_DOCUMENTS.contains(&name) {
+        return device_id.is_none();
     }
     let parts: Vec<&str> = name.split('/').collect();
     if !name.ends_with(".json") || !parts.iter().all(|part| safe_part(part)) {
@@ -190,6 +195,49 @@ impl SyncServer {
         self.save_devices(&devices)
     }
 
+    /// Add a login or give it a new password (`users.json`, sent to every device).
+    pub fn set_user(&self, name: &str, password: &str) -> Result<(), String> {
+        self.change_users(|users| users.set(name, password))
+    }
+
+    pub fn remove_user(&self, name: &str) -> Result<(), String> {
+        self.change_users(|users| {
+            if users.remove(name) {
+                Ok(())
+            } else {
+                Err(format!("no login '{name}'"))
+            }
+        })
+    }
+
+    pub fn users(&self) -> Vec<String> {
+        self.load_document(crate::users::USERS_DOCUMENT)
+            .and_then(|stored| serde_json::from_value::<crate::users::Users>(stored.content).ok())
+            .unwrap_or_default()
+            .names()
+    }
+
+    fn change_users(
+        &self,
+        change: impl FnOnce(&mut crate::users::Users) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let _busy = self.busy.lock();
+        let name = crate::users::USERS_DOCUMENT;
+        let current = self.load_document(name);
+        let mut users: crate::users::Users = current
+            .as_ref()
+            .and_then(|stored| serde_json::from_value(stored.content.clone()).ok())
+            .unwrap_or_default();
+        change(&mut users)?;
+        let stored = Stored {
+            revision: current.map_or(0, |stored| stored.revision) + 1,
+            written_by: "server".into(),
+            written_at: Utc::now(),
+            content: serde_json::to_value(&users).map_err(|error| error.to_string())?,
+        };
+        write_json(&self.documents_folder().join(file_name(name)), &stored)
+    }
+
     /// The paired devices, without their keys.
     pub fn devices(&self) -> Vec<Device> {
         self.load_devices()
@@ -239,7 +287,9 @@ impl SyncServer {
             serde_json::from_slice(&plaintext).map_err(|error| format!("bad request: {error}"))?;
         let now = Utc::now();
         if (now - request.sent_at).num_seconds().abs() > MAX_CLOCK_SKEW_SECONDS {
-            return Err("the request is too old (or the clocks differ by more than 10 minutes)".into());
+            return Err(
+                "the request is too old (or the clocks differ by more than 10 minutes)".into(),
+            );
         }
         if request.counter <= device.last_counter {
             return Err("the request was already used".into());
@@ -293,7 +343,10 @@ impl SyncServer {
             .all_documents()
             .into_iter()
             .filter(|(name, stored)| {
-                request.known.get(name).is_none_or(|known| stored.revision > *known)
+                request
+                    .known
+                    .get(name)
+                    .is_none_or(|known| stored.revision > *known)
                     || rejected.iter().any(|refused| &refused.name == name)
             })
             .map(|(name, stored)| Document {
@@ -333,7 +386,9 @@ impl SyncServer {
                     .get("protected_since")
                     .is_some_and(|since| !since.is_null())
             };
-            if current.as_ref().is_some_and(|stored| protected(&stored.content))
+            if current
+                .as_ref()
+                .is_some_and(|stored| protected(&stored.content))
                 && !protected(&push.content)
             {
                 return Err("the protection cannot be turned off".into());
@@ -346,7 +401,10 @@ impl SyncServer {
             // Never kept here, whatever a device sends: each device has its own API key.
             content: crate::device_local::shared_part(&push.name, &push.content),
         };
-        write_json(&self.documents_folder().join(file_name(&push.name)), &stored)
+        write_json(
+            &self.documents_folder().join(file_name(&push.name)),
+            &stored,
+        )
     }
 
     /// Serve HTTP on `port` forever (`POST /sync` with an envelope as JSON).
@@ -376,7 +434,10 @@ impl SyncServer {
         let mut length = 0usize;
         loop {
             let mut line = String::new();
-            if reader.read_line(&mut line).map_err(|error| error.to_string())? == 0
+            if reader
+                .read_line(&mut line)
+                .map_err(|error| error.to_string())?
+                == 0
                 || line == "\r\n"
             {
                 break;
@@ -397,8 +458,9 @@ impl SyncServer {
             match serde_json::from_slice::<Envelope>(&body)
                 .map_err(|error| error.to_string())
                 .and_then(|envelope| self.handle(&envelope))
-                .and_then(|sealed| serde_json::to_string(&sealed).map_err(|error| error.to_string()))
-            {
+                .and_then(|sealed| {
+                    serde_json::to_string(&sealed).map_err(|error| error.to_string())
+                }) {
                 Ok(json) => ("200 OK", json),
                 Err(error) => ("403 Forbidden", error),
             }
@@ -442,5 +504,8 @@ mod tests {
         assert!(!allowed_name("machine.json", Some("laptop")));
         assert!(!allowed_name("blocks/../ai_focus.json", Some("laptop")));
         assert!(!allowed_name("grants/a/b/c.json", Some("laptop")));
+        // Only the server writes the logins; every device reads them.
+        assert!(!allowed_name("users.json", Some("laptop")));
+        assert!(allowed_name("users.json", None));
     }
 }

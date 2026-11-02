@@ -147,6 +147,7 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
     settings_reservations.json  예약된 업데이트, 각 업데이트에 받은 "예" 답, 지난 업데이트의 결과 기록. (6.4절)
     usage\<기기>~<사용자>.json  동기화로 받은 다른 기기의 AI 사용량. 통계와 하루 예산이 이것까지 더합니다. (docs/sync.md)
     sync.json, sync_state.json, sync_base\   여러 기기 동기화의 서버 주소와 이 기기의 열쇠, 마지막 동기화 기록, 병합의 기준본. 서비스가 씁니다. (docs/sync.md)
+    users.json           동기화 서버가 보낸 로그인 목록(이름과 비밀번호 해시). logins.json  이 PC의 Windows 계정마다 쓰는 로그인. (docs/sync.md 7장)
     logs\service.log, logs\agent-session<번호>.log   실행 기록
 ```
 

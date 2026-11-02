@@ -239,8 +239,16 @@ fn the_focus_follows_an_assignment_another_device_made() {
     let folder = std::env::temp_dir().join(format!("dw_planner_follow_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&folder);
     let path = folder.join("planner_state.json");
-    let laptop = harness_with_state(true, &["a", "b"], JsonStore::open(path.clone(), true).unwrap());
-    let desktop = harness_with_state(true, &["a", "b"], JsonStore::open(path.clone(), true).unwrap());
+    let laptop = harness_with_state(
+        true,
+        &["a", "b"],
+        JsonStore::open(path.clone(), true).unwrap(),
+    );
+    let desktop = harness_with_state(
+        true,
+        &["a", "b"],
+        JsonStore::open(path.clone(), true).unwrap(),
+    );
 
     laptop.planner.assign(Utc::now()).unwrap();
     assert!(!desktop.focus.store().get().session_active);

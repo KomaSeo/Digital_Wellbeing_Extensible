@@ -71,12 +71,23 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     let ai_store = AiFocusStore::open_read_only(machine::ai_focus_path())?;
     let user =
         machine::session::session_user(session).unwrap_or_else(|| format!("session{session}"));
-    let grants = JsonStore::<GrantState>::open(machine::grants_path_for(&user), true)?;
-    let blocks = JsonStore::<SavedBlocks>::open(machine::blocks_path_for(&user), true)?;
+    // With sync logins, the files of the login this account used (the same on every PC);
+    // after logging in or out the agent starts again (the service restarts it) to switch.
+    machine::login::set_session_user(&user);
+    machine::login::on_change(|| {
+        thread::spawn(|| {
+            thread::sleep(Duration::from_millis(500));
+            info!("the login changed; starting again with its files");
+            std::process::exit(0);
+        });
+    });
+    let profile = machine::login::profile_for(&machine::data_dir(), &user);
+    let grants = JsonStore::<GrantState>::open(machine::grants_path_for(&profile), true)?;
+    let blocks = JsonStore::<SavedBlocks>::open(machine::blocks_path_for(&profile), true)?;
     // Every Claude call of this agent (focus checks, planner, access reviews) is counted;
     // the daily budget adds up every user's file.
     let usage = Arc::new(UsageRecorder::new(
-        JsonStore::open(machine::usage_path_for(&user), true)?,
+        JsonStore::open(machine::usage_path_for(&profile), true)?,
         Some(machine::usage_dir()),
     ));
     ai_focus_rule::usage::install(Arc::clone(&usage));

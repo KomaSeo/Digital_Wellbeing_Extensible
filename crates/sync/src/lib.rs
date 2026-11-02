@@ -9,6 +9,7 @@
 //!   both changes where it can; where both changed the same value, the server's wins.
 //! - [`device_local`]: what stays on each device (its Anthropic API key).
 //! - [`server`]: the server's document store and request handling.
+//! - [`users`]: the logins (one per person), made on the server.
 //! - [`client`]: one device's side: which files sync, and one sync round.
 //!
 //! Walkthrough (Korean): `docs/sync.md`.
@@ -19,3 +20,4 @@ pub mod envelope;
 pub mod merge;
 pub mod protocol;
 pub mod server;
+pub mod users;
