@@ -381,6 +381,12 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             tracing::info!("settings protected since {:?}", protection.protected_since);
             return serde_json::to_value(protection).map_err(|error| error.to_string());
         }
+        // Test edition only (the main edition refuses inside `unprotect`).
+        "settings_unprotect" => {
+            crate::settings::unprotect(&data_directory)?;
+            tracing::warn!("settings protection turned off (test edition)");
+            return Ok(json!({ "protected": false }));
+        }
         _ => {}
     }
     match method {

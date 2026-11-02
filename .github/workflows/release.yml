@@ -1,5 +1,6 @@
 # Responsibility: Build, test and package Digital Wellbeing on Windows, and
-# publish the setup program and a zip as a GitHub pre-release.
+# publish the setup program and a zip as a GitHub pre-release, for the main
+# edition and the test edition (-TEST: it can turn the settings protection off).
 #
 # A release is published when
 # - a `v*` tag is pushed, or
@@ -39,6 +40,16 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked --release
 
+      # The test edition first, set aside; then the main edition (only the crates
+      # that depend on `machine` compile again).
+      - name: Build (test edition)
+        shell: pwsh
+        run: |
+          cargo build --release --workspace --locked --features machine/test-edition
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force target\test-edition | Out-Null
+          Copy-Item target\release\digital-wellbeing-service.exe, target\release\digital-wellbeing-focus.exe, target\release\digital-wellbeing-mcp.exe target\test-edition
+
       - name: Build
         run: cargo build --release --workspace --locked
 
@@ -67,17 +78,23 @@ jobs:
           if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
           & $iscc installer\DigitalWellbeing.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:BUILD_DIR = "..\target\test-edition"
+          $env:EDITION_SUFFIX = "-TEST"
+          & $iscc installer\DigitalWellbeing.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Zip
         shell: pwsh
         run: |
           $v = "${{ steps.version.outputs.value }}"
-          $stage = "dist\DigitalWellbeing-$v"
-          New-Item -ItemType Directory -Force "$stage\docs" | Out-Null
-          Copy-Item target\release\digital-wellbeing-service.exe, target\release\digital-wellbeing-focus.exe, target\release\digital-wellbeing-mcp.exe, installer\install.cmd $stage
-          Copy-Item docs\*.md "$stage\docs"
-          Compress-Archive -Path "$stage\*" -DestinationPath "dist\DigitalWellbeing-$v-windows-x64.zip"
-          Remove-Item -Recurse $stage
+          foreach ($edition in @(@{ dir = "target\release"; suffix = "" }, @{ dir = "target\test-edition"; suffix = "-TEST" })) {
+            $stage = "dist\DigitalWellbeing-$v$($edition.suffix)"
+            New-Item -ItemType Directory -Force "$stage\docs" | Out-Null
+            Copy-Item "$($edition.dir)\digital-wellbeing-service.exe", "$($edition.dir)\digital-wellbeing-focus.exe", "$($edition.dir)\digital-wellbeing-mcp.exe", installer\install.cmd $stage
+            Copy-Item docs\*.md "$stage\docs"
+            Compress-Archive -Path "$stage\*" -DestinationPath "dist\DigitalWellbeing-$v-windows-x64$($edition.suffix).zip"
+            Remove-Item -Recurse $stage
+          }
 
       - uses: actions/upload-artifact@v4
         with:

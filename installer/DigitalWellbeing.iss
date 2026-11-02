@@ -4,16 +4,28 @@
 ; the administrators included: the owner's choice); uninstall runs `uninstall`.
 ;
 ; Built by .github/workflows/release.yml:  ISCC.exe installer\DigitalWellbeing.iss
-; The version comes from the APP_VERSION environment variable.
+; The version comes from the APP_VERSION environment variable. The test edition (which can
+; turn the settings protection off) is built from the executables in BUILD_DIR with
+; EDITION_SUFFIX=-TEST; it installs over the main edition and the main edition over it.
 
 #define AppVersion GetEnv("APP_VERSION")
 #if AppVersion == ""
   #define AppVersion "0.0.0-dev"
 #endif
+#define BuildDir GetEnv("BUILD_DIR")
+#if BuildDir == ""
+  #define BuildDir "..\target\release"
+#endif
+#define EditionSuffix GetEnv("EDITION_SUFFIX")
+#if EditionSuffix == ""
+  #define AppTitle "Digital Wellbeing"
+#else
+  #define AppTitle "Digital Wellbeing (TEST edition)"
+#endif
 
 [Setup]
 AppId={{6F3C2A51-9B8E-4D7A-A0C2-2E5B9F1D7C44}
-AppName=Digital Wellbeing
+AppName={#AppTitle}
 AppVersion={#AppVersion}
 AppPublisher=Digital Wellbeing
 DefaultDirName={autopf}\DigitalWellbeing
@@ -23,7 +35,7 @@ PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
-OutputBaseFilename=DigitalWellbeing-Setup-{#AppVersion}
+OutputBaseFilename=DigitalWellbeing-Setup-{#AppVersion}{#EditionSuffix}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -33,9 +45,9 @@ CloseApplications=force
 RestartApplications=no
 
 [Files]
-Source: "..\target\release\digital-wellbeing-service.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\digital-wellbeing-focus.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\digital-wellbeing-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\digital-wellbeing-service.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\digital-wellbeing-focus.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\digital-wellbeing-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\docs\*.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 
 [Icons]

@@ -21,6 +21,10 @@
 //!     logs\
 //! ```
 
+/// This is the test edition (built with the `test-edition` feature): the settings protection
+/// can be turned off again. The main edition has no way to do that.
+pub const TEST_EDITION: bool = cfg!(feature = "test-edition");
+
 pub mod assistant;
 pub mod assistant_tools;
 pub mod lockdown;

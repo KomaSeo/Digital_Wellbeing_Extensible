@@ -459,6 +459,12 @@ impl eframe::App for FocusApp {
                         return;
                     }
                 };
+                if machine::TEST_EDITION {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(200, 150, 40),
+                        "테스트판입니다. 설정 탭에서 설정 보호를 풀 수 있습니다. 실제로 쓸 때는 본편을 설치하세요.",
+                    );
+                }
                 if let Some(lockdown) = &status.lockdown {
                     ui.colored_label(
                         RED,

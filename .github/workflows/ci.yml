@@ -34,6 +34,11 @@ jobs:
           sudo apt-get install -y xvfb libxkbcommon-dev libwayland-dev libgl1-mesa-dev libxcb1-dev
       - name: Test (with a virtual X server)
         run: xvfb-run -a cargo test --workspace --locked
+      # The test edition (it can turn the settings protection off) builds and passes too.
+      - name: Test edition
+        run: |
+          cargo test -p machine --locked --features test-edition
+          cargo check --workspace --locked --features machine/test-edition
 
   windows:
     runs-on: windows-latest

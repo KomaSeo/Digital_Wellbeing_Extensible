@@ -264,6 +264,22 @@ pub fn protect(data_directory: &Path, now: DateTime<Utc>) -> Result<Protection, 
     Ok(protection)
 }
 
+/// Test edition only: turn the protection off again (back to setup). Scheduled updates stay
+/// as they are. The main edition refuses.
+pub fn unprotect(data_directory: &Path) -> Result<(), String> {
+    if !crate::TEST_EDITION {
+        return Err("본편에서는 설정 보호를 풀 수 없습니다".into());
+    }
+    let _write = write_lock();
+    for file in [PROTECTION_FILE, OLD_LOCK_FILE] {
+        let path = data_directory.join(file);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|error| format!("could not remove {file}: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Read everything the admin panels need from `data_directory`.
 pub fn snapshot(data_directory: &Path) -> Result<SettingsSnapshot, String> {
     let files = EDITABLE
@@ -756,6 +772,20 @@ mod tests {
             .scheduled
             .expect("a scheduled update")
             .id
+    }
+
+    #[test]
+    fn only_the_test_edition_can_turn_the_protection_off() {
+        let data_directory = temp_dir("unprotect");
+        protect(&data_directory, Utc::now()).unwrap();
+        let result = unprotect(&data_directory);
+        if crate::TEST_EDITION {
+            assert!(result.is_ok());
+            assert!(!is_protected(&data_directory));
+        } else {
+            assert!(result.is_err());
+            assert!(is_protected(&data_directory));
+        }
     }
 
     #[test]

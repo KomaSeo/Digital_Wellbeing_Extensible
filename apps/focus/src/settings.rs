@@ -341,6 +341,17 @@ impl SettingsTab {
                  간격으로 {APPROVALS_NEEDED}번 연속 \"예\"라고 답하면 적용되고, 한 번이라도 \
                  \"아니요\"라고 답하면 거절됩니다."
             ));
+            if machine::TEST_EDITION {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(YELLOW, "테스트판에만 있는 버튼입니다:");
+                    if ui.button("보호 풀기(설정 단계로 돌아가기)").clicked() {
+                        match call_value(self.session, "settings_unprotect", json!({})) {
+                            Ok(_) => self.fetched_at = None,
+                            Err(error) => self.error = error,
+                        }
+                    }
+                });
+            }
         } else {
             self.protect_ui(ui);
         }
