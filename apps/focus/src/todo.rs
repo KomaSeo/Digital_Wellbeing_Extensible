@@ -409,32 +409,6 @@ impl FocusApp {
             self.notes_ui(ui, &todo_id, planner);
         }
 
-        // --- quick requests -------------------------------------------------------------
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("✔ 끝냈어요").clicked() {
-                self.choice = ChangeChoice::Done;
-                self.reason = "끝낸 것: ".into();
-            }
-            if ui.button("⏱ 시간이 더 필요해요").clicked() {
-                self.choice = ChangeChoice::Extend;
-                self.reason = "더 필요한 까닭: ".into();
-            }
-            if report_due {
-                if ui.button("… 다 못 했어요").clicked() {
-                    self.choice = ChangeChoice::NotFinished;
-                    self.reason = "한 데까지: ".into();
-                }
-            } else {
-                if ui.button("⛔ 막혔어요").clicked() {
-                    self.choice = ChangeChoice::Repick;
-                    self.reason = "막힌 까닭: ".into();
-                }
-                if ui.button("☕ 쉬고 싶어요").clicked() {
-                    self.choice = ChangeChoice::Repick;
-                    self.reason = "쉬어야 하는 까닭: ".into();
-                }
-            }
-        });
         // Only a report once the time is up; "not finished" only then.
         if report_due
             && !matches!(
@@ -550,6 +524,7 @@ impl FocusApp {
             .id_salt("ask_to_change")
             .default_open(true)
             .show(ui, |ui| {
+                let choice_before = self.choice;
                 ui.horizontal_wrapped(|ui| {
                     ui.radio_value(&mut self.choice, ChangeChoice::Done, "끝냈다");
                     ui.radio_value(&mut self.choice, ChangeChoice::Extend, "연장하기");
@@ -560,6 +535,14 @@ impl FocusApp {
                         ui.radio_value(&mut self.choice, ChangeChoice::End, "AI 검사 멈추기");
                     }
                 });
+                // A new choice starts the reason with what it asks for, unless the user
+                // already wrote their own.
+                if self.choice != choice_before
+                    && (self.reason.trim().is_empty()
+                        || self.reason.trim() == reason_start(choice_before).trim())
+                {
+                    self.reason = reason_start(self.choice).to_string();
+                }
                 match self.choice {
                     ChangeChoice::NotFinished => {
                         ui.small(
@@ -1459,5 +1442,16 @@ fn minutes_text(minutes: i64) -> String {
         (0, rest) => format!("{rest}분"),
         (hours, 0) => format!("{hours}시간"),
         (hours, rest) => format!("{hours}시간 {rest}분"),
+    }
+}
+
+/// How the reason starts for each kind of request (the old quick buttons' text).
+fn reason_start(choice: ChangeChoice) -> &'static str {
+    match choice {
+        ChangeChoice::Done => "끝낸 것: ",
+        ChangeChoice::Extend => "더 필요한 까닭: ",
+        ChangeChoice::NotFinished => "한 데까지: ",
+        ChangeChoice::Repick => "다른 일을 받으려는 까닭: ",
+        ChangeChoice::End => "AI 검사를 멈추려는 까닭: ",
     }
 }
