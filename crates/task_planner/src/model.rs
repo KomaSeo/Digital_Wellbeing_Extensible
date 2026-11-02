@@ -239,6 +239,10 @@ pub struct Assignment {
     /// Set for an appointment: it is fixed, ends by itself at `until`, and needs no report.
     #[serde(default)]
     pub appointment_id: Option<String>,
+    /// Websites (https URLs) the task clearly needs; the Focus app opens them when the task
+    /// starts.
+    #[serde(default)]
+    pub open: Vec<String>,
 }
 
 impl Assignment {

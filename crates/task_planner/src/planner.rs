@@ -335,6 +335,7 @@ impl TaskPlanner {
             when_time_is_up: WhenTimeIsUp::Reassign,
             away_from_computer: running.away_from_computer,
             appointment_id: Some(running.id.clone()),
+            open: Vec::new(),
         };
         info!("appointment started: {}", running.title);
         self.apply(assignment.clone())?;
@@ -1396,6 +1397,7 @@ impl TaskPlanner {
                     when_time_is_up: WhenTimeIsUp::Reassign,
                     away_from_computer: todo.away_from_computer.unwrap_or(false),
                     appointment_id: None,
+                    open: Vec::new(),
                 })?;
             }
             ChangeKind::SwitchFree { task } => {
@@ -1414,6 +1416,7 @@ impl TaskPlanner {
                     when_time_is_up: WhenTimeIsUp::Reassign,
                     away_from_computer: false,
                     appointment_id: None,
+                    open: Vec::new(),
                 })?;
             }
             ChangeKind::Repick => {
@@ -1472,6 +1475,14 @@ impl TaskPlanner {
             until: Some(self.cut_at_next_appointment(now, end_after(now, pick.minutes))),
             when_time_is_up: WhenTimeIsUp::Reassign,
             appointment_id: None,
+            // Websites only, and only a few: the Focus app opens them in the browser.
+            open: pick
+                .open
+                .iter()
+                .map(|url| url.trim().to_string())
+                .filter(|url| url.starts_with("https://") && url.len() <= 300 && !url.contains(' '))
+                .take(5)
+                .collect(),
         };
         info!(
             "assigned for {} min: {}",

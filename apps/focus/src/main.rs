@@ -155,6 +155,8 @@ struct FocusApp {
     /// The assignment whose time-up was seen last (`None` before the first status): a new
     /// one brings the window up with [`block_prompt::TimeUpPrompt`].
     seen_time_up: Option<Option<String>>,
+    /// The assignment whose websites were opened last (`None` before the first status).
+    opened_for: Option<Option<String>>,
     time_up_prompt: Option<block_prompt::TimeUpPrompt>,
     access: AccessForm,
     todo_ui: todo::TodoUiState,
@@ -211,6 +213,7 @@ impl FocusApp {
             change_sent_at: None,
             extend_minutes: 30,
             seen_time_up: None,
+            opened_for: None,
             time_up_prompt: None,
             access: AccessForm::default(),
             todo_ui: todo::TodoUiState::default(),
@@ -565,6 +568,26 @@ impl eframe::App for FocusApp {
                         context.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                     self.seen_time_up = Some(newest);
+                }
+                Some(_) => {}
+            }
+        }
+        // A new task: open the websites it clearly needs (once; not again after a restart).
+        if let Some(Ok(current_status)) = &status {
+            let assignment = current_status
+                .planner
+                .as_ref()
+                .and_then(|planner| planner.assignment.clone());
+            let newest = assignment
+                .as_ref()
+                .map(|assignment| assignment.at.to_rfc3339());
+            match &self.opened_for {
+                None => self.opened_for = Some(newest),
+                Some(opened) if *opened != newest => {
+                    for url in assignment.iter().flat_map(|assignment| &assignment.open) {
+                        context.open_url(egui::OpenUrl::new_tab(url));
+                    }
+                    self.opened_for = Some(newest);
                 }
                 Some(_) => {}
             }

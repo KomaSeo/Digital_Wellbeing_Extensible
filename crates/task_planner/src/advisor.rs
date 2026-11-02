@@ -65,6 +65,12 @@ Set `away_from_computer`: true when this session is done away from the computer 
 then locks every app and website until the user reports. When the to-do says \
 \"away_from_computer\", follow it; otherwise judge from the to-do.
 
+Set `open`: the websites this session clearly needs at its start, as full https \
+URLs (for \"check email\": the user's mail sites named in the to-do or its notes, \
+such as https://mail.google.com or https://mail.naver.com). The app opens them when \
+the task starts. List only what the to-do or its notes make certain, at most five; \
+leave it empty when unsure or when the work is done in apps.
+
 Then write `task`: one or two sentences saying concretely what to do in this \
 session, naming the apps and websites it plausibly needs. A separate checker \
 blocks every window that does not fit this text, so leave out nothing the work \
@@ -292,6 +298,9 @@ pub struct Pick {
     /// The session is done away from the computer (used when the to-do does not say).
     #[serde(default)]
     pub away_from_computer: bool,
+    /// Websites (https URLs) the session clearly needs at its start.
+    #[serde(default)]
+    pub open: Vec<String>,
 }
 
 /// Responsibility: Hold one change to the to-do list the AI makes with a change request.
@@ -802,9 +811,14 @@ fn pick_schema() -> Value {
                 "type": "integer",
                 "description": "how long this session runs (10 to 720)"
             },
-            "away_from_computer": { "type": "boolean" }
+            "away_from_computer": { "type": "boolean" },
+            "open": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "full https URLs of the websites this session clearly needs at its start; empty when unsure"
+            }
         },
-        "required": ["todo_id", "task", "why", "minutes", "away_from_computer"],
+        "required": ["todo_id", "task", "why", "minutes", "away_from_computer", "open"],
         "additionalProperties": false
     })
 }

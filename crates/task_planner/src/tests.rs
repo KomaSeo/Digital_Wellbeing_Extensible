@@ -61,6 +61,11 @@ impl Advisor for FakeAdvisor {
             why: "deadline".into(),
             minutes: 45,
             away_from_computer: self.judges_away.load(Ordering::SeqCst),
+            open: vec![
+                "https://mail.google.com".into(),
+                "not a url".into(),
+                "http://plain.example".into(),
+            ],
         })
     }
 
@@ -241,6 +246,8 @@ fn assign_starts_focus_session_and_resumes_without_asking_again() {
     let fixture = harness(true, &["a", "b"]);
     let assignment = fixture.planner.assign(Utc::now()).unwrap();
     assert_eq!(assignment.todo_id.as_deref(), Some("a"));
+    // Only https websites are kept for the Focus app to open.
+    assert_eq!(assignment.open, ["https://mail.google.com"]);
     let focus = fixture.focus.store().get();
     assert!(focus.session_active);
     assert_eq!(focus.task, "work on a");
