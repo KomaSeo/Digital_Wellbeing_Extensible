@@ -433,6 +433,37 @@ impl FocusApp {
         ui.separator();
         self.access_ui(ui, status);
 
+        ui.separator();
+        egui::CollapsingHeader::new(format!(
+            "최근에 끈 프로그램 ({})",
+            status.recent_kills.len()
+        ))
+        .id_salt("recent_kills")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.small(
+                "항상 막을 프로그램, AI 차단, 잠금 때문에 끈 프로그램입니다. 창이 없는 \
+                     백그라운드 프로그램도 들어갑니다. 끄지 못한 프로그램은 빨간 글로 나오고, \
+                     몇 초마다 다시 시도합니다.",
+            );
+            if status.recent_kills.is_empty() {
+                ui.label("아직 없습니다.");
+            }
+            for kill in &status.recent_kills {
+                let time = kill
+                    .at
+                    .with_timezone(&chrono::Local)
+                    .format("%m-%d %H:%M:%S")
+                    .to_string();
+                let line = format!("{time} {} — {}", kill.process_name, kill.reason);
+                if kill.terminated {
+                    ui.label(line);
+                } else {
+                    ui.colored_label(RED, format!("{line} (끄지 못함)"));
+                }
+            }
+        });
+
         ui.small("지난 AI 판정과 비용은 통계 탭에 있습니다.");
     }
 }

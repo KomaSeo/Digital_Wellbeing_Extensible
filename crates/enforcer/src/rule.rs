@@ -21,6 +21,10 @@ pub struct BlockEvent {
     pub pid: u32,
     pub reason: String,
     pub at: DateTime<Utc>,
+    /// In the enforcer's log: the process was terminated (`false`: terminating it failed;
+    /// the enforcer keeps trying).
+    #[serde(default)]
+    pub terminated: bool,
 }
 
 impl BlockEvent {
@@ -30,6 +34,7 @@ impl BlockEvent {
             pid: process.pid,
             reason: reason.into(),
             at: Utc::now(),
+            terminated: false,
         }
     }
 }

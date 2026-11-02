@@ -140,12 +140,18 @@ pub struct Status {
     /// The block the AI made last: the Focus app asks at once what to do about it.
     #[serde(default)]
     pub last_block: Option<ai_focus_rule::NewBlock>,
+    /// Programs the enforcer closed (or could not close) lately, newest first: blacklisted
+    /// ones, AI blocks and the lockdown alike, windowless background programs included.
+    #[serde(default)]
+    pub recent_kills: Vec<enforcer::BlockEvent>,
 }
 
 /// Responsibility: Hold what the agent exposes (focus monitor, optional planner) and tell
 /// whether the planner restricts a request.
 pub struct AgentApi {
     pub monitor: Arc<FocusMonitor>,
+    /// The enforcer of this session, for its log of terminated programs (`None` in tests).
+    pub enforcer: Option<Arc<enforcer::Enforcer>>,
     pub planner: Option<Arc<TaskPlanner>>,
     /// The AI assistant tab's conversation.
     pub assistant: crate::assistant::Assistant,
@@ -198,6 +204,11 @@ fn status(api: &AgentApi) -> Status {
         daily_budget_usd: config.daily_budget_usd,
         lockdown: lockdown_now(api.planner.as_deref()),
         last_block: state.last_block.clone(),
+        recent_kills: api
+            .enforcer
+            .as_ref()
+            .map(|enforcer| enforcer.recent_blocks(30))
+            .unwrap_or_default(),
     }
 }
 
@@ -783,6 +794,7 @@ mod tests {
             Arc::new(|_: &AiFocusConfig| Err(JudgeError::NoApiKey)),
         ));
         let api = Arc::new(AgentApi {
+            enforcer: None,
             monitor,
             planner: None,
             assistant: Default::default(),
@@ -824,6 +836,7 @@ mod tests {
             Arc::new(|_: &AiFocusConfig| Err(JudgeError::NoApiKey)),
         ));
         let api = Arc::new(AgentApi {
+            enforcer: None,
             monitor,
             planner: None,
             assistant: Default::default(),
@@ -859,6 +872,7 @@ mod tests {
             Arc::new(|_: &AiFocusConfig| Err(JudgeError::NoApiKey)),
         ));
         let api = AgentApi {
+            enforcer: None,
             monitor,
             planner: Some(planner),
             assistant: Default::default(),

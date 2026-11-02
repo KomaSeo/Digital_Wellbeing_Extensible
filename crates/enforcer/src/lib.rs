@@ -308,14 +308,27 @@ impl Enforcer {
                     "terminated {} (pid={}) [{}]",
                     event.process_name, event.pid, event.reason
                 );
-                self.push_log(event);
+                self.push_log(BlockEvent {
+                    terminated: true,
+                    ..event
+                });
             } else {
-                debug!(
-                    "failed to terminate {} (pid={}); retrying in {}s",
-                    event.process_name,
-                    event.pid,
-                    KILL_RETRY.as_secs()
-                );
+                // Logged (and shown) once per process; the retries are quiet.
+                if !failed.contains_key(&key) {
+                    warn!(
+                        "could not terminate {} (pid={}) [{}]; retrying every {}s",
+                        event.process_name,
+                        event.pid,
+                        event.reason,
+                        KILL_RETRY.as_secs()
+                    );
+                    self.push_log(event.clone());
+                } else {
+                    debug!(
+                        "failed to terminate {} (pid={}) again",
+                        event.process_name, event.pid
+                    );
+                }
                 failed.insert(key, now + KILL_RETRY);
             }
         }

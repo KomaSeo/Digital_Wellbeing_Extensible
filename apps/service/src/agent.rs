@@ -142,6 +142,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     thread::spawn(move || planner_loop(auto_planner));
 
     let api = Arc::new(AgentApi {
+        enforcer: Some(Arc::clone(&enforcer)),
         monitor: Arc::clone(&monitor),
         planner: Some(planner),
         assistant: Default::default(),
