@@ -150,6 +150,8 @@ pub struct PlannerInstructions {
     pub week_plan: String,
     /// Whether an appointment the user adds is accepted.
     pub appointment_review: String,
+    /// Whether the current task gets more time ("연장하기").
+    pub extension_review: String,
 }
 
 impl PlannerInstructions {
@@ -171,6 +173,10 @@ impl PlannerInstructions {
 
     pub fn appointment_review_or_default(&self) -> &str {
         or_default(&self.appointment_review, crate::advisor::APPOINTMENT_PROMPT)
+    }
+
+    pub fn extension_review_or_default(&self) -> &str {
+        or_default(&self.extension_review, crate::advisor::EXTENSION_PROMPT)
     }
 }
 
@@ -263,6 +269,9 @@ pub enum ChangeKind {
     /// The time is up and the to-do is not finished: it stays on the list, and the next task
     /// comes when the user asks for one. Needs no AI review.
     NotFinished,
+    /// More time for the current task ("연장하기"), also once its time is up. Reviewed with
+    /// its own instruction (`instructions.extension_review`).
+    Extend { minutes: u32 },
     /// An appointment ran past its planned end and the grace time: keep it going for
     /// `minutes` more. The AI approves only a fitting reason.
     ExtendAppointment {

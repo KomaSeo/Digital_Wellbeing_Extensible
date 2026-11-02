@@ -110,6 +110,8 @@ enum ChangeChoice {
     End,
     /// The time is up and the to-do is not finished (it stays on the list).
     NotFinished,
+    /// More time for the current task ("연장하기"), reviewed by the AI.
+    Extend,
 }
 
 /// Responsibility: Name the Focus window's tabs: what to do (the planner's assignment, the
@@ -148,6 +150,12 @@ struct FocusApp {
     proof_screenshot: bool,
     /// When the last change request was sent, until its answer (or error) has come.
     change_sent_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Minutes asked for with "연장하기".
+    extend_minutes: u32,
+    /// The assignment whose time-up was seen last (`None` before the first status): a new
+    /// one brings the window up with [`block_prompt::TimeUpPrompt`].
+    seen_time_up: Option<Option<String>>,
+    time_up_prompt: Option<block_prompt::TimeUpPrompt>,
     access: AccessForm,
     todo_ui: todo::TodoUiState,
     /// Settings questions due at the last status; more than before brings the window up.
@@ -201,6 +209,9 @@ impl FocusApp {
             evidence: String::new(),
             proof_screenshot: false,
             change_sent_at: None,
+            extend_minutes: 30,
+            seen_time_up: None,
+            time_up_prompt: None,
             access: AccessForm::default(),
             todo_ui: todo::TodoUiState::default(),
             questions_due: 0,
@@ -533,8 +544,34 @@ impl eframe::App for FocusApp {
                 Some(_) => {}
             }
         }
+        // The current task's time is up: ask at once whether it is finished or needs more time.
+        if let Some(Ok(current_status)) = &status {
+            let due = current_status
+                .planner
+                .as_ref()
+                .filter(|planner| planner.report_due)
+                .and_then(|planner| planner.assignment.clone())
+                .filter(|assignment| assignment.appointment_id.is_none());
+            let newest = due
+                .as_ref()
+                .map(|assignment| format!("{}|{:?}", assignment.at, assignment.until));
+            match &self.seen_time_up {
+                None => self.seen_time_up = Some(newest),
+                Some(seen) if *seen != newest => {
+                    if let Some(assignment) = due {
+                        self.time_up_prompt = Some(block_prompt::TimeUpPrompt::new(assignment));
+                        tray::show_window(TITLE);
+                        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    self.seen_time_up = Some(newest);
+                }
+                Some(_) => {}
+            }
+        }
         self.block_prompt_ui(context);
         self.extension_prompt_ui(context);
+        self.time_up_prompt_ui(context);
         egui::TopBottomPanel::top("tabs").show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Todo, "할 일");

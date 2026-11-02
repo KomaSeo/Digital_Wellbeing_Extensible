@@ -271,3 +271,132 @@ impl FocusApp {
         }
     }
 }
+
+/// Responsibility: Hold the task whose time is up and what the user types for "not finished"
+/// or "more time".
+pub(crate) struct TimeUpPrompt {
+    assignment: task_planner::Assignment,
+    /// `Some(true)`: asking for more time; `Some(false)`: reporting "not finished".
+    answering: Option<bool>,
+    minutes: u32,
+    reason: String,
+    sent_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl TimeUpPrompt {
+    pub(crate) fn new(assignment: task_planner::Assignment) -> Self {
+        Self {
+            assignment,
+            answering: None,
+            minutes: 30,
+            reason: String::new(),
+            sent_at: None,
+        }
+    }
+}
+
+impl FocusApp {
+    /// "The time for this task is up: finished, more time, or not finished?"
+    pub(crate) fn time_up_prompt_ui(&mut self, context: &egui::Context) {
+        let Some(mut prompt) = self.time_up_prompt.take() else {
+            return;
+        };
+        let idle = !self.pending.load(Ordering::SeqCst);
+        let mut keep = true;
+        egui::Window::new("할 일 시간이 끝났습니다")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(context, |ui| {
+                ui.strong(&prompt.assignment.task);
+                ui.label("끝냈나요, 시간이 더 필요한가요?");
+                match prompt.answering {
+                    None => {
+                        if ui.button("끝냈어요(완료 보고하기)").clicked() {
+                            self.tab = Tab::Todo;
+                            self.choice = crate::ChangeChoice::Done;
+                            if self.reason.trim().is_empty() {
+                                self.reason = "끝낸 것: ".into();
+                            }
+                            keep = false;
+                        }
+                        if ui.button("시간이 더 필요해요(연장 요청)").clicked() {
+                            prompt.answering = Some(true);
+                        }
+                        if ui.button("다 못 했어요(목록에 남김)").clicked() {
+                            prompt.answering = Some(false);
+                        }
+                        if ui.button("나중에 할 일 탭에서 보고하기").clicked() {
+                            keep = false;
+                        }
+                    }
+                    Some(more_time) => {
+                        if more_time {
+                            ui.horizontal(|ui| {
+                                ui.label("더 필요한 시간(분)");
+                                ui.add(egui::DragValue::new(&mut prompt.minutes).range(5..=240));
+                            });
+                        }
+                        ui.add(
+                            egui::TextEdit::multiline(&mut prompt.reason)
+                                .desired_rows(2)
+                                .desired_width(f32::INFINITY)
+                                .hint_text(if more_time {
+                                    "왜 더 필요한가요? AI가 정합니다"
+                                } else {
+                                    "어디까지 했나요?"
+                                }),
+                        );
+                        let ready = idle && prompt.reason.trim().chars().count() >= 4;
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(ready, egui::Button::new("보내기")).clicked() {
+                                prompt.sent_at = Some(chrono::Utc::now());
+                                let request = if more_time {
+                                    json!({ "kind": "extend", "minutes": prompt.minutes })
+                                } else {
+                                    json!({ "kind": "not_finished" })
+                                };
+                                self.send(
+                                    "request_change",
+                                    json!({ "request": request, "reason": prompt.reason.trim() }),
+                                );
+                            }
+                            if ui.button("돌아가기").clicked() {
+                                prompt.answering = None;
+                            }
+                            if !idle {
+                                ui.spinner();
+                            }
+                        });
+                    }
+                }
+                let answer = prompt.sent_at.and_then(|sent_at| {
+                    self.shared
+                        .lock()
+                        .decision
+                        .clone()
+                        .filter(|decision| decision.at >= sent_at)
+                });
+                if let Some(decision) = answer {
+                    ui.horizontal_wrapped(|ui| {
+                        if decision.approved {
+                            ui.colored_label(GREEN, "승인");
+                        } else {
+                            ui.colored_label(RED, "거절");
+                        }
+                        ui.label(&decision.reply);
+                    });
+                    if ui.button("닫기").clicked() {
+                        keep = false;
+                    }
+                }
+                let message = self.shared.lock().message.clone();
+                if !message.is_empty() {
+                    ui.colored_label(RED, message);
+                }
+            });
+        if keep {
+            self.time_up_prompt = Some(prompt);
+        }
+    }
+}

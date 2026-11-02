@@ -415,6 +415,10 @@ impl FocusApp {
                 self.choice = ChangeChoice::Done;
                 self.reason = "끝낸 것: ".into();
             }
+            if ui.button("⏱ 시간이 더 필요해요").clicked() {
+                self.choice = ChangeChoice::Extend;
+                self.reason = "더 필요한 까닭: ".into();
+            }
             if report_due {
                 if ui.button("… 다 못 했어요").clicked() {
                     self.choice = ChangeChoice::NotFinished;
@@ -432,7 +436,12 @@ impl FocusApp {
             }
         });
         // Only a report once the time is up; "not finished" only then.
-        if report_due && !matches!(self.choice, ChangeChoice::Done | ChangeChoice::NotFinished) {
+        if report_due
+            && !matches!(
+                self.choice,
+                ChangeChoice::Done | ChangeChoice::NotFinished | ChangeChoice::Extend
+            )
+        {
             self.choice = ChangeChoice::Done;
         }
         if !report_due && self.choice == ChangeChoice::NotFinished {
@@ -543,6 +552,7 @@ impl FocusApp {
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.radio_value(&mut self.choice, ChangeChoice::Done, "끝냈다");
+                    ui.radio_value(&mut self.choice, ChangeChoice::Extend, "연장하기");
                     if report_due {
                         ui.radio_value(&mut self.choice, ChangeChoice::NotFinished, "다 못 했다");
                     } else {
@@ -555,6 +565,16 @@ impl FocusApp {
                         ui.small(
                             "할 일은 목록에 남습니다. 어디까지 했는지 적으세요. 보고한 뒤에는 \"할 일 \
                              받기\"로 다음 할 일을 받습니다.",
+                        );
+                    }
+                    ChangeChoice::Extend => {
+                        ui.horizontal(|ui| {
+                            ui.label("더 필요한 시간(분)");
+                            ui.add(egui::DragValue::new(&mut self.extend_minutes).range(5..=240));
+                        });
+                        ui.small(
+                            "이 할 일의 시간을 늘립니다. 늘릴지와 얼마나 늘릴지는 AI가 설정의 \"할 일 연장 \
+                             요청 심사\" 지시문에 따라 정합니다.",
                         );
                     }
                     ChangeChoice::Repick => {
@@ -592,6 +612,9 @@ impl FocusApp {
                     ChangeChoice::End => Some(ChangeKind::End),
                     ChangeChoice::Repick => Some(ChangeKind::Repick),
                     ChangeChoice::NotFinished => Some(ChangeKind::NotFinished),
+                    ChangeChoice::Extend => Some(ChangeKind::Extend {
+                        minutes: self.extend_minutes,
+                    }),
                 };
                 let ready = idle && request.is_some() && self.reason.trim().chars().count() >= 4;
                 ui.horizontal(|ui| {
@@ -1354,6 +1377,7 @@ fn task_planner_label(request: &ChangeKind) -> String {
         ChangeKind::End => "AI 검사 멈추기".into(),
         ChangeKind::NotFinished => "다 못 했다(보고)".into(),
         ChangeKind::ExtendAppointment { minutes, .. } => format!("약속 {minutes}분 연장"),
+        ChangeKind::Extend { minutes } => format!("{minutes}분 연장하기"),
         ChangeKind::SetWhenTimeIsUp {
             action: WhenTimeIsUp::NotifyOnly,
         } => "시간이 다 되어도 알림만".into(),

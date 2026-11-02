@@ -36,8 +36,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use task_planner::{
-    PlannerConfig, APPOINTMENT_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT,
-    WEEK_PLAN_PROMPT,
+    PlannerConfig, APPOINTMENT_PROMPT, EXTENSION_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT,
+    REVIEW_PROMPT, WEEK_PLAN_PROMPT,
 };
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
@@ -125,6 +125,12 @@ const APPOINTMENT_INSTRUCTION: Block = Block {
     paths: &[&["instructions", "appointment_review"]],
     has_default: true,
 };
+const EXTENSION_INSTRUCTION: Block = Block {
+    id: "instruction_extension_review",
+    file: "planner",
+    paths: &[&["instructions", "extension_review"]],
+    has_default: true,
+};
 const WEEK_PLAN_INSTRUCTION: Block = Block {
     id: "instruction_week_plan",
     file: "planner",
@@ -203,13 +209,14 @@ const TIME_ZONE: Block = Block {
     has_default: false,
 };
 /// Every group; an edit outside them (such as a timestamp) is not the user's.
-const BLOCKS: [&Block; 21] = [
+const BLOCKS: [&Block; 22] = [
     &API_KEY,
     &MODEL,
     &BUDGET,
     &LIFE_RULES,
     &APPOINTMENT_RULES,
     &APPOINTMENT_INSTRUCTION,
+    &EXTENSION_INSTRUCTION,
     &PICK_INSTRUCTION,
     &REVIEW_INSTRUCTION,
     &PROPOSAL_INSTRUCTION,
@@ -693,7 +700,7 @@ impl SettingsTab {
              영어로 씁니다. 비어 있으면 프로그램에 들어 있는 기본 지시문을 씁니다.",
         );
         type Accessor = fn(&mut PlannerConfig) -> &mut String;
-        let instructions: [(&str, Accessor, &str, &'static Block); 5] = [
+        let instructions: [(&str, Accessor, &str, &'static Block); 6] = [
             (
                 "지금 할 일과 시간 고르기",
                 |planner| &mut planner.instructions.pick,
@@ -723,6 +730,12 @@ impl SettingsTab {
                 |planner| &mut planner.instructions.appointment_review,
                 APPOINTMENT_PROMPT,
                 &APPOINTMENT_INSTRUCTION,
+            ),
+            (
+                "할 일 연장 요청 심사",
+                |planner| &mut planner.instructions.extension_review,
+                EXTENSION_PROMPT,
+                &EXTENSION_INSTRUCTION,
             ),
         ];
         for (label, accessor, built_in, block) in instructions {

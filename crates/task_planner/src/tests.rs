@@ -1666,3 +1666,49 @@ fn stopping_ends_the_task_and_holds_everything_until_resumed() {
         .assignment
         .is_some_and(|assignment| assignment.appointment_id.is_some()));
 }
+
+#[test]
+fn extending_a_task_uses_its_own_instruction_and_moves_the_end() {
+    let fixture = harness(true, &["a"]);
+    let now = Utc::now();
+    let assignment = fixture.planner.assign(now).unwrap();
+    let until = assignment.until.unwrap();
+    // Before the end: the end moves by what the review gave (the fake gives 30).
+    fixture
+        .planner
+        .request_change(
+            now,
+            ChangeKind::Extend { minutes: 45 },
+            "almost done with the draft",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        *fixture.advisor.saw_instructions.lock(),
+        crate::advisor::EXTENSION_PROMPT
+    );
+    let extended = fixture.planner.status().assignment.unwrap().until.unwrap();
+    assert_eq!(extended, until + chrono::Duration::minutes(30));
+    // After the time is up, more time is accepted instead of a report, counted from now.
+    let late = extended + chrono::Duration::minutes(10);
+    fixture
+        .planner
+        .request_change(
+            late,
+            ChangeKind::Extend { minutes: 20 },
+            "one more section to write",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.planner.status().assignment.unwrap().until,
+        Some(late + chrono::Duration::minutes(20))
+    );
+    // Out of range: refused before the AI.
+    assert!(matches!(
+        fixture
+            .planner
+            .check_change(late, &ChangeKind::Extend { minutes: 1 }, "just a bit"),
+        Err(PlannerError::BadTaskExtension)
+    ));
+}

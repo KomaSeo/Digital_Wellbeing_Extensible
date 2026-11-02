@@ -370,6 +370,7 @@ pub fn action_line(name: &str, input: &Value, outcome: &Result<String, String>) 
                 "repick" => "다른 일 받기",
                 "end" => "데일리 웰빙 멈추기",
                 "not_finished" => "다 못 했다(보고)",
+                "extend" => "연장하기",
                 other => other,
             };
             format!("변경을 요청했습니다: {change}")

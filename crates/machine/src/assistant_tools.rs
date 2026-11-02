@@ -111,11 +111,12 @@ pub fn tools() -> Value {
         },
         {
             "name": "request_change",
-            "description": "Ask to change the assigned task: it is done, get something else (repick: the app's AI picks what comes next; the user only gives the reason and never chooses the next task), or stop (end). Every task runs until a planned end (\"until\" in get_status); then (report_due in get_status) only a report is accepted: done (reviewed by the app's AI) or not_finished (the to-do stays on the list; no review). After a report or end, nothing is assigned until the user asks again (get_my_task). The app's AI approves or rejects the other requests.",
+            "description": "Ask to change the assigned task: it is done, get something else (repick: the app's AI picks what comes next; the user only gives the reason and never chooses the next task), or stop (end). Every task runs until a planned end (\"until\" in get_status); then (report_due in get_status) only a report (done, reviewed by the app's AI; not_finished, the to-do stays on the list, no review) or extend (more minutes, reviewed) is accepted. After a report or end, nothing is assigned until the user asks again (get_my_task). The app's AI approves or rejects the other requests.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "change": { "type": "string", "enum": ["done", "not_finished", "repick", "end"] },
+                    "change": { "type": "string", "enum": ["done", "not_finished", "extend", "repick", "end"] },
+                    "minutes": { "type": "integer", "minimum": 5, "maximum": 240, "description": "For extend: how many more minutes the user asks for" },
                     "reason": { "type": "string", "description": "The user's reason, in their words" },
                     "evidence": { "type": "string", "description": "For done: proof of the result in the user's words (what was sent, to whom, an order number). The app's AI asks for proof when the result is a fact like a sent mail or an order; work that can always be improved (a report, practice) is accepted and the planned time left comes back later as an \"Improve: ...\" to-do." }
                 },
@@ -337,6 +338,10 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                 "done" => json!({ "kind": "done" }),
                 "end" => json!({ "kind": "end" }),
                 "not_finished" => json!({ "kind": "not_finished" }),
+                "extend" => json!({
+                    "kind": "extend",
+                    "minutes": arguments["minutes"].as_u64().unwrap_or(30),
+                }),
                 "repick" => json!({ "kind": "repick" }),
                 other => return Err(format!("unknown change '{other}'")),
             };
@@ -489,6 +494,7 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                     "proposal_review": task_planner::PROPOSAL_PROMPT,
                     "week_plan": task_planner::WEEK_PLAN_PROMPT,
                     "appointment_review": task_planner::APPOINTMENT_PROMPT,
+                    "extension_review": task_planner::EXTENSION_PROMPT,
                 },
                 "scheduled_updates": scheduled,
                 "recent_outcomes": settings["reservations"]["history"],

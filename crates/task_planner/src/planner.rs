@@ -102,6 +102,8 @@ pub enum PlannerError {
     UnknownAppointment(String),
     #[error("연장은 약속이 끝난 뒤 30분 안에, 10분에서 {MAX_EXTENSION_MINUTES}분까지 요청합니다")]
     BadExtension,
+    #[error("연장은 5분에서 {MAX_EXTENSION_MINUTES}분까지 요청합니다. 약속은 끝난 뒤에 연장을 요청하세요")]
+    BadTaskExtension,
     #[error(
         "사용을 멈춘 동안에는 AI를 쓰는 일을 하지 않습니다. 먼저 \"다시 사용하기\"를 누르세요"
     )]
@@ -945,7 +947,12 @@ impl TaskPlanner {
             .as_ref()
             .and_then(|assignment| assignment.todo_id.clone());
         let review = advisor.review(&ReviewRequest {
-            instructions: config.instructions.change_review_or_default(),
+            // "연장하기" has its own instruction.
+            instructions: if matches!(request, ChangeKind::Extend { .. }) {
+                config.instructions.extension_review_or_default()
+            } else {
+                config.instructions.change_review_or_default()
+            },
             now_local: &now_local,
             life_rules: &config.life_rules,
             current: state.assignment.as_ref(),
@@ -1035,8 +1042,20 @@ impl TaskPlanner {
                 return Err(PlannerError::NothingAssigned)
             }
             ChangeKind::NotFinished if !time_is_up => return Err(PlannerError::NotTimeYet),
-            // Nothing else before the report.
-            ChangeKind::Done | ChangeKind::NotFinished => {}
+            ChangeKind::Extend { .. } if assignment.is_none() => {
+                return Err(PlannerError::NothingAssigned)
+            }
+            // An appointment has its own extension (after its end); minutes in range.
+            ChangeKind::Extend { minutes }
+                if !(5..=MAX_EXTENSION_MINUTES).contains(minutes)
+                    || assignment
+                        .as_ref()
+                        .is_some_and(|assignment| assignment.appointment_id.is_some()) =>
+            {
+                return Err(PlannerError::BadTaskExtension)
+            }
+            // Nothing else before the report (more time is a way to report too).
+            ChangeKind::Done | ChangeKind::NotFinished | ChangeKind::Extend { .. } => {}
             _ if time_is_up => return Err(PlannerError::ReportFirst),
             _ => {}
         }
@@ -1209,6 +1228,20 @@ impl TaskPlanner {
             ChangeKind::NotFinished => self.end(now)?,
             // Applied above.
             ChangeKind::ExtendAppointment { .. } => {}
+            ChangeKind::Extend { minutes } => {
+                // The AI may give less than asked, never more; from now once the time is up.
+                let minutes = if review.minutes > 0 {
+                    review.minutes.min(*minutes)
+                } else {
+                    *minutes
+                };
+                self.state.update(|planner_state| {
+                    if let Some(assignment) = planner_state.assignment.as_mut() {
+                        let from = assignment.until.map_or(now, |until| until.max(now));
+                        assignment.until = Some(from + Duration::minutes(i64::from(minutes)));
+                    }
+                })?;
+            }
             ChangeKind::SwitchTodo { todo_id } => {
                 let todo = open
                     .iter()
