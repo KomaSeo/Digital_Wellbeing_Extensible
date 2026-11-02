@@ -80,6 +80,11 @@ pub struct Judgement {
     /// Judgements of [`JudgeRequest::others`], by id.
     #[serde(default)]
     pub others: Vec<OtherVerdict>,
+    /// Search results pages only, when off task: a pattern (a word or a regular expression)
+    /// for searches on the same off-task topic. Blocks on search sites are per search (see
+    /// `search.rs`).
+    #[serde(default)]
+    pub search_pattern: String,
 }
 
 /// Responsibility: Carry everything the judge sees for one check.
@@ -91,6 +96,8 @@ pub struct JudgeRequest<'a> {
     pub title: &'a str,
     /// The window is a YouTube tab: ask for the channel too.
     pub youtube: bool,
+    /// The window is a search results page for this query: ask for a search pattern too.
+    pub search_query: Option<&'a str>,
     /// JPEG bytes.
     pub screenshot: Option<&'a [u8]>,
     /// Purpose of an access grant covering this window, if any.
@@ -181,6 +188,10 @@ fn verdict_schema() -> Value {
                 "type": "string",
                 "description": "YouTube only: the name of the channel whose video or page is in front, exactly as shown on screen. Empty for other windows, for pages without a single channel, or when it cannot be read."
             },
+            "search_pattern": {
+                "type": "string",
+                "description": "Search results pages only, when off_task: a case-insensitive regular expression (or a plain word) matching this search and close variants on the same off-task topic, never broader than that topic. Empty otherwise."
+            },
             "others": {
                 "type": "array",
                 "description": "One entry per listed other open window, by id; empty when none are listed.",
@@ -196,7 +207,7 @@ fn verdict_schema() -> Value {
                 }
             }
         },
-        "required": ["verdict", "reason", "channel", "others"],
+        "required": ["verdict", "reason", "channel", "search_pattern", "others"],
         "additionalProperties": false
     })
 }
@@ -205,7 +216,7 @@ fn user_text(request: &JudgeRequest) -> String {
     format!(
         "Declared task:\n{task}\n\n\
          Recent foreground activity (oldest first):\n{history}\n\n\
-         In front right now: {process} — \"{title}\"\n{grant}{youtube}{shot}{others}",
+         In front right now: {process} — \"{title}\"\n{grant}{youtube}{search}{shot}{others}",
         task = request.task.trim(),
         history = if request.history.is_empty() {
             "(none yet)"
@@ -230,6 +241,17 @@ fn user_text(request: &JudgeRequest) -> String {
              results, subscriptions) or when you cannot read it.\n"
         } else {
             ""
+        },
+        search = match request.search_query {
+            Some(query) => format!(
+                "This is a search results page for \"{query}\". Blocks on search sites apply \
+                 to searches, not the whole site, so the user can still search for their \
+                 work. Judge the search itself; when it is off task, put in `search_pattern` \
+                 a case-insensitive regular expression (or a plain word) that matches this \
+                 search and close variants on the same off-task topic, never broader than \
+                 that topic. Otherwise leave `search_pattern` empty.\n"
+            ),
+            None => String::new(),
         },
         shot = if request.screenshot.is_some() {
             "The attached screenshot shows that screen."
@@ -305,6 +327,7 @@ mod tests {
             process_name: "chrome.exe",
             title: "YouTube",
             youtube: true,
+            search_query: None,
             screenshot: Some(&[1, 2, 3]),
             grant_purpose: None,
             others: &[],
@@ -349,6 +372,7 @@ mod tests {
             process_name: "chrome.exe",
             title: "Rust 강의 - YouTube",
             youtube: false,
+            search_query: None,
             screenshot: None,
             grant_purpose: Some("Rust 비동기 강의 시청"),
             others: &[],

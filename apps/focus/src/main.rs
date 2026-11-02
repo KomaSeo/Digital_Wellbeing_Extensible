@@ -252,6 +252,19 @@ impl FocusApp {
     /// "youtube"; the purpose the user gives then limits what the grant covers.
     fn prefill_access(&mut self, key: &str) {
         match key.split_once('|') {
+            // A blocked search (`chrome.exe|search: funny cats?|cat videos`): ask for its
+            // words, as plain text (the first alternative, without pattern characters).
+            Some((_, title)) if title.starts_with("search: ") => {
+                self.access.site = true;
+                let pattern = &title["search: ".len()..];
+                let first = pattern.split('|').next().unwrap_or(pattern);
+                self.access.target = first
+                    .chars()
+                    .filter(|character| !"\\^$.*+?()[]{}".contains(*character))
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
+            }
             Some((_, title)) => {
                 self.access.site = true;
                 // Page names may contain " - " themselves, so look for the

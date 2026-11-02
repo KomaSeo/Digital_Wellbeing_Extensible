@@ -597,6 +597,21 @@ Other open windows (title only; judge each in `others`):
 
 **한계.** 웹사이트를 닫지 않고 그 자리에 차단 화면을 띄웠다가, 허용되면 원래 사이트를 다시 보여 주는 방식(Cold Turkey 같은 방식)은 아직 없습니다. 이 프로그램은 탭의 주소를 모르고 창 제목만 보기 때문입니다. 방법은 소유자가 고르기로 했습니다.
 
+### 5.17 검색 사이트는 검색어로 막기 (`search.rs`)
+
+이 절에서 **검색 사이트**는 Google, 네이버, Daum, Bing, DuckDuckGo처럼 검색 결과를 보여 주는 사이트를 말하고, **검색 패턴**은 막을 검색어를 나타내는 말이나 정규식을 말합니다.
+
+**왜 필요한가.** 소유자는 "구글과 같이 검색기능이 달린 사이트의 경우, 구글자체를 막기보다는 regular expression을 활용해서 검색어를 막는 편이 낫겠어."라고 요청했습니다. 예전에는 탭의 차단이 사이트 단위(`tab_key`)여서, 딴짓 검색 하나가 Google 전체를 막았고 일에 필요한 검색도 할 수 없었습니다.
+
+**동작.**
+1. 모니터는 탭 제목의 끝으로 검색 결과 페이지를 알아봅니다(`search::query_of`): "… - Google 검색", "… - Google Search", "… : 네이버 검색", "… - Daum 검색", "… - Bing", "… at DuckDuckGo". 그 앞부분이 검색어입니다.
+2. 검색 결과 페이지를 판정할 때, AI는 "이 검색이 딴짓이면 같은 딴짓 주제의 검색어에 맞는 패턴을 `search_pattern`에 적어라. 그 주제보다 넓게 적지 마라"라는 안내를 함께 받습니다.
+3. 딴짓 판정이면 모니터는 사이트 대신 검색 패턴을 막습니다(차단 열쇠 `chrome.exe|search: <패턴>`). AI의 패턴이 지금 검색어에 맞지 않거나, 빈 글이나 한 글자에도 맞을 만큼 넓거나(예: `.*`), 120글자보다 길면, 지금 검색어 그대로를 패턴으로 씁니다(`search::pattern_for`). 그래서 패턴 하나가 모든 검색을 막을 수는 없습니다.
+4. 그 뒤로 검색 결과 페이지가 열리면, 모니터는 그 검색어가 막힌 패턴 중 하나에 맞는지 봅니다(`tab_blocked`). 맞으면 AI에게 묻지 않고 닫고, 맞지 않으면 다른 페이지처럼 AI가 판정합니다.
+5. 뒤쪽 창에서 딴짓으로 판정된 검색은 그 검색어 그대로를 패턴으로 막습니다.
+
+**세부 사항.** 패턴은 대소문자를 가리지 않습니다. 정규식 문자가 없는 패턴은 검색어에 그 말이 들어 있으면 맞습니다. 차단 탭과 설정 탭의 걸린 차단에는 "chrome.exe|search: funny cats?|cat videos"처럼 패턴이 보이고, 접근 요청 칸에는 패턴의 첫 부분이 글자로 채워집니다. YouTube의 검색 결과는 지금처럼 YouTube의 규칙(5.7절)을 따릅니다.
+
 ---
 
 ## 6. Claude 호출 (`judge.rs`, `claude.rs`)
@@ -761,6 +776,8 @@ let rule_uis = vec![list_rule.ui(), ai_rule.ui()];
 | `blocks_saved_without_an_id_get_one` | ID가 없던 예전 차단 파일을 읽으면, 모니터가 각 차단에 ID를 붙인다. |
 | `blocks_app_after_strikes` | 첫 `off_task` 판정 뒤에는 앱이 차단되지 않는다. 5초 뒤에는 그 앱의 판정을 다시 할 때(검사 간격 60초)가 아니므로 모니터가 Claude를 부르지 않는다. 61초 뒤 두 번째 `off_task`에서 앱이 차단된다. 하루 뒤에도 차단은 풀리지 않는다. |
 | `on_task_never_blocks_and_screenshot_is_sent` | `recheck_minutes`가 0일 때 판정이 계속 `on_task`면, 모니터가 매번 판정하고 앱을 차단하지 않는다. 모니터가 화면 캡처를 보낸다. |
+| `a_search_is_blocked_by_its_terms_not_the_whole_search_site` | 딴짓 검색은 AI의 패턴으로 막히고, 같은 주제의 다른 검색은 AI에게 묻지 않고 닫히며, 일에 필요한 검색은 열린다. |
+| `search::tests::*` | 검색 결과 페이지의 제목을 알아보고, 너무 넓은 패턴은 검색어 그대로로 바꾼다. |
 | `browser_tab_is_closed_and_stays_closed` | 브라우저는 강제로 꺼지지 않고 탭이 닫힌다. 사용자가 그 탭을 다시 열면, 모니터가 Claude를 부르지 않고 그 탭을 다시 닫는다. |
 | `tab_is_not_closed_if_user_switched_tabs_meanwhile` | 판정하는 동안 사용자가 탭을 바꾸면, 모니터가 탭을 닫지 않는다. 차단 기록은 남는다. |
 | `idle_without_session_and_skips_exempt_apps` | AI 검사가 멈춰 있으면 모니터가 Claude를 부르지 않는다. `always_allow`의 앱은 판정하지 않지만 활동 기록에는 남긴다. |

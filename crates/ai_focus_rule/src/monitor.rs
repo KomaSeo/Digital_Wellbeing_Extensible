@@ -12,7 +12,7 @@ use crate::judge::{
 use crate::platform::{Desktop, Foreground, OpenWindow, Screenshot};
 use crate::store::JsonStore;
 use crate::usage::UsageRecorder;
-use crate::youtube;
+use crate::{search, youtube};
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use enforcer::{is_never_terminate, normalize_process_name};
 use parking_lot::Mutex;
@@ -342,6 +342,10 @@ impl MonitorState {
             return normalize_process_name(&foreground.process_name);
         }
         if !youtube::is_youtube(&foreground.title) {
+            // A search is blocked by its terms, not the whole site (see `search.rs`).
+            if let Some(query) = search::query_of(&foreground.title) {
+                return search::key(&foreground.process_name, &query);
+            }
             return tab_key(foreground);
         }
         match self.channels.get(&youtube::page_name(&foreground.title)) {
@@ -485,6 +489,15 @@ impl MonitorState {
 
     /// Is this browser tab blocked?
     pub fn tab_blocked(&self, config: &AiFocusConfig, foreground: &Foreground) -> bool {
+        if config.is_browser(&foreground.process_name) && !youtube::is_youtube(&foreground.title) {
+            if let Some(query) = search::query_of(&foreground.title) {
+                let prefix = search::key_prefix(&foreground.process_name);
+                return self.blocked_tabs.keys().any(|key| {
+                    key.strip_prefix(&prefix)
+                        .is_some_and(|pattern| search::blocks(pattern, &query))
+                });
+            }
+        }
         self.blocked_tabs
             .contains_key(&self.target_key(config, foreground))
     }
@@ -514,7 +527,7 @@ impl MonitorState {
 
         let mut action = Action::None;
         let mut action_label = String::new();
-        if grant.is_none() && is_browser && self.blocked_tabs.contains_key(&target) {
+        if grant.is_none() && is_browser && self.tab_blocked(config, foreground) {
             // Only now known to be a blocked channel (its first screenshot).
             action = Action::CloseTab;
             action_label = "tab closed (already blocked)".into();
@@ -528,6 +541,16 @@ impl MonitorState {
                     id,
                     reason: judgement.reason.clone(),
                     title: foreground.title.clone(),
+                };
+                // A search: the judge's pattern for the topic (or the query itself).
+                let target = match search::query_of(&foreground.title)
+                    .filter(|_| !youtube::is_youtube(&foreground.title))
+                {
+                    Some(query) => search::key(
+                        &foreground.process_name,
+                        &search::pattern_for(&query, &judgement.search_pattern),
+                    ),
+                    None => target,
                 };
                 self.note_block(now, &target, foreground, true, &entry);
                 self.blocked_tabs.insert(target, entry);
@@ -1410,6 +1433,9 @@ impl FocusMonitor {
             None
         };
         let history = self.state.lock().history_text();
+        let search_query = search::query_of(&foreground.title).filter(|_| {
+            config.is_browser(&foreground.process_name) && !youtube::is_youtube(&foreground.title)
+        });
         let mut request = JudgeRequest {
             task: &config.task,
             history: &history,
@@ -1417,6 +1443,7 @@ impl FocusMonitor {
             title: &foreground.title,
             youtube: config.is_browser(&foreground.process_name)
                 && youtube::is_youtube(&foreground.title),
+            search_query: search_query.as_deref(),
             screenshot: screenshot.as_deref(),
             grant_purpose: grant.map(|active_grant| active_grant.purpose.as_str()),
             others,
@@ -1539,6 +1566,8 @@ mod tests {
         verdict: Arc<Mutex<Verdict>>,
         /// Channel the judge "reads" from the screenshot.
         channel: Arc<Mutex<String>>,
+        /// The search pattern the judge proposes for an off-task search.
+        search_pattern: Arc<Mutex<String>>,
         /// Verdict for every listed other window, and the last list it saw.
         others_verdict: Arc<Mutex<Verdict>>,
         saw_others: Arc<Mutex<Vec<OtherWindow>>>,
@@ -1570,6 +1599,7 @@ mod tests {
                 verdict: *self.verdict.lock(),
                 reason: "test".into(),
                 channel: self.channel.lock().clone(),
+                search_pattern: self.search_pattern.lock().clone(),
                 others: request
                     .others
                     .iter()
@@ -1592,6 +1622,7 @@ mod tests {
         switch_to: Arc<Mutex<Option<Foreground>>>,
         verdict: Arc<Mutex<Verdict>>,
         channel: Arc<Mutex<String>>,
+        search_pattern: Arc<Mutex<String>>,
         others_verdict: Arc<Mutex<Verdict>>,
         saw_others: Arc<Mutex<Vec<OtherWindow>>>,
         open: Arc<Mutex<Vec<OpenWindow>>>,
@@ -1619,6 +1650,7 @@ mod tests {
         let switch_to = Arc::new(Mutex::new(None));
         let verdict = Arc::new(Mutex::new(verdict));
         let channel = Arc::new(Mutex::new(String::new()));
+        let search_pattern = Arc::new(Mutex::new(String::new()));
         let others_verdict = Arc::new(Mutex::new(Verdict::OnTask));
         let saw_others = Arc::new(Mutex::new(Vec::new()));
         let open = Arc::new(Mutex::new(Vec::new()));
@@ -1630,6 +1662,7 @@ mod tests {
             during_call: Arc::clone(&during_call),
             verdict: Arc::clone(&verdict),
             channel: Arc::clone(&channel),
+            search_pattern: Arc::clone(&search_pattern),
             others_verdict: Arc::clone(&others_verdict),
             saw_others: Arc::clone(&saw_others),
             saw_grant: Arc::clone(&saw_grant),
@@ -1657,6 +1690,7 @@ mod tests {
             switch_to,
             verdict,
             channel,
+            search_pattern,
             others_verdict,
             saw_others,
             open,
@@ -1841,6 +1875,47 @@ mod tests {
             .monitor
             .step(start_time + ChronoDuration::seconds(66));
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_search_is_blocked_by_its_terms_not_the_whole_search_site() {
+        let mut config = session("write thesis");
+        config.strikes_to_block = 1;
+        let fixture = harness(
+            Verdict::OffTask,
+            foreground("chrome.exe", "funny cats - Google 검색 - Google Chrome"),
+            config.clone(),
+        );
+        *fixture.search_pattern.lock() = "funny cats?|cat videos".into();
+        let start_time = Utc::now();
+        fixture.monitor.step(start_time);
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
+        assert!(fixture
+            .monitor
+            .state()
+            .blocked_tabs
+            .contains_key("chrome.exe|search: funny cats?|cat videos"));
+        // A search on the same topic: closed without asking the judge.
+        *fixture.current.lock() = Some(foreground(
+            "chrome.exe",
+            "best cat videos - Google 검색 - Google Chrome",
+        ));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(3));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 2);
+        // A search for the work: Google stays open; the judge decides.
+        *fixture.verdict.lock() = Verdict::OnTask;
+        *fixture.current.lock() = Some(foreground(
+            "chrome.exe",
+            "thesis citation style - Google 검색 - Google Chrome",
+        ));
+        fixture
+            .monitor
+            .step(start_time + ChronoDuration::seconds(6));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -2048,6 +2123,7 @@ mod tests {
             switch_to,
             verdict,
             channel,
+            search_pattern,
             others_verdict,
             saw_others,
             open,
@@ -2067,6 +2143,7 @@ mod tests {
                 switch_to,
                 verdict,
                 channel,
+                search_pattern,
                 others_verdict,
                 saw_others,
                 open,
@@ -2551,6 +2628,7 @@ mod tests {
                 verdict: self.shared.verdicts.lock()[&self.model],
                 reason: "test".into(),
                 channel: String::new(),
+                search_pattern: String::new(),
                 others: Vec::new(),
             })
         }

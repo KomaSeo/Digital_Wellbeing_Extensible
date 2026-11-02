@@ -20,6 +20,7 @@ mod judge;
 mod monitor;
 pub mod platform;
 mod rule;
+pub mod search;
 pub mod store;
 pub mod usage;
 mod youtube;
