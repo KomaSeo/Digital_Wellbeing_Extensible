@@ -94,6 +94,9 @@ pub struct NewBlock {
     pub title: String,
     pub is_tab: bool,
     pub reason: String,
+    /// The browser window the tab was closed in (to open it again once access is granted).
+    #[serde(default)]
+    pub window: isize,
 }
 
 /// Responsibility: Hold the blocks in force, as saved to disk so that logging
@@ -541,6 +544,7 @@ impl MonitorState {
             title: foreground.title.clone(),
             is_tab,
             reason: entry.reason.clone(),
+            window: foreground.window,
         });
     }
 

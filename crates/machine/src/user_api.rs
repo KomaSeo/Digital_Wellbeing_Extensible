@@ -481,6 +481,9 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     }
     match method {
         "status" => {}
+        // Cheap, for the Focus app to ask several times a second and show its check window
+        // the moment a block is made.
+        "last_block" => return Ok(json!(api.monitor.state().last_block)),
         "start_session" => {
             if api.planner_active() {
                 return Err(PLANNER_ON.into());

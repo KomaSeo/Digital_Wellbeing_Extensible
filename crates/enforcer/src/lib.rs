@@ -1,6 +1,7 @@
 //! Responsibility: Run the enforcement loop: snapshot processes, ask every registered
 //! BlockRule, and terminate what they block (never OS-critical or own processes).
 
+mod helpers;
 pub mod pattern;
 mod rule;
 
@@ -374,6 +375,7 @@ fn terminate(process: &sysinfo::Process) -> bool {
 }
 
 /// Merge rule outputs: first event for each pid wins; reasons are prefixed with rule id.
+/// The helpers of every blocked program (`helpers.rs`) are closed with it.
 fn collect_blocks(rules: &[Arc<dyn BlockRule>], processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();
@@ -386,12 +388,54 @@ fn collect_blocks(rules: &[Arc<dyn BlockRule>], processes: &[ProcessSnapshot]) -
             merged.push(event);
         }
     }
+    let mut helpers = Vec::new();
+    for event in &merged {
+        let Some(blocked) = processes.iter().find(|process| process.pid == event.pid) else {
+            continue;
+        };
+        for helper in helpers::helpers_of(blocked, processes) {
+            if seen.insert(helper.pid) {
+                helpers.push(BlockEvent::new(
+                    helper,
+                    format!("helper of {}: {}", blocked.name, event.reason),
+                ));
+            }
+        }
+    }
+    merged.extend(helpers);
     merged
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blocked_programs_helpers_are_closed_with_it() {
+        let blocked = Arc::new(AtomicBool::new(true));
+        let rule: Arc<dyn BlockRule> = Arc::new(FlagRule {
+            id: "flag",
+            block: Arc::clone(&blocked),
+        });
+        let process = |pid: u32, name: &str, exe: &str| ProcessSnapshot {
+            pid,
+            name: name.into(),
+            exe: Some(exe.into()),
+        };
+        let processes = [
+            process(1, "evil.exe", "/opt/evil/evil.exe"),
+            process(2, "evilhelper.exe", "/opt/evil/bin/evilhelper.exe"),
+            process(3, "good.exe", "/opt/good/good.exe"),
+        ];
+        let blocks = collect_blocks(&[rule], &processes);
+        let pids: Vec<u32> = blocks.iter().map(|event| event.pid).collect();
+        assert_eq!(pids, vec![1, 2]);
+        assert!(
+            blocks[1].reason.starts_with("helper of evil.exe"),
+            "{}",
+            blocks[1].reason
+        );
+    }
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Responsibility: Test rule: block evil.exe while its flag is set.
