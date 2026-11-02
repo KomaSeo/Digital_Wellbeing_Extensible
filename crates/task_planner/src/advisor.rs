@@ -193,6 +193,12 @@ emergency, an obligation that just came up, being ill or hurt. Wanting to use th
 computer, boredom or a change of mood is never urgent. Finishing it (\"done\") is \
 judged as usual.
 
+Extending an appointment that ran past its planned end and the half hour of grace: \
+approve only for a fitting reason, such as the meeting or class still going on, \
+the other people still needing the user, or a delay outside the user's control \
+(transport). Reject extensions that only postpone work. When approving, you may set \
+`minutes` lower than asked if the reason needs less.
+
 Reject vague or avoidant reasons (bored, not in the mood, just for a minute), \
 reasons the activity log contradicts, and requests that repeat ones already \
 rejected without new information.
@@ -894,6 +900,11 @@ fn describe(request: &ChangeKind, target_title: Option<&str>) -> String {
         ChangeKind::NotFinished => {
             "report that the time is up and the to-do is not finished".into()
         }
+        ChangeKind::ExtendAppointment { minutes, .. } => format!(
+            "extend the appointment that just ended (it already ran {} minutes past its \
+             planned end) by {minutes} more minutes",
+            crate::model::APPOINTMENT_GRACE_MINUTES
+        ),
         ChangeKind::SetWhenTimeIsUp {
             action: WhenTimeIsUp::NotifyOnly,
         } => "when the current task's time is up, only be notified and keep on with it \

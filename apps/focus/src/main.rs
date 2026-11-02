@@ -156,6 +156,10 @@ struct FocusApp {
     /// the window up with [`block_prompt::BlockPrompt`].
     seen_block: Option<Option<String>>,
     block_prompt: Option<block_prompt::BlockPrompt>,
+    /// The appointment-extension offer seen last (`None` before the first status): a new one
+    /// brings the window up with [`block_prompt::ExtensionPrompt`].
+    seen_offer: Option<Option<String>>,
+    extension_prompt: Option<block_prompt::ExtensionPrompt>,
 }
 
 impl FocusApp {
@@ -202,6 +206,8 @@ impl FocusApp {
             questions_due: 0,
             seen_block: None,
             block_prompt: None,
+            seen_offer: None,
+            extension_prompt: None,
         }
     }
 
@@ -473,7 +479,31 @@ impl eframe::App for FocusApp {
                 Some(_) => {}
             }
         }
+        // An appointment just ended after its grace time: offer to extend it, once.
+        if let Some(Ok(current_status)) = &status {
+            let offer = current_status
+                .planner
+                .as_ref()
+                .and_then(|planner| planner.extension_offer.clone());
+            let newest = offer
+                .as_ref()
+                .map(|offer| format!("{}@{}", offer.appointment.id, offer.ended_at));
+            match &self.seen_offer {
+                None => self.seen_offer = Some(newest),
+                Some(seen) if *seen != newest => {
+                    if let Some(offer) = offer {
+                        self.extension_prompt = Some(block_prompt::ExtensionPrompt::new(offer));
+                        tray::show_window(TITLE);
+                        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    self.seen_offer = Some(newest);
+                }
+                Some(_) => {}
+            }
+        }
         self.block_prompt_ui(context);
+        self.extension_prompt_ui(context);
         egui::TopBottomPanel::top("tabs").show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Todo, "할 일");

@@ -1481,13 +1481,102 @@ fn an_appointment_is_fixed_at_its_time_and_ends_by_itself() {
         .unwrap();
     assert!(again.appointment_id.is_some());
     assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), picks);
-    // At its end it ends by itself: the user asks for the next task.
+    // Past its planned end it goes on for the grace time (meetings run late) ...
     fixture
         .planner
         .resume(start + chrono::Duration::minutes(61))
         .unwrap();
+    assert!(fixture
+        .planner
+        .status()
+        .assignment
+        .is_some_and(|assignment| assignment.appointment_id.is_some()));
+    // ... then it ends by itself: the user asks for the next task, and may ask to extend it.
+    let after_grace = start + chrono::Duration::minutes(60 + APPOINTMENT_GRACE_MINUTES + 1);
+    fixture.planner.resume(after_grace).unwrap();
     assert!(fixture.planner.status().assignment.is_none());
     assert!(fixture.planner.waiting_for_task());
+    let offer = fixture.planner.extension_offer(after_grace).unwrap();
+    assert_eq!(offer.appointment.title, "meeting");
+}
+
+#[test]
+fn an_appointment_is_extended_only_with_an_approved_reason() {
+    let fixture = harness(true, &["a"]);
+    let now = Utc::now();
+    let start = now + chrono::Duration::minutes(5);
+    add_appointment(
+        &fixture,
+        now,
+        appointment_change("meeting", start, 60, Some(true)),
+    )
+    .unwrap();
+    let ended = start + chrono::Duration::minutes(60 + APPOINTMENT_GRACE_MINUTES);
+    let after = ended + chrono::Duration::minutes(2);
+    fixture
+        .planner
+        .resume(start + chrono::Duration::minutes(1))
+        .unwrap();
+    fixture.planner.resume(after).unwrap();
+    let appointment_id = fixture
+        .planner
+        .extension_offer(after)
+        .unwrap()
+        .appointment
+        .id;
+    let extend = |minutes| ChangeKind::ExtendAppointment {
+        appointment_id: appointment_id.clone(),
+        minutes,
+    };
+    // Checked before the AI: a reason, a sensible length.
+    assert!(matches!(
+        fixture.planner.check_change(after, &extend(30), "hm"),
+        Err(PlannerError::ReasonTooShort)
+    ));
+    assert!(matches!(
+        fixture
+            .planner
+            .check_change(after, &extend(1000), "the meeting still runs"),
+        Err(PlannerError::BadExtension)
+    ));
+    // Rejected: it stays ended.
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .request_change(after, extend(30), "I want more time", Evidence::default())
+        .unwrap();
+    assert!(!record.approved);
+    assert!(fixture.planner.status().assignment.is_none());
+    // Approved: it runs again, until the extension ends (the review gave 30 minutes).
+    fixture.advisor.approve.store(true, Ordering::SeqCst);
+    fixture
+        .planner
+        .request_change(
+            after,
+            extend(45),
+            "the meeting is still going on",
+            Evidence::default(),
+        )
+        .unwrap();
+    let assignment = fixture.planner.status().assignment.unwrap();
+    assert!(assignment.appointment_id.is_some());
+    assert_eq!(
+        assignment.until,
+        Some(after + chrono::Duration::minutes(30))
+    );
+    // Too late to extend: half an hour after it ended there is no offer.
+    fixture
+        .planner
+        .resume(after + chrono::Duration::minutes(31 + APPOINTMENT_GRACE_MINUTES))
+        .unwrap();
+    assert!(matches!(
+        fixture.planner.check_change(
+            after + chrono::Duration::minutes(31 + APPOINTMENT_GRACE_MINUTES),
+            &extend(30),
+            "the meeting still runs"
+        ),
+        Err(PlannerError::BadExtension)
+    ));
 }
 
 #[test]

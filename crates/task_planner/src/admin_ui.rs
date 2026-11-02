@@ -405,6 +405,9 @@ pub(crate) fn request_label(request: &ChangeKind) -> String {
         ChangeKind::Repick => "something else (the AI picks)".into(),
         ChangeKind::End => "end session".into(),
         ChangeKind::NotFinished => "not finished (report)".into(),
+        ChangeKind::ExtendAppointment { minutes, .. } => {
+            format!("extend the appointment by {minutes} min")
+        }
         ChangeKind::SetWhenTimeIsUp {
             action: WhenTimeIsUp::NotifyOnly,
         } => "only notify when time is up".into(),

@@ -21,9 +21,9 @@ use crate::advisor::{
 };
 use crate::model::{
     Appointment, Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord,
-    DoneRecord, Evidence, PlannerConfig, PlannerState, PlannerStatus, PolishItem, ProposalInput,
-    TaskNotes, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan, WeekPlanDay,
-    WeekPlanTodo, WhenTimeIsUp,
+    DoneRecord, Evidence, ExtensionOffer, PlannerConfig, PlannerState, PlannerStatus, PolishItem,
+    ProposalInput, TaskNotes, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan,
+    WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -54,6 +54,8 @@ const MAX_TASK_NOTES_CHARS: usize = 4000;
 const MAX_TASK_STEPS: usize = 50;
 /// The longest appointment.
 const MAX_APPOINTMENT_MINUTES: i64 = 24 * 60;
+/// The longest extension of an appointment at a time.
+const MAX_EXTENSION_MINUTES: u32 = 240;
 /// Ended appointments stay in `planner.json` this long, then the next change drops them.
 const APPOINTMENTS_KEPT_FOR: Duration = Duration::days(7);
 
@@ -98,6 +100,8 @@ pub enum PlannerError {
     AppointmentOverlaps(String),
     #[error("없는 약속입니다('{0}')")]
     UnknownAppointment(String),
+    #[error("연장은 약속이 끝난 뒤 30분 안에, 10분에서 {MAX_EXTENSION_MINUTES}분까지 요청합니다")]
+    BadExtension,
     #[error(
         "사용을 멈춘 동안에는 AI를 쓰는 일을 하지 않습니다. 먼저 \"다시 사용하기\"를 누르세요"
     )]
@@ -189,18 +193,44 @@ impl TaskPlanner {
         finished + running
     }
 
-    /// Appointments that have not ended (and were not ended early), soonest first.
+    /// Appointments that have not ended (and were not ended early), soonest first. An
+    /// appointment runs until [`Self::runs_until`].
     pub fn appointments(&self, now: DateTime<Utc>) -> Vec<Appointment> {
-        let ended = self.state.get().ended_appointments;
+        let state = self.state.get();
         let mut appointments: Vec<Appointment> = self
             .config
             .get()
             .appointments
             .into_iter()
-            .filter(|appointment| appointment.end > now && !ended.contains(&appointment.id))
+            .filter(|appointment| {
+                runs_until(&state, appointment) > now
+                    && !state.ended_appointments.contains(&appointment.id)
+            })
             .collect();
         appointments.sort_by_key(|appointment| appointment.start);
         appointments
+    }
+
+    /// The appointment that ended last, within the last half hour, if it may be extended.
+    pub fn extension_offer(&self, now: DateTime<Utc>) -> Option<ExtensionOffer> {
+        let state = self.state.get();
+        self.config
+            .get()
+            .appointments
+            .into_iter()
+            .filter(|appointment| !state.ended_appointments.contains(&appointment.id))
+            .map(|appointment| {
+                let ended_at = runs_until(&state, &appointment);
+                ExtensionOffer {
+                    appointment,
+                    ended_at,
+                }
+            })
+            .filter(|offer| {
+                offer.ended_at <= now
+                    && now - offer.ended_at < Duration::minutes(APPOINTMENT_GRACE_MINUTES)
+            })
+            .max_by_key(|offer| offer.ended_at)
     }
 
     /// The user stopped using the computer ("사용 중지"): every app is locked, and nothing
@@ -269,15 +299,16 @@ impl TaskPlanner {
         {
             if !appointments
                 .iter()
-                .any(|appointment| &appointment.id == appointment_id && appointment.runs_at(now))
+                .any(|appointment| &appointment.id == appointment_id && appointment.start <= now)
             {
                 info!("appointment {appointment_id} is over");
                 self.end(now)?;
             }
         }
+        let state = self.state.get();
         let Some(running) = appointments
             .into_iter()
-            .find(|appointment| appointment.runs_at(now))
+            .find(|appointment| appointment.start <= now && now < runs_until(&state, appointment))
         else {
             return Ok(None);
         };
@@ -298,7 +329,7 @@ impl TaskPlanner {
             why: "약속 시간입니다".into(),
             source: AssignmentSource::Planner,
             at: now,
-            until: Some(running.end),
+            until: Some(runs_until(&state, &running)),
             when_time_is_up: WhenTimeIsUp::Reassign,
             away_from_computer: running.away_from_computer,
             appointment_id: Some(running.id.clone()),
@@ -384,6 +415,7 @@ impl TaskPlanner {
             }
         }
         PlannerStatus {
+            extension_offer: self.extension_offer(now),
             stopped_at: state.stopped_at,
             active: self.is_active_with(&open_todos),
             assignment: state.assignment.clone(),
@@ -969,6 +1001,22 @@ impl TaskPlanner {
     ) -> Result<(), PlannerError> {
         let open = self.open_todos();
         let assignment = self.state.get().assignment;
+        if let ChangeKind::ExtendAppointment {
+            appointment_id,
+            minutes,
+        } = request
+        {
+            if reason.trim().chars().count() < MIN_REASON_CHARS {
+                return Err(PlannerError::ReasonTooShort);
+            }
+            let offered = self
+                .extension_offer(now)
+                .is_some_and(|offer| &offer.appointment.id == appointment_id);
+            if !offered || !(10..=MAX_EXTENSION_MINUTES).contains(minutes) {
+                return Err(PlannerError::BadExtension);
+            }
+            return Ok(());
+        }
         // An appointment runs even with an empty list.
         if !self.is_active_with(&open) && assignment.is_none() {
             return Err(PlannerError::NotActive);
@@ -1060,6 +1108,27 @@ impl TaskPlanner {
         open: &[TodoItem],
     ) -> Result<(), PlannerError> {
         let reply = review.reply.as_str();
+        if let ChangeKind::ExtendAppointment {
+            appointment_id,
+            minutes,
+        } = request
+        {
+            // The AI may give less time than asked, never more.
+            let minutes = if review.minutes > 0 {
+                review.minutes.min(*minutes)
+            } else {
+                *minutes
+            };
+            self.state.update(|planner_state| {
+                planner_state.appointment_extensions.insert(
+                    appointment_id.clone(),
+                    now + Duration::minutes(i64::from(minutes)),
+                );
+            })?;
+            // It runs again at once (the agent would within seconds).
+            self.keep_appointments(now)?;
+            return Ok(());
+        }
         // An appointment left early (approved) does not start again.
         if let Some(appointment_id) = self
             .state
@@ -1138,6 +1207,8 @@ impl TaskPlanner {
                 self.end(now)?;
             }
             ChangeKind::NotFinished => self.end(now)?,
+            // Applied above.
+            ChangeKind::ExtendAppointment { .. } => {}
             ChangeKind::SwitchTodo { todo_id } => {
                 let todo = open
                     .iter()
@@ -1287,6 +1358,16 @@ impl TaskPlanner {
             .map_err(|error| PlannerError::Io(std::io::Error::other(error.to_string())))?;
         Ok(())
     }
+}
+
+/// When `appointment` stops: its planned end plus the grace time, or the end of an approved
+/// extension.
+fn runs_until(state: &PlannerState, appointment: &Appointment) -> DateTime<Utc> {
+    state
+        .appointment_extensions
+        .get(&appointment.id)
+        .copied()
+        .unwrap_or(appointment.end + Duration::minutes(crate::model::APPOINTMENT_GRACE_MINUTES))
 }
 
 /// Log how long the current assignment ran, as it ends at `ended`; time spent improving a

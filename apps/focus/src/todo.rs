@@ -785,6 +785,60 @@ impl FocusApp {
         });
     }
 
+    /// Open the form a rejected change came from, filled with what was sent.
+    fn reopen_form(&mut self, record: &TodoChangeRecord) {
+        let from_draft = |draft: &task_planner::ProposalInput| TodoForm {
+            title: draft.title.clone(),
+            notes: draft.notes.clone(),
+            deadline: draft
+                .deadline
+                .map(|deadline| deadline.to_string())
+                .unwrap_or_default(),
+            priority: draft.priority.unwrap_or(0),
+            estimate_minutes: draft.estimate_minutes.unwrap_or(0),
+            repeat: draft.repeat.unwrap_or(false),
+            away_from_computer: draft.away_from_computer,
+            reason: record.reason.clone(),
+        };
+        match &record.change {
+            TodoChange::Add { todo } => {
+                self.todo_ui.form = from_draft(todo);
+                self.todo_ui.editing = None;
+                self.todo_ui.form_open = true;
+            }
+            TodoChange::Edit { todo_id, todo } => {
+                // The fields left empty stay as they are; show the to-do as it is for them.
+                let mut form = from_draft(todo);
+                if let Some(before) = &record.before {
+                    if form.title.is_empty() {
+                        form.title = before.title.clone();
+                    }
+                    if form.notes.is_empty() {
+                        form.notes = before.notes.clone();
+                    }
+                }
+                self.todo_ui.form = form;
+                self.todo_ui.editing = Some(todo_id.clone());
+                self.todo_ui.form_open = true;
+            }
+            TodoChange::AddAppointment { appointment } => {
+                let start = appointment.start.with_timezone(&Local);
+                let end = appointment.end.with_timezone(&Local);
+                self.todo_ui.appointment_form = AppointmentForm {
+                    title: appointment.title.clone(),
+                    notes: appointment.notes.clone(),
+                    date: start.format("%Y-%m-%d").to_string(),
+                    start: start.format("%H:%M").to_string(),
+                    end: end.format("%H:%M").to_string(),
+                    away_from_computer: appointment.away_from_computer,
+                    reason: record.reason.clone(),
+                };
+                self.todo_ui.appointment_form_open = true;
+            }
+            TodoChange::Remove { .. } | TodoChange::RemoveAppointment { .. } => {}
+        }
+    }
+
     /// Open the form to add a to-do, with `title` filled in (from the block prompt).
     pub(crate) fn open_add_form(&mut self, title: &str) {
         self.todo_ui.form = TodoForm {
@@ -946,8 +1000,26 @@ impl FocusApp {
             ui.colored_label(color, label);
             ui.label(format!("{summary}: {}", record.reply));
         });
+        if record.approved {
+            return;
+        }
+        // A small mistake: open the form again with what was sent, to fix and resend.
+        let can_edit = matches!(
+            record.change,
+            TodoChange::Add { .. } | TodoChange::Edit { .. } | TodoChange::AddAppointment { .. }
+        );
+        if can_edit
+            && ui
+                .add_enabled(idle, egui::Button::new("수정하기(고쳐서 다시 보내기)"))
+                .on_hover_text(
+                    "보낸 내용으로 양식을 다시 엽니다. AI의 답을 보고 빠진 내용을 보태세요.",
+                )
+                .clicked()
+        {
+            self.reopen_form(&record);
+        }
         // An appointment the AI did not take cannot be scheduled without it.
-        if record.approved || matches!(record.change, TodoChange::AddAppointment { .. }) {
+        if matches!(record.change, TodoChange::AddAppointment { .. }) {
             return;
         }
         match &record.scheduled_update {
@@ -1281,6 +1353,7 @@ fn task_planner_label(request: &ChangeKind) -> String {
         ChangeKind::Repick => "다른 일 받기(AI가 고름)".into(),
         ChangeKind::End => "AI 검사 멈추기".into(),
         ChangeKind::NotFinished => "다 못 했다(보고)".into(),
+        ChangeKind::ExtendAppointment { minutes, .. } => format!("약속 {minutes}분 연장"),
         ChangeKind::SetWhenTimeIsUp {
             action: WhenTimeIsUp::NotifyOnly,
         } => "시간이 다 되어도 알림만".into(),

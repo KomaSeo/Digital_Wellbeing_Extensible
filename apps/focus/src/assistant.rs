@@ -7,7 +7,7 @@
 
 use crate::RED;
 use eframe::egui;
-use machine::assistant::{AssistantView, ChatRole};
+use machine::assistant::{AssistantView, ChatLine, ChatRole};
 use machine::user_api::call_value;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -28,8 +28,6 @@ pub struct AssistantTab {
     input: String,
     /// A thread is asking the agent (sending, or waiting for the turn to end).
     asking: Arc<AtomicBool>,
-    /// Lines shown at the last frame; new lines scroll the input box into view.
-    lines_shown: usize,
 }
 
 impl AssistantTab {
@@ -40,7 +38,6 @@ impl AssistantTab {
             view: Arc::new(Mutex::new(None)),
             input: String::new(),
             asking: Arc::new(AtomicBool::new(false)),
-            lines_shown: 0,
         }
     }
 
@@ -126,51 +123,6 @@ impl AssistantTab {
             }
             Some(Ok(current)) => current,
         };
-        if current.lines.is_empty() {
-            ui.label("아직 대화가 없습니다.");
-        }
-        for line in &current.lines {
-            let time = line
-                .at
-                .with_timezone(&chrono::Local)
-                .format("%H:%M")
-                .to_string();
-            match line.role {
-                ChatRole::User => {
-                    ui.add_space(6.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.small(time);
-                        ui.strong("나:");
-                        ui.add(egui::Label::new(&line.text).wrap());
-                    });
-                }
-                ChatRole::Assistant => {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.small(time);
-                        ui.strong("AI 비서:");
-                        // The tab shows plain text; bold marks that slip through are dropped.
-                        ui.add(egui::Label::new(line.text.replace("**", "")).wrap());
-                    });
-                }
-                ChatRole::Action => {
-                    ui.indent(("action", line.at.timestamp_micros()), |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("· {}", line.text))
-                                    .small()
-                                    .color(egui::Color32::GRAY),
-                            )
-                            .wrap(),
-                        );
-                    });
-                }
-                ChatRole::Error => {
-                    ui.colored_label(RED, format!("{time} {}", line.text));
-                }
-            }
-        }
-
-        ui.add_space(8.0);
         let waiting = current.busy || self.asking.load(Ordering::SeqCst);
         if current.busy {
             ui.horizontal(|ui| {
@@ -211,9 +163,60 @@ impl AssistantTab {
                 self.ask("assistant_reset", json!({}));
             }
         });
-        if current.lines.len() != self.lines_shown {
-            self.lines_shown = current.lines.len();
-            input.scroll_to_me(Some(egui::Align::Max));
+        ui.separator();
+        if current.lines.is_empty() {
+            ui.label("아직 대화가 없습니다.");
+        }
+        // Newest exchange first (each starts with the user's words), so the latest answer is
+        // on top without scrolling; within an exchange the order stays as it happened.
+        let mut exchanges: Vec<Vec<&ChatLine>> = Vec::new();
+        for line in &current.lines {
+            if line.role == ChatRole::User || exchanges.is_empty() {
+                exchanges.push(Vec::new());
+            }
+            if let Some(exchange) = exchanges.last_mut() {
+                exchange.push(line);
+            }
+        }
+        for line in exchanges.iter().rev().flatten() {
+            let time = line
+                .at
+                .with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string();
+            match line.role {
+                ChatRole::User => {
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.small(time);
+                        ui.strong("나:");
+                        ui.add(egui::Label::new(&line.text).wrap());
+                    });
+                }
+                ChatRole::Assistant => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.small(time);
+                        ui.strong("AI 비서:");
+                        // The tab shows plain text; bold marks that slip through are dropped.
+                        ui.add(egui::Label::new(line.text.replace("**", "")).wrap());
+                    });
+                }
+                ChatRole::Action => {
+                    ui.indent(("action", line.at.timestamp_micros()), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("· {}", line.text))
+                                    .small()
+                                    .color(egui::Color32::GRAY),
+                            )
+                            .wrap(),
+                        );
+                    });
+                }
+                ChatRole::Error => {
+                    ui.colored_label(RED, format!("{time} {}", line.text));
+                }
+            }
         }
     }
 }

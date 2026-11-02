@@ -162,3 +162,112 @@ impl FocusApp {
         }
     }
 }
+
+/// Responsibility: Hold the appointment that just ended and what the user types to ask for
+/// more time.
+pub(crate) struct ExtensionPrompt {
+    offer: task_planner::ExtensionOffer,
+    minutes: u32,
+    reason: String,
+    sent_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ExtensionPrompt {
+    pub(crate) fn new(offer: task_planner::ExtensionOffer) -> Self {
+        Self {
+            offer,
+            minutes: 30,
+            reason: String::new(),
+            sent_at: None,
+        }
+    }
+}
+
+impl FocusApp {
+    /// "The appointment ran past its end and the grace time: extend it?" The AI approves an
+    /// extension only for a fitting reason.
+    pub(crate) fn extension_prompt_ui(&mut self, context: &egui::Context) {
+        let Some(mut prompt) = self.extension_prompt.take() else {
+            return;
+        };
+        let idle = !self.pending.load(Ordering::SeqCst);
+        let mut keep = true;
+        egui::Window::new("약속이 끝났습니다")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(context, |ui| {
+                ui.strong(&prompt.offer.appointment.title);
+                ui.label(format!(
+                    "예정보다 {}분 더 이어진 뒤 {}에 끝났습니다. 아직 끝나지 않았다면 연장을 요청하세요. \
+                     연장은 AI가 까닭을 보고 정합니다.",
+                    task_planner::APPOINTMENT_GRACE_MINUTES,
+                    prompt
+                        .offer
+                        .ended_at
+                        .with_timezone(&chrono::Local)
+                        .format("%H:%M")
+                ));
+                ui.horizontal(|ui| {
+                    ui.label("더 필요한 시간(분)");
+                    ui.add(egui::DragValue::new(&mut prompt.minutes).range(10..=240));
+                });
+                ui.add(
+                    egui::TextEdit::multiline(&mut prompt.reason)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("왜 연장해야 하나요? 예: 회의가 아직 끝나지 않았다"),
+                );
+                let ready = idle && prompt.reason.trim().chars().count() >= 4;
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(ready, egui::Button::new("연장 요청")).clicked() {
+                        prompt.sent_at = Some(chrono::Utc::now());
+                        self.send(
+                            "request_change",
+                            json!({
+                                "request": {
+                                    "kind": "extend_appointment",
+                                    "appointment_id": prompt.offer.appointment.id,
+                                    "minutes": prompt.minutes,
+                                },
+                                "reason": prompt.reason.trim(),
+                            }),
+                        );
+                    }
+                    if ui.button("연장하지 않기").clicked() {
+                        keep = false;
+                    }
+                    if !idle {
+                        ui.spinner();
+                    }
+                });
+                let answer = prompt.sent_at.and_then(|sent_at| {
+                    self.shared
+                        .lock()
+                        .decision
+                        .clone()
+                        .filter(|decision| decision.at >= sent_at)
+                });
+                if let Some(decision) = answer {
+                    ui.horizontal_wrapped(|ui| {
+                        if decision.approved {
+                            ui.colored_label(GREEN, "연장됨");
+                        } else {
+                            ui.colored_label(RED, "거절");
+                        }
+                        ui.label(&decision.reply);
+                    });
+                    if ui.button("닫기").clicked() {
+                        keep = false;
+                    }
+                }
+                let message = self.shared.lock().message.clone();
+                if !message.is_empty() {
+                    ui.colored_label(RED, message);
+                }
+            });
+        if keep {
+            self.extension_prompt = Some(prompt);
+        }
+    }
+}

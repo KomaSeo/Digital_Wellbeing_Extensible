@@ -73,11 +73,17 @@ pub struct Appointment {
     pub away_from_computer: bool,
 }
 
-impl Appointment {
-    /// It runs at `now`.
-    pub fn runs_at(&self, now: DateTime<Utc>) -> bool {
-        self.start <= now && now < self.end
-    }
+/// How long an appointment goes on past its planned end: meetings with other people run
+/// late, and cutting them off at the minute would hurt.
+pub const APPOINTMENT_GRACE_MINUTES: i64 = 30;
+
+/// Responsibility: Offer to extend an appointment that just ended (after its grace time);
+/// the user gives a reason the AI must approve.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionOffer {
+    pub appointment: Appointment,
+    /// When it ended (its planned end plus the grace time, or the end of an extension).
+    pub ended_at: DateTime<Utc>,
 }
 
 /// Responsibility: Carry an appointment the user asks to add, as it arrives over the agent
@@ -257,6 +263,12 @@ pub enum ChangeKind {
     /// The time is up and the to-do is not finished: it stays on the list, and the next task
     /// comes when the user asks for one. Needs no AI review.
     NotFinished,
+    /// An appointment ran past its planned end and the grace time: keep it going for
+    /// `minutes` more. The AI approves only a fitting reason.
+    ExtendAppointment {
+        appointment_id: String,
+        minutes: u32,
+    },
     /// Change what happens when the current task's time is up. Asking for `NotifyOnly`
     /// (keep working past the planned end) needs the AI's approval; asking for `Reassign`
     /// is stricter and is approved without asking.
@@ -524,6 +536,9 @@ pub struct PlannerState {
     /// nothing runs but the blocking, until they press "다시 사용하기".
     #[serde(default)]
     pub stopped_at: Option<DateTime<Utc>>,
+    /// Approved extensions of appointments: the new end, by appointment id.
+    #[serde(default)]
+    pub appointment_extensions: BTreeMap<String, DateTime<Utc>>,
 }
 
 impl PlannerState {
@@ -576,4 +591,7 @@ pub struct PlannerStatus {
     /// The user stopped using the computer ("사용 중지") at this time.
     #[serde(default)]
     pub stopped_at: Option<DateTime<Utc>>,
+    /// An appointment that just ended (within the last half hour) and may be extended.
+    #[serde(default)]
+    pub extension_offer: Option<ExtensionOffer>,
 }
