@@ -80,7 +80,7 @@ const API_KEY: Block = Block {
 const MODEL: Block = Block {
     id: "model",
     file: "ai_focus",
-    paths: &[&["model"]],
+    paths: &[&["model"], &["recheck_model"]],
     has_default: true,
 };
 const BUDGET: Block = Block {
@@ -551,15 +551,51 @@ impl SettingsTab {
                     })
             };
             let current = drafts.ai_focus.model.clone();
-            egui::ComboBox::from_id_salt("model_choice")
-                .width(320.0)
-                .selected_text(label_of(&current))
-                .show_ui(ui, |ui| {
-                    for model_id in catalog.choices(&current) {
-                        let label = label_of(&model_id);
-                        ui.selectable_value(&mut drafts.ai_focus.model, model_id, label);
-                    }
-                });
+            ui.horizontal(|ui| {
+                ui.label("기본 모델");
+                egui::ComboBox::from_id_salt("model_choice")
+                    .width(320.0)
+                    .selected_text(label_of(&current))
+                    .show_ui(ui, |ui| {
+                        for model_id in catalog.choices(&current) {
+                            let label = label_of(&model_id);
+                            ui.selectable_value(&mut drafts.ai_focus.model, model_id, label);
+                        }
+                    });
+            });
+            // Rechecks of windows already judged: the cheaper model first; a changed verdict
+            // goes back to the main model.
+            let current_recheck = drafts.ai_focus.recheck_model.clone();
+            ui.horizontal(|ui| {
+                ui.label("다시 검사할 때 먼저 쓰는 모델");
+                egui::ComboBox::from_id_salt("recheck_model_choice")
+                    .width(320.0)
+                    .selected_text(if current_recheck.is_empty() {
+                        "쓰지 않음(기본 모델이 모두 검사)".to_string()
+                    } else {
+                        label_of(&current_recheck)
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut drafts.ai_focus.recheck_model,
+                            String::new(),
+                            "쓰지 않음(기본 모델이 모두 검사)",
+                        );
+                        for model_id in catalog.choices(&current_recheck) {
+                            let label = label_of(&model_id);
+                            ui.selectable_value(
+                                &mut drafts.ai_focus.recheck_model,
+                                model_id,
+                                label,
+                            );
+                        }
+                    });
+            });
+            ui.small(
+                "이미 판정한 창을 다시 검사할 때는 이 모델이 먼저 봅니다. 판정이 지난번과 같으면 그대로 \
+                 두고, 바뀌면 기본 모델이 다시 확인해서 그 판정을 따릅니다. 처음 보는 창은 언제나 기본 \
+                 모델이 검사합니다.",
+            );
             match (catalog.fetched_at, catalog.error.is_empty()) {
                 (Some(fetched_at), _) => {
                     ui.small(format!(
@@ -1686,7 +1722,11 @@ fn purpose_label(purpose: &str) -> (&str, &str) {
     match purpose {
         "focus check" => (
             "창 검사(AI 검사)",
-            "새 창이 보일 때와 다시 검사할 때마다 화면 캡처와 창 제목을 보냅니다",
+            "새 창이 보일 때, 그리고 다시 검사에서 판정이 바뀌어 기본 모델이 재확인할 때 화면 캡처와 창 제목을 보냅니다",
+        ),
+        "focus recheck" => (
+            "창 다시 검사(싼 모델)",
+            "이미 판정한 창을 다시 검사할 때 싼 모델이 먼저 봅니다",
         ),
         "access review" => ("접근 요청 심사", "차단 탭의 접근 요청"),
         "planner pick" => ("할 일 고르기", "\"할 일 받기\"를 누를 때"),

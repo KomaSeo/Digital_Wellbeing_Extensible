@@ -206,11 +206,21 @@ fn connection_probe_loop(ai_store: AiFocusStore, stopped: impl Fn() -> bool) {
                             ..
                         }
                     );
-                    let result = if billing {
+                    let mut result = if billing {
                         client.ping()
                     } else {
                         client.check()
                     };
+                    // The recheck model must exist too: every recheck would fail without it.
+                    let recheck_model = config.recheck_model.trim();
+                    if result.is_ok() && !recheck_model.is_empty() && recheck_model != config.model
+                    {
+                        result = ClaudeClient::new(
+                            config.resolve_api_key().unwrap_or_default(),
+                            recheck_model.to_string(),
+                        )
+                        .check();
+                    }
                     if let Err(error) = result {
                         tracing::debug!("connection check: {error}");
                     }

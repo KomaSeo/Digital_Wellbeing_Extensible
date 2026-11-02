@@ -34,6 +34,9 @@ const MAX_TITLE_CHARS: usize = 120;
 /// Most YouTube pages whose channel is remembered (see `MonitorState::channels`).
 const CHANNEL_CACHE_CAPACITY: usize = 500;
 const SCREENSHOT_MAX_WIDTH: u32 = 1280;
+/// How long a verdict is remembered after it was made (it comes due again much earlier):
+/// long enough that a recheck knows the verdict it checks.
+const VERDICTS_KEPT_FOR: ChronoDuration = ChronoDuration::hours(24);
 /// Most other open windows listed in one check (each costs a few tokens).
 const MAX_OTHER_WINDOWS: usize = 30;
 
@@ -363,6 +366,17 @@ impl MonitorState {
         }
     }
 
+    /// The verdict this window got last under the current task, due again or not.
+    pub fn previous_verdict(
+        &self,
+        config: &AiFocusConfig,
+        foreground: &Foreground,
+    ) -> Option<Verdict> {
+        self.last_verdicts
+            .get(&self.verdict_key(config, foreground))
+            .map(|(_, verdict)| *verdict)
+    }
+
     fn remember_verdict(
         &mut self,
         now: DateTime<Utc>,
@@ -371,9 +385,9 @@ impl MonitorState {
         verdict: Verdict,
     ) {
         let key = self.verdict_key(config, foreground);
-        self.last_verdicts.retain(|_, (at, remembered_verdict)| {
-            now - *at < recheck_after(config, *remembered_verdict)
-        });
+        // Kept past their due time, so a recheck knows the verdict it checks again.
+        self.last_verdicts
+            .retain(|_, (at, _)| now - *at < VERDICTS_KEPT_FOR);
         self.last_verdicts.insert(key, (now, verdict));
     }
 
@@ -677,19 +691,21 @@ pub type JudgeProvider =
 /// Claude judge for the current config. The judge (and its HTTP connection)
 /// is reused until the key or the model changes.
 pub fn claude_judge_provider() -> JudgeProvider {
-    type Cached = Option<((String, String), Arc<dyn Judge>)>;
-    let cache: Mutex<Cached> = Mutex::new(None);
+    // One judge per (key, model): the main model and the recheck model alternate.
+    let cache: Mutex<HashMap<(String, String), Arc<dyn Judge>>> = Mutex::new(HashMap::new());
     Arc::new(move |config: &AiFocusConfig| {
         let key = config.resolve_api_key().ok_or(JudgeError::NoApiKey)?;
         let id = (key, config.model.clone());
         let mut cache = cache.lock();
-        if let Some((cached_id, judge)) = cache.as_ref() {
-            if *cached_id == id {
-                return Ok(Arc::clone(judge));
-            }
+        if let Some(judge) = cache.get(&id) {
+            return Ok(Arc::clone(judge));
+        }
+        // A changed key or model leaves old entries behind; there are never many.
+        if cache.len() >= 4 {
+            cache.clear();
         }
         let judge: Arc<dyn Judge> = Arc::new(ClaudeJudge::new(id.0.clone(), id.1.clone()));
-        *cache = Some((id, Arc::clone(&judge)));
+        cache.insert(id, Arc::clone(&judge));
         Ok(judge)
     })
 }
@@ -899,7 +915,7 @@ impl FocusMonitor {
         let exempt = self.exempt(&config, &foreground);
         let open = self.desktop.open_windows();
 
-        let (due, judge_front, others) = {
+        let (due, judge_front, others, previous) = {
             let mut state = self.state.lock();
             state.record(now, &foreground);
             if !exempt
@@ -926,13 +942,26 @@ impl FocusMonitor {
             let others = self.others_to_judge(now, &config, &state, &foreground, &open);
             let judge_front = !exempt && state.needs_judging(now, &config, &foreground);
             let due = (judge_front || !others.is_empty()) && state.call_allowed(now);
+            // Every window of this check was judged before: the cheaper model may recheck.
+            let previous = Previous {
+                front: judge_front
+                    .then(|| state.previous_verdict(&config, &foreground))
+                    .flatten(),
+                others: others
+                    .iter()
+                    .map(|other| state.previous_verdict(&config, &other.as_foreground()))
+                    .collect(),
+            };
+            let recheck = (!judge_front || previous.front.is_some())
+                && previous.others.iter().all(Option::is_some);
+            let previous = recheck.then_some(previous);
             drop(state);
             // A blocked tab shown in a background window (say, a video on a second
             // monitor) is hidden; it is closed once it comes to the front.
             for window in hide {
                 self.desktop.minimize(window);
             }
-            (due, judge_front, others)
+            (due, judge_front, others, previous)
         };
         if !due {
             return;
@@ -949,7 +978,13 @@ impl FocusMonitor {
                 title: truncate(&other.title, MAX_TITLE_CHARS),
             })
             .collect();
-        let result = self.run_judge(&config, &foreground, grant.as_ref(), &listed);
+        let result = self.run_judge(
+            &config,
+            &foreground,
+            grant.as_ref(),
+            &listed,
+            previous.as_ref(),
+        );
         // The judge call can take a while; if access to this window was granted
         // (or revoked) meanwhile, the verdict was made under the old terms.
         let grant_now = self
@@ -1304,12 +1339,18 @@ impl FocusMonitor {
             .ok_or_else(|| "증거 화면을 찍지 못했습니다".into())
     }
 
+    /// Ask the judge about the front window (and `others`). When every window was judged
+    /// before (`previous`) and a cheaper recheck model is set, that model asks first; its
+    /// answer stands when every verdict is the same as before. When a verdict differs (or
+    /// the call fails for a reason other than the key or the model), the main model asks
+    /// again, with the same screenshot, and its answer counts.
     fn run_judge(
         &self,
         config: &AiFocusConfig,
         foreground: &Foreground,
         grant: Option<&Grant>,
         others: &[OtherWindow],
+        previous: Option<&Previous>,
     ) -> Result<Judgement, JudgeError> {
         if let Some((spent, limit)) = self
             .usage
@@ -1332,7 +1373,7 @@ impl FocusMonitor {
             None
         };
         let history = self.state.lock().history_text();
-        judge.judge(&JudgeRequest {
+        let mut request = JudgeRequest {
             task: &config.task,
             history: &history,
             process_name: &foreground.process_name,
@@ -1342,7 +1383,53 @@ impl FocusMonitor {
             screenshot: screenshot.as_deref(),
             grant_purpose: grant.map(|active_grant| active_grant.purpose.as_str()),
             others,
-        })
+            recheck: false,
+        };
+        let recheck_model = config.recheck_model.trim();
+        if let Some(previous) =
+            previous.filter(|_| !recheck_model.is_empty() && recheck_model != config.model)
+        {
+            let cheaper = AiFocusConfig {
+                model: recheck_model.to_string(),
+                ..config.clone()
+            };
+            request.recheck = true;
+            match (self.judge)(&cheaper).and_then(|recheck_judge| recheck_judge.judge(&request)) {
+                Ok(judgement) if previous.agrees_with(&judgement) => return Ok(judgement),
+                Ok(judgement) => info!(
+                    "recheck of {} changed the verdict ({:?}); the main model checks again",
+                    foreground.process_name, judgement.verdict
+                ),
+                // A broken key or an unknown recheck model is the user's to fix: it shows
+                // (and locks, once protected) like any broken connection.
+                Err(error) if crate::connection::problem_of(&error).is_some() => return Err(error),
+                Err(error) => warn!("recheck failed ({error}); the main model checks"),
+            }
+            request.recheck = false;
+        }
+        judge.judge(&request)
+    }
+}
+
+/// Responsibility: Hold the verdicts the windows of a recheck got last time: the front window
+/// (`None` when it is not judged this time) and each other window, in the order sent.
+pub(crate) struct Previous {
+    front: Option<Verdict>,
+    others: Vec<Option<Verdict>>,
+}
+
+impl Previous {
+    /// Every verdict in `judgement` is the same as last time.
+    fn agrees_with(&self, judgement: &Judgement) -> bool {
+        self.front
+            .is_none_or(|verdict| verdict == judgement.verdict)
+            && judgement.others.iter().all(|other| {
+                self.others
+                    .get(other.id)
+                    .copied()
+                    .flatten()
+                    .is_none_or(|verdict| verdict == other.verdict)
+            })
     }
 }
 
@@ -2399,6 +2486,116 @@ mod tests {
             .monitor
             .step(start_time + ChronoDuration::seconds(9));
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Responsibility: Answer as the model the judge was made for says: one verdict per
+    /// model name, and a log of (model, recheck) for every call.
+    struct ModelJudges {
+        verdicts: Mutex<HashMap<String, Verdict>>,
+        calls: Mutex<Vec<(String, bool)>>,
+    }
+
+    struct ModelJudge {
+        model: String,
+        shared: Arc<ModelJudges>,
+    }
+
+    impl Judge for ModelJudge {
+        fn judge(&self, request: &JudgeRequest) -> Result<Judgement, JudgeError> {
+            self.shared
+                .calls
+                .lock()
+                .push((self.model.clone(), request.recheck));
+            Ok(Judgement {
+                verdict: self.shared.verdicts.lock()[&self.model],
+                reason: "test".into(),
+                channel: String::new(),
+                others: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn rechecks_use_the_cheaper_model_and_the_main_model_confirms_a_change() {
+        let shared = Arc::new(ModelJudges {
+            verdicts: Mutex::new(HashMap::from([
+                ("main".to_string(), Verdict::OnTask),
+                ("cheap".to_string(), Verdict::OnTask),
+            ])),
+            calls: Mutex::new(Vec::new()),
+        });
+        let provided = Arc::clone(&shared);
+        let mut config = session("thesis");
+        config.model = "main".into();
+        config.recheck_model = "cheap".into();
+        config.strikes_to_block = 1;
+        config.recheck_minutes = 15;
+        let current = Arc::new(Mutex::new(Some(foreground("code.exe", "main.rs"))));
+        let monitor = FocusMonitor::new(
+            AiFocusStore::in_memory(config),
+            Box::new(FakeDesktop {
+                foreground: Arc::clone(&current),
+                tabs_closed: Arc::new(AtomicUsize::new(0)),
+                visible: Arc::new(Mutex::new(Vec::new())),
+                open: Arc::new(Mutex::new(Vec::new())),
+                minimized: Arc::new(Mutex::new(Vec::new())),
+            }),
+            Arc::new(move |config: &AiFocusConfig| {
+                Ok(Arc::new(ModelJudge {
+                    model: config.model.clone(),
+                    shared: Arc::clone(&provided),
+                }) as Arc<dyn Judge>)
+            }),
+        );
+        let calls = || std::mem::take(&mut *shared.calls.lock());
+        let start_time = Utc::now();
+        // A window seen for the first time: the main model.
+        monitor.step(start_time);
+        assert_eq!(calls(), [("main".to_string(), false)]);
+        // Due again, the same verdict: the cheaper model's answer stands.
+        let first_recheck = start_time + ChronoDuration::minutes(16);
+        monitor.step(first_recheck);
+        assert_eq!(calls(), [("cheap".to_string(), true)]);
+        // The cheaper model says off task, the main model disagrees: nothing is blocked.
+        shared
+            .verdicts
+            .lock()
+            .insert("cheap".into(), Verdict::OffTask);
+        let second_recheck = first_recheck + ChronoDuration::minutes(16);
+        monitor.step(second_recheck);
+        assert_eq!(
+            calls(),
+            [("cheap".to_string(), true), ("main".to_string(), false)]
+        );
+        assert!(monitor.state().process_blocks().is_empty());
+        // Both say off task: blocked, on the main model's word.
+        shared
+            .verdicts
+            .lock()
+            .insert("main".into(), Verdict::OffTask);
+        monitor.step(second_recheck + ChronoDuration::minutes(16));
+        assert_eq!(
+            calls(),
+            [("cheap".to_string(), true), ("main".to_string(), false)]
+        );
+        assert_eq!(monitor.state().process_blocks().len(), 1);
+        // A new task forgets every verdict: the main model again; and without a recheck
+        // model the main model does every check.
+        monitor
+            .store()
+            .update(|stored_config| {
+                stored_config.task = "slides".into();
+                stored_config.recheck_model.clear();
+            })
+            .unwrap();
+        *current.lock() = Some(foreground("word.exe", "slides"));
+        let later = second_recheck + ChronoDuration::hours(1);
+        monitor.step(later);
+        monitor.step(later + ChronoDuration::minutes(16));
+        assert_eq!(
+            calls(),
+            [("main".to_string(), false), ("main".to_string(), false)]
+        );
     }
 
     #[test]

@@ -287,13 +287,19 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             // A new model is put in force (or scheduled) only once the API knows it.
             if name == "ai_focus" {
                 let in_force = api.monitor.store().get();
+                let edited: ai_focus_rule::AiFocusConfig =
+                    serde_json::from_value(params["content"].clone()).unwrap_or_default();
+                let key = edited
+                    .resolve_api_key()
+                    .or_else(|| in_force.resolve_api_key());
                 if let Some(model) = params["content"]["model"].as_str() {
                     if model.trim() != in_force.model {
-                        let edited: ai_focus_rule::AiFocusConfig =
-                            serde_json::from_value(params["content"].clone()).unwrap_or_default();
-                        let key = edited
-                            .resolve_api_key()
-                            .or_else(|| in_force.resolve_api_key());
+                        crate::model_catalog::check(key.clone(), model)?;
+                    }
+                }
+                // The recheck model may be empty (rechecks off).
+                if let Some(model) = params["content"]["recheck_model"].as_str() {
+                    if model.trim() != in_force.recheck_model && !model.trim().is_empty() {
                         crate::model_catalog::check(key, model)?;
                     }
                 }

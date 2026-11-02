@@ -12,6 +12,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
+/// The cheaper model that rechecks windows already judged (see `recheck_model`).
+pub const DEFAULT_RECHECK_MODEL: &str = "claude-haiku-5-5";
 
 /// Responsibility: Report why the settings could not be loaded or saved.
 #[derive(Debug, Error)]
@@ -45,6 +47,11 @@ pub struct AiFocusConfig {
     /// New windows are judged at once, whatever this says.
     pub check_interval_secs: u64,
     pub model: String,
+    /// A cheaper model for checking again a window already judged under the current task.
+    /// When its verdict is the same as before it stands; when it differs, `model` checks the
+    /// window again and its verdict counts. Empty (or the same as `model`): `model` does
+    /// every check.
+    pub recheck_model: String,
     /// Used when `ANTHROPIC_API_KEY` is not set in the environment.
     pub api_key: String,
     /// Attach a downscaled screenshot of the foreground monitor to each check.
@@ -103,6 +110,7 @@ impl Default for AiFocusConfig {
             task_scope: String::new(),
             check_interval_secs: 60,
             model: DEFAULT_MODEL.to_string(),
+            recheck_model: DEFAULT_RECHECK_MODEL.to_string(),
             api_key: String::new(),
             send_screenshot: true,
             strikes_to_block: 2,

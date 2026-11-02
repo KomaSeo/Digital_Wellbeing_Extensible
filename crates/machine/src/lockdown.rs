@@ -95,6 +95,7 @@ pub fn lockdown(
         let mut fix_now = vec![vec!["api_key".to_string()]];
         if *problem == KeyProblem::UnknownModel {
             fix_now.push(vec!["model".to_string()]);
+            fix_now.push(vec!["recheck_model".to_string()]);
         }
         return Some(Lockdown {
             cause: LockdownCause::Connection { problem: *problem },
@@ -246,7 +247,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(model.fix_now.len(), 2);
+        assert_eq!(model.fix_now.len(), 3, "the key and both models");
         let waiting = lockdown(true, &Connection::Working, Some(TaskLock::WaitingForTask)).unwrap();
         assert_eq!(waiting.cause, LockdownCause::NoTask);
         assert!(!waiting.browsers_allowed);
