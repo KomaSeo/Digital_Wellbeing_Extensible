@@ -1035,6 +1035,12 @@ impl SettingsTab {
         for (heading, list, accessor, hint, block) in lists {
             ui.separator();
             ui.heading(heading);
+            if list == "always_allow" {
+                ui.weak(format!(
+                    "작업 관리자({})는 이 목록과 상관없이 언제나 허용됩니다.",
+                    ai_focus_rule::BUILT_IN_ALWAYS_ALLOW.join(", ")
+                ));
+            }
             if let Some(drafts) = &mut self.drafts {
                 set_ui(
                     ui,

@@ -203,8 +203,10 @@ pub fn lockdown_allows_page(title: &str) -> bool {
 }
 
 impl AiFocusConfig {
+    /// In [`Self::always_allow`], or one of [`BUILT_IN_ALWAYS_ALLOW`].
     pub fn is_always_allowed(&self, process_name: &str) -> bool {
-        listed(&self.always_allow, process_name)
+        let name = normalize_process_name(process_name);
+        BUILT_IN_ALWAYS_ALLOW.contains(&name.as_str()) || listed(&self.always_allow, process_name)
     }
 
     pub fn is_private(&self, process_name: &str) -> bool {
@@ -375,6 +377,10 @@ impl AiFocusStore {
 
 /// Is `process_name` in `list`? Both sides are compared in `normalize_process_name` form, so a
 /// hand-edited file with "Chrome" or "firefox" still matches.
+/// Programs never judged and never blocked whatever the settings say (the owner's choice):
+/// Task Manager, so the user can always see what runs and end a hung program.
+pub const BUILT_IN_ALWAYS_ALLOW: [&str; 1] = ["taskmgr.exe"];
+
 fn listed(list: &BTreeSet<String>, process_name: &str) -> bool {
     let name = normalize_process_name(process_name);
     list.contains(&name)
@@ -386,6 +392,14 @@ fn listed(list: &BTreeSet<String>, process_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_manager_is_always_allowed() {
+        let config = AiFocusConfig::default();
+        assert!(config.is_always_allowed("Taskmgr.exe"));
+        assert!(config.is_always_allowed("taskmgr"));
+        assert!(!config.is_always_allowed("steam.exe"));
+    }
 
     #[test]
     fn a_lockdown_keeps_only_claude_pages_and_new_tabs() {
