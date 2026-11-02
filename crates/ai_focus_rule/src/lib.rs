@@ -30,8 +30,8 @@ pub use config::{
 };
 pub use judge::{ClaudeJudge, Judge, JudgeError, JudgeRequest, Judgement, Verdict};
 pub use monitor::{
-    claude_judge_provider, AccessError, ActivityEntry, BlockSet, BlockedEntry, FocusMonitor,
-    JudgeProvider, MonitorState, SavedBlocks, VerdictLogEntry,
+    claude_judge_provider, strip_browser_noise, AccessError, ActivityEntry, BlockSet, BlockedEntry,
+    FocusMonitor, JudgeProvider, MonitorState, NewBlock, SavedBlocks, VerdictLogEntry,
 };
 pub use rule::{AiFocusRule, AiFocusRuleHandle};
 

@@ -21,6 +21,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod assistant;
+mod block_prompt;
 mod help;
 mod settings;
 mod statistics;
@@ -151,6 +152,10 @@ struct FocusApp {
     todo_ui: todo::TodoUiState,
     /// Settings questions due at the last status; more than before brings the window up.
     questions_due: usize,
+    /// The id of the newest block seen (`None` before the first status): a newer one brings
+    /// the window up with [`block_prompt::BlockPrompt`].
+    seen_block: Option<Option<String>>,
+    block_prompt: Option<block_prompt::BlockPrompt>,
 }
 
 impl FocusApp {
@@ -195,6 +200,8 @@ impl FocusApp {
             access: AccessForm::default(),
             todo_ui: todo::TodoUiState::default(),
             questions_due: 0,
+            seen_block: None,
+            block_prompt: None,
         }
     }
 
@@ -434,7 +441,26 @@ impl eframe::App for FocusApp {
                 self.tab = Tab::Settings;
             }
             self.questions_due = current_status.settings_questions_due;
+            // A new block: bring the window up and ask what to do about it.
+            let newest = current_status
+                .last_block
+                .as_ref()
+                .map(|block| block.id.clone());
+            match &self.seen_block {
+                None => self.seen_block = Some(newest),
+                Some(seen) if *seen != newest => {
+                    if let Some(block) = current_status.last_block.clone() {
+                        self.block_prompt = Some(block_prompt::BlockPrompt::new(block));
+                        tray::show_window(TITLE);
+                        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    self.seen_block = Some(newest);
+                }
+                Some(_) => {}
+            }
         }
+        self.block_prompt_ui(context);
         egui::TopBottomPanel::top("tabs").show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Todo, "할 일");

@@ -137,6 +137,9 @@ pub struct Status {
     /// Every app is locked: the settings are protected and the AI connection is broken.
     #[serde(default)]
     pub lockdown: Option<crate::lockdown::Lockdown>,
+    /// The block the AI made last: the Focus app asks at once what to do about it.
+    #[serde(default)]
+    pub last_block: Option<ai_focus_rule::NewBlock>,
 }
 
 /// Responsibility: Hold what the agent exposes (focus monitor, optional planner) and tell
@@ -194,6 +197,7 @@ fn status(api: &AgentApi) -> Status {
         ai_cost_today_usd: monitor.usage().map(|usage| usage.today_cost()),
         daily_budget_usd: config.daily_budget_usd,
         lockdown: lockdown_now(api.planner.as_deref()),
+        last_block: state.last_block.clone(),
     }
 }
 

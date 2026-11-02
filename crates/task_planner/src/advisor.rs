@@ -160,7 +160,11 @@ with having worked on it for a plausible time);
 For a switch to another to-do or a free-form task, also judge whether it is a \
 sensible use of time compared with the open list and its deadlines, and when \
 approving set `minutes`: how long the new task should run (10 to 720). For \
-other requests set `minutes` to 0.
+other requests set `minutes` to 0. A switch to a free-form task comes from the \
+user right after an app or site was blocked, asking to do that thing now because \
+it is urgent: approve it only when it really cannot wait (a deadline today, \
+someone waiting on the user, an obligation that just came up), and never for \
+leisure; anything that can wait belongs on the to-do list instead.
 
 Each assignment has a planned end. When it is up the user reports whether the \
 to-do is finished; only \"done\" reports come to you. A to-do marked as a routine \

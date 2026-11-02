@@ -184,6 +184,11 @@ fn end_to_end(real_key: Option<String>) {
             |verdict_record| verdict_record.title == "Funny cats - YouTube"
                 && verdict_record.action.contains("tab closed")
         ));
+    // The Focus app learns of the new block, to ask what to do about it.
+    assert!(status
+        .last_block
+        .as_ref()
+        .is_some_and(|block| block.is_tab && block.title == "Funny cats - YouTube"));
     if real {
         for verdict_record in &status.verdicts {
             println!(

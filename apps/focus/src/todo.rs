@@ -785,6 +785,16 @@ impl FocusApp {
         });
     }
 
+    /// Open the form to add a to-do, with `title` filled in (from the block prompt).
+    pub(crate) fn open_add_form(&mut self, title: &str) {
+        self.todo_ui.form = TodoForm {
+            title: title.to_string(),
+            ..Default::default()
+        };
+        self.todo_ui.editing = None;
+        self.todo_ui.form_open = true;
+    }
+
     /// Adding a to-do (empty fields are filled in by the AI) or editing one (empty fields
     /// stay as they are). The AI reviews both.
     fn form_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {

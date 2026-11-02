@@ -81,6 +81,21 @@ pub struct BlockedEntry {
     pub title: String,
 }
 
+/// Responsibility: Describe the block the monitor made last, for the Focus app to ask the user
+/// at once what to do about it (a mistake, access, a to-do, something urgent).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewBlock {
+    /// The block's id (`BlockedEntry::id`).
+    pub id: String,
+    pub at: DateTime<Utc>,
+    /// The block-list key (process name, or `process|site` for a tab).
+    pub key: String,
+    pub process_name: String,
+    pub title: String,
+    pub is_tab: bool,
+    pub reason: String,
+}
+
 /// Responsibility: Hold the blocks in force, as saved to disk so that logging
 /// out and back in (which restarts the agent) does not lift them.
 ///
@@ -149,6 +164,8 @@ pub struct MonitorState {
     retry_at: Option<DateTime<Utc>>,
     random_state: u64,
     pub last_error: Option<String>,
+    /// The block made last (cleared when the task changes).
+    pub last_block: Option<NewBlock>,
 }
 
 impl MonitorState {
@@ -262,6 +279,7 @@ impl MonitorState {
                 title: foreground.title.clone(),
             };
             if is_browser {
+                self.note_block(now, &target, &foreground, true, &entry);
                 self.blocked_tabs.insert(target, entry);
                 minimize = !window.minimized;
                 action = if minimize {
@@ -275,6 +293,7 @@ impl MonitorState {
                 *strikes += 1;
                 if *strikes >= needed {
                     self.strikes.remove(&target);
+                    self.note_block(now, &target, &foreground, false, &entry);
                     self.blocked_processes.insert(target, entry);
                     action = "blocked".into();
                 } else {
@@ -430,6 +449,26 @@ impl MonitorState {
     }
 
     /// Remember which channel a YouTube page belongs to.
+    /// Remember a block just made, for the Focus app's prompt.
+    fn note_block(
+        &mut self,
+        now: DateTime<Utc>,
+        key: &str,
+        foreground: &Foreground,
+        is_tab: bool,
+        entry: &BlockedEntry,
+    ) {
+        self.last_block = Some(NewBlock {
+            id: entry.id.clone(),
+            at: now,
+            key: key.to_string(),
+            process_name: foreground.process_name.clone(),
+            title: foreground.title.clone(),
+            is_tab,
+            reason: entry.reason.clone(),
+        });
+    }
+
     fn learn_channel(&mut self, foreground: &Foreground, channel: &str) {
         if !youtube::is_youtube(&foreground.title) {
             return;
@@ -485,14 +524,13 @@ impl MonitorState {
             // verdicts leaves the user a whole check interval of distraction.
             if judgement.verdict == Verdict::OffTask {
                 let id = self.new_block_id(now);
-                self.blocked_tabs.insert(
-                    target,
-                    BlockedEntry {
-                        id,
-                        reason: judgement.reason.clone(),
-                        title: foreground.title.clone(),
-                    },
-                );
+                let entry = BlockedEntry {
+                    id,
+                    reason: judgement.reason.clone(),
+                    title: foreground.title.clone(),
+                };
+                self.note_block(now, &target, foreground, true, &entry);
+                self.blocked_tabs.insert(target, entry);
                 action = Action::CloseTab;
                 action_label = "tab closed".into();
             }
@@ -516,14 +554,13 @@ impl MonitorState {
                     if *strikes >= needed {
                         self.strikes.remove(&key);
                         let id = self.new_block_id(now);
-                        self.blocked_processes.insert(
-                            target.clone(),
-                            BlockedEntry {
-                                id,
-                                reason: judgement.reason.clone(),
-                                title: foreground.title.clone(),
-                            },
-                        );
+                        let entry = BlockedEntry {
+                            id,
+                            reason: judgement.reason.clone(),
+                            title: foreground.title.clone(),
+                        };
+                        self.note_block(now, &target, foreground, false, &entry);
+                        self.blocked_processes.insert(target.clone(), entry);
                         action = Action::BlockProcess(target);
                         action_label = "blocked".into();
                     } else {
@@ -1819,6 +1856,10 @@ mod tests {
         fixture.monitor.step(start_time);
         assert_eq!(fixture.tabs_closed.load(Ordering::SeqCst), 1);
         assert!(fixture.monitor.state().blocked_processes.is_empty());
+        // The Focus app is told, to ask the user what to do about it.
+        let last_block = fixture.monitor.state().last_block.clone().unwrap();
+        assert!(last_block.is_tab);
+        assert_eq!(last_block.title, "Funny cats - YouTube");
         // Reopened: closed on the next sample without asking the judge.
         fixture
             .monitor
