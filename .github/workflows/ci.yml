@@ -130,6 +130,58 @@ jobs:
           cargo test --release --locked -p digital-wellbeing-service --test e2e_windows -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw "end-to-end test failed" }
 
+      # Multi-device sync (docs/sync.md): the sync server installed as its own service, this
+      # PC paired with it, and the installed service's sync loop filling the server.
+      - name: Sync server and a paired device
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "target\release\digital-wellbeing-service.exe"
+          $port = 47821
+          & $exe sync-server-setup --port $port
+          if ($LASTEXITCODE -ne 0) { throw "sync-server-setup failed ($LASTEXITCODE)" }
+          $svc = Get-Service DigitalWellbeingSync
+          if ($svc.Status -ne "Running") { throw "the sync server is $($svc.Status)" }
+          if ($svc.StartType -ne "Automatic") { throw "the sync server starts $($svc.StartType)" }
+          $serverData = "C:\ProgramData\DigitalWellbeingSync"
+          $folder = (Get-Acl $serverData).AccessToString
+          Write-Host $folder
+          if ($folder -match "Users|Everyone|Authenticated") { throw "standard users can reach $serverData" }
+          if (-not (Test-Path "C:\Program Files\DigitalWellbeingSync\digital-wellbeing-service.exe")) {
+            throw "the server program was not copied"
+          }
+
+          $out = & $exe sync-add-device ci-runner
+          if ($LASTEXITCODE -ne 0) { throw "sync-add-device failed ($LASTEXITCODE)" }
+          $code = (($out | Select-String "sync-join").Line.Trim() -split "\s+")[-1]
+          & $exe sync-join "http://127.0.0.1:$port" $code
+          if ($LASTEXITCODE -ne 0) { throw "sync-join failed ($LASTEXITCODE)" }
+
+          # The installed service syncs every 20 seconds.
+          $deadline = (Get-Date).AddSeconds(90)
+          while (-not (Test-Path "$serverData\documents\planner.json")) {
+            if ((Get-Date) -gt $deadline) {
+              & $exe sync-status
+              throw "the service did not sync this PC to the server"
+            }
+            Start-Sleep -Seconds 3
+          }
+          $status = & $exe sync-status | Out-String
+          Write-Host $status
+          if ($status -match "last sync: never") { throw "sync-status shows no sync" }
+          $devices = & $exe sync-devices | Out-String
+          Write-Host $devices
+          if ($devices -notmatch "ci-runner") { throw "the device is not listed" }
+
+          & $exe sync-leave
+          if ($LASTEXITCODE -ne 0) { throw "sync-leave failed ($LASTEXITCODE)" }
+          sc.exe stop DigitalWellbeingSync | Out-Null
+          Start-Sleep -Seconds 2
+          sc.exe delete DigitalWellbeingSync | Out-Null
+          netsh advfirewall firewall delete rule name="Digital Wellbeing Sync" | Out-Null
+          exit 0
+
       - name: Service and agent logs
         if: always()
         shell: pwsh
