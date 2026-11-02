@@ -144,6 +144,52 @@ pub struct Status {
     /// ones, AI blocks and the lockdown alike, windowless background programs included.
     #[serde(default)]
     pub recent_kills: Vec<enforcer::BlockEvent>,
+    /// Multi-device sync of this PC (`None`: it does not sync). See `docs/sync.md`.
+    #[serde(default)]
+    pub sync: Option<SyncStatus>,
+}
+
+/// Responsibility: Tell the Focus app how this PC's sync went.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncStatus {
+    pub server_url: String,
+    pub device_id: String,
+    pub last_success: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    /// Changes the server refused (e.g. turning the protection off), with the reason.
+    pub refused: Vec<String>,
+}
+
+/// Read from `sync.json` and `sync_state.json` (written by the service).
+pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
+    let read = |name: &str| -> Option<Value> {
+        serde_json::from_str(&std::fs::read_to_string(data_directory.join(name)).ok()?).ok()
+    };
+    let config = read("sync.json")?;
+    let state = read("sync_state.json").unwrap_or(Value::Null);
+    let text = |value: &Value| value.as_str().map(str::to_string);
+    Some(SyncStatus {
+        server_url: text(&config["server_url"]).unwrap_or_default(),
+        device_id: text(&config["device_id"]).unwrap_or_default(),
+        last_success: serde_json::from_value(state["last_success"].clone()).ok().flatten(),
+        last_error: text(&state["last_error"]),
+        refused: state["refused"]
+            .as_array()
+            .map(|refusals| {
+                refusals
+                    .iter()
+                    .map(|refusal| {
+                        format!(
+                            "{} ({})",
+                            refusal["name"].as_str().unwrap_or_default(),
+                            refusal["reason"].as_str().unwrap_or_default()
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
 }
 
 /// Responsibility: Hold what the agent exposes (focus monitor, optional planner) and tell
@@ -209,6 +255,7 @@ fn status(api: &AgentApi) -> Status {
             .as_ref()
             .map(|enforcer| enforcer.recent_blocks(30))
             .unwrap_or_default(),
+        sync: sync_status(&crate::data_dir()),
     }
 }
 

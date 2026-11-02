@@ -17,10 +17,65 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::{define_windows_service, service_dispatcher};
 
 pub const SERVICE_NAME: &str = "DigitalWellbeing";
+/// The sync server's service (`sync-server-setup`), on the computer that is the server.
+pub const SYNC_SERVICE_NAME: &str = "DigitalWellbeingSync";
 /// How often sessions are re-scanned and dead agents restarted.
 const TICK: Duration = Duration::from_secs(2);
 
 define_windows_service!(ffi_service_main, service_main);
+define_windows_service!(ffi_sync_service_main, sync_service_main);
+
+/// Entry point when the SCM starts the sync server (`sync-service --port N`).
+pub fn run_sync_dispatcher() -> anyhow::Result<()> {
+    service_dispatcher::start(SYNC_SERVICE_NAME, ffi_sync_service_main)?;
+    Ok(())
+}
+
+fn sync_service_main(_arguments: Vec<OsString>) {
+    crate::init_logging("sync_server.log");
+    let arguments: Vec<String> = std::env::args().collect();
+    let port = arguments
+        .iter()
+        .position(|argument| argument == "--port")
+        .and_then(|index| arguments.get(index + 1))
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(crate::sync_commands::DEFAULT_PORT);
+    if let Err(error) = run_sync_service(port) {
+        error!("sync server failed: {error:#}");
+    }
+}
+
+fn run_sync_service(port: u16) -> anyhow::Result<()> {
+    let (stop_sender, stop_receiver) = mpsc::channel();
+    let handler = move |control| match control {
+        ServiceControl::Stop | ServiceControl::Shutdown => {
+            let _ = stop_sender.send(());
+            ServiceControlHandlerResult::NoError
+        }
+        ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+        _ => ServiceControlHandlerResult::NotImplemented,
+    };
+    let status = service_control_handler::register(SYNC_SERVICE_NAME, handler)?;
+    let report = |state, accept| ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: state,
+        controls_accepted: accept,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    };
+    status.set_service_status(report(
+        ServiceState::Running,
+        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+    ))?;
+    info!("sync server running on port {port}");
+    thread::spawn(move || crate::sync_commands::serve_forever(port));
+    let _ = stop_receiver.recv();
+    info!("sync server stopped");
+    status.set_service_status(report(ServiceState::Stopped, ServiceControlAccept::empty()))?;
+    Ok(())
+}
 
 /// Entry point when the SCM starts us with `run`.
 pub fn run_dispatcher() -> anyhow::Result<()> {
@@ -65,6 +120,8 @@ fn run_service() -> anyhow::Result<()> {
 
     thread::spawn(|| care_loop(CareJob::TimeZone));
     thread::spawn(|| care_loop(CareJob::Updates));
+    // Other devices' changes in, this device's out (only after `sync-join`).
+    thread::spawn(|| crate::sync_commands::sync_loop(machine::data_dir()));
     let mut supervisor = Supervisor::new(std::env::current_exe()?);
     loop {
         supervisor.tick();

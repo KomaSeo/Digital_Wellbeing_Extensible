@@ -340,7 +340,13 @@ impl SettingsTab {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, protected: bool, lockdown: Option<&Lockdown>) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        protected: bool,
+        lockdown: Option<&Lockdown>,
+        sync: Option<&machine::user_api::SyncStatus>,
+    ) {
         self.fix_now = lockdown
             .map(|lockdown| lockdown.fix_now.clone())
             .unwrap_or_default();
@@ -367,6 +373,7 @@ impl SettingsTab {
         } else {
             self.protect_ui(ui);
         }
+        sync_ui(ui, sync);
         if self.reservations_ui(ui) {
             // Answered or withdrawn: the drafts are rebased on what is now true.
             self.fetched_at = None;
@@ -1941,4 +1948,36 @@ fn local(time: DateTime<Utc>) -> String {
     time.with_timezone(&Local)
         .format("%Y-%m-%d %H:%M")
         .to_string()
+}
+
+/// Whether this PC syncs with other devices, and how the last sync went (`docs/sync.md`).
+/// Joining and leaving are administrator commands, so there are no buttons here.
+fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
+    ui.separator();
+    ui.heading("기기 동기화");
+    let Some(sync) = sync else {
+        ui.weak(
+            "이 PC는 다른 기기와 동기화하지 않습니다. 동기화를 켜려면 관리자가 \
+             \"digital-wellbeing-service sync-join\" 명령을 실행해야 합니다(도움말의 \"여러 기기 \
+             동기화\"를 보세요).",
+        );
+        return;
+    };
+    ui.label(format!(
+        "이 PC는 \"{}\"라는 이름으로 {} 서버와 동기화합니다.",
+        sync.device_id, sync.server_url
+    ));
+    match sync.last_success {
+        Some(time) => ui.label(format!(
+            "마지막 동기화: {}",
+            time.with_timezone(&chrono::Local).format("%m월 %d일 %H:%M:%S")
+        )),
+        None => ui.label("아직 한 번도 동기화하지 못했습니다."),
+    };
+    if let Some(error) = &sync.last_error {
+        ui.colored_label(RED, format!("마지막 동기화가 실패했습니다: {error}"));
+    }
+    for refusal in &sync.refused {
+        ui.colored_label(YELLOW, format!("서버가 받아들이지 않은 변경: {refusal}"));
+    }
 }

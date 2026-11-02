@@ -658,6 +658,7 @@ impl eframe::App for FocusApp {
                         ui,
                         status.settings_protected,
                         status.lockdown.as_ref(),
+                        status.sync.as_ref(),
                     ),
                     Tab::Statistics => self.statistics_tab(ui, &status),
                     Tab::Help => {

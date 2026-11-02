@@ -153,7 +153,8 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         }
     });
 
-    thread::spawn(move || reload_loop(list_store, ai_store, planner_config));
+    let grants = monitor.grants().clone();
+    thread::spawn(move || reload_loop(list_store, ai_store, planner_config, grants));
 
     enforce.join().ok();
     Ok(())
@@ -250,6 +251,7 @@ fn reload_loop(
     list_store: ListStore,
     ai_store: AiFocusStore,
     planner_config: JsonStore<PlannerConfig>,
+    grants: JsonStore<GrantState>,
 ) {
     let policy_path = machine::policy_path();
     let ai_focus_path = machine::ai_focus_path();
@@ -284,6 +286,14 @@ fn reload_loop(
                     seen.1 = now.1;
                 }
                 Err(error) => warn!("reload {}: {error}; retrying", ai_focus_path.display()),
+            }
+        }
+        // Grants another device gave (taken in by sync); the planner state and the blocks
+        // take theirs in on their own (`TaskPlanner::resume`, `FocusMonitor::save_blocks`).
+        if grants.changed_on_disk() {
+            match grants.reload() {
+                Ok(()) => info!("took in changed grants"),
+                Err(error) => warn!("reload grants: {error}; retrying"),
             }
         }
         if now.2 != seen.2 {

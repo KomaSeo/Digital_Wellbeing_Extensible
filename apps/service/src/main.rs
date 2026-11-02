@@ -11,6 +11,7 @@
 //! | `uninstall` | an administrator                | stop + remove the service                      |
 //! | `run`       | the Service Control Manager     | supervisor: keep one agent per managed session |
 //! | `agent`     | the supervisor (as SYSTEM)      | enforce rules inside one user's session        |
+//! | `sync-…`    | an administrator / the SCM      | multi-device sync (see `sync_commands`)        |
 //!
 //! See `docs/multi_account.md` for the full picture.
 
@@ -21,6 +22,7 @@ mod install;
 mod service;
 #[cfg(windows)]
 mod spawn;
+mod sync_commands;
 
 use std::fs::{self, OpenOptions};
 use std::sync::Mutex;
@@ -44,11 +46,17 @@ fn main() -> anyhow::Result<()> {
         Some("uninstall") => install::uninstall(),
         #[cfg(windows)]
         Some("run") => service::run_dispatcher(),
+        Some(command) if command.starts_with("sync-") => {
+            sync_commands::run_command(command, &arguments[1..]).unwrap_or_else(|| {
+                anyhow::bail!("unknown command '{command}' (see docs/sync.md)")
+            })
+        }
         _ => {
             eprintln!(
                 "usage (from an administrator terminal):\n  \
                  digital-wellbeing-service install [--manage <windows user>]... | [--manage-all]\n  \
-                 digital-wellbeing-service uninstall"
+                 digital-wellbeing-service uninstall\n  \
+                 digital-wellbeing-service sync-… (multi-device sync, see docs/sync.md)"
             );
             Ok(())
         }

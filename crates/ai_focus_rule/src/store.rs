@@ -15,6 +15,11 @@ use tracing::warn;
 ///
 /// `writable = false` means this process only reads the file (the agent reading
 /// the admin's `planner.json`); `update` then changes memory only.
+///
+/// Another process may write the file too (another session's agent, or the service taking in
+/// a sync). The store remembers the file's size and time as it last read or wrote it: an
+/// [`Self::update`] after such a write first reads the file again and changes that, so the
+/// other write is kept; [`Self::reload_if_changed`] takes it in without a change.
 pub struct JsonStore<T> {
     path: Option<PathBuf>,
     writable: bool,
@@ -22,6 +27,15 @@ pub struct JsonStore<T> {
     /// Held for a whole update (change, save, commit), so two threads cannot
     /// save out of order. Readers are not blocked while the file is written.
     writer: Arc<Mutex<()>>,
+    /// The file's (modified time, length) when this store last read or wrote it.
+    seen: Arc<Mutex<Option<FileSignature>>>,
+}
+
+type FileSignature = (std::time::SystemTime, u64);
+
+fn signature(path: &Path) -> Option<FileSignature> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
 }
 
 impl<T> Clone for JsonStore<T> {
@@ -31,6 +45,7 @@ impl<T> Clone for JsonStore<T> {
             writable: self.writable,
             inner: Arc::clone(&self.inner),
             writer: Arc::clone(&self.writer),
+            seen: Arc::clone(&self.seen),
         }
     }
 }
@@ -40,6 +55,7 @@ impl<T: Clone + Default + Serialize + DeserializeOwned> JsonStore<T> {
     /// moved to `<name>.corrupt` and the default is used, so one damaged file
     /// never stops the program from starting.
     pub fn open(path: PathBuf, writable: bool) -> io::Result<Self> {
+        let seen = signature(&path);
         let value = match read(&path) {
             Ok(value) => value.unwrap_or_default(),
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
@@ -57,6 +73,7 @@ impl<T: Clone + Default + Serialize + DeserializeOwned> JsonStore<T> {
             Err(error) => return Err(error),
         };
         Ok(Self {
+            seen: Arc::new(Mutex::new(signature(&path).or(seen))),
             path: Some(path),
             writable,
             inner: Arc::new(RwLock::new(value)),
@@ -70,6 +87,7 @@ impl<T: Clone + Default + Serialize + DeserializeOwned> JsonStore<T> {
             writable: false,
             inner: Arc::new(RwLock::new(value)),
             writer: Arc::new(Mutex::new(())),
+            seen: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -85,21 +103,51 @@ impl<T: Clone + Default + Serialize + DeserializeOwned> JsonStore<T> {
     /// fails, memory is unchanged, so memory and file never disagree.
     pub fn update<R>(&self, change: impl FnOnce(&mut T) -> R) -> io::Result<R> {
         let _writer = self.writer.lock();
+        // Written by another process since: change its version, not the stale one.
+        if self.writable && self.changed_on_disk() {
+            if let Err(error) = self.reload() {
+                warn!("could not read the changed file before saving: {error}");
+            }
+        }
         let mut next = self.get();
         let result = change(&mut next);
         if let Some(path) = self.path.as_ref().filter(|_| self.writable) {
             write(path, &next)?;
+            *self.seen.lock() = signature(path);
         }
         *self.inner.write() = next;
         Ok(result)
+    }
+
+    /// Has another process written the file since this store last read or wrote it?
+    pub fn changed_on_disk(&self) -> bool {
+        match &self.path {
+            Some(path) => signature(path) != *self.seen.lock(),
+            None => false,
+        }
+    }
+
+    /// Read the file again if another process wrote it; `true` when memory changed.
+    pub fn reload_if_changed(&self) -> io::Result<bool>
+    where
+        T: PartialEq,
+    {
+        if !self.changed_on_disk() {
+            return Ok(false);
+        }
+        let before = self.get();
+        self.reload()?;
+        Ok(self.get() != before)
     }
 
     /// Replace memory with the file's current contents. On error (e.g. the
     /// file is being written in place), memory keeps the last good value.
     pub fn reload(&self) -> io::Result<()> {
         if let Some(path) = &self.path {
+            let seen = signature(path);
             let value = read(path)?.unwrap_or_default();
             *self.inner.write() = value;
+            *self.seen.lock() = seen;
         }
         Ok(())
     }
@@ -164,6 +212,25 @@ mod tests {
     }
 
     #[test]
+    fn a_write_by_another_process_is_kept() {
+        let directory = temp_dir("outside");
+        let path = directory.join("state.json");
+        let store = JsonStore::<Counter>::open(path.clone(), true).unwrap();
+        store.update(|counter| counter.n = 1).unwrap();
+        assert!(!store.changed_on_disk());
+        // Another process (a sync) writes 10; the length differs, so it is noticed at once.
+        fs::write(&path, "{ \"n\": 10 }").unwrap();
+        assert!(store.changed_on_disk());
+        store.update(|counter| counter.n += 1).unwrap();
+        assert_eq!(store.get().n, 11);
+        fs::write(&path, "{ \"n\": 20 }").unwrap();
+        assert!(store.reload_if_changed().unwrap());
+        assert_eq!(store.get().n, 20);
+        assert!(!store.reload_if_changed().unwrap());
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
     fn corrupt_file_is_moved_aside() {
         let directory = temp_dir("corrupt");
         let path = directory.join("state.json");
@@ -187,6 +254,7 @@ mod tests {
             writable: true,
             inner: Arc::new(RwLock::new(Counter::default())),
             writer: Arc::new(Mutex::new(())),
+            seen: Arc::new(Mutex::new(None)),
         };
         assert!(store.update(|counter| counter.n = 7).is_err());
         assert_eq!(store.get().n, 0);

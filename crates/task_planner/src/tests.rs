@@ -188,6 +188,10 @@ fn todo(id: &str) -> TodoItem {
 }
 
 fn harness(enabled: bool, ids: &[&str]) -> Harness {
+    harness_with_state(enabled, ids, JsonStore::in_memory(PlannerState::default()))
+}
+
+fn harness_with_state(enabled: bool, ids: &[&str], state: JsonStore<PlannerState>) -> Harness {
     let focus = Arc::new(FocusMonitor::new(
         AiFocusStore::in_memory(AiFocusConfig::default()),
         platform::native(),
@@ -218,7 +222,7 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
             todos: ids.iter().map(|id| todo(id)).collect(),
             ..Default::default()
         }),
-        JsonStore::in_memory(PlannerState::default()),
+        state,
         Arc::clone(&focus),
         Arc::new(move |_| Ok(Arc::clone(&provided) as Arc<dyn Advisor>)),
     );
@@ -227,6 +231,32 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
         focus,
         advisor,
     }
+}
+
+#[test]
+fn the_focus_follows_an_assignment_another_device_made() {
+    // Two devices whose planner_state.json sync keeps the same (here: one file).
+    let folder = std::env::temp_dir().join(format!("dw_planner_follow_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    let path = folder.join("planner_state.json");
+    let laptop = harness_with_state(true, &["a", "b"], JsonStore::open(path.clone(), true).unwrap());
+    let desktop = harness_with_state(true, &["a", "b"], JsonStore::open(path.clone(), true).unwrap());
+
+    laptop.planner.assign(Utc::now()).unwrap();
+    assert!(!desktop.focus.store().get().session_active);
+    desktop.planner.resume(Utc::now()).unwrap();
+    let focus = desktop.focus.store().get();
+    assert!(focus.session_active);
+    assert_eq!(focus.task, "work on a");
+    assert_eq!(focus.task_scope, "a");
+    assert_eq!(desktop.advisor.picks.load(Ordering::SeqCst), 0);
+
+    // "사용 중지" on one device stops the other too.
+    laptop.planner.stop_use(Utc::now()).unwrap();
+    desktop.planner.resume(Utc::now()).unwrap();
+    assert!(desktop.planner.stopped());
+    assert!(!desktop.focus.store().get().session_active);
+    let _ = std::fs::remove_dir_all(&folder);
 }
 
 #[test]

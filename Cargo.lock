@@ -1009,6 +1009,7 @@ dependencies = [
  "list_based_rule",
  "machine",
  "serde_json",
+ "sync",
  "task_planner",
  "tracing",
  "tracing-subscriber",

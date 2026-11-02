@@ -145,6 +145,8 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
     usage\<사용자>.json   그 사용자의 Claude 호출 토큰 수와 예상 비용(날짜·용도별). 그 사용자의 agent가 씁니다. (docs/ai_focus_rule.md 5.10절)
     settings_protection.json    설정을 보호한 시각. 이 파일이 있으면 설정이 보호된 것입니다. (6.4절)
     settings_reservations.json  예약된 업데이트, 각 업데이트에 받은 "예" 답, 지난 업데이트의 결과 기록. (6.4절)
+    usage\<기기>~<사용자>.json  동기화로 받은 다른 기기의 AI 사용량. 통계와 하루 예산이 이것까지 더합니다. (docs/sync.md)
+    sync.json, sync_state.json, sync_base\   여러 기기 동기화의 서버 주소와 이 기기의 열쇠, 마지막 동기화 기록, 병합의 기준본. 서비스가 씁니다. (docs/sync.md)
     logs\service.log, logs\agent-session<번호>.log   실행 기록
 ```
 

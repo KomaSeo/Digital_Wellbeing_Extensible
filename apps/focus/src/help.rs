@@ -40,6 +40,9 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
     egui::CollapsingHeader::new("모든 앱이 잠겼을 때 (AI 연결이 끊겼을 때)")
         .default_open(false)
         .show(ui, lockdown_guide);
+    egui::CollapsingHeader::new("여러 기기 동기화 (서버 설치와 기기 짝짓기)")
+        .default_open(false)
+        .show(ui, sync_guide);
     egui::CollapsingHeader::new("카카오톡처럼 관리자 권한이 필요한 프로그램 업데이트하기")
         .default_open(false)
         .show(ui, updates_guide);
@@ -467,6 +470,43 @@ fn claude_desktop_guide(ui: &mut egui::Ui) {
          연결해도 차단을 피할 새 길은 생기지 않습니다. 이 프로그램의 AI가 요청을 거절하면, Claude는 그 \
          이유를 전하고 말을 바꿔 다시 요청하지 않습니다. 자세한 설명은 설치 폴더의 \
          docs\\claude_desktop.md에 있습니다.",
+    );
+}
+
+/// Multi-device sync in short; `docs/sync.md` has every step.
+fn sync_guide(ui: &mut egui::Ui) {
+    paragraph(
+        ui,
+        "동기화는 여러 PC가 같은 설정, 같은 할 일 목록, 같은 지금 할 일을 쓰게 합니다. 동기화 서버는 모든 \
+         PC가 공유하는 파일을 보관하는 프로그램이고, 서버가 도는 PC를 서버 PC라고 부릅니다. 서버 PC는 \
+         기기 중 한 대여도 됩니다. 각 PC의 서비스는 20초마다 서버와 바뀐 것을 주고받습니다. AI 사용량은 PC마다 \
+         따로 기록되고, 통계 탭은 모든 PC의 합계를 보여 줍니다.",
+    );
+    paragraph(
+        ui,
+        "1. 서버 PC에서 관리자 터미널(관리자 권한으로 연 명령 창)을 열고 \
+         \"C:\\Program Files\\DigitalWellbeing\\digital-wellbeing-service.exe\" sync-server-setup 을 \
+         실행합니다. 이 명령은 서버를 Windows 서비스로 설치하고, 서버의 폴더를 관리자만 열 수 있게 잠그고, \
+         방화벽에서 47820번 포트를 엽니다.",
+    );
+    paragraph(
+        ui,
+        "2. 서버 PC의 관리자 터미널에서 \
+         \"C:\\Program Files\\DigitalWellbeingSync\\digital-wellbeing-service.exe\" sync-add-device laptop \
+         처럼 PC 하나를 더합니다. 명령은 짝 코드(그 PC만 쓰는 비밀 열쇠)가 들어간 sync-join 명령 한 줄을 \
+         한 번만 보여 줍니다.",
+    );
+    paragraph(
+        ui,
+        "3. 그 PC의 관리자 터미널에서 그 sync-join 줄을 실행합니다. 서버 주소에는 서버 PC의 IP 주소(서버 \
+         PC에서 ipconfig로 봅니다)를 넣습니다. 처음 짝지은 PC의 설정이 서버로 올라가고, 그 뒤에 짝지은 PC는 \
+         서버의 설정을 받습니다. 그러니 가장 잘 설정해 둔 PC를 먼저 짝짓습니다.",
+    );
+    paragraph(
+        ui,
+        "서버의 파일과 각 PC의 열쇠는 관리자만 열 수 있는 폴더에 있으므로, 관리자 비밀번호가 없으면 서버의 \
+         내용을 바꿀 수 없습니다. 설정 보호가 한 번 켜지면 서버는 보호를 끄는 변경을 받지 않습니다. 집 밖의 \
+         PC를 동기화하는 방법, 리눅스 서버, 그 밖의 명령은 설치 폴더의 docs\\sync.md에 있습니다.",
     );
 }
 
