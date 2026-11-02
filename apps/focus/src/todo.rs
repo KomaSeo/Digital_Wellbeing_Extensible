@@ -653,6 +653,10 @@ impl FocusApp {
                         ui.colored_label(color, label);
                         ui.label(&decision.reply);
                     });
+                    // What the AI changed in the list with it.
+                    for line in &decision.list_summary {
+                        ui.small(format!("할 일 목록: {line}"));
+                    }
                 }
             });
     }

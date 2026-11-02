@@ -41,7 +41,8 @@ break now). To-dos marked \
 life rules; weigh them like any other. To-dos marked \"repeat\": true are routines \
 (sleep, getting ready, exercise, meals) that stay on the list after they are done: \
 use the recently finished list, the time of day and the life rules to judge whether \
-one is due now.
+one is due now. Respect dates in the notes such as \"not before YYYY-MM-DD\": never \
+pick a to-do before its date.
 
 You also get the user's upcoming appointments. They are fixed: at an appointment's \
 start the app replaces whatever task is running with it, and the session you assign \
@@ -199,6 +200,15 @@ the other people still needing the user, or a delay outside the user's control \
 (transport). Reject extensions that only postpone work. When approving, you may set \
 `minutes` lower than asked if the reason needs less.
 
+When you approve and the user's reason or proof says the to-do list should change, \
+put those changes in `list_changes`: a follow-up to-do (\"I read the mail, reply in \
+two days\" adds \"Reply to the mail\" with notes \"Not before YYYY-MM-DD\", the date \
+worked out from now), a corrected title or notes, steps done or new steps for a \
+to-do (set_notes, with the whole list of steps), or a to-do that turned out to be \
+unnecessary. Only what the user said or plainly implies; never touch other \
+to-dos. Write in the language of the to-dos. The finished to-do itself leaves the \
+list by \"done\"; do not remove it again. Leave `list_changes` empty otherwise.
+
 Reject vague or avoidant reasons (bored, not in the mood, just for a minute), \
 reasons the activity log contradicts, and requests that repeat ones already \
 rejected without new information.
@@ -284,8 +294,29 @@ pub struct Pick {
     pub away_from_computer: bool,
 }
 
+/// Responsibility: Hold one change to the to-do list the AI makes with a change request.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ListChange {
+    /// "add", "edit", "remove" or "set_notes" (the to-do's working notes and steps).
+    pub action: String,
+    /// The to-do (empty for "add").
+    pub todo_id: String,
+    pub title: String,
+    pub notes: String,
+    /// `YYYY-MM-DD` or empty.
+    pub deadline: String,
+    /// 1..=5; 0 = leave it.
+    pub priority: u8,
+    /// 0 = leave it.
+    pub estimate_minutes: u32,
+    /// For "set_notes": the working notes and the steps.
+    pub working_notes: String,
+    pub steps: Vec<String>,
+}
+
 /// Responsibility: Hold the AI's decision on a change request or a proposal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Review {
     pub approved: bool,
     pub reply: String,
@@ -295,6 +326,9 @@ pub struct Review {
     /// For "done": "decisive", "open_ended" or "not_applicable".
     #[serde(default)]
     pub outcome: String,
+    /// Changes to the to-do list the user's request calls for (applied when approved).
+    #[serde(default)]
+    pub list_changes: Vec<ListChange>,
 }
 
 /// Responsibility: Carry what the AI sees when picking a to-do.
@@ -814,9 +848,29 @@ fn change_review_schema() -> Value {
                 "type": "string",
                 "enum": ["decisive", "open_ended", "not_applicable"],
                 "description": "for done: whether the to-do has a clear, provable result or can always be done better"
+            },
+            "list_changes": {
+                "type": "array",
+                "description": "Changes to the to-do list the user's request calls for; empty when none",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["add", "edit", "remove", "set_notes"] },
+                        "todo_id": { "type": "string", "description": "the to-do's id; empty for add" },
+                        "title": { "type": "string", "description": "add: required; edit: empty keeps it" },
+                        "notes": { "type": "string", "description": "add/edit: what done means, and dates such as 'not before YYYY-MM-DD'; empty keeps it" },
+                        "deadline": { "type": "string", "description": "YYYY-MM-DD or empty" },
+                        "priority": { "type": "integer", "description": "1 (low) to 5 (urgent); 0 keeps it" },
+                        "estimate_minutes": { "type": "integer", "description": "0 keeps it" },
+                        "working_notes": { "type": "string", "description": "set_notes: the to-do's working notes" },
+                        "steps": { "type": "array", "items": { "type": "string" }, "description": "set_notes: the to-do's steps, in order" }
+                    },
+                    "required": ["action", "todo_id", "title", "notes", "deadline", "priority", "estimate_minutes", "working_notes", "steps"],
+                    "additionalProperties": false
+                }
             }
         },
-        "required": ["approved", "reply", "minutes", "outcome"],
+        "required": ["approved", "reply", "minutes", "outcome", "list_changes"],
         "additionalProperties": false
     })
 }

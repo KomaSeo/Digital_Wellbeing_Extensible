@@ -475,6 +475,19 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let record = planner
                 .request_change(Utc::now(), request, reason, evidence)
                 .map_err(|error| error.to_string())?;
+            // The list changes the AI made with an approved request: in force at once, like
+            // an approved to-do change.
+            if record.approved && !record.list_writes.is_empty() {
+                crate::settings::apply_now(
+                    &data_directory,
+                    "planner",
+                    &todo_list_edits(&record.list_writes),
+                )?;
+                planner
+                    .config_store()
+                    .reload()
+                    .map_err(|error| error.to_string())?;
+            }
             last_decision = Some(record);
         }
         "request_access" => {

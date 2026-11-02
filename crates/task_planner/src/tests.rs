@@ -35,6 +35,8 @@ struct FakeAdvisor {
     saw_appointments: parking_lot::Mutex<Vec<String>>,
     /// The current assignment as the last change review saw it.
     saw_current_away: AtomicBool,
+    /// The list changes the next change review makes.
+    list_changes: parking_lot::Mutex<Vec<ListChange>>,
 }
 
 impl Advisor for FakeAdvisor {
@@ -161,6 +163,7 @@ impl Advisor for FakeAdvisor {
             reply: if approved { "ok" } else { "no" }.into(),
             minutes: 30,
             outcome: self.outcome.lock().clone(),
+            list_changes: self.list_changes.lock().clone(),
         })
     }
 }
@@ -201,6 +204,7 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
         saw_appointment_rules: parking_lot::Mutex::new(String::new()),
         saw_appointments: parking_lot::Mutex::new(Vec::new()),
         saw_current_away: AtomicBool::new(false),
+        list_changes: parking_lot::Mutex::new(Vec::new()),
     });
     let provided = Arc::clone(&advisor);
     let planner = TaskPlanner::new(
@@ -1711,4 +1715,71 @@ fn extending_a_task_uses_its_own_instruction_and_moves_the_end() {
             .check_change(late, &ChangeKind::Extend { minutes: 1 }, "just a bit"),
         Err(PlannerError::BadTaskExtension)
     ));
+}
+
+#[test]
+fn an_approved_done_can_add_a_follow_up_and_set_steps() {
+    let fixture = harness(true, &["mail", "b"]);
+    let now = Utc::now();
+    fixture.planner.assign(now).unwrap();
+    *fixture.advisor.list_changes.lock() = vec![
+        ListChange {
+            action: "add".into(),
+            title: "Reply to the mail".into(),
+            notes: "Not before 2030-01-03".into(),
+            ..Default::default()
+        },
+        ListChange {
+            action: "set_notes".into(),
+            todo_id: "b".into(),
+            working_notes: "started".into(),
+            steps: vec!["outline".into(), "draft".into()],
+            ..Default::default()
+        },
+        // Dropped: names no open to-do, or repeats a title.
+        ListChange {
+            action: "remove".into(),
+            todo_id: "nope".into(),
+            ..Default::default()
+        },
+        ListChange {
+            action: "add".into(),
+            title: "title b".into(),
+            ..Default::default()
+        },
+    ];
+    let record = fixture
+        .planner
+        .request_change(
+            now,
+            ChangeKind::Done,
+            "read the mail, reply in two days",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert!(record.approved);
+    assert_eq!(
+        record.list_summary,
+        ["추가: Reply to the mail", "메모와 단계: title b"]
+    );
+    assert_eq!(record.list_writes.len(), 1);
+    apply_writes(&fixture, record.list_writes.clone());
+    assert!(fixture
+        .planner
+        .open_todos()
+        .iter()
+        .any(|todo| todo.title == "Reply to the mail" && todo.notes.contains("2030-01-03")));
+    assert_eq!(
+        fixture.planner.status().task_notes["b"].steps.len(),
+        2,
+        "the steps were set"
+    );
+    // A rejected request changes nothing in the list.
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    fixture.planner.assign(now).unwrap();
+    let rejected = fixture
+        .planner
+        .request_change(now, ChangeKind::Repick, "bored of it", Evidence::default())
+        .unwrap();
+    assert!(rejected.list_writes.is_empty());
 }

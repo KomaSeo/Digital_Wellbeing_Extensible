@@ -22,8 +22,8 @@ use crate::advisor::{
 use crate::model::{
     Appointment, Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord,
     DoneRecord, Evidence, ExtensionOffer, PlannerConfig, PlannerState, PlannerStatus, PolishItem,
-    ProposalInput, TaskNotes, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan,
-    WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
+    ProposalInput, TaskNotes, TaskStep, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite,
+    WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -920,8 +920,7 @@ impl TaskPlanner {
                 Review {
                     approved: true,
                     reply: "할 일은 목록에 남습니다. 준비되면 \"할 일 받기\"를 누르세요.".into(),
-                    minutes: 0,
-                    outcome: String::new(),
+                    ..Default::default()
                 },
                 &self.open_todos(),
                 (evidence_text, false),
@@ -1081,7 +1080,24 @@ impl TaskPlanner {
         (evidence, screenshot_attached): (String, bool),
     ) -> Result<ChangeRecord, PlannerError> {
         let state = self.state.get();
+        // The list changes the AI made with an approved request (applied by the agent).
+        let (list_writes, list_summary, notes_updates) = if review.approved {
+            self.list_change_writes(now, &review.list_changes, open, &state)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+        if !notes_updates.is_empty() {
+            self.state.update(|planner_state| {
+                for (todo_id, notes) in &notes_updates {
+                    planner_state
+                        .task_notes
+                        .insert(todo_id.clone(), notes.clone());
+                }
+            })?;
+        }
         let record = ChangeRecord {
+            list_writes,
+            list_summary,
             evidence,
             screenshot_attached,
             outcome: review.outcome.clone(),
@@ -1116,6 +1132,119 @@ impl TaskPlanner {
             self.apply_change(now, &request, reason, &review, open)?;
         }
         Ok(record)
+    }
+
+    /// Turn the AI's list changes into checked writes to `planner.json` (plus notes and steps
+    /// for `planner_state.json`) and one line each for the user. Changes that name no open
+    /// to-do, an app-made "Improve" to-do, or a title that is empty or already listed are
+    /// dropped; at most a few are kept.
+    fn list_change_writes(
+        &self,
+        now: DateTime<Utc>,
+        changes: &[crate::advisor::ListChange],
+        open: &[TodoItem],
+        state: &PlannerState,
+    ) -> (Vec<TodoListWrite>, Vec<String>, Vec<(String, TaskNotes)>) {
+        const MAX_LIST_CHANGES: usize = 5;
+        let in_settings: Vec<String> = self
+            .config
+            .get()
+            .todos
+            .iter()
+            .map(|todo| todo.id.clone())
+            .collect();
+        let (mut writes, mut summary, mut notes_updates) = (Vec::new(), Vec::new(), Vec::new());
+        let clip = |text: &str, max: usize| text.trim().chars().take(max).collect::<String>();
+        for (index, change) in changes.iter().take(MAX_LIST_CHANGES).enumerate() {
+            let target = open
+                .iter()
+                .find(|todo| todo.id == change.todo_id && !is_polish(&todo.id));
+            let deadline = change.deadline.trim().parse::<NaiveDate>().ok();
+            match (change.action.as_str(), target) {
+                ("add", _) => {
+                    let title = clip(&change.title, MAX_TITLE_CHARS);
+                    let duplicate = open
+                        .iter()
+                        .any(|todo| todo.title.trim().eq_ignore_ascii_case(&title));
+                    if title.chars().count() < 2 || duplicate {
+                        continue;
+                    }
+                    let todo = TodoItem {
+                        id: format!("p{}{index}", now.timestamp_millis()),
+                        notes: clip(&change.notes, MAX_NOTES_CHARS),
+                        deadline,
+                        priority: if change.priority == 0 {
+                            3
+                        } else {
+                            change.priority.clamp(1, 5)
+                        },
+                        estimate_minutes: (change.estimate_minutes > 0)
+                            .then(|| change.estimate_minutes.min(6000)),
+                        proposed: true,
+                        ..TodoItem::new(title.clone())
+                    };
+                    summary.push(format!("추가: {title}"));
+                    writes.push(TodoListWrite::Put(todo));
+                }
+                ("edit", Some(todo)) => {
+                    let draft = ProposalInput {
+                        title: clip(&change.title, MAX_TITLE_CHARS),
+                        notes: clip(&change.notes, MAX_NOTES_CHARS),
+                        deadline,
+                        priority: (change.priority > 0).then_some(change.priority),
+                        estimate_minutes: (change.estimate_minutes > 0)
+                            .then_some(change.estimate_minutes),
+                        ..Default::default()
+                    };
+                    let changed_fields = edited_fields(&draft);
+                    if changed_fields.is_empty() {
+                        continue;
+                    }
+                    let outside_the_file = !in_settings.contains(&todo.id);
+                    if outside_the_file {
+                        writes.push(TodoListWrite::Dismiss(todo.id.clone()));
+                    }
+                    writes.push(TodoListWrite::Merge {
+                        todo_id: todo.id.clone(),
+                        changed_fields,
+                        base: outside_the_file.then(|| todo.clone()),
+                    });
+                    summary.push(format!("고침: {}", todo.title));
+                }
+                ("remove", Some(todo)) => {
+                    if !in_settings.contains(&todo.id) {
+                        writes.push(TodoListWrite::Dismiss(todo.id.clone()));
+                    }
+                    writes.push(TodoListWrite::Remove(todo.id.clone()));
+                    summary.push(format!("지움: {}", todo.title));
+                }
+                ("set_notes", Some(todo)) => {
+                    let before = state.task_notes.get(&todo.id).cloned().unwrap_or_default();
+                    let steps = change
+                        .steps
+                        .iter()
+                        .map(|step| clip(step, MAX_TITLE_CHARS))
+                        .filter(|step| !step.is_empty())
+                        .take(MAX_TASK_STEPS)
+                        .map(|text| TaskStep {
+                            // A step that was checked stays checked.
+                            done: before.steps.iter().any(|old| old.done && old.text == text),
+                            text,
+                        })
+                        .collect();
+                    notes_updates.push((
+                        todo.id.clone(),
+                        TaskNotes {
+                            text: clip(&change.working_notes, MAX_TASK_NOTES_CHARS),
+                            steps,
+                        },
+                    ));
+                    summary.push(format!("메모와 단계: {}", todo.title));
+                }
+                _ => {}
+            }
+        }
+        (writes, summary, notes_updates)
     }
 
     fn apply_change(

@@ -304,6 +304,13 @@ pub struct ChangeRecord {
     /// can always be better) or empty, as the AI judged it.
     #[serde(default)]
     pub outcome: String,
+    /// Approved only: the writes to the to-do list the AI made with this request (a follow-up
+    /// to-do, a corrected title); the agent applies them to `planner.json`.
+    #[serde(default)]
+    pub list_writes: Vec<TodoListWrite>,
+    /// Approved only: what the AI changed in the list, one line each, for the user.
+    #[serde(default)]
+    pub list_summary: Vec<String>,
 }
 
 /// Responsibility: Carry the proof the user offers with "I finished it": what they write,
