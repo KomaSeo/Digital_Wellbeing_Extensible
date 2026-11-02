@@ -12,6 +12,9 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
+/// The effort levels the Messages API takes, least to most thinking.
+pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
 /// The cheaper model that rechecks windows already judged (see `recheck_model`).
 pub const DEFAULT_RECHECK_MODEL: &str = "claude-haiku-5-5";
 
@@ -52,6 +55,12 @@ pub struct AiFocusConfig {
     /// window again and its verdict counts. Empty (or the same as `model`): `model` does
     /// every check.
     pub recheck_model: String,
+    /// How much the AI thinks before a window check (one of [`EFFORT_LEVELS`]; default
+    /// "low": checks are many and simple).
+    pub check_effort: String,
+    /// How much the AI thinks for every other decision: picking and reviewing tasks, access
+    /// requests, the assistant (default "medium").
+    pub decision_effort: String,
     /// Used when `ANTHROPIC_API_KEY` is not set in the environment.
     pub api_key: String,
     /// Attach a downscaled screenshot of the foreground monitor to each check.
@@ -111,6 +120,8 @@ impl Default for AiFocusConfig {
             check_interval_secs: 60,
             model: DEFAULT_MODEL.to_string(),
             recheck_model: DEFAULT_RECHECK_MODEL.to_string(),
+            check_effort: "low".to_string(),
+            decision_effort: "medium".to_string(),
             api_key: String::new(),
             send_screenshot: true,
             strikes_to_block: 2,
@@ -213,6 +224,16 @@ impl AiFocusConfig {
             .iter()
             .find(|pattern| enforcer::pattern::matches_part(pattern, page))
             .map(String::as_str)
+    }
+
+    /// The effort of window checks; an unknown value counts as "low".
+    pub fn check_effort(&self) -> &str {
+        known_effort(&self.check_effort).unwrap_or("low")
+    }
+
+    /// The effort of every other decision; an unknown value counts as "medium".
+    pub fn decision_effort(&self) -> &str {
+        known_effort(&self.decision_effort).unwrap_or("medium")
     }
 
     /// API key from the environment, falling back to the saved one.
@@ -423,4 +444,12 @@ mod tests {
         assert_eq!(reloaded.task, "thesis");
         fs::remove_dir_all(&directory).unwrap();
     }
+}
+
+/// `value` when it is one of [`EFFORT_LEVELS`].
+fn known_effort(value: &str) -> Option<&'static str> {
+    EFFORT_LEVELS
+        .iter()
+        .find(|level| **level == value.trim())
+        .copied()
 }

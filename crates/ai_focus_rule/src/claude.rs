@@ -23,6 +23,16 @@ fn api_base() -> String {
 const API_VERSION: &str = "2026-10-21";
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 
+/// Room for the answer: thinking counts against `max_tokens`, so more effort needs more.
+pub fn max_tokens_for(effort: &str) -> u32 {
+    match effort {
+        "low" => 4096,
+        "medium" => 8192,
+        "high" => 16384,
+        _ => 32000,
+    }
+}
+
 /// Responsibility: Name one model the Models API lists.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelInfo {
@@ -46,7 +56,7 @@ impl ClaudeClient {
             .iter()
             .any(|prefix| base_url.starts_with(prefix));
         let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(90))
+            .timeout(Duration::from_secs(300))
             .try_proxy_from_env(!local)
             .build();
         Self {
@@ -176,7 +186,7 @@ impl ClaudeClient {
     pub fn body(&self, system: &str, content: Vec<Value>, schema: Value, effort: &str) -> Value {
         let mut body = json!({
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": max_tokens_for(effort),
             "system": system,
             "output_config": {
                 "effort": effort,
@@ -298,6 +308,24 @@ pub fn parse_structured<T: DeserializeOwned>(response: &Value) -> Result<T, Judg
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn more_effort_leaves_more_room_for_the_answer() {
+        let client = ClaudeClient::new("k".into(), "claude-opus-5-5".into());
+        let low = client.body("s", vec![], json!({}), "low");
+        let max = client.body("s", vec![], json!({}), "max");
+        assert_eq!(low["output_config"]["effort"], "low");
+        assert_eq!(max["output_config"]["effort"], "max");
+        assert!(max["max_tokens"].as_u64() > low["max_tokens"].as_u64());
+        // The settings' values fall back to the defaults when unknown.
+        let config = crate::AiFocusConfig {
+            check_effort: "a lot".into(),
+            decision_effort: "max".into(),
+            ..Default::default()
+        };
+        assert_eq!(config.check_effort(), "low");
+        assert_eq!(config.decision_effort(), "max");
+    }
     use serde_json::json;
 
     #[derive(Debug, serde::Deserialize, PartialEq)]

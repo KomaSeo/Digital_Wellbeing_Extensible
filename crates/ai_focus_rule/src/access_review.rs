@@ -75,6 +75,7 @@ pub fn claude_reviewer_provider() -> ReviewerProvider {
         let api_key = config.resolve_api_key().ok_or(JudgeError::NoApiKey)?;
         Ok(Arc::new(ClaudeAccessReviewer {
             client: ClaudeClient::new(api_key, config.model.clone()),
+            effort: config.decision_effort().to_string(),
         }) as Arc<dyn AccessReviewer>)
     })
 }
@@ -82,17 +83,18 @@ pub fn claude_reviewer_provider() -> ReviewerProvider {
 /// Responsibility: Review access requests with the Claude API.
 pub struct ClaudeAccessReviewer {
     client: ClaudeClient,
+    /// The settings' effort for decisions.
+    effort: String,
 }
 
 impl AccessReviewer for ClaudeAccessReviewer {
     fn review(&self, request: &AccessRequest) -> Result<AccessDecision, JudgeError> {
-        // `medium`: rare call that weighs a purpose against a task.
         self.client.structured(
             "access review",
             ACCESS_PROMPT,
             vec![text_block(request_text(request))],
             decision_schema(),
-            "medium",
+            &self.effort,
         )
     }
 }

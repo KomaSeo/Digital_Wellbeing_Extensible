@@ -520,6 +520,7 @@ pub fn claude_advisor_provider() -> AdvisorProvider {
         let key = config.resolve_api_key().ok_or(JudgeError::NoApiKey)?;
         Ok(Arc::new(ClaudeAdvisor {
             client: ClaudeClient::new(key, config.model.clone()),
+            effort: config.decision_effort().to_string(),
         }) as Arc<dyn Advisor>)
     })
 }
@@ -527,6 +528,8 @@ pub fn claude_advisor_provider() -> AdvisorProvider {
 /// Responsibility: Answer the planner's questions with the Claude API.
 pub struct ClaudeAdvisor {
     client: ClaudeClient,
+    /// The settings' effort for decisions.
+    effort: String,
 }
 
 impl Advisor for ClaudeAdvisor {
@@ -538,7 +541,7 @@ impl Advisor for ClaudeAdvisor {
             request.instructions,
             vec![text_block(pick_text(request))],
             pick_schema(),
-            "medium",
+            &self.effort,
         )
     }
 
@@ -556,7 +559,7 @@ impl Advisor for ClaudeAdvisor {
             request.instructions,
             content,
             change_review_schema(),
-            "medium",
+            &self.effort,
         )
     }
 
@@ -566,7 +569,7 @@ impl Advisor for ClaudeAdvisor {
             request.instructions,
             vec![text_block(week_plan_text(request))],
             week_plan_schema(),
-            "medium",
+            &self.effort,
         )
     }
 
@@ -576,7 +579,7 @@ impl Advisor for ClaudeAdvisor {
             request.instructions,
             vec![text_block(todo_change_text(request))],
             todo_review_schema(),
-            "medium",
+            &self.effort,
         )
     }
 
@@ -589,7 +592,7 @@ impl Advisor for ClaudeAdvisor {
             request.instructions,
             vec![text_block(appointment_text(request))],
             appointment_review_schema(),
-            "medium",
+            &self.effort,
         )
     }
 }
