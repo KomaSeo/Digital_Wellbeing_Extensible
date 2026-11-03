@@ -29,7 +29,7 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 3. 작업 계정으로 로그인하면 Focus 앱이 뜹니다. 설정 탭에서 Anthropic API 키를 넣고, 생활 규칙과 항상 막을 프로그램을 정하고, 할 일 탭에서 할 일을 넣습니다.
 4. 며칠 써 보고 원하는 대로 동작하면, 설정 탭 맨 위에서 푸는 방법을 골라 설정을 보호합니다.
 
-설치와 우회 막기의 자세한 방법은 Focus 앱의 도움말 탭과 [`docs/multi_account.md`](docs/multi_account.md)에 있습니다. 버전마다 바뀐 것은 [`installer/RELEASE_NOTES.md`](installer/RELEASE_NOTES.md)에 있습니다.
+설치와 우회 막기의 자세한 방법은 Focus 앱의 도움말 탭과 [`docs/multi_account.md`](docs/multi_account.md)에 있습니다. 이번 버전에서 바뀐 것은 [`installer/RELEASE_NOTES.md`](installer/RELEASE_NOTES.md)에 있고, 예전 버전에서 바뀐 것은 [릴리스 페이지](https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases)의 각 릴리스에 있습니다.
 
 ## 4. 문서
 
