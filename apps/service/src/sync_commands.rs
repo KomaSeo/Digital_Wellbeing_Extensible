@@ -8,7 +8,6 @@
 //! | `sync-add-device <name>`             | the server, administrator | pair a device; prints its code once  |
 //! | `sync-devices`                       | the server, administrator | list the paired devices              |
 //! | `sync-remove-device <id>`            | the server, administrator | unpair a device                      |
-//! | `sync-add-user <name>`               | the server, administrator | make a login (asks for its password) or give it a new password |
 //! | `sync-users` / `sync-remove-user <name>` | the server, administrator | list / remove logins          |
 //! | `sync-signup <server address> <name>` | a device, administrator  | make the first account of an empty server (asks for a password) and sync this device |
 //! | `sync-login <server address> <name>` | a device, administrator   | log this device in to the account (asks for the password) and sync it |
@@ -76,7 +75,10 @@ pub fn run_command(command: &str, arguments: &[String]) -> Option<anyhow::Result
         #[cfg(windows)]
         "sync-service" => crate::service::run_sync_dispatcher(),
         "sync-add-device" => add_device(arguments),
-        "sync-add-user" => add_user(arguments),
+        "sync-add-user" => Err(anyhow::anyhow!(
+            "logins are made by signing up from a PC (Focus app or sync-signup): the server never \
+             sees a password"
+        )),
         "sync-remove-user" => remove_user(arguments),
         "sync-users" => list_users(),
         "sync-devices" => list_devices(),
@@ -153,26 +155,6 @@ fn read_password(prompt: &str) -> anyhow::Result<String> {
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 
-fn add_user(arguments: &[String]) -> anyhow::Result<()> {
-    let name = arguments
-        .first()
-        .context("usage: sync-add-user <login name, e.g. me>")?;
-    let password = read_password("password: ")?;
-    let again = read_password("the same password again: ")?;
-    if password != again {
-        bail!("the two passwords differ");
-    }
-    server()
-        .set_user(name, &password)
-        .map_err(anyhow::Error::msg)?;
-    println!(
-        "login '{}' saved. Every paired device gets it at its next sync; each Windows account \
-         logs in once in the Focus app.",
-        name.trim().to_lowercase()
-    );
-    Ok(())
-}
-
 fn remove_user(arguments: &[String]) -> anyhow::Result<()> {
     let name = arguments
         .first()
@@ -185,7 +167,7 @@ fn remove_user(arguments: &[String]) -> anyhow::Result<()> {
 fn list_users() -> anyhow::Result<()> {
     let users = server().users();
     if users.is_empty() {
-        println!("no logins (sync-add-user <name> makes one)");
+        println!("no logins (a PC signs up to make one)");
     }
     for user in users {
         println!("{user}");
@@ -360,50 +342,48 @@ pub fn log_in_device(
 ) -> Result<String, String> {
     let server_url = clean_server_url(&request.server_url);
     let name = sync::users::clean_name(&request.name)?;
-    let account_key = sync::account::account_key(&name, &request.password)?;
     let current = ClientConfig::load(data_directory);
+    // This PC already syncs with this account: the password is checked against the one it
+    // keeps, without asking the server (another Windows account of the same PC logging in).
     let already_in = current.as_ref().is_some_and(|config| {
         config.server_url == server_url
-            && config
-                .account
-                .as_ref()
-                .is_some_and(|account| account.name == name && account.key == account_key)
+            && config.account.as_ref().is_some_and(|account| {
+                account.name == name
+                    && sync::secret::unprotect(&account.password)
+                        .is_ok_and(|kept| same_text(&kept, &request.password))
+            })
     });
     let mut message = String::new();
     if !already_in || request.signup {
-        let mut transport = client::http_transport(&server_url);
+        let mut transport = sync::account::http_transport(&server_url);
         let mut joiner = Joiner {
             transport: &mut transport,
         };
-        let (answer, credentials) = if request.signup {
-            let public_key = sync::account::fetch_public_key(&server_url)?;
-            joiner.sign_up(&public_key, &name, &request.password, device_name)?
+        let joined = if request.signup {
+            joiner.sign_up(&name, &request.password, device_name)?
         } else {
-            let credentials = AccountCredentials {
-                name: name.clone(),
-                key: account_key,
-            };
             // The same computer logging in again keeps its id on that server.
             let previous = current
                 .as_ref()
                 .filter(|config| config.server_url == server_url)
                 .map(|config| config.device_id.clone());
-            (
-                joiner.log_in(&credentials, device_name, previous)?,
-                credentials,
-            )
+            joiner.log_in(&name, &request.password, device_name, previous)?
         };
         forget_sync_state(data_directory).map_err(|error| error.to_string())?;
         ClientConfig {
             server_url: server_url.clone(),
-            device_id: answer.device_id.clone(),
-            key: answer.key,
-            account: Some(credentials),
+            device_id: joined.answer.device_id.clone(),
+            key: joined.answer.key,
+            account: Some(AccountCredentials {
+                name: name.clone(),
+                password: sync::secret::protect(&request.password)?,
+                vault_key: joined.vault_key,
+            }),
         }
         .save(data_directory)?;
         message = format!(
             "this device syncs with {server_url} as '{}' in the account '{name}' (within {} seconds once the service runs). ",
-            answer.device_id,
+            joined.answer.device_id,
             SYNC_INTERVAL.as_secs()
         );
     }
@@ -423,8 +403,7 @@ pub fn log_in_device(
 /// One sync; when the server no longer knows this device (it was set up again) and the device
 /// logged in with an account, it logs in again by itself and syncs from the server's state.
 pub fn sync_device(data_directory: &Path, config: &ClientConfig) -> Result<SyncReport, String> {
-    let result = SyncClient::new(data_directory.to_path_buf(), config.clone())
-        .sync_once(&mut client::http_transport(&config.server_url));
+    let result = sync_with_vault(data_directory, config);
     let Err(error) = &result else {
         return result;
     };
@@ -434,20 +413,22 @@ pub fn sync_device(data_directory: &Path, config: &ClientConfig) -> Result<SyncR
     if !error.contains("unknown device") {
         return result;
     }
+    let password = sync::secret::unprotect(&credentials.password)?;
     let logged_in = Joiner {
-        transport: &mut client::http_transport(&config.server_url),
+        transport: &mut sync::account::http_transport(&config.server_url),
     }
     .log_in(
-        credentials,
+        &credentials.name,
+        &password,
         &config.device_id,
         Some(config.device_id.clone()),
     );
-    let answer = match logged_in {
-        Ok(answer) => answer,
+    let joined = match logged_in {
+        Ok(joined) => joined,
         Err(login_error) => {
-            // The password was changed (or this device was given up): the kept key is no
-            // good, and trying it every 20 seconds would lock the name out for everyone.
-            if login_error.contains("맞지 않습니다") {
+            // The password was changed (the server was set up with another one): the kept
+            // password is no good, and trying it every 20 seconds would lock the name out.
+            if login_error == sync::account::WRONG_LOGIN {
                 ClientConfig {
                     account: None,
                     ..config.clone()
@@ -459,17 +440,57 @@ pub fn sync_device(data_directory: &Path, config: &ClientConfig) -> Result<SyncR
     };
     info!(
         "sync: the server did not know this device; logged in again as '{}'",
-        answer.device_id
+        joined.answer.device_id
     );
     forget_sync_state(data_directory).map_err(|error| error.to_string())?;
     let renewed = ClientConfig {
-        device_id: answer.device_id,
-        key: answer.key,
+        device_id: joined.answer.device_id,
+        key: joined.answer.key,
+        account: Some(AccountCredentials {
+            vault_key: joined.vault_key,
+            ..credentials.clone()
+        }),
         ..config.clone()
     };
     renewed.save(data_directory)?;
-    SyncClient::new(data_directory.to_path_buf(), renewed.clone())
-        .sync_once(&mut client::http_transport(&renewed.server_url))
+    sync_with_vault(data_directory, &renewed)
+}
+
+/// One sync round, with the API key sealed into the vault before (a key changed here goes
+/// out) and taken from it after (a key changed elsewhere comes in), when the PC logged in
+/// with an account.
+fn sync_with_vault(data_directory: &Path, config: &ClientConfig) -> Result<SyncReport, String> {
+    let vault_key = config
+        .account
+        .as_ref()
+        .map(|account| account.vault_key.clone());
+    if let Some(vault_key) = &vault_key {
+        if let Err(error) = sync::vault::reconcile(data_directory, vault_key) {
+            warn!("sync: the API key vault: {error}");
+        }
+    }
+    let report = SyncClient::new(data_directory.to_path_buf(), config.clone())
+        .sync_once(&mut client::http_transport(&config.server_url))?;
+    if let Some(vault_key) = &vault_key {
+        match sync::vault::reconcile(data_directory, vault_key) {
+            Ok(Some(sync::vault::VaultChange::TookTheVaultKey)) => {
+                info!("sync: took the API key the other PCs use")
+            }
+            Ok(_) => {}
+            Err(error) => warn!("sync: the API key vault: {error}"),
+        }
+    }
+    Ok(report)
+}
+
+/// The same text, compared in a time that does not depend on where they differ.
+fn same_text(first: &str, second: &str) -> bool {
+    first.len() == second.len()
+        && first
+            .bytes()
+            .zip(second.bytes())
+            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+            == 0
 }
 
 fn forget_sync_state(data_directory: &Path) -> anyhow::Result<()> {

@@ -1,29 +1,24 @@
-//! Responsibility: Keep the logins of the owner's devices: a name and a password hash per
-//! login, made by the server's administrator and shared with every device (`users.json`).
+//! Responsibility: Keep the names of the owner's logins, shared with every device
+//! (`users.json`). Passwords are not here, not even as a hash: the server checks them with
+//! OPAQUE ([`crate::account`]) and knows nothing from which a password could be read.
 //!
 //! A Windows account on a device logs in once (Focus app); from then on its access grants,
 //! blocks and AI usage belong to the login, so they are the same on every device whatever
 //! the Windows account is called. Only the server writes this document.
 
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 /// The shared document of logins (written by the server only).
 pub const USERS_DOCUMENT: &str = "users.json";
-/// PBKDF2-HMAC-SHA256 rounds for a new password (about a tenth of a second).
-const ROUNDS: u32 = 200_000;
-const SALT_BYTES: usize = 16;
 
-/// Responsibility: Hold one login: its name and how to check its password.
+/// The shortest password a login may have: the password is the only thing between someone
+/// who has the server's files and the owner's API key, so a short one could be guessed.
+pub const MIN_PASSWORD_CHARACTERS: usize = 8;
+
+/// Responsibility: Hold one login's name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserEntry {
     pub name: String,
-    /// Base64.
-    pub salt: String,
-    /// Base64 of PBKDF2-HMAC-SHA256(password, salt, rounds).
-    pub hash: String,
-    pub rounds: u32,
 }
 
 /// Responsibility: Hold every login (`users.json`).
@@ -48,61 +43,26 @@ pub fn clean_name(name: &str) -> Result<String, String> {
     Ok(name)
 }
 
-fn hash(password: &str, salt: &[u8], rounds: u32) -> Vec<u8> {
-    let mut output = [0u8; 32];
-    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), salt, rounds, &mut output);
-    output.to_vec()
-}
-
-/// The shortest password a login may have (a sign-up comes from the internet, so a short
-/// one could be guessed).
-pub const MIN_PASSWORD_CHARACTERS: usize = 8;
-
-impl UserEntry {
-    /// A login `name` with a new salt and the hash of `password`.
-    pub fn new(name: &str, password: &str) -> Result<Self, String> {
-        let name = clean_name(name)?;
-        if password.chars().count() < MIN_PASSWORD_CHARACTERS {
-            return Err(format!(
-                "the password needs at least {MIN_PASSWORD_CHARACTERS} characters"
-            ));
-        }
-        let mut salt = [0u8; SALT_BYTES];
-        getrandom::getrandom(&mut salt).map_err(|error| error.to_string())?;
-        Ok(Self {
-            name,
-            salt: STANDARD.encode(salt),
-            hash: STANDARD.encode(hash(password, &salt, ROUNDS)),
-            rounds: ROUNDS,
-        })
+/// A password long enough for a login.
+pub fn check_password(password: &str) -> Result<(), String> {
+    if password.chars().count() < MIN_PASSWORD_CHARACTERS {
+        return Err(format!(
+            "비밀번호는 {MIN_PASSWORD_CHARACTERS}자 이상이어야 합니다"
+        ));
     }
-
-    /// Is this a well-formed entry (as a sign-up sends it)?
-    pub fn is_well_formed(&self) -> bool {
-        clean_name(&self.name).as_deref() == Ok(self.name.as_str())
-            && (100_000..=2_000_000).contains(&self.rounds)
-            && STANDARD
-                .decode(&self.salt)
-                .is_ok_and(|salt| salt.len() == SALT_BYTES)
-            && STANDARD
-                .decode(&self.hash)
-                .is_ok_and(|hash| hash.len() == 32)
-    }
+    Ok(())
 }
 
 impl Users {
-    /// Add `name` with `password`, or give an existing login a new password.
-    pub fn set(&mut self, name: &str, password: &str) -> Result<(), String> {
-        self.put(UserEntry::new(name, password)?);
+    /// Add `name` (no change when it is there).
+    pub fn add(&mut self, name: &str) -> Result<(), String> {
+        let name = clean_name(name)?;
+        if !self.contains(&name) {
+            self.users.push(UserEntry { name });
+            self.users
+                .sort_by(|first, second| first.name.cmp(&second.name));
+        }
         Ok(())
-    }
-
-    /// Add `entry`, or replace the login of the same name.
-    pub fn put(&mut self, entry: UserEntry) {
-        self.users.retain(|user| user.name != entry.name);
-        self.users.push(entry);
-        self.users
-            .sort_by(|first, second| first.name.cmp(&second.name));
     }
 
     pub fn remove(&mut self, name: &str) -> bool {
@@ -120,25 +80,6 @@ impl Users {
         let name = name.trim().to_lowercase();
         self.users.iter().any(|user| user.name == name)
     }
-
-    /// Is `password` the password of `name`? Returns the login's clean name.
-    pub fn check(&self, name: &str, password: &str) -> Option<String> {
-        let name = name.trim().to_lowercase();
-        let user = self.users.iter().find(|user| user.name == name)?;
-        let salt = STANDARD.decode(&user.salt).ok()?;
-        let expected = STANDARD.decode(&user.hash).ok()?;
-        let actual = hash(password, &salt, user.rounds);
-        // The same time whatever byte differs.
-        let same = expected.len() == actual.len()
-            && expected
-                .iter()
-                .zip(&actual)
-                .fold(0u8, |difference, (first, second)| {
-                    difference | (first ^ second)
-                })
-                == 0;
-        same.then(|| user.name.clone())
-    }
 }
 
 #[cfg(test)]
@@ -146,21 +87,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_right_password_logs_in() {
+    fn names_are_cleaned_and_kept_once() {
         let mut users = Users::default();
-        users.set(" Me ", "correct horse").unwrap();
-        assert_eq!(users.check("me", "correct horse"), Some("me".to_string()));
-        assert_eq!(users.check("ME", "correct horse"), Some("me".to_string()));
-        assert_eq!(users.check("me", "wrong"), None);
-        assert_eq!(users.check("nobody", "correct horse"), None);
-        assert!(users.set("../x", "password").is_err());
-        assert!(users.set("me", "abc").is_err());
-        assert!(users.set("me", "seven77").is_err());
-        // A new password replaces the old one.
-        users.set("me", "battery staple").unwrap();
-        assert_eq!(users.check("me", "correct horse"), None);
+        users.add(" Me ").unwrap();
+        users.add("me").unwrap();
         assert_eq!(users.names(), vec!["me".to_string()]);
+        assert!(users.contains("ME"));
+        assert!(users.add("../x").is_err());
+        assert!(check_password("seven77").is_err());
+        assert!(check_password("eight888").is_ok());
         assert!(users.remove("me"));
         assert!(!users.contains("me"));
+    }
+
+    #[test]
+    fn an_older_users_file_with_hashes_still_reads() {
+        let users: Users = serde_json::from_str(
+            r#"{"users":[{"name":"me","salt":"x","hash":"y","rounds":200000}]}"#,
+        )
+        .unwrap();
+        assert!(users.contains("me"));
     }
 }

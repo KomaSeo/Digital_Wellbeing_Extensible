@@ -49,3 +49,7 @@ sync = { path = "crates/sync" }
 opt-level = 3
 [profile.dev.package.pbkdf2]
 opt-level = 3
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3

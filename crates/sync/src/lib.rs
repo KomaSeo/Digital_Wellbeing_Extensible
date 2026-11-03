@@ -10,7 +10,9 @@
 //! - [`device_local`]: what stays on each device (its Anthropic API key).
 //! - [`server`]: the server's document store and request handling.
 //! - [`users`]: the logins (one per person), made on the server.
-//! - [`account`]: joining a device with a login name and password (sign up, log in).
+//! - [`account`]: joining a device with a login name and password (OPAQUE sign-up and login).
+//! - [`vault`]: the owner's API key, sealed with a key the server never sees.
+//! - [`secret`]: the password kept on a PC, sealed for that PC.
 //! - [`client`]: one device's side: which files sync, and one sync round.
 //!
 //! Walkthrough (Korean): `docs/sync.md`.
@@ -21,5 +23,7 @@ pub mod device_local;
 pub mod envelope;
 pub mod merge;
 pub mod protocol;
+pub mod secret;
 pub mod server;
 pub mod users;
+pub mod vault;

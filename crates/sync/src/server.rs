@@ -11,13 +11,13 @@
 //! - Once the settings are protected (`settings_protection.json` has `protected_since`), a
 //!   push turns the protection off only the way it allows ([`protection_may_end`]).
 //!
-//! - A login ([`crate::account`]) must open with the account key of its name; after
-//!   [`MAX_FAILED_LOGINS`] wrong ones in [`FAILED_LOGIN_WINDOW_MINUTES`] minutes, that name is
-//!   refused until the window passes (so a password cannot be guessed over the internet). A
-//!   sign-up is taken only while the server has no account.
+//! - Logins are OPAQUE ([`crate::account`]): the server never gets a password. A name may
+//!   start [`MAX_UNFINISHED_LOGINS`] logins that do not end in [`LOGIN_WINDOW_MINUTES`]
+//!   minutes (a wrong password ends none); then it waits, so a password cannot be guessed
+//!   over the internet. A sign-up is taken only while the server has no account.
 //!
-//! Storage: `<folder>/devices.json`, `<folder>/accounts.json` (account keys),
-//! `<folder>/server_key.json` (the key pair for sign-ups) and
+//! Storage: `<folder>/devices.json`, `<folder>/accounts.json` (OPAQUE password files),
+//! `<folder>/opaque_setup.json` (the server's OPAQUE keys) and
 //! `<folder>/documents/<name with / as ~>.json`.
 
 use crate::envelope::{self, Envelope};
@@ -25,7 +25,6 @@ use crate::protocol::{
     version_order, Document, PairingCode, Rejected, SyncRequest, SyncResponse,
     MAX_CLOCK_SKEW_SECONDS,
 };
-use base64::Engine;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -38,13 +37,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Documents every device shares.
-pub const SHARED_DOCUMENTS: [&str; 6] = [
+pub const SHARED_DOCUMENTS: [&str; 7] = [
     "policy.json",
     "ai_focus.json",
     "planner.json",
     "settings_protection.json",
     "settings_reservations.json",
     "planner_state.json",
+    // The API key, sealed with a key the server never sees ([`crate::vault`]).
+    crate::vault::VAULT_DOCUMENT,
 ];
 /// Documents only the server writes; devices take them as they are.
 pub const SERVER_DOCUMENTS: [&str; 1] = [crate::users::USERS_DOCUMENT];
@@ -59,10 +60,11 @@ const MAX_HEAD_BYTES: u64 = 16 * 1024;
 /// Requests answered at the same time: one owner with about ten devices, each syncing every
 /// 20 seconds in a fraction of a second, needs few; more are refused at once.
 const MAX_CONNECTIONS: usize = 16;
-/// Wrong logins of one name that are allowed in [`FAILED_LOGIN_WINDOW_MINUTES`].
-pub const MAX_FAILED_LOGINS: usize = 5;
-pub const FAILED_LOGIN_WINDOW_MINUTES: i64 = 15;
-const WRONG_LOGIN: &str = "이름이나 비밀번호가 맞지 않습니다";
+/// Logins of one name that may start without ending, in [`LOGIN_WINDOW_MINUTES`].
+pub const MAX_UNFINISHED_LOGINS: usize = 5;
+pub const LOGIN_WINDOW_MINUTES: i64 = 15;
+/// How long a started login waits for its second step.
+const LOGIN_STEP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Responsibility: Describe one paired device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,17 +85,26 @@ pub struct Device {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Devices {
     devices: Vec<Device>,
+    /// Devices taken out with `sync-remove-device`: they may not log in again by themselves
+    /// under the same id.
+    #[serde(default)]
+    removed: Vec<String>,
 }
 
-/// Responsibility: Hold one account's key, which only its password makes.
+/// Responsibility: Hold one account's OPAQUE password file (nothing a password can be read
+/// from).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Account {
     name: String,
-    /// Base64 ([`crate::account::account_key`]).
-    key: String,
-    /// The newest login, so the same login request cannot be sent again.
-    #[serde(default)]
-    last_login_at: Option<DateTime<Utc>>,
+    /// Base64 of the serialized `ServerRegistration`.
+    password_file: String,
+}
+
+/// Responsibility: Hold a login between its two steps.
+struct PendingLogin {
+    name: String,
+    state: opaque_ke::ServerLogin<crate::account::Suite>,
+    started: std::time::Instant,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -181,8 +192,10 @@ pub struct SyncServer {
     folder: PathBuf,
     /// One request at a time: rounds are short, and this keeps revisions simple.
     busy: Mutex<()>,
-    /// Account name -> when its recent wrong logins happened.
-    failed_logins: Mutex<std::collections::HashMap<String, Vec<DateTime<Utc>>>>,
+    /// Account name -> when its recent logins started that did not end.
+    unfinished_logins: Mutex<std::collections::HashMap<String, Vec<DateTime<Utc>>>>,
+    /// Login id -> a login between its two steps.
+    pending_logins: Mutex<std::collections::HashMap<String, PendingLogin>>,
 }
 
 impl SyncServer {
@@ -190,7 +203,8 @@ impl SyncServer {
         Self {
             folder,
             busy: Mutex::new(()),
-            failed_logins: Mutex::new(std::collections::HashMap::new()),
+            unfinished_logins: Mutex::new(std::collections::HashMap::new()),
+            pending_logins: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -202,31 +216,23 @@ impl SyncServer {
         read_json(&self.accounts_path()).unwrap_or_default()
     }
 
-    /// The secret half of the sign-up key pair, made the first time it is needed.
-    fn server_secret(&self) -> Result<[u8; 32], String> {
-        let path = self.folder.join("server_key.json");
-        let stored = read_json::<Value>(&path)
-            .and_then(|value| value["secret"].as_str().map(str::to_string))
-            .and_then(|text| base64::engine::general_purpose::STANDARD.decode(text).ok())
-            .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok());
-        if let Some(secret) = stored {
-            return Ok(secret);
+    /// The server's OPAQUE keys (its OPRF seed and key pair), made the first time they are
+    /// needed. Setting the server up again (an empty folder) makes new ones, so every
+    /// account must sign up again.
+    fn opaque_setup(&self) -> Result<opaque_ke::ServerSetup<crate::account::Suite>, String> {
+        let path = self.folder.join("opaque_setup.json");
+        if let Some(text) =
+            read_json::<Value>(&path).and_then(|value| value["setup"].as_str().map(str::to_string))
+        {
+            return opaque_ke::ServerSetup::deserialize(&crate::account::decode(&text)?)
+                .map_err(|error| format!("{}: {error}", path.display()));
         }
-        let mut secret = [0u8; 32];
-        getrandom::getrandom(&mut secret).map_err(|error| error.to_string())?;
+        let setup = opaque_ke::ServerSetup::<crate::account::Suite>::new(&mut rand_core::OsRng);
         write_json(
             &path,
-            &json!({ "secret": base64::engine::general_purpose::STANDARD.encode(secret) }),
+            &json!({ "setup": crate::account::encode(&setup.serialize()) }),
         )?;
-        Ok(secret)
-    }
-
-    /// The public half of the sign-up key pair (base64), for `GET /public-key`.
-    pub fn public_key(&self) -> Result<String, String> {
-        let _busy = self.busy.lock();
-        let secret = self.server_secret()?;
-        Ok(base64::engine::general_purpose::STANDARD
-            .encode(crate::account::server_public_key(&secret)))
+        Ok(setup)
     }
 
     fn devices_path(&self) -> PathBuf {
@@ -321,127 +327,180 @@ impl SyncServer {
         Ok(code)
     }
 
-    /// Refused while `name` had too many wrong logins lately.
-    fn check_not_locked_out(&self, name: &str, now: DateTime<Utc>) -> Result<(), String> {
-        let mut failed = self.failed_logins.lock();
-        let recent = failed.entry(name.to_string()).or_default();
-        recent.retain(|time| now - *time < chrono::Duration::minutes(FAILED_LOGIN_WINDOW_MINUTES));
-        if recent.len() >= MAX_FAILED_LOGINS {
+    /// Refused while `name` started too many logins lately that did not end; otherwise this
+    /// login is counted until it ends.
+    fn count_login_start(&self, name: &str, now: DateTime<Utc>) -> Result<(), String> {
+        let mut unfinished = self.unfinished_logins.lock();
+        let recent = unfinished.entry(name.to_string()).or_default();
+        recent.retain(|time| now - *time < chrono::Duration::minutes(LOGIN_WINDOW_MINUTES));
+        if recent.len() >= MAX_UNFINISHED_LOGINS {
             return Err(format!(
-                "로그인을 너무 많이 틀렸습니다. {FAILED_LOGIN_WINDOW_MINUTES}분 뒤에 다시 하세요"
+                "로그인을 너무 많이 시도했습니다. {LOGIN_WINDOW_MINUTES}분 뒤에 다시 하세요"
             ));
         }
+        recent.push(now);
         Ok(())
     }
 
-    fn wrong_login(&self, name: &str, now: DateTime<Utc>) -> String {
-        self.failed_logins
-            .lock()
-            .entry(name.to_string())
-            .or_default()
-            .push(now);
-        WRONG_LOGIN.into()
-    }
-
-    /// Answer a login (envelope id `account:<name>`, sealed with the account key).
-    fn handle_login(&self, envelope: &Envelope) -> Result<Envelope, String> {
-        use crate::account::{JoinAnswer, LoginRequest, LOGIN_PREFIX};
-        let now = Utc::now();
-        let name = crate::users::clean_name(
-            envelope
-                .device_id
-                .strip_prefix(LOGIN_PREFIX)
-                .unwrap_or_default(),
-        )?;
-        self.check_not_locked_out(&name, now)?;
-        let mut accounts = self.load_accounts();
-        if accounts.accounts.is_empty() {
-            return Err("이 서버에는 아직 계정이 없습니다. 한 PC에서 먼저 회원가입하세요".into());
+    /// Answer one step of signing up or logging in (`POST /account`).
+    pub fn handle_account(
+        &self,
+        request: &crate::account::AccountRequest,
+    ) -> Result<crate::account::AccountAnswer, String> {
+        use crate::account::{self as account, AccountAnswer, AccountRequest};
+        use opaque_ke::{ServerLogin, ServerLoginParameters, ServerRegistration};
+        let _busy = self.busy.lock();
+        match request {
+            AccountRequest::SignupStart { name, request } => {
+                let name = crate::users::clean_name(name)?;
+                if !self.load_accounts().accounts.is_empty() {
+                    return Err(
+                        "이 서버에는 이미 계정이 있습니다. 회원가입 대신 로그인하세요".into(),
+                    );
+                }
+                let started = ServerRegistration::<account::Suite>::start(
+                    &self.opaque_setup()?,
+                    account::registration_request(request)?,
+                    name.as_bytes(),
+                )
+                .map_err(|error| format!("sign-up: {error}"))?;
+                Ok(AccountAnswer::SignupStarted {
+                    response: account::encode(&started.message.serialize()),
+                })
+            }
+            AccountRequest::SignupFinish { name, upload } => {
+                let name = crate::users::clean_name(name)?;
+                if !self.load_accounts().accounts.is_empty() {
+                    return Err(
+                        "이 서버에는 이미 계정이 있습니다. 회원가입 대신 로그인하세요".into(),
+                    );
+                }
+                let password_file = ServerRegistration::<account::Suite>::finish(
+                    account::registration_upload(upload)?,
+                );
+                write_json(
+                    &self.accounts_path(),
+                    &Accounts {
+                        accounts: vec![Account {
+                            name: name.clone(),
+                            password_file: account::encode(&password_file.serialize()),
+                        }],
+                    },
+                )?;
+                self.write_users(|users| users.add(&name))?;
+                tracing::info!("'{name}' signed up");
+                Ok(AccountAnswer::SignedUp)
+            }
+            AccountRequest::LoginStart { name, request } => {
+                let name = crate::users::clean_name(name)?;
+                let accounts = self.load_accounts();
+                if accounts.accounts.is_empty() {
+                    return Err(
+                        "이 서버에는 아직 계정이 없습니다. 한 PC에서 먼저 회원가입하세요".into(),
+                    );
+                }
+                self.count_login_start(&name, Utc::now())?;
+                // An unknown name gets an answer that looks like any other (OPAQUE's dummy
+                // password file), so names cannot be probed.
+                let password_file = accounts
+                    .accounts
+                    .iter()
+                    .find(|account| account.name == name)
+                    .map(|account| {
+                        account::decode(&account.password_file).and_then(|bytes| {
+                            ServerRegistration::<account::Suite>::deserialize(&bytes)
+                                .map_err(|error| error.to_string())
+                        })
+                    })
+                    .transpose()?;
+                let started = ServerLogin::start(
+                    &mut rand_core::OsRng,
+                    &self.opaque_setup()?,
+                    password_file,
+                    account::credential_request(request)?,
+                    name.as_bytes(),
+                    ServerLoginParameters::default(),
+                )
+                .map_err(|error| format!("login: {error}"))?;
+                let mut id_bytes = [0u8; 16];
+                getrandom::getrandom(&mut id_bytes).map_err(|error| error.to_string())?;
+                let login_id: String = id_bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+                let mut pending = self.pending_logins.lock();
+                pending.retain(|_, login| login.started.elapsed() < LOGIN_STEP_TIMEOUT);
+                pending.insert(
+                    login_id.clone(),
+                    PendingLogin {
+                        name,
+                        state: started.state,
+                        started: std::time::Instant::now(),
+                    },
+                );
+                Ok(AccountAnswer::LoginStarted {
+                    login_id,
+                    response: account::encode(&started.message.serialize()),
+                })
+            }
+            AccountRequest::LoginFinish {
+                login_id,
+                finalization,
+                sealed,
+            } => {
+                let pending = self
+                    .pending_logins
+                    .lock()
+                    .remove(login_id)
+                    .filter(|login| login.started.elapsed() < LOGIN_STEP_TIMEOUT)
+                    .ok_or("the login took too long; log in again")?;
+                let finished = pending
+                    .state
+                    .finish(
+                        account::credential_finalization(finalization)?,
+                        ServerLoginParameters::default(),
+                    )
+                    .map_err(|_| account::WRONG_LOGIN.to_string())?;
+                let key = account::session_envelope_key(&finished.session_key);
+                let envelope_id = format!("login:{login_id}");
+                if sealed.device_id != envelope_id {
+                    return Err("bad request".into());
+                }
+                let request: account::DeviceRequest =
+                    serde_json::from_slice(&envelope::open(sealed, &key)?)
+                        .map_err(|error| format!("bad request: {error}"))?;
+                if let Some(previous) = request.previous_device_id.as_deref() {
+                    if self
+                        .load_devices()
+                        .removed
+                        .iter()
+                        .any(|removed| removed == previous)
+                    {
+                        return Err(format!(
+                            "이 기기('{previous}')는 서버에서 빠졌습니다. 다시 붙이려면 서버에서 \
+                             sync-remove-device로 뺀 기록을 지우거나 새 이름으로 로그인하세요"
+                        ));
+                    }
+                }
+                let code =
+                    self.join_device(&request.device_name, request.previous_device_id.as_deref())?;
+                // This login ended: it no longer counts against the name.
+                if let Some(recent) = self.unfinished_logins.lock().get_mut(&pending.name) {
+                    recent.pop();
+                }
+                tracing::info!(
+                    "'{}' logged in on device '{}'",
+                    pending.name,
+                    code.device_id
+                );
+                let answer = account::JoinAnswer {
+                    account: pending.name,
+                    device_id: code.device_id,
+                    key: code.key,
+                };
+                let bytes = serde_json::to_vec(&answer).map_err(|error| error.to_string())?;
+                Ok(AccountAnswer::LoggedIn {
+                    sealed: envelope::seal(&envelope_id, &key, &bytes)?,
+                })
+            }
         }
-        let Some(account) = accounts
-            .accounts
-            .iter_mut()
-            .find(|account| account.name == name)
-        else {
-            return Err(self.wrong_login(&name, now));
-        };
-        let Ok(plaintext) = envelope::open(envelope, &account.key) else {
-            return Err(self.wrong_login(&name, now));
-        };
-        let request: LoginRequest =
-            serde_json::from_slice(&plaintext).map_err(|error| format!("bad request: {error}"))?;
-        if (now - request.sent_at).num_seconds().abs() > MAX_CLOCK_SKEW_SECONDS {
-            return Err(
-                "the request is too old (or the clocks differ by more than 10 minutes)".into(),
-            );
-        }
-        if account
-            .last_login_at
-            .is_some_and(|last| request.sent_at <= last)
-        {
-            return Err("the request was already used".into());
-        }
-        account.last_login_at = Some(request.sent_at);
-        let key = account.key.clone();
-        write_json(&self.accounts_path(), &accounts)?;
-        let code = self.join_device(&request.device_name, request.previous_device_id.as_deref())?;
-        tracing::info!("'{name}' logged in on device '{}'", code.device_id);
-        let answer = JoinAnswer {
-            request_sent_at: request.sent_at,
-            account: name,
-            device_id: code.device_id,
-            key: code.key,
-        };
-        let bytes = serde_json::to_vec(&answer).map_err(|error| error.to_string())?;
-        envelope::seal(&envelope.device_id, &key, &bytes)
-    }
-
-    /// Answer a sign-up (envelope id `signup:<device public key>`): only while the server has
-    /// no account.
-    fn handle_signup(&self, envelope: &Envelope) -> Result<Envelope, String> {
-        use crate::account::{JoinAnswer, SignupRequest};
-        let now = Utc::now();
-        let key = crate::account::server_signup_key(&envelope.device_id, &self.server_secret()?)?;
-        let plaintext = envelope::open(envelope, &key)?;
-        let request: SignupRequest =
-            serde_json::from_slice(&plaintext).map_err(|error| format!("bad request: {error}"))?;
-        if (now - request.sent_at).num_seconds().abs() > MAX_CLOCK_SKEW_SECONDS {
-            return Err(
-                "the request is too old (or the clocks differ by more than 10 minutes)".into(),
-            );
-        }
-        if !self.load_accounts().accounts.is_empty() {
-            return Err("이 서버에는 이미 계정이 있습니다. 회원가입 대신 로그인하세요".into());
-        }
-        if !request.login.is_well_formed() {
-            return Err("the login is not well formed".into());
-        }
-        envelope::seal("check", &request.account_key, b"check")?;
-        let name = request.login.name.clone();
-        write_json(
-            &self.accounts_path(),
-            &Accounts {
-                accounts: vec![Account {
-                    name: name.clone(),
-                    key: request.account_key.clone(),
-                    last_login_at: Some(request.sent_at),
-                }],
-            },
-        )?;
-        self.write_users(|users| {
-            users.put(request.login.clone());
-            Ok(())
-        })?;
-        let code = self.join_device(&request.device_name, None)?;
-        tracing::info!("'{name}' signed up on device '{}'", code.device_id);
-        let answer = JoinAnswer {
-            request_sent_at: request.sent_at,
-            account: name,
-            device_id: code.device_id,
-            key: code.key,
-        };
-        let bytes = serde_json::to_vec(&answer).map_err(|error| error.to_string())?;
-        envelope::seal(&envelope.device_id, &key, &bytes)
     }
 
     pub fn remove_device(&self, id: &str) -> Result<(), String> {
@@ -452,30 +511,10 @@ impl SyncServer {
         if devices.devices.len() == before {
             return Err(format!("no device '{id}'"));
         }
+        if !devices.removed.iter().any(|removed| removed == id) {
+            devices.removed.push(id.to_string());
+        }
         self.save_devices(&devices)
-    }
-
-    /// Add a login or give it a new password (`users.json`, sent to every device).
-    /// The account key changes with it, so devices that logged in with the old password
-    /// can no longer log in again by themselves.
-    pub fn set_user(&self, name: &str, password: &str) -> Result<(), String> {
-        let _busy = self.busy.lock();
-        let entry = crate::users::UserEntry::new(name, password)?;
-        let key = crate::account::account_key(&entry.name, password)?;
-        let mut accounts = self.load_accounts();
-        accounts
-            .accounts
-            .retain(|account| account.name != entry.name);
-        accounts.accounts.push(Account {
-            name: entry.name.clone(),
-            key,
-            last_login_at: None,
-        });
-        write_json(&self.accounts_path(), &accounts)?;
-        self.write_users(|users| {
-            users.put(entry);
-            Ok(())
-        })
     }
 
     pub fn remove_user(&self, name: &str) -> Result<(), String> {
@@ -484,6 +523,8 @@ impl SyncServer {
         let mut accounts = self.load_accounts();
         accounts.accounts.retain(|account| account.name != clean);
         write_json(&self.accounts_path(), &accounts)?;
+        // A removed login may be signed up again (the server takes a sign-up when it has no
+        // account).
         self.write_users(|users| {
             if users.remove(name) {
                 Ok(())
@@ -556,24 +597,7 @@ impl SyncServer {
 
     /// Answer one sealed request with a sealed response.
     pub fn handle(&self, envelope: &Envelope) -> Result<Envelope, String> {
-        if envelope.device_id.starts_with(crate::account::LOGIN_PREFIX) {
-            let answer = {
-                let _busy = self.busy.lock();
-                self.handle_login(envelope)
-            };
-            if answer.as_ref().is_err_and(|error| error == WRONG_LOGIN) {
-                // Slows down guessing, without holding up the other devices' syncs.
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            return answer;
-        }
         let _busy = self.busy.lock();
-        if envelope
-            .device_id
-            .starts_with(crate::account::SIGNUP_PREFIX)
-        {
-            return self.handle_signup(envelope);
-        }
         let mut devices = self.load_devices();
         let Some(device) = devices
             .devices
@@ -782,10 +806,19 @@ impl SyncServer {
                 length = value.trim().parse().unwrap_or(0);
             }
         }
-        let (status, body) = if request_line.starts_with("GET /public-key ") {
-            match self.public_key() {
-                Ok(key) => ("200 OK", json!({ "public_key": key }).to_string()),
-                Err(error) => ("500 Internal Server Error", error),
+        let (status, body) = if request_line.starts_with("POST /account ") && length <= 64 * 1024 {
+            let mut body = vec![0; length];
+            reader
+                .read_exact(&mut body)
+                .map_err(|error| error.to_string())?;
+            match serde_json::from_slice::<crate::account::AccountRequest>(&body)
+                .map_err(|error| format!("bad request: {error}"))
+                .and_then(|request| self.handle_account(&request))
+                .and_then(|answer| {
+                    serde_json::to_string(&answer).map_err(|error| error.to_string())
+                }) {
+                Ok(json) => ("200 OK", json),
+                Err(error) => ("403 Forbidden", error),
             }
         } else if !request_line.starts_with("POST /sync ") {
             ("200 OK", "digital wellbeing sync server".to_string())

@@ -210,7 +210,7 @@ mod tests {
         assert!(!status(&folder).available);
 
         let mut users = Users::default();
-        users.set("me", "password").unwrap();
+        users.add("me").unwrap();
         std::fs::write(
             folder.join(USERS_DOCUMENT),
             serde_json::to_string(&users).unwrap(),

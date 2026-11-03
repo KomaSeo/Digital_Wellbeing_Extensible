@@ -176,7 +176,7 @@ impl LoginForm {
         if self.joined_from_welcome {
             self.message_ui(ui);
             ui.label(
-                "이 PC가 동기화 서버에 붙었습니다. 20초 안에 첫 동기화가 일어나고, 설정 탭의 \"기기 동기화\"에서 마지막 동기화 시각을 볼 수 있습니다. 새 PC라면 설정 탭에서 이 PC의 Anthropic API 키를 넣으세요.",
+                "이 PC가 동기화 서버에 붙었습니다. 20초 안에 첫 동기화가 일어나고, 설정 탭의 \"기기 동기화\"에서 마지막 동기화 시각을 볼 수 있습니다. Anthropic API 키는 다른 PC가 쓰는 키를 받아 오므로 따로 넣지 않아도 됩니다. 이 PC가 처음이라면 설정 탭에서 키를 넣으면 다른 PC도 그 키를 씁니다.",
             );
             if ui.button("시작하기").clicked() {
                 note_welcome_answered();

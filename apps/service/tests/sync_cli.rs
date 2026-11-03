@@ -96,34 +96,15 @@ fn two_devices_sync_through_the_real_program() {
     assert!(synced.status.success(), "{}", text(&synced));
     assert!(text(&synced).contains("planner.json"), "{}", text(&synced));
 
-    // A login made on the server reaches the devices (with its password hashed).
-    let mut adding = Command::new(PROGRAM)
-        .args(["sync-add-user", "Me"])
-        .env("DW_SYNC_SERVER_DIR", &server_folder)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    {
-        use std::io::Write;
-        let mut input = adding.stdin.take().unwrap();
-        input.write_all(b"secret pass\nsecret pass\n").unwrap();
-    }
-    let added = adding.wait_with_output().unwrap();
-    assert!(added.status.success(), "{}", text(&added));
-    let users = text(&run(&server_folder, &laptop, &["sync-users"]));
-    assert!(users.contains("me"), "{users}");
+    // Logins are made by signing up from a PC, not on the server.
+    let refused = run(&server_folder, &laptop, &["sync-add-user", "me"]);
+    assert!(!refused.status.success());
 
     pair(&server_folder, &desktop, "desktop", port);
     let synced = run(&server_folder, &desktop, &["sync-now"]);
     assert!(synced.status.success(), "{}", text(&synced));
     let received = fs::read_to_string(desktop.join("planner.json")).unwrap();
     assert!(received.contains("from the laptop"), "{received}");
-    let logins = fs::read_to_string(desktop.join("users.json")).unwrap();
-    assert!(
-        logins.contains("\"me\"") && !logins.contains("secret"),
-        "{logins}"
-    );
 
     let status = text(&run(&server_folder, &desktop, &["sync-status"]));
     assert!(status.contains("device: desktop"), "{status}");
@@ -223,6 +204,11 @@ fn devices_sign_up_and_log_in_and_come_back_after_the_server_is_set_up_again() {
         r#"{ "life_rules": "from the laptop" }"#,
     )
     .unwrap();
+    fs::write(
+        laptop.join("ai_focus.json"),
+        r#"{ "api_key": "sk-ant-test-shared-key" }"#,
+    )
+    .unwrap();
     let signed_up = run_with_input(
         &server_folder,
         &laptop,
@@ -263,7 +249,24 @@ fn devices_sign_up_and_log_in_and_come_back_after_the_server_is_set_up_again() {
     assert!(synced.status.success(), "{}", text(&synced));
     let received = fs::read_to_string(desktop.join("planner.json")).unwrap();
     assert!(received.contains("from the laptop"), "{received}");
-    // The password itself is kept nowhere on the device.
+    // One API key for every PC: the desktop took the laptop's, through the sealed vault.
+    let settings = fs::read_to_string(desktop.join("ai_focus.json")).unwrap();
+    assert!(settings.contains("sk-ant-test-shared-key"), "{settings}");
+    // The server has neither the key nor the password, in any file.
+    let mut server_files = String::new();
+    let mut folders = vec![server_folder.clone()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(folder).unwrap().flatten() {
+            if entry.path().is_dir() {
+                folders.push(entry.path());
+            } else {
+                server_files.push_str(&String::from_utf8_lossy(&fs::read(entry.path()).unwrap()));
+            }
+        }
+    }
+    assert!(!server_files.contains("sk-ant-test-shared-key"));
+    assert!(!server_files.contains("long password"));
+    // The password is kept on the device only sealed.
     let config = fs::read_to_string(desktop.join("sync.json")).unwrap();
     assert!(!config.contains("long password"), "{config}");
 
