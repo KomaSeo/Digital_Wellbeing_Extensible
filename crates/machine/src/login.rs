@@ -94,14 +94,55 @@ pub fn profile_for(data_directory: &Path, windows_user: &str) -> String {
         .unwrap_or_else(|| crate::bare_user(windows_user).to_string())
 }
 
+/// A file's (modified time, length), to tell whether it changed.
+type FileSignature = Option<(std::time::SystemTime, u64)>;
+
+fn signature(path: &Path) -> FileSignature {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// The last [`status`] and what it was read from. The lockdown asks several times a second,
+/// and the two files change only on a login, a logout or a sync.
+type StatusCache = Option<(
+    std::path::PathBuf,
+    FileSignature,
+    FileSignature,
+    bool,
+    LoginStatus,
+)>;
+static STATUS_CACHE: std::sync::Mutex<StatusCache> = std::sync::Mutex::new(None);
+
 pub fn status(data_directory: &Path) -> LoginStatus {
-    let available = !users(data_directory).users.is_empty();
-    LoginStatus {
-        available,
+    let users_signature = signature(&data_directory.join(USERS_DOCUMENT));
+    let logins_signature = signature(&data_directory.join(LOGINS_FILE));
+    let session_known = SESSION_USER.get().is_some();
+    let mut cache = STATUS_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((folder, users_seen, logins_seen, session_seen, cached)) = cache.as_ref() {
+        if folder == data_directory
+            && *users_seen == users_signature
+            && *logins_seen == logins_signature
+            && *session_seen == session_known
+        {
+            return cached.clone();
+        }
+    }
+    let fresh = LoginStatus {
+        available: !users(data_directory).users.is_empty(),
         user: SESSION_USER
             .get()
             .and_then(|user| login_of(data_directory, user)),
-    }
+    };
+    *cache = Some((
+        data_directory.to_path_buf(),
+        users_signature,
+        logins_signature,
+        session_known,
+        fresh.clone(),
+    ));
+    fresh
 }
 
 /// This session must log in before it may use the PC (see the module comment).

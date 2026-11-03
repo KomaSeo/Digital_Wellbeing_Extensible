@@ -21,11 +21,12 @@ use crate::protocol::{
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Documents every device shares.
@@ -45,6 +46,10 @@ pub const SHARED_FOLDERS: [&str; 2] = ["grants", "blocks"];
 pub const DEVICE_FOLDER: &str = "usage";
 /// The largest request the server reads.
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+/// The largest request line and headers together.
+const MAX_HEAD_BYTES: u64 = 16 * 1024;
+/// Requests answered at the same time.
+const MAX_CONNECTIONS: usize = 32;
 
 /// Responsibility: Describe one paired device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -357,6 +362,7 @@ impl SyncServer {
             })
             .collect();
         let response = SyncResponse {
+            request_counter: request.counter,
             server_time: now,
             documents,
             rejected,
@@ -407,16 +413,37 @@ impl SyncServer {
         )
     }
 
-    /// Serve HTTP on `port` forever (`POST /sync` with an envelope as JSON).
+    /// The port this server was set up with (`server.json`), for the pairing hint.
+    pub fn port(&self) -> Option<u16> {
+        read_json::<Value>(&self.folder.join("server.json"))?
+            .get("port")?
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+    }
+
+    /// Serve HTTP on `port` forever (`POST /sync` with an envelope as JSON). At most
+    /// [`MAX_CONNECTIONS`] requests are answered at once; more are closed at once, so a
+    /// flood of connections cannot use up the server's memory or threads.
     pub fn serve(self: std::sync::Arc<Self>, port: u16) -> std::io::Result<()> {
         let listener = TcpListener::bind(("0.0.0.0", port))?;
+        if let Err(error) = write_json(&self.folder.join("server.json"), &json!({ "port": port })) {
+            tracing::warn!("could not note the port: {error}");
+        }
         tracing::info!("sync server listening on port {port}");
+        let open_connections = std::sync::Arc::new(AtomicUsize::new(0));
         for stream in listener.incoming().flatten() {
+            if open_connections.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                open_connections.fetch_sub(1, Ordering::SeqCst);
+                drop(stream);
+                continue;
+            }
             let server = std::sync::Arc::clone(&self);
+            let open_connections = std::sync::Arc::clone(&open_connections);
             std::thread::spawn(move || {
                 if let Err(error) = server.answer(stream) {
                     tracing::debug!("sync request: {error}");
                 }
+                open_connections.fetch_sub(1, Ordering::SeqCst);
             });
         }
         Ok(())
@@ -426,21 +453,29 @@ impl SyncServer {
         stream
             .set_read_timeout(Some(Duration::from_secs(30)))
             .map_err(|error| error.to_string())?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(30)))
+            .map_err(|error| error.to_string())?;
         let mut reader = BufReader::new(stream);
+        // The request line and headers together are read through a limit, so a line without
+        // an end cannot grow without bound.
+        let mut head = (&mut reader).take(MAX_HEAD_BYTES);
         let mut request_line = String::new();
-        reader
-            .read_line(&mut request_line)
+        head.read_line(&mut request_line)
             .map_err(|error| error.to_string())?;
         let mut length = 0usize;
         loop {
             let mut line = String::new();
-            if reader
+            if head
                 .read_line(&mut line)
                 .map_err(|error| error.to_string())?
                 == 0
                 || line == "\r\n"
             {
                 break;
+            }
+            if !line.ends_with('\n') {
+                return Err("the request head is too long".into());
             }
             if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                 length = value.trim().parse().unwrap_or(0);
@@ -479,15 +514,29 @@ pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
 
-/// Temp file + rename.
+/// Temp file (unique per process and write) + flush to disk + rename, so a crash or power
+/// loss leaves the old file or the new one, never an empty one.
 pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let text = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
-    let temporary = path.with_extension("json.sync.tmp");
-    fs::write(&temporary, text).map_err(|error| error.to_string())?;
-    fs::rename(&temporary, path).map_err(|error| error.to_string())
+    let temporary = path.with_extension(format!(
+        "json.sync.{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    written.map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        error.to_string()
+    })
 }
 
 #[cfg(test)]

@@ -152,10 +152,10 @@ pub fn local_documents(data_directory: &Path, device_id: &str) -> Vec<String> {
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().is_file())
             .map(|entry| entry.file_name().to_string_lossy().to_string())
-            // `<name>.json` only: no temporary, corrupt or other devices' (`~`) files.
-            .filter(|file| {
-                file.ends_with(".json") && file.matches('.').count() == 1 && !file.contains('~')
-            })
+            // `<name>.json` only (a name may hold dots, e.g. `john.doe.json`): temporary
+            // (`….tmp`) and corrupt (`….json.corrupt`) files end otherwise; other devices'
+            // files (`<device>~<user>.json`) are taken in, never sent.
+            .filter(|file| file.ends_with(".json") && !file.contains('~'))
             .collect();
         files.sort();
         files
@@ -184,6 +184,57 @@ fn read_value(path: &Path) -> Option<Value> {
 pub struct SyncClient {
     data_directory: PathBuf,
     config: ClientConfig,
+    /// A test-edition device may take in a turned-off protection; any other keeps its
+    /// protection whatever the server sends.
+    allow_unprotect: bool,
+}
+
+/// Is the protection on in this `settings_protection.json` content?
+fn protected(content: &Value) -> bool {
+    content
+        .get("protected_since")
+        .is_some_and(|since| !since.is_null())
+}
+
+/// Held while one sync runs on a data folder (`sync.lock`), so the service's loop and a
+/// `sync-now` never run at once. A lock older than [`STALE_LOCK`] is left from a crash.
+struct SyncLock(PathBuf);
+
+const STALE_LOCK: std::time::Duration = std::time::Duration::from_secs(300);
+
+impl SyncLock {
+    fn take(data_directory: &Path) -> Result<Self, String> {
+        fs::create_dir_all(data_directory).map_err(|error| format!("sync lock: {error}"))?;
+        let path = data_directory.join("sync.lock");
+        for _ in 0..2 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&path)
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .is_some_and(|age| age > STALE_LOCK);
+                    if !stale {
+                        return Err("another sync of this PC is running".into());
+                    }
+                    let _ = fs::remove_file(&path);
+                }
+                Err(error) => return Err(format!("sync lock: {error}")),
+            }
+        }
+        Err("another sync of this PC is running".into())
+    }
+}
+
+impl Drop for SyncLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 impl SyncClient {
@@ -191,7 +242,14 @@ impl SyncClient {
         Self {
             data_directory,
             config,
+            allow_unprotect: false,
         }
+    }
+
+    /// For the test edition, which can turn the protection off itself.
+    pub fn allowing_unprotect(mut self, allow: bool) -> Self {
+        self.allow_unprotect = allow;
+        self
     }
 
     pub fn config(&self) -> &ClientConfig {
@@ -242,6 +300,15 @@ impl SyncClient {
             }
             _ => remote.clone(),
         };
+        // A protected device stays protected, whatever comes (an old answer sent again, a
+        // test-edition server): its protected version is sent back at the next round.
+        if document_name == "settings_protection.json"
+            && !self.allow_unprotect
+            && current.as_ref().is_some_and(protected)
+            && !protected(&next_shared)
+        {
+            return Ok(false);
+        }
         // This device's own parts (its API key) stay as they are.
         let next = with_local_part(document_name, &next_shared, current_whole.as_ref());
         if current_whole.as_ref() == Some(&next) {
@@ -258,6 +325,7 @@ impl SyncClient {
         &self,
         transport: &mut dyn FnMut(&Envelope) -> Result<Envelope, String>,
     ) -> Result<SyncReport, String> {
+        let _lock = SyncLock::take(&self.data_directory)?;
         let mut state = SyncState::load(&self.data_directory);
         state.last_attempt = Some(Utc::now());
         let result = self.rounds(&mut state, transport);
@@ -317,6 +385,14 @@ impl SyncClient {
             let response: SyncResponse =
                 serde_json::from_slice(&envelope::open(&answer, &self.config.key)?)
                     .map_err(|error| format!("bad answer: {error}"))?;
+            // Only the answer to this very request counts: an old answer sent again would
+            // bring old documents back.
+            if response.request_counter != request.counter
+                || (Utc::now() - response.server_time).num_seconds().abs()
+                    > crate::protocol::MAX_CLOCK_SKEW_SECONDS
+            {
+                return Err("the answer does not belong to this request".into());
+            }
 
             report.outdated_devices = response.outdated_devices.clone();
             let mut conflicts = 0;

@@ -76,6 +76,10 @@ pub struct Rejected {
 /// (including the ones it just accepted), and the pushes it refused.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncResponse {
+    /// The counter of the request this answers: a device takes no answer meant for another
+    /// (an old answer sent again would bring old settings back).
+    #[serde(default)]
+    pub request_counter: u64,
     pub server_time: DateTime<Utc>,
     pub documents: Vec<Document>,
     pub rejected: Vec<Rejected>,

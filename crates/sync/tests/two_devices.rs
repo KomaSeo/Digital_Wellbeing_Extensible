@@ -361,6 +361,20 @@ fn a_sync_round_works_over_http() {
         .unwrap();
     assert_eq!(report.pushed, vec!["planner.json".to_string()]);
 
+    // A request line with no end is cut off, not read forever.
+    {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let _ = stream.write_all(&vec![b'a'; 64 * 1024]);
+        let mut answer = Vec::new();
+        let _ = stream.read_to_end(&mut answer);
+        assert!(answer.len() < 1024, "{}", String::from_utf8_lossy(&answer));
+    }
+    assert_eq!(server.port(), Some(port));
+
     // A wrong key is refused with the server's reason.
     let stranger = SyncClient::new(
         root.join("stranger"),
@@ -469,4 +483,115 @@ fn a_device_with_an_older_version_stops_syncing_until_it_is_updated() {
     )
     .unwrap();
     assert!(answer.outdated_devices.is_empty());
+}
+
+#[test]
+fn an_old_answer_sent_again_is_refused_and_protection_stays() {
+    let setup = setup("replay");
+    let (laptop_folder, laptop) = &setup.laptop;
+    // The server is unprotected at first; the laptop records that answer.
+    write(
+        laptop_folder,
+        "settings_protection.json",
+        &json!({ "protected_since": null }),
+    );
+    let mut recorded: Option<Envelope> = None;
+    laptop
+        .sync_once(&mut |sealed: &Envelope| {
+            let answer = setup.server.handle(sealed)?;
+            recorded.get_or_insert(answer.clone());
+            Ok(answer)
+        })
+        .unwrap();
+    // Protection goes on and is synced.
+    let protected = json!({ "protected_since": "2026-11-01T00:00:00Z" });
+    write(laptop_folder, "settings_protection.json", &protected);
+    sync(&setup.server, laptop);
+
+    // Someone sends the old answer back in place of the server's.
+    let old = recorded.unwrap();
+    let error = laptop
+        .sync_once(&mut |_sealed: &Envelope| Ok(old.clone()))
+        .unwrap_err();
+    assert!(error.contains("does not belong"), "{error}");
+    assert_eq!(
+        read(laptop_folder, "settings_protection.json").unwrap(),
+        protected
+    );
+}
+
+#[test]
+fn a_protected_device_keeps_its_protection_whatever_the_server_sends() {
+    let root = temporary_folder("test_server");
+    // A test-edition server lets a device turn the protection off.
+    let server = SyncServer::new(root.join("server"), true);
+    let device = |name: &str| {
+        let code = server.add_device(name).unwrap();
+        let folder = root.join(name);
+        fs::create_dir_all(&folder).unwrap();
+        let client = SyncClient::new(
+            folder.clone(),
+            ClientConfig {
+                server_url: String::new(),
+                device_id: code.device_id,
+                key: code.key,
+            },
+        );
+        (folder, client)
+    };
+    let (laptop_folder, laptop) = device("laptop");
+    let (desktop_folder, desktop) = device("desktop");
+    let protected = json!({ "protected_since": "2026-11-01T00:00:00Z" });
+    write(&laptop_folder, "settings_protection.json", &protected);
+    sync(&server, &laptop);
+    sync(&server, &desktop);
+    // The test-edition laptop turns it off; the main-edition desktop does not follow.
+    let laptop = laptop.allowing_unprotect(true);
+    write(
+        &laptop_folder,
+        "settings_protection.json",
+        &json!({ "protected_since": null }),
+    );
+    sync(&server, &laptop);
+    sync(&server, &desktop);
+    assert_eq!(
+        read(&desktop_folder, "settings_protection.json").unwrap(),
+        protected
+    );
+}
+
+#[test]
+fn files_with_dots_in_their_names_are_synced() {
+    let setup = setup("dots");
+    let (laptop_folder, laptop) = &setup.laptop;
+    let (desktop_folder, desktop) = &setup.desktop;
+    write(
+        laptop_folder,
+        "grants/john.doe.json",
+        &json!({ "grants": [1] }),
+    );
+    // Temporary and corrupt files are not.
+    write(laptop_folder, "grants/john.doe.json.123.4.tmp", &json!({}));
+    write(laptop_folder, "grants/john.doe.json.corrupt", &json!({}));
+    sync(&setup.server, laptop);
+    sync(&setup.server, desktop);
+    assert_eq!(
+        read(desktop_folder, "grants/john.doe.json").unwrap(),
+        json!({ "grants": [1] })
+    );
+    assert!(!desktop_folder.join("grants/john.doe.json.corrupt").exists());
+}
+
+#[test]
+fn only_one_sync_of_a_device_runs_at_a_time() {
+    let setup = setup("lock");
+    let (laptop_folder, laptop) = &setup.laptop;
+    fs::write(laptop_folder.join("sync.lock"), "").unwrap();
+    let error = laptop
+        .sync_once(&mut |sealed: &Envelope| setup.server.handle(sealed))
+        .unwrap_err();
+    assert!(error.contains("another sync"), "{error}");
+    fs::remove_file(laptop_folder.join("sync.lock")).unwrap();
+    sync(&setup.server, laptop);
+    assert!(!laptop_folder.join("sync.lock").exists());
 }

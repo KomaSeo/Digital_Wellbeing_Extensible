@@ -111,13 +111,16 @@ fn add_device(arguments: &[String]) -> anyhow::Result<()> {
     if name.trim().is_empty() {
         bail!("usage: sync-add-device <a name for the device, e.g. laptop>");
     }
-    let code = server().add_device(&name).map_err(anyhow::Error::msg)?;
+    let sync_server = server();
+    let code = sync_server.add_device(&name).map_err(anyhow::Error::msg)?;
+    // The port the server runs on (noted when it starts), else the default.
+    let port = sync_server.port().unwrap_or(DEFAULT_PORT);
     println!(
         "paired '{}'. On that device, from an administrator terminal:",
         code.device_id
     );
     println!(
-        "  digital-wellbeing-service sync-join http://<this server's address>:{DEFAULT_PORT} {}",
+        "  digital-wellbeing-service sync-join http://<this server's address>:{port} {}",
         code.to_line()
     );
     println!("The code is shown only this once; anyone with it can sync as that device.");
@@ -296,6 +299,7 @@ fn status(data_directory: &Path) -> anyhow::Result<()> {
 fn sync_now(data_directory: &Path) -> anyhow::Result<()> {
     let config = ClientConfig::load(data_directory).context("this device does not sync")?;
     let report = SyncClient::new(data_directory.to_path_buf(), config.clone())
+        .allowing_unprotect(machine::TEST_EDITION)
         .sync_once(&mut client::http_transport(&config.server_url))
         .map_err(anyhow::Error::msg)?;
     println!(
@@ -314,7 +318,8 @@ pub fn sync_loop(data_directory: PathBuf) {
     let mut last_error: Option<String> = None;
     loop {
         if let Some(config) = ClientConfig::load(&data_directory) {
-            let client = SyncClient::new(data_directory.clone(), config.clone());
+            let client = SyncClient::new(data_directory.clone(), config.clone())
+                .allowing_unprotect(machine::TEST_EDITION);
             match client.sync_once(&mut client::http_transport(&config.server_url)) {
                 Ok(report) => {
                     if !report.pulled.is_empty() || !report.merged.is_empty() {

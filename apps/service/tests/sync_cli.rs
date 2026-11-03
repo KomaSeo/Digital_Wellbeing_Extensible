@@ -39,6 +39,8 @@ fn pair(server_folder: &Path, data_folder: &Path, name: &str, port: u16) {
     let added = run(server_folder, data_folder, &["sync-add-device", name]);
     assert!(added.status.success(), "{}", text(&added));
     let printed = text(&added);
+    // The hint names the port the server runs on, not the default.
+    assert!(printed.contains(&format!(":{port} ")), "{printed}");
     let code = printed
         .lines()
         .find(|line| line.contains("sync-join"))
