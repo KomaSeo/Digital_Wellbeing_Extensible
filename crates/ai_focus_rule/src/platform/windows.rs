@@ -42,6 +42,22 @@ impl WindowsDesktop {
 }
 
 impl Desktop for WindowsDesktop {
+    fn idle_seconds(&self) -> Option<u64> {
+        use windows_sys::Win32::System::SystemInformation::GetTickCount;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+        let mut info = LASTINPUTINFO {
+            cbSize: size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        // SAFETY: `info` is a valid LASTINPUTINFO with its size set.
+        if unsafe { GetLastInputInfo(&mut info) } == 0 {
+            return None;
+        }
+        // Both are milliseconds since boot; wrapping keeps the difference right after 49 days.
+        let now = unsafe { GetTickCount() };
+        Some(u64::from(now.wrapping_sub(info.dwTime)) / 1000)
+    }
+
     fn foreground(&self) -> Option<Foreground> {
         // SAFETY: plain Win32 queries on the foreground HWND; buffers are sized by us.
         unsafe {

@@ -141,12 +141,17 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
 
     let planner_config = JsonStore::<PlannerConfig>::open(machine::planner_path(), false)?;
     let planner_state = JsonStore::<PlannerState>::open(machine::planner_state_path(), true)?;
-    let planner = Arc::new(TaskPlanner::new(
-        planner_config.clone(),
-        planner_state,
-        Arc::clone(&monitor),
-        claude_advisor_provider(),
-    ));
+    let idle_monitor = Arc::clone(&monitor);
+    let planner = Arc::new(
+        TaskPlanner::new(
+            planner_config.clone(),
+            planner_state,
+            Arc::clone(&monitor),
+            claude_advisor_provider(),
+        )
+        // A task done at the computer stands still while the user does not touch it.
+        .with_idle_source(move || idle_monitor.idle_seconds()),
+    );
 
     let _ = planner_cell.set(Arc::clone(&planner));
     let auto_planner = Arc::clone(&planner);
