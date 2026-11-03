@@ -384,4 +384,4 @@ rc.21은 배포 중에 GitHub 오류가 나서 릴리스 페이지가 없습니�
 
 - **시험판입니다.** 이 버전은 GitHub Actions의 Windows에서 빌드와 자동 테스트만 거쳤고, 실제 PC에서 서비스·화면 캡처·탭 닫기를 확인하지 않았습니다. 처음 설치한 뒤 `docs\multi_account.md` 5장의 점검 목록을 따라 해 보세요.
 - **서명되지 않은 실행 파일입니다.** Windows SmartScreen이 "알 수 없는 게시자" 경고를 띄웁니다. "추가 정보 → 실행"을 눌러야 합니다.
-- 제거는 Windows 설정의 **앱 → 설치된 앱**에서 합니다. 설정 폴더 `C:\ProgramData\DigitalWellbeing`은 남으므로, 필요하면 직접 지웁니다.
+- 제거는 Windows 설정의 **앱 → 설치된 앱**에서 합니다. 제거 프로그램이 사용자 정보(설정 폴더 `C:\ProgramData\DigitalWellbeing`)를 지울지 묻고, 기본값은 남겨 두는 것입니다.
