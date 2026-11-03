@@ -40,6 +40,7 @@ Claude API는 지금처럼 각 기기가 직접 부릅니다. 서버는 Claude�
   - **영구** 보호를 끄는 변경은 서버가 받지 않고, 기기도 받지 않습니다.
   - **기간** 보호를 끄는 변경은 그 기간이 끝난 뒤에만 받습니다.
   - **관리자 권한**과 **비밀번호** 보호는, 한 기기에서 그 방법으로 풀면(그 기기의 서비스가 관리자 권한이나 비밀번호를 확인합니다) 모든 기기에서 풀립니다. 그러면 모든 기기의 걸린 차단도 풀립니다.
+  - **관리자 권한** 보호는 보호할 때 "어느 컴퓨터의 관리자가 풀 수 있나"를 고를 수 있습니다(기본값은 보호하는 컴퓨터). 예를 들어 "desktop"을 고르면, desktop에서 desktop의 관리자 승인으로만 풀립니다. 다른 컴퓨터에서는 버튼이 나오지 않고, 서버도 다른 컴퓨터가 보낸 "보호 풀림"을 받지 않습니다. "아무 컴퓨터"를 고르면 어느 컴퓨터든 그 컴퓨터의 관리자가 풀 수 있습니다. 고른 컴퓨터를 동기화에서 빼면(`sync-remove-device`) 그 보호는 풀 수 없게 됩니다.
   - 보호가 켜진 동안에는 푸는 방법을 바꾸는 변경도 서버가 받지 않습니다.
   - 받지 않은 기기는 다음 동기화에서 서버의 보호된 설정을 다시 받고, 보호된 기기는 자기의 보호된 설정을 서버에 다시 보냅니다.
 - 서버는 한 번에 32개까지의 요청만 받고, 요청의 첫 부분(요청 줄과 헤더)은 16KB까지만 읽습니다. 그래서 포트를 인터넷에 열어도, 누가 연결을 잔뜩 열거나 끝없는 요청을 보내 서버 PC의 메모리를 다 쓰게 할 수 없습니다.
@@ -71,22 +72,64 @@ Claude API는 지금처럼 각 기기가 직접 부릅니다. 서버는 Claude�
 
 서버를 없애려면 관리자 터미널에서 `sc stop DigitalWellbeingSync`와 `sc delete DigitalWellbeingSync`를 실행하고, 두 폴더를 지웁니다.
 
+### 클라우드 서버로 쓸 때 (권장: 24시간 켜 두기)
+
+이 절에서 **클라우드 서버**는 클라우드 회사가 빌려주는 리눅스 컴퓨터를 말합니다. 집의 PC와 달리 꺼지지 않으므로, 동기화 서버를 24시간 두기에 알맞습니다. 이 프로그램의 서버는 한 사람이 기기 10대쯤으로 쓰기에 아주 작은 컴퓨터로 충분합니다. 서버는 한 번에 16개까지의 요청만 받는데, 기기마다 20초에 한 번 1초도 걸리지 않는 요청을 보내므로 넉넉합니다.
+
+**권장: AWS Lightsail의 서울 리전, 가장 작은 리눅스 요금제.** 이유는 다음과 같습니다.
+- 요금이 월 정액이고(가장 작은 요금제가 월 몇 달러), 고정 IP가 무료입니다(인스턴스에 붙어 있는 동안).
+- 서울 리전이 있어 한국에서 빠릅니다.
+- 자동 스냅샷(매일 백업)을 켤 수 있습니다.
+- 무료 요금제(예: Oracle Cloud의 Always Free)는 쓰지 않는 것이 좋습니다. 이 서버처럼 CPU를 거의 쓰지 않는 인스턴스는 "놀고 있다"고 회수될 수 있기 때문입니다.
+
+**1. 서버 만들기 (AWS 콘솔)**
+1. AWS 계정을 만들고, 루트 계정에 MFA(두 번째 인증)를 켭니다.
+2. Lightsail → 인스턴스 생성: 리전 **서울(ap-northeast-2)**, 플랫폼 **Linux/Unix**, 블루프린트 **OS 전용 → Ubuntu 24.04 LTS**, 요금제는 IPv4가 있는 가장 작은 것을 고릅니다.
+3. 네트워킹 탭: **고정 IP**를 만들어 이 인스턴스에 붙입니다. 이 주소가 서버 주소입니다(예: `3.35.x.x`).
+4. 네트워킹 탭 → IPv4 방화벽: **사용자 지정, TCP, 47820** 규칙을 더합니다. SSH(22)는 "Lightsail 브라우저 SSH/RDP만 허용"으로 좁힙니다.
+5. 스냅샷 탭: **자동 스냅샷**을 켭니다.
+
+**2. 서버 프로그램 받기 (PC에서)**
+- GitHub에 로그인한 브라우저에서, 이 브랜치의 최근 `ci` 실행(Actions 탭)을 열고 Artifacts의 `digital-wellbeing-sync-server-linux-x64`를 내려받아 풉니다. 안에 `digital-wellbeing-service`(리눅스용 프로그램, 다른 파일이 필요 없는 정적 실행 파일)와 `digital-wellbeing-sync.service`(systemd 서비스 파일)가 있습니다.
+
+**3. 서버에 올리고 켜기**
+1. Lightsail 계정 페이지에서 기본 SSH 키(`LightsailDefaultKey-ap-northeast-2.pem`)를 내려받고, PC의 PowerShell에서 두 파일을 올립니다.
+
+   ```
+   scp -i LightsailDefaultKey-ap-northeast-2.pem digital-wellbeing-service digital-wellbeing-sync.service ubuntu@<고정 IP>:~/
+   ```
+
+   (SSH를 브라우저 SSH만 허용으로 좁혔다면, 이때만 잠깐 내 IP의 22번을 열고 끝나면 닫습니다.)
+2. Lightsail의 "SSH를 사용하여 연결"(브라우저 SSH)에서 다음을 실행합니다.
+
+   ```
+   sudo install -m 755 ~/digital-wellbeing-service /usr/local/bin/
+   sudo install -m 644 ~/digital-wellbeing-sync.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now digital-wellbeing-sync
+   systemctl status digital-wellbeing-sync
+   ```
+
+   서비스는 서버가 켜질 때 저절로 시작하고, 멈추면 5초 뒤에 다시 시작합니다. 문서와 기기 열쇠는 `/var/lib/digital-wellbeing-sync`에 있고, root만 읽을 수 있습니다.
+3. 같은 창에서 로그인과 기기를 만듭니다(7장, 5장).
+
+   ```
+   sudo digital-wellbeing-service sync-add-user me
+   sudo digital-wellbeing-service sync-add-device laptop
+   ```
+
+   나온 `sync-join` 줄의 `<this server's address>`에 고정 IP를 넣어 각 PC에서 실행합니다.
+
+**운영**
+- 기록 보기: `journalctl -u digital-wellbeing-sync -f`
+- 새 버전으로 바꾸기: 새 `digital-wellbeing-service`를 올리고 `sudo install -m 755 ~/digital-wellbeing-service /usr/local/bin/` 뒤에 `sudo systemctl restart digital-wellbeing-sync`. 서버와 PC는 같은 버전으로 맞춥니다(8장).
+- 백업: 자동 스냅샷이 매일 서버 전체를 남깁니다.
+
+**서버의 내용을 마음대로 바꾸지 못하게 하려면** 클라우드에서는 AWS 계정이 "관리자 비밀번호"입니다. AWS 계정의 비밀번호와 MFA 장치, 그리고 SSH 키(`.pem` 파일)를 관리자 비밀번호처럼 물리적으로 따로 보관하고, PC에 남은 `.pem` 파일은 지웁니다. 이것들이 있는 사람은 서버의 파일을 바꿀 수 있습니다.
+
 ### 리눅스 PC를 서버로 쓸 때
 
-리눅스에서는 `digital-wellbeing-service sync-serve --port 47820`이 서버를 터미널에서 돌립니다. 파일은 `/var/lib/digital-wellbeing-sync`에 있습니다. 계속 돌리려면 root 권한의 systemd 서비스로 등록하고, 그 폴더를 root만 읽게(`chmod 700`) 합니다.
-
-```
-[Unit]
-Description=Digital Wellbeing Sync Server
-After=network-online.target
-
-[Service]
-ExecStart=/usr/local/bin/digital-wellbeing-service sync-serve --port 47820
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
+위의 3번과 같습니다. `digital-wellbeing-sync.service`를 설치해 systemd 서비스로 돌립니다. 터미널에서 잠깐 돌려 보려면 `sudo digital-wellbeing-service sync-serve --port 47820`을 씁니다.
 
 ## 5. 기기 짝짓기
 

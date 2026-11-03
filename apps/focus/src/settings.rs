@@ -267,6 +267,10 @@ pub struct SettingsTab {
     session: u32,
     error: String,
     confirm_protect: bool,
+    /// The sync device whose administrator may end an administrator protection (`None`: any).
+    protect_admin_device: Option<String>,
+    /// The choice above was set (to this computer, at first).
+    protect_admin_device_chosen: bool,
     /// The protection the user is choosing, and its length or password.
     protect_kind: ProtectKind,
     protect_days: u32,
@@ -338,6 +342,8 @@ impl SettingsTab {
             session,
             error: String::new(),
             confirm_protect: false,
+            protect_admin_device: None,
+            protect_admin_device_chosen: false,
             protect_kind: ProtectKind::Until,
             protect_days: 7,
             protect_hours: 0,
@@ -384,9 +390,9 @@ impl SettingsTab {
                  간격으로 {APPROVALS_NEEDED}번 연속 \"예\"라고 답하면 적용되고, 한 번이라도 \
                  \"아니요\"라고 답하면 거절됩니다."
             ));
-            self.unlock_ui(ui, protection);
+            self.unlock_ui(ui, protection, sync);
         } else {
-            self.protect_ui(ui);
+            self.protect_ui(ui, sync);
         }
         sync_ui(ui, sync);
         if self.reservations_ui(ui) {
@@ -473,7 +479,7 @@ impl SettingsTab {
     }
 
     /// Setup: changes take effect at once until the user protects the settings.
-    fn protect_ui(&mut self, ui: &mut egui::Ui) {
+    fn protect_ui(&mut self, ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
         ui.colored_label(
             YELLOW,
             "설정 단계: 변경이 바로 적용되고, 이 PC를 쓰는 누구나 설정을 바꿀 수 있습니다.",
@@ -516,6 +522,58 @@ impl SettingsTab {
             ProtectKind::Administrator,
             "관리자 권한: Windows가 관리자 승인을 물을 때 승인할 수 있어야 풀 수 있습니다",
         );
+        // With sync: whose administrator. This computer by default, since the one choosing
+        // is here; any computer's administrator is a choice too.
+        if let (ProtectKind::Administrator, Some(sync)) = (self.protect_kind, sync) {
+            if !self.protect_admin_device_chosen {
+                self.protect_admin_device = Some(sync.device_id.clone());
+                self.protect_admin_device_chosen = true;
+            }
+            let name_of = |id: &str| {
+                sync.devices
+                    .iter()
+                    .find(|(device_id, _)| device_id == id)
+                    .map(|(_, name)| format!("{name} ({id})"))
+                    .unwrap_or_else(|| id.to_string())
+            };
+            let shown = match &self.protect_admin_device {
+                Some(id) => name_of(id),
+                None => "아무 컴퓨터".to_string(),
+            };
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.label("어느 컴퓨터의 관리자가 풀 수 있나");
+                egui::ComboBox::from_id_salt("protect_admin_device")
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        let mut ids: Vec<String> =
+                            sync.devices.iter().map(|(id, _)| id.clone()).collect();
+                        if !ids.contains(&sync.device_id) {
+                            ids.insert(0, sync.device_id.clone());
+                        }
+                        for id in ids {
+                            let label = if id == sync.device_id {
+                                format!("{} — 이 컴퓨터", name_of(&id))
+                            } else {
+                                name_of(&id)
+                            };
+                            ui.selectable_value(&mut self.protect_admin_device, Some(id), label);
+                        }
+                        ui.selectable_value(
+                            &mut self.protect_admin_device,
+                            None,
+                            "아무 컴퓨터(동기화하는 어느 컴퓨터든 그 컴퓨터의 관리자)",
+                        );
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.small(
+                    "고른 컴퓨터에서만, 그 컴퓨터의 관리자 승인으로 풀 수 있습니다. 풀면 모든 \
+                     컴퓨터에서 풀립니다. 그 컴퓨터를 동기화에서 빼면 이 보호는 풀 수 없게 됩니다.",
+                );
+            });
+        }
         ui.radio_value(
             &mut self.protect_kind,
             ProtectKind::Password,
@@ -538,7 +596,10 @@ impl SettingsTab {
         let mode = match self.protect_kind {
             ProtectKind::Until => Some(json!({ "kind": "until", "until": self.protect_until() })),
             ProtectKind::Permanent => Some(json!({ "kind": "permanent" })),
-            ProtectKind::Administrator => Some(json!({ "kind": "administrator" })),
+            ProtectKind::Administrator => Some(json!({
+                "kind": "administrator",
+                "device": sync.and(self.protect_admin_device.clone()),
+            })),
             ProtectKind::Password => {
                 let password = self.protect_password.clone();
                 (password.chars().count() >= 4 && password == self.protect_password_again)
@@ -582,6 +643,7 @@ impl SettingsTab {
         &mut self,
         ui: &mut egui::Ui,
         protection: Option<&machine::user_api::ProtectionView>,
+        sync: Option<&machine::user_api::SyncStatus>,
     ) {
         let Some(protection) = protection else {
             return;
@@ -600,8 +662,36 @@ impl SettingsTab {
                 }
             }
             "administrator" => {
-                ui.label("관리자 권한 보호입니다. Windows의 관리자 승인 창에서 승인해야 풀립니다.");
-                if ui.button("관리자 권한으로 보호 풀기").clicked() {
+                let this_device = sync.map(|sync| sync.device_id.as_str());
+                let elsewhere = protection
+                    .device
+                    .as_deref()
+                    .filter(|required| Some(*required) != this_device);
+                if let Some(required) = elsewhere {
+                    let name = sync
+                        .and_then(|sync| {
+                            sync.devices
+                                .iter()
+                                .find(|(device_id, _)| device_id == required)
+                                .map(|(_, name)| name.clone())
+                        })
+                        .unwrap_or_else(|| required.to_string());
+                    ui.label(format!(
+                        "관리자 권한 보호입니다. \"{name}\" 컴퓨터에서, 그 컴퓨터의 관리자 승인으로만 \
+                         풀 수 있습니다. 거기서 풀면 이 컴퓨터도 풀립니다."
+                    ));
+                } else if protection.device.is_some() {
+                    ui.label(
+                        "관리자 권한 보호입니다. 이 컴퓨터에서 Windows의 관리자 승인 창에서 \
+                         승인해야 풀립니다. 풀면 모든 컴퓨터에서 풀립니다.",
+                    );
+                } else {
+                    ui.label(
+                        "관리자 권한 보호입니다. Windows의 관리자 승인 창에서 승인해야 풀립니다.",
+                    );
+                }
+                if elsewhere.is_none() && ui.button("관리자 권한으로 보호 풀기").clicked()
+                {
                     match crate::elevate::run_settings_unlock() {
                         Ok(()) => {
                             self.message =

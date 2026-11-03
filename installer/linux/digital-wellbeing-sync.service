@@ -1,0 +1,29 @@
+# Responsibility: Run the Digital Wellbeing sync server on a Linux machine (a cloud server)
+# all the time: started at boot, started again if it stops. See docs/sync.md 4장.
+#
+# Install (as root):
+#   install -m 755 digital-wellbeing-service /usr/local/bin/
+#   install -m 644 digital-wellbeing-sync.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now digital-wellbeing-sync
+
+[Unit]
+Description=Digital Wellbeing sync server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/digital-wellbeing-service sync-serve --port 47820
+Restart=always
+RestartSec=5
+# The documents and the device keys live here; only root can read them.
+StateDirectory=digital-wellbeing-sync
+StateDirectoryMode=0700
+UMask=0077
+# The server needs nothing else of the machine.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -48,8 +48,9 @@ pub const DEVICE_FOLDER: &str = "usage";
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// The largest request line and headers together.
 const MAX_HEAD_BYTES: u64 = 16 * 1024;
-/// Requests answered at the same time.
-const MAX_CONNECTIONS: usize = 32;
+/// Requests answered at the same time: one owner with about ten devices, each syncing every
+/// 20 seconds in a fraction of a second, needs few; more are refused at once.
+const MAX_CONNECTIONS: usize = 16;
 
 /// Responsibility: Describe one paired device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,17 +89,28 @@ pub fn protected(content: &Value) -> bool {
         .is_some_and(|since| !since.is_null())
 }
 
-/// May this protection (as `settings_protection.json` holds it) end now? Never a permanent
-/// one (nor one saved before there were options); a time one once its time is over; an
-/// administrator or password one when a device ended it (that device's service checked the
-/// administrator rights or the password, which neither the server nor another device can).
-pub fn protection_may_end(protection: &Value, now: DateTime<Utc>) -> bool {
+/// May this protection (as `settings_protection.json` holds it) end now, ended by the device
+/// `by_device` (`None`: not known, as on a device taking in what the server took)? Never a
+/// permanent one (nor one saved before there were options); a time one once its time is over;
+/// a password one, or an administrator one, when a device ended it (that device's service
+/// checked the password or the administrator rights, which neither the server nor another
+/// device can) — an administrator one tied to a device only when that device ended it.
+pub fn protection_may_end(protection: &Value, now: DateTime<Utc>, by_device: Option<&str>) -> bool {
     match protection.pointer("/mode/kind").and_then(Value::as_str) {
         Some("until") => protection
             .pointer("/mode/until")
             .and_then(|until| serde_json::from_value::<DateTime<Utc>>(until.clone()).ok())
             .is_some_and(|until| now >= until),
-        Some("administrator") | Some("password") => true,
+        Some("administrator") => {
+            match (
+                protection.pointer("/mode/device").and_then(Value::as_str),
+                by_device,
+            ) {
+                (Some(required), Some(device)) => required == device,
+                _ => true,
+            }
+        }
+        Some("password") => true,
         _ => false,
     }
 }
@@ -386,6 +398,11 @@ impl SyncServer {
             documents,
             rejected,
             outdated_devices,
+            devices: devices
+                .devices
+                .iter()
+                .map(|device| (device.id.clone(), device.name.clone()))
+                .collect(),
         };
         let bytes = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
         envelope::seal(&device_id, &key, &bytes)
@@ -407,7 +424,9 @@ impl SyncServer {
         }
         if push.name == "settings_protection.json" {
             if let Some(stored) = current.as_ref().filter(|stored| protected(&stored.content)) {
-                if !protected(&push.content) && !protection_may_end(&stored.content, now) {
+                if !protected(&push.content)
+                    && !protection_may_end(&stored.content, now, Some(device_id))
+                {
                     return Err("the protection cannot be turned off".into());
                 }
                 // How a protection ends is chosen once, when protecting.

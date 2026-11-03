@@ -87,6 +87,10 @@ pub struct SyncResponse {
     /// they cannot sync until they are updated.
     #[serde(default)]
     pub outdated_devices: Vec<(String, String)>,
+    /// Every paired device: (id, the name it was paired with), for choosing whose
+    /// administrator may turn a protection off.
+    #[serde(default)]
+    pub devices: Vec<(String, String)>,
 }
 
 /// Responsibility: Carry what a device needs to join: the server's address is given apart.

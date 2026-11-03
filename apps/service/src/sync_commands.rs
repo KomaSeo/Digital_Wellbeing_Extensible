@@ -87,6 +87,13 @@ pub fn run_command(command: &str, arguments: &[String]) -> Option<anyhow::Result
 
 fn serve(arguments: &[String]) -> anyhow::Result<()> {
     let port = port_option(arguments)?;
+    // To standard error, so a Linux service manager (systemd's journal) keeps the log.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .with_ansi(false)
+        .try_init();
     println!(
         "sync server: {} on port {port} (Ctrl+C stops it)",
         server_folder().display()

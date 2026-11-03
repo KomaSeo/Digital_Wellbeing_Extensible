@@ -35,6 +35,39 @@ jobs:
       - name: Test (with a virtual X server)
         run: xvfb-run -a cargo test --workspace --locked
 
+  # The sync server for a Linux machine (a cloud server): one static program that runs on any
+  # 64-bit Linux, with its systemd service file. Download it from the run's artifacts.
+  linux-sync-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-musl
+      - name: Build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          cargo build --release --locked --target x86_64-unknown-linux-musl -p digital-wellbeing-service
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/digital-wellbeing-service installer/linux/digital-wellbeing-sync.service dist/
+      - name: The server answers
+        run: |
+          export DW_SYNC_SERVER_DIR="$RUNNER_TEMP/sync"
+          dist/digital-wellbeing-service sync-serve --port 47900 &
+          sleep 2
+          curl -fsS http://127.0.0.1:47900/ | grep -q "sync server"
+          dist/digital-wellbeing-service sync-add-device ci | grep -q "sync-join http://"
+          kill %1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-wellbeing-sync-server-linux-x64
+          path: dist/*
+
   windows:
     runs-on: windows-latest
     timeout-minutes: 60

@@ -71,6 +71,8 @@ pub struct SyncState {
     pub refused: Vec<Rejected>,
     /// Other devices that must be updated before they sync again: (device, its version).
     pub outdated_devices: Vec<(String, String)>,
+    /// Every paired device as the server last told: (id, name).
+    pub devices: Vec<(String, String)>,
 }
 
 impl SyncState {
@@ -94,6 +96,7 @@ pub struct SyncReport {
     pub merged: Vec<String>,
     pub refused: Vec<Rejected>,
     pub outdated_devices: Vec<(String, String)>,
+    pub devices: Vec<(String, String)>,
 }
 
 /// Top-level values of a document that are never merged inside (one side's whole value wins).
@@ -287,7 +290,7 @@ impl SyncClient {
         // rule as the server's): its protected version is sent back at the next round.
         if document_name == "settings_protection.json" {
             if let Some(local) = current.as_ref().filter(|local| protected(local)) {
-                if !protected(&next_shared) && !protection_may_end(local, Utc::now()) {
+                if !protected(&next_shared) && !protection_may_end(local, Utc::now(), None) {
                     return Ok(false);
                 }
             }
@@ -318,6 +321,7 @@ impl SyncClient {
                 state.last_error = None;
                 state.refused = report.refused.clone();
                 state.outdated_devices = report.outdated_devices.clone();
+                state.devices = report.devices.clone();
             }
             Err(error) => state.last_error = Some(error.clone()),
         }
@@ -378,6 +382,7 @@ impl SyncClient {
             }
 
             report.outdated_devices = response.outdated_devices.clone();
+            report.devices = response.devices.clone();
             let mut conflicts = 0;
             for refusal in &response.rejected {
                 if refusal.reason == "conflict" {

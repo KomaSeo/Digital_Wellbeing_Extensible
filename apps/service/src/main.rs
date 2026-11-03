@@ -75,7 +75,9 @@ fn settings_unlock() -> anyhow::Result<()> {
     machine::settings::unprotect(
         &data_directory,
         chrono::Utc::now(),
-        machine::settings::Unlock::Administrator,
+        machine::settings::Unlock::Administrator {
+            device: machine::settings::this_device_id(&data_directory),
+        },
     )
     .map_err(anyhow::Error::msg)?;
     println!("설정 보호를 풀었습니다. 걸린 차단도 모두 풀립니다.");

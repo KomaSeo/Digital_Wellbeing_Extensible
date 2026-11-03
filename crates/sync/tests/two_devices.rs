@@ -645,3 +645,41 @@ fn only_one_sync_of_a_device_runs_at_a_time() {
     sync(&setup.server, laptop);
     assert!(!laptop_folder.join("sync.lock").exists());
 }
+
+#[test]
+fn an_administrator_protection_tied_to_one_computer_ends_only_from_there() {
+    let setup = setup("protection_device");
+    let (laptop_folder, laptop) = &setup.laptop;
+    let (desktop_folder, desktop) = &setup.desktop;
+    // Only the desktop's administrator may end it.
+    let mode = json!({ "kind": "administrator", "device": "desktop" });
+    let on = json!({ "protected_since": "2026-11-01T00:00:00Z", "mode": mode });
+    let off = json!({ "protected_since": null, "mode": mode });
+    write(laptop_folder, "settings_protection.json", &on);
+    sync(&setup.server, laptop);
+    let report = sync(&setup.server, desktop);
+    // Every device learns the paired devices (for choosing whose administrator).
+    assert_eq!(
+        report.devices,
+        vec![
+            ("laptop".to_string(), "Laptop".to_string()),
+            ("desktop".to_string(), "Desktop".to_string())
+        ]
+    );
+
+    // From the laptop: refused, and the laptop is protected again.
+    write(laptop_folder, "settings_protection.json", &off);
+    let report = sync(&setup.server, laptop);
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+    assert_eq!(read(laptop_folder, "settings_protection.json").unwrap(), on);
+
+    // From the desktop: taken, and it reaches the laptop.
+    write(desktop_folder, "settings_protection.json", &off);
+    let report = sync(&setup.server, desktop);
+    assert!(report.refused.is_empty(), "{report:?}");
+    sync(&setup.server, laptop);
+    assert_eq!(
+        read(laptop_folder, "settings_protection.json").unwrap(),
+        off
+    );
+}

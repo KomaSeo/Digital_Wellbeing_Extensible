@@ -106,8 +106,12 @@ pub enum ProtectionMode {
     /// Not before `until`; then with one press.
     Until { until: DateTime<Utc> },
     /// Only by a program run with administrator rights (Windows asks for an administrator's
-    /// approval, `digital-wellbeing-service settings-unlock`).
-    Administrator,
+    /// approval, `digital-wellbeing-service settings-unlock`). With `device` (a sync device
+    /// id), only on that computer: its administrator, not another computer's.
+    Administrator {
+        #[serde(default)]
+        device: Option<String>,
+    },
     /// With the password set when protecting (kept as a hash only).
     Password {
         password: crate::password::PasswordHash,
@@ -120,9 +124,17 @@ pub enum ProtectionMode {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProtectionChoice {
     Permanent,
-    Until { until: DateTime<Utc> },
-    Administrator,
-    Password { password: String },
+    Until {
+        until: DateTime<Utc>,
+    },
+    Administrator {
+        /// The sync device whose administrator may turn it off (`None`: any).
+        #[serde(default)]
+        device: Option<String>,
+    },
+    Password {
+        password: String,
+    },
 }
 
 /// Responsibility: Carry how the user asks to turn the protection off.
@@ -132,8 +144,16 @@ pub enum Unlock<'a> {
     Press,
     /// The password of a password protection.
     Password(&'a str),
-    /// The program runs with administrator rights.
-    Administrator,
+    /// The program runs with administrator rights, on this sync device (`None`: this PC does
+    /// not sync).
+    Administrator { device: Option<String> },
+}
+
+/// This PC's sync device id (`sync.json`), if it syncs.
+pub fn this_device_id(data_directory: &Path) -> Option<String> {
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(data_directory.join("sync.json")).ok()?).ok()?;
+    config["device_id"].as_str().map(str::to_string)
 }
 
 /// The shortest time protection: shorter would be no protection at all.
@@ -324,7 +344,11 @@ pub fn protect(
     }
     let mode = match choice {
         ProtectionChoice::Permanent => ProtectionMode::Permanent,
-        ProtectionChoice::Administrator => ProtectionMode::Administrator,
+        ProtectionChoice::Administrator { device } => ProtectionMode::Administrator {
+            device: device
+                .map(|device| device.trim().to_string())
+                .filter(|device| !device.is_empty()),
+        },
         ProtectionChoice::Until { until } => {
             if until < now + chrono::Duration::minutes(MIN_PROTECTION_MINUTES) {
                 return Err(format!(
@@ -365,8 +389,16 @@ pub fn may_unprotect(
             until.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
         )),
         (ProtectionMode::Until { .. }, _) => Ok(()),
-        (ProtectionMode::Administrator, Unlock::Administrator) => Ok(()),
-        (ProtectionMode::Administrator, _) => {
+        (
+            ProtectionMode::Administrator {
+                device: Some(required),
+            },
+            Unlock::Administrator { device },
+        ) if device.as_deref() != Some(required.as_str()) => Err(format!(
+            "\"{required}\" 컴퓨터의 관리자 권한으로만 풀 수 있습니다"
+        )),
+        (ProtectionMode::Administrator { .. }, Unlock::Administrator { .. }) => Ok(()),
+        (ProtectionMode::Administrator { .. }, _) => {
             Err("관리자 권한으로만 풀 수 있습니다(관리자 승인 창에서 승인하세요)".into())
         }
         (ProtectionMode::Password { password }, Unlock::Password(typed)) => {
@@ -927,7 +959,7 @@ mod tests {
         let data_directory = temp_dir("unprotect_permanent");
         protect(&data_directory, now, ProtectionChoice::Permanent).unwrap();
         assert!(unprotect(&data_directory, now, Unlock::Press).is_err());
-        assert!(unprotect(&data_directory, now, Unlock::Administrator).is_err());
+        assert!(unprotect(&data_directory, now, Unlock::Administrator { device: None }).is_err());
         assert!(is_protected(&data_directory));
 
         // Until a time: not before it, then with a press.
@@ -949,10 +981,33 @@ mod tests {
 
         // Administrator: only with administrator rights.
         let data_directory = temp_dir("unprotect_administrator");
-        protect(&data_directory, now, ProtectionChoice::Administrator).unwrap();
+        protect(
+            &data_directory,
+            now,
+            ProtectionChoice::Administrator { device: None },
+        )
+        .unwrap();
         assert!(unprotect(&data_directory, now, Unlock::Press).is_err());
         assert!(unprotect(&data_directory, now, Unlock::Password("x")).is_err());
-        unprotect(&data_directory, now, Unlock::Administrator).unwrap();
+        unprotect(&data_directory, now, Unlock::Administrator { device: None }).unwrap();
+        assert!(!is_protected(&data_directory));
+
+        // Administrator of one computer: only there.
+        let data_directory = temp_dir("unprotect_administrator_device");
+        let choice = ProtectionChoice::Administrator {
+            device: Some("desktop".into()),
+        };
+        protect(&data_directory, now, choice).unwrap();
+        let elsewhere = Unlock::Administrator {
+            device: Some("laptop".into()),
+        };
+        let error = unprotect(&data_directory, now, elsewhere).unwrap_err();
+        assert!(error.contains("desktop"), "{error}");
+        assert!(unprotect(&data_directory, now, Unlock::Administrator { device: None }).is_err());
+        let there = Unlock::Administrator {
+            device: Some("desktop".into()),
+        };
+        unprotect(&data_directory, now, there).unwrap();
         assert!(!is_protected(&data_directory));
 
         // Password: only the right one; the file keeps a hash only.
@@ -964,7 +1019,7 @@ mod tests {
         let saved = fs::read_to_string(data_directory.join(PROTECTION_FILE)).unwrap();
         assert!(!saved.contains("open sesame"));
         assert!(unprotect(&data_directory, now, Unlock::Password("wrong")).is_err());
-        assert!(unprotect(&data_directory, now, Unlock::Administrator).is_err());
+        assert!(unprotect(&data_directory, now, Unlock::Administrator { device: None }).is_err());
         unprotect(&data_directory, now, Unlock::Password("open sesame")).unwrap();
         assert!(!is_protected(&data_directory));
     }
@@ -984,8 +1039,13 @@ mod tests {
         )
         .unwrap();
         let now = Utc::now();
-        protect(&data_directory, now, ProtectionChoice::Administrator).unwrap();
-        unprotect(&data_directory, now, Unlock::Administrator).unwrap();
+        protect(
+            &data_directory,
+            now,
+            ProtectionChoice::Administrator { device: None },
+        )
+        .unwrap();
+        unprotect(&data_directory, now, Unlock::Administrator { device: None }).unwrap();
         let after: ai_focus_rule::SavedBlocks = serde_json::from_str(
             &fs::read_to_string(data_directory.join("blocks").join("me.json")).unwrap(),
         )
@@ -1005,7 +1065,12 @@ mod tests {
             protection(&data_directory).unwrap().mode,
             ProtectionMode::Permanent
         );
-        assert!(unprotect(&data_directory, Utc::now(), Unlock::Administrator).is_err());
+        assert!(unprotect(
+            &data_directory,
+            Utc::now(),
+            Unlock::Administrator { device: None }
+        )
+        .is_err());
     }
 
     #[test]

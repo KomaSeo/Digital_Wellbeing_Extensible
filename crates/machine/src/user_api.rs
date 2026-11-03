@@ -169,6 +169,8 @@ pub struct SyncStatus {
     pub refused: Vec<String>,
     /// Other PCs on an older version (they wait for an update): "<device> (<version>)".
     pub outdated_devices: Vec<String>,
+    /// Every paired device: (id, name), as the server last told.
+    pub devices: Vec<(String, String)>,
 }
 
 /// Read from `sync.json` and `sync_state.json` (written by the service).
@@ -180,6 +182,7 @@ pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
     let state = read("sync_state.json").unwrap_or(Value::Null);
     let text = |value: &Value| value.as_str().map(str::to_string);
     Some(SyncStatus {
+        devices: serde_json::from_value(state["devices"].clone()).unwrap_or_default(),
         server_url: text(&config["server_url"]).unwrap_or_default(),
         device_id: text(&config["device_id"]).unwrap_or_default(),
         last_success: serde_json::from_value(state["last_success"].clone())
@@ -231,21 +234,26 @@ pub struct ProtectionView {
     /// The end of a time protection.
     #[serde(default)]
     pub until: Option<DateTime<Utc>>,
+    /// The sync device whose administrator may turn an administrator protection off
+    /// (`None`: any computer's).
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 impl ProtectionView {
     pub fn of(protection: &crate::settings::Protection) -> Self {
         use crate::settings::ProtectionMode;
-        let (kind, until) = match &protection.mode {
-            ProtectionMode::Permanent => ("permanent", None),
-            ProtectionMode::Until { until } => ("until", Some(*until)),
-            ProtectionMode::Administrator => ("administrator", None),
-            ProtectionMode::Password { .. } => ("password", None),
+        let (kind, until, device) = match &protection.mode {
+            ProtectionMode::Permanent => ("permanent", None, None),
+            ProtectionMode::Until { until } => ("until", Some(*until), None),
+            ProtectionMode::Administrator { device } => ("administrator", None, device.clone()),
+            ProtectionMode::Password { .. } => ("password", None, None),
         };
         Self {
             since: protection.protected_since,
             kind: kind.to_string(),
             until,
+            device,
         }
     }
 }
