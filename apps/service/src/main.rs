@@ -38,6 +38,9 @@ fn main() -> anyhow::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match arguments.first().map(String::as_str) {
         Some("agent") => agent::run(),
+        // Run with administrator rights (the Focus app asks Windows for them): turn off a
+        // protection that only an administrator may turn off.
+        Some("settings-unlock") => settings_unlock(),
         #[cfg(windows)]
         Some("install") => install::install(&arguments[1..]),
         #[cfg(windows)]
@@ -53,6 +56,23 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// `settings-unlock`: only an administrator can read the data folder, so reading it is the
+/// check that this runs with administrator rights.
+fn settings_unlock() -> anyhow::Result<()> {
+    let data_directory = machine::data_dir();
+    if std::fs::read_dir(&data_directory).is_err() {
+        anyhow::bail!("관리자 권한으로 실행해야 합니다");
+    }
+    machine::settings::unprotect(
+        &data_directory,
+        chrono::Utc::now(),
+        machine::settings::Unlock::Administrator,
+    )
+    .map_err(anyhow::Error::msg)?;
+    println!("설정 보호를 풀었습니다. 걸린 차단도 모두 풀립니다.");
+    Ok(())
 }
 
 /// Log to `%ProgramData%\DigitalWellbeing\logs\<file>`; stderr if that fails.

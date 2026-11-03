@@ -153,7 +153,8 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         }
     });
 
-    thread::spawn(move || reload_loop(list_store, ai_store, planner_config));
+    let reload_monitor = Arc::clone(&monitor);
+    thread::spawn(move || reload_loop(list_store, ai_store, planner_config, reload_monitor));
 
     enforce.join().ok();
     Ok(())
@@ -250,7 +251,10 @@ fn reload_loop(
     list_store: ListStore,
     ai_store: AiFocusStore,
     planner_config: JsonStore<PlannerConfig>,
+    monitor: Arc<FocusMonitor>,
 ) {
+    let data_directory = machine::data_dir();
+    let mut was_protected = machine::settings::is_protected(&data_directory);
     let policy_path = machine::policy_path();
     let ai_focus_path = machine::ai_focus_path();
     let planner_path = machine::planner_path();
@@ -261,6 +265,14 @@ fn reload_loop(
     );
     loop {
         thread::sleep(RELOAD_INTERVAL);
+        // The protection was turned off (here, in another session, or by an administrator):
+        // without it a block means nothing, so every block of this session is lifted.
+        let protected = machine::settings::is_protected(&data_directory);
+        if was_protected && !protected {
+            monitor.lift_all_blocks();
+            info!("settings protection turned off; every block lifted");
+        }
+        was_protected = protected;
         let now = (
             modified(&policy_path),
             modified(&ai_focus_path),

@@ -86,12 +86,58 @@ fn settings_interval() -> i64 {
     SETTINGS_QUESTION_INTERVAL_SECONDS
 }
 
-/// Responsibility: Record when the settings were protected.
+/// Responsibility: Record when the settings were protected, and how the protection may end.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Protection {
     pub protected_since: Option<DateTime<Utc>>,
+    /// Files from before the options were permanent.
+    pub mode: ProtectionMode,
 }
+
+/// Responsibility: Say how a protection may be turned off (chosen when protecting, like
+/// Cold Turkey's lock options).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProtectionMode {
+    /// Never, from inside the program.
+    #[default]
+    Permanent,
+    /// Not before `until`; then with one press.
+    Until { until: DateTime<Utc> },
+    /// Only by a program run with administrator rights (Windows asks for an administrator's
+    /// approval, `digital-wellbeing-service settings-unlock`).
+    Administrator,
+    /// With the password set when protecting (kept as a hash only).
+    Password {
+        password: crate::password::PasswordHash,
+    },
+}
+
+/// Responsibility: Carry the protection the user chose (the password in plain text, only
+/// until it is hashed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProtectionChoice {
+    Permanent,
+    Until { until: DateTime<Utc> },
+    Administrator,
+    Password { password: String },
+}
+
+/// Responsibility: Carry how the user asks to turn the protection off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unlock<'a> {
+    /// A press of the button (a time protection whose time is over).
+    Press,
+    /// The password of a password protection.
+    Password(&'a str),
+    /// The program runs with administrator rights.
+    Administrator,
+}
+
+/// The shortest time protection: shorter would be no protection at all.
+pub const MIN_PROTECTION_MINUTES: i64 = 10;
 
 /// Responsibility: Say where a scheduled update came from, which decides how it is replaced.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,40 +290,130 @@ pub fn is_protected(data_directory: &Path) -> bool {
     data_directory.join(PROTECTION_FILE).exists() || data_directory.join(OLD_LOCK_FILE).exists()
 }
 
-/// End the setup: from now on every edit is scheduled. Nothing in the program undoes this.
-pub fn protect(data_directory: &Path, now: DateTime<Utc>) -> Result<Protection, String> {
-    let _write = write_lock();
+/// The protection in force (an older version's lock counts as a permanent protection).
+pub fn protection(data_directory: &Path) -> Option<Protection> {
     let path = data_directory.join(PROTECTION_FILE);
-    let current: Protection = fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    if current.protected_since.is_some() {
+    if path.exists() {
+        let protection: Protection = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        return Some(protection);
+    }
+    data_directory
+        .join(OLD_LOCK_FILE)
+        .exists()
+        .then(Protection::default)
+}
+
+/// End the setup: from now on every looser edit is scheduled. The protection ends only the
+/// way `choice` allows ([`unprotect`]).
+pub fn protect(
+    data_directory: &Path,
+    now: DateTime<Utc>,
+    choice: ProtectionChoice,
+) -> Result<Protection, String> {
+    let _write = write_lock();
+    if let Some(current) = protection(data_directory) {
         return Ok(current);
     }
+    let mode = match choice {
+        ProtectionChoice::Permanent => ProtectionMode::Permanent,
+        ProtectionChoice::Administrator => ProtectionMode::Administrator,
+        ProtectionChoice::Until { until } => {
+            if until < now + chrono::Duration::minutes(MIN_PROTECTION_MINUTES) {
+                return Err(format!(
+                    "보호 기간은 적어도 {MIN_PROTECTION_MINUTES}분이어야 합니다"
+                ));
+            }
+            ProtectionMode::Until { until }
+        }
+        ProtectionChoice::Password { password } => {
+            if password.chars().count() < 4 {
+                return Err("비밀번호는 적어도 4글자여야 합니다".into());
+            }
+            ProtectionMode::Password {
+                password: crate::password::PasswordHash::new(&password)?,
+            }
+        }
+    };
     let protection = Protection {
         protected_since: Some(now),
+        mode,
     };
     let bytes = serde_json::to_vec_pretty(&protection).map_err(|error| error.to_string())?;
-    write_atomic(&path, &bytes)
+    write_atomic(&data_directory.join(PROTECTION_FILE), &bytes)
         .map_err(|error| format!("could not save {PROTECTION_FILE}: {error}"))?;
     Ok(protection)
 }
 
-/// Test edition only: turn the protection off again (back to setup). Scheduled updates stay
-/// as they are. The main edition refuses.
-pub fn unprotect(data_directory: &Path) -> Result<(), String> {
-    if !crate::TEST_EDITION {
-        return Err("본편에서는 설정 보호를 풀 수 없습니다".into());
+/// Whether `protection` may end now, and if not, why (in Korean, for the Focus app).
+pub fn may_unprotect(
+    protection: &Protection,
+    now: DateTime<Utc>,
+    unlock: &Unlock,
+) -> Result<(), String> {
+    match (&protection.mode, unlock) {
+        (ProtectionMode::Permanent, _) => Err("영구 보호는 풀 수 없습니다".into()),
+        (ProtectionMode::Until { until }, _) if now < *until => Err(format!(
+            "{}까지는 보호를 풀 수 없습니다",
+            until.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+        )),
+        (ProtectionMode::Until { .. }, _) => Ok(()),
+        (ProtectionMode::Administrator, Unlock::Administrator) => Ok(()),
+        (ProtectionMode::Administrator, _) => {
+            Err("관리자 권한으로만 풀 수 있습니다(관리자 승인 창에서 승인하세요)".into())
+        }
+        (ProtectionMode::Password { password }, Unlock::Password(typed)) => {
+            if password.matches(typed) {
+                Ok(())
+            } else {
+                Err("비밀번호가 맞지 않습니다".into())
+            }
+        }
+        (ProtectionMode::Password { .. }, _) => Err("비밀번호를 넣어야 풀 수 있습니다".into()),
     }
+}
+
+/// Turn the protection off (back to setup) when its mode allows it now. Scheduled updates
+/// stay as they are. Every blocks file is emptied: without the protection a block means
+/// nothing (the owner's rule); running agents also lift theirs when they see the change.
+pub fn unprotect(data_directory: &Path, now: DateTime<Utc>, unlock: Unlock) -> Result<(), String> {
     let _write = write_lock();
+    let Some(current) = protection(data_directory) else {
+        return Ok(());
+    };
+    may_unprotect(&current, now, &unlock)?;
     for file in [PROTECTION_FILE, OLD_LOCK_FILE] {
         let path = data_directory.join(file);
         if path.exists() {
             fs::remove_file(&path).map_err(|error| format!("could not remove {file}: {error}"))?;
         }
     }
+    clear_blocks(data_directory);
     Ok(())
+}
+
+/// Empty every user's blocks file.
+fn clear_blocks(data_directory: &Path) {
+    let Ok(entries) = fs::read_dir(data_directory.join("blocks")) else {
+        return;
+    };
+    let empty = serde_json::to_vec_pretty(&ai_focus_rule::SavedBlocks::default())
+        .unwrap_or_else(|_| b"{}".to_vec());
+    for path in entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+    {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            if let Err(error) = write_atomic(&path, &empty) {
+                tracing::warn!("could not empty {}: {error}", path.display());
+            }
+        }
+    }
 }
 
 /// Read everything the admin panels need from `data_directory`.
@@ -775,17 +911,91 @@ mod tests {
     }
 
     #[test]
-    fn only_the_test_edition_can_turn_the_protection_off() {
-        let data_directory = temp_dir("unprotect");
-        protect(&data_directory, Utc::now()).unwrap();
-        let result = unprotect(&data_directory);
-        if crate::TEST_EDITION {
-            assert!(result.is_ok());
-            assert!(!is_protected(&data_directory));
-        } else {
-            assert!(result.is_err());
-            assert!(is_protected(&data_directory));
-        }
+    fn each_protection_ends_only_its_own_way() {
+        let now = Utc::now();
+        // Permanent: never.
+        let data_directory = temp_dir("unprotect_permanent");
+        protect(&data_directory, now, ProtectionChoice::Permanent).unwrap();
+        assert!(unprotect(&data_directory, now, Unlock::Press).is_err());
+        assert!(unprotect(&data_directory, now, Unlock::Administrator).is_err());
+        assert!(is_protected(&data_directory));
+
+        // Until a time: not before it, then with a press.
+        let data_directory = temp_dir("unprotect_until");
+        let until = now + chrono::Duration::hours(2);
+        assert!(protect(
+            &data_directory,
+            now,
+            ProtectionChoice::Until {
+                until: now + chrono::Duration::minutes(1)
+            }
+        )
+        .is_err());
+        protect(&data_directory, now, ProtectionChoice::Until { until }).unwrap();
+        assert!(unprotect(&data_directory, now, Unlock::Press).is_err());
+        assert!(is_protected(&data_directory));
+        unprotect(&data_directory, until, Unlock::Press).unwrap();
+        assert!(!is_protected(&data_directory));
+
+        // Administrator: only with administrator rights.
+        let data_directory = temp_dir("unprotect_administrator");
+        protect(&data_directory, now, ProtectionChoice::Administrator).unwrap();
+        assert!(unprotect(&data_directory, now, Unlock::Press).is_err());
+        assert!(unprotect(&data_directory, now, Unlock::Password("x")).is_err());
+        unprotect(&data_directory, now, Unlock::Administrator).unwrap();
+        assert!(!is_protected(&data_directory));
+
+        // Password: only the right one; the file keeps a hash only.
+        let data_directory = temp_dir("unprotect_password");
+        let choice = ProtectionChoice::Password {
+            password: "open sesame".into(),
+        };
+        protect(&data_directory, now, choice).unwrap();
+        let saved = fs::read_to_string(data_directory.join(PROTECTION_FILE)).unwrap();
+        assert!(!saved.contains("open sesame"));
+        assert!(unprotect(&data_directory, now, Unlock::Password("wrong")).is_err());
+        assert!(unprotect(&data_directory, now, Unlock::Administrator).is_err());
+        unprotect(&data_directory, now, Unlock::Password("open sesame")).unwrap();
+        assert!(!is_protected(&data_directory));
+    }
+
+    #[test]
+    fn turning_the_protection_off_lifts_every_block() {
+        let data_directory = temp_dir("unprotect_blocks");
+        fs::create_dir_all(data_directory.join("blocks")).unwrap();
+        let mut saved = ai_focus_rule::SavedBlocks::default();
+        saved.processes.insert(
+            "steam.exe".into(),
+            serde_json::from_value(json!({ "reason": "games", "until": null })).unwrap(),
+        );
+        fs::write(
+            data_directory.join("blocks").join("me.json"),
+            serde_json::to_string(&saved).unwrap(),
+        )
+        .unwrap();
+        let now = Utc::now();
+        protect(&data_directory, now, ProtectionChoice::Administrator).unwrap();
+        unprotect(&data_directory, now, Unlock::Administrator).unwrap();
+        let after: ai_focus_rule::SavedBlocks = serde_json::from_str(
+            &fs::read_to_string(data_directory.join("blocks").join("me.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(after.processes.is_empty());
+    }
+
+    #[test]
+    fn a_protection_saved_before_the_options_is_permanent() {
+        let data_directory = temp_dir("unprotect_old");
+        fs::write(
+            data_directory.join(PROTECTION_FILE),
+            r#"{ "protected_since": "2026-11-01T00:00:00Z" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            protection(&data_directory).unwrap().mode,
+            ProtectionMode::Permanent
+        );
+        assert!(unprotect(&data_directory, Utc::now(), Unlock::Administrator).is_err());
     }
 
     #[test]
@@ -818,7 +1028,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        protect(&data_directory, now).unwrap();
+        protect(&data_directory, now, ProtectionChoice::Permanent).unwrap();
         let new_key = json!({ "api_key": "new", "model": "other-model" });
         let fix_now = vec![vec!["api_key".to_string()]];
         let outcome = put(
@@ -893,7 +1103,7 @@ mod tests {
         let start = Utc::now();
         let ai_focus = json!({ "always_allow": ["a.exe"], "strikes_to_block": 2, "model": "m" });
         put(&data_directory, start, "ai_focus", &ai_focus, "", &[]).unwrap();
-        protect(&data_directory, start).unwrap();
+        protect(&data_directory, start, ProtectionChoice::Permanent).unwrap();
 
         // Stricter (fewer strikes, a.exe no longer allowed) and looser (another model).
         let saved = json!({ "always_allow": [], "strikes_to_block": 1, "model": "cheap" });
@@ -972,7 +1182,7 @@ mod tests {
             json!({ "api_key": "k", "send_screenshot": false }).to_string(),
         )
         .unwrap();
-        protect(&data_directory, start).unwrap();
+        protect(&data_directory, start, ProtectionChoice::Permanent).unwrap();
         // The Settings tab sends the whole typed config, defaults included, with one change.
         let mut full: ai_focus_rule::AiFocusConfig =
             serde_json::from_value(json!({ "api_key": "k", "send_screenshot": false })).unwrap();
@@ -1007,7 +1217,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        protect(&data_directory, start).unwrap();
+        protect(&data_directory, start, ProtectionChoice::Permanent).unwrap();
         assert!(is_protected(&data_directory));
         let outcome = put(
             &data_directory,
@@ -1088,11 +1298,15 @@ mod tests {
             &[],
         )
         .unwrap();
-        protect(&data_directory, start).unwrap();
+        protect(&data_directory, start, ProtectionChoice::Permanent).unwrap();
         assert_eq!(
-            protect(&data_directory, start + Duration::days(9))
-                .unwrap()
-                .protected_since,
+            protect(
+                &data_directory,
+                start + Duration::days(9),
+                ProtectionChoice::Permanent
+            )
+            .unwrap()
+            .protected_since,
             Some(start)
         );
         let first = schedule_file(&data_directory, start, json!({ "life_rules": "a" }));
@@ -1183,7 +1397,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        protect(&data_directory, start).unwrap();
+        protect(&data_directory, start, ProtectionChoice::Permanent).unwrap();
         let todo = json!({ "id": "t1", "title": "Read a novel" });
         let edits = vec![Edit::PutListItem {
             path: vec!["todos".into()],
