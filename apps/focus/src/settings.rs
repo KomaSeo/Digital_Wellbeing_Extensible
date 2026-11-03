@@ -2202,15 +2202,14 @@ fn local(time: DateTime<Utc>) -> String {
 }
 
 /// Whether this PC syncs with other devices, and how the last sync went (`docs/sync.md`).
-/// Joining and leaving are administrator commands, so there are no buttons here.
+/// Logging in is at the top of this tab ([`crate::login`]).
 fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
     ui.separator();
     ui.heading("기기 동기화");
     let Some(sync) = sync else {
         ui.weak(
-            "이 PC는 다른 기기와 동기화하지 않습니다. 동기화를 켜려면 관리자가 \
-             \"digital-wellbeing-service sync-join\" 명령을 실행해야 합니다(도움말의 \"여러 기기 \
-             동기화\"를 보세요).",
+            "이 PC는 다른 기기와 동기화하지 않습니다. 동기화를 켜려면 이 탭 맨 위의 \
+             \"여러 기기 동기화: 서버에 로그인하거나 회원가입하기\"를 엽니다.",
         );
         return;
     };

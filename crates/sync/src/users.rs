@@ -54,26 +54,55 @@ fn hash(password: &str, salt: &[u8], rounds: u32) -> Vec<u8> {
     output.to_vec()
 }
 
-impl Users {
-    /// Add `name` with `password`, or give an existing login a new password.
-    pub fn set(&mut self, name: &str, password: &str) -> Result<(), String> {
+/// The shortest password a login may have (a sign-up comes from the internet, so a short
+/// one could be guessed).
+pub const MIN_PASSWORD_CHARACTERS: usize = 8;
+
+impl UserEntry {
+    /// A login `name` with a new salt and the hash of `password`.
+    pub fn new(name: &str, password: &str) -> Result<Self, String> {
         let name = clean_name(name)?;
-        if password.chars().count() < 4 {
-            return Err("the password needs at least 4 characters".into());
+        if password.chars().count() < MIN_PASSWORD_CHARACTERS {
+            return Err(format!(
+                "the password needs at least {MIN_PASSWORD_CHARACTERS} characters"
+            ));
         }
         let mut salt = [0u8; SALT_BYTES];
         getrandom::getrandom(&mut salt).map_err(|error| error.to_string())?;
-        let entry = UserEntry {
-            name: name.clone(),
+        Ok(Self {
+            name,
             salt: STANDARD.encode(salt),
             hash: STANDARD.encode(hash(password, &salt, ROUNDS)),
             rounds: ROUNDS,
-        };
-        self.users.retain(|user| user.name != name);
+        })
+    }
+
+    /// Is this a well-formed entry (as a sign-up sends it)?
+    pub fn is_well_formed(&self) -> bool {
+        clean_name(&self.name).as_deref() == Ok(self.name.as_str())
+            && (100_000..=2_000_000).contains(&self.rounds)
+            && STANDARD
+                .decode(&self.salt)
+                .is_ok_and(|salt| salt.len() == SALT_BYTES)
+            && STANDARD
+                .decode(&self.hash)
+                .is_ok_and(|hash| hash.len() == 32)
+    }
+}
+
+impl Users {
+    /// Add `name` with `password`, or give an existing login a new password.
+    pub fn set(&mut self, name: &str, password: &str) -> Result<(), String> {
+        self.put(UserEntry::new(name, password)?);
+        Ok(())
+    }
+
+    /// Add `entry`, or replace the login of the same name.
+    pub fn put(&mut self, entry: UserEntry) {
+        self.users.retain(|user| user.name != entry.name);
         self.users.push(entry);
         self.users
             .sort_by(|first, second| first.name.cmp(&second.name));
-        Ok(())
     }
 
     pub fn remove(&mut self, name: &str) -> bool {
@@ -126,6 +155,7 @@ mod tests {
         assert_eq!(users.check("nobody", "correct horse"), None);
         assert!(users.set("../x", "password").is_err());
         assert!(users.set("me", "abc").is_err());
+        assert!(users.set("me", "seven77").is_err());
         // A new password replaces the old one.
         users.set("me", "battery staple").unwrap();
         assert_eq!(users.check("me", "correct horse"), None);

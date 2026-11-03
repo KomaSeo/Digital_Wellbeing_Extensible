@@ -11,13 +11,21 @@
 //! - Once the settings are protected (`settings_protection.json` has `protected_since`), a
 //!   push turns the protection off only the way it allows ([`protection_may_end`]).
 //!
-//! Storage: `<folder>/devices.json` and `<folder>/documents/<name with / as ~>.json`.
+//! - A login ([`crate::account`]) must open with the account key of its name; after
+//!   [`MAX_FAILED_LOGINS`] wrong ones in [`FAILED_LOGIN_WINDOW_MINUTES`] minutes, that name is
+//!   refused until the window passes (so a password cannot be guessed over the internet). A
+//!   sign-up is taken only while the server has no account.
+//!
+//! Storage: `<folder>/devices.json`, `<folder>/accounts.json` (account keys),
+//! `<folder>/server_key.json` (the key pair for sign-ups) and
+//! `<folder>/documents/<name with / as ~>.json`.
 
 use crate::envelope::{self, Envelope};
 use crate::protocol::{
     version_order, Document, PairingCode, Rejected, SyncRequest, SyncResponse,
     MAX_CLOCK_SKEW_SECONDS,
 };
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -51,6 +59,10 @@ const MAX_HEAD_BYTES: u64 = 16 * 1024;
 /// Requests answered at the same time: one owner with about ten devices, each syncing every
 /// 20 seconds in a fraction of a second, needs few; more are refused at once.
 const MAX_CONNECTIONS: usize = 16;
+/// Wrong logins of one name that are allowed in [`FAILED_LOGIN_WINDOW_MINUTES`].
+pub const MAX_FAILED_LOGINS: usize = 5;
+pub const FAILED_LOGIN_WINDOW_MINUTES: i64 = 15;
+const WRONG_LOGIN: &str = "이름이나 비밀번호가 맞지 않습니다";
 
 /// Responsibility: Describe one paired device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +83,22 @@ pub struct Device {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Devices {
     devices: Vec<Device>,
+}
+
+/// Responsibility: Hold one account's key, which only its password makes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Account {
+    name: String,
+    /// Base64 ([`crate::account::account_key`]).
+    key: String,
+    /// The newest login, so the same login request cannot be sent again.
+    #[serde(default)]
+    last_login_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct Accounts {
+    accounts: Vec<Account>,
 }
 
 /// Responsibility: Keep one stored document with its revision.
@@ -153,6 +181,8 @@ pub struct SyncServer {
     folder: PathBuf,
     /// One request at a time: rounds are short, and this keeps revisions simple.
     busy: Mutex<()>,
+    /// Account name -> when its recent wrong logins happened.
+    failed_logins: Mutex<std::collections::HashMap<String, Vec<DateTime<Utc>>>>,
 }
 
 impl SyncServer {
@@ -160,7 +190,43 @@ impl SyncServer {
         Self {
             folder,
             busy: Mutex::new(()),
+            failed_logins: Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    fn accounts_path(&self) -> PathBuf {
+        self.folder.join("accounts.json")
+    }
+
+    fn load_accounts(&self) -> Accounts {
+        read_json(&self.accounts_path()).unwrap_or_default()
+    }
+
+    /// The secret half of the sign-up key pair, made the first time it is needed.
+    fn server_secret(&self) -> Result<[u8; 32], String> {
+        let path = self.folder.join("server_key.json");
+        let stored = read_json::<Value>(&path)
+            .and_then(|value| value["secret"].as_str().map(str::to_string))
+            .and_then(|text| base64::engine::general_purpose::STANDARD.decode(text).ok())
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok());
+        if let Some(secret) = stored {
+            return Ok(secret);
+        }
+        let mut secret = [0u8; 32];
+        getrandom::getrandom(&mut secret).map_err(|error| error.to_string())?;
+        write_json(
+            &path,
+            &json!({ "secret": base64::engine::general_purpose::STANDARD.encode(secret) }),
+        )?;
+        Ok(secret)
+    }
+
+    /// The public half of the sign-up key pair (base64), for `GET /public-key`.
+    pub fn public_key(&self) -> Result<String, String> {
+        let _busy = self.busy.lock();
+        let secret = self.server_secret()?;
+        Ok(base64::engine::general_purpose::STANDARD
+            .encode(crate::account::server_public_key(&secret)))
     }
 
     fn devices_path(&self) -> PathBuf {
@@ -183,6 +249,13 @@ impl SyncServer {
     pub fn add_device(&self, name: &str) -> Result<PairingCode, String> {
         let _busy = self.busy.lock();
         let mut devices = self.load_devices();
+        let code = Self::new_device(&mut devices, name)?;
+        self.save_devices(&devices)?;
+        Ok(code)
+    }
+
+    /// Add a device named `name` to `devices` with a new id and key.
+    fn new_device(devices: &mut Devices, name: &str) -> Result<PairingCode, String> {
         let base: String = name
             .trim()
             .to_lowercase()
@@ -216,8 +289,159 @@ impl SyncServer {
             last_seen: None,
             version: String::new(),
         });
-        self.save_devices(&devices)?;
         Ok(PairingCode { device_id: id, key })
+    }
+
+    /// Join a device to the account: give `previous_device_id` a new key when it is still
+    /// paired (the same computer logging in again), or else pair a new device.
+    fn join_device(
+        &self,
+        device_name: &str,
+        previous_device_id: Option<&str>,
+    ) -> Result<PairingCode, String> {
+        let mut devices = self.load_devices();
+        let code = match previous_device_id.and_then(|previous| {
+            devices
+                .devices
+                .iter_mut()
+                .find(|device| device.id == previous)
+        }) {
+            Some(device) => {
+                device.key = envelope::new_key()?;
+                // The device starts its counter again (it forgets its old sync state).
+                device.last_counter = 0;
+                PairingCode {
+                    device_id: device.id.clone(),
+                    key: device.key.clone(),
+                }
+            }
+            None => Self::new_device(&mut devices, device_name)?,
+        };
+        self.save_devices(&devices)?;
+        Ok(code)
+    }
+
+    /// Refused while `name` had too many wrong logins lately.
+    fn check_not_locked_out(&self, name: &str, now: DateTime<Utc>) -> Result<(), String> {
+        let mut failed = self.failed_logins.lock();
+        let recent = failed.entry(name.to_string()).or_default();
+        recent.retain(|time| now - *time < chrono::Duration::minutes(FAILED_LOGIN_WINDOW_MINUTES));
+        if recent.len() >= MAX_FAILED_LOGINS {
+            return Err(format!(
+                "로그인을 너무 많이 틀렸습니다. {FAILED_LOGIN_WINDOW_MINUTES}분 뒤에 다시 하세요"
+            ));
+        }
+        Ok(())
+    }
+
+    fn wrong_login(&self, name: &str, now: DateTime<Utc>) -> String {
+        self.failed_logins
+            .lock()
+            .entry(name.to_string())
+            .or_default()
+            .push(now);
+        WRONG_LOGIN.into()
+    }
+
+    /// Answer a login (envelope id `account:<name>`, sealed with the account key).
+    fn handle_login(&self, envelope: &Envelope) -> Result<Envelope, String> {
+        use crate::account::{JoinAnswer, LoginRequest, LOGIN_PREFIX};
+        let now = Utc::now();
+        let name = crate::users::clean_name(
+            envelope
+                .device_id
+                .strip_prefix(LOGIN_PREFIX)
+                .unwrap_or_default(),
+        )?;
+        self.check_not_locked_out(&name, now)?;
+        let mut accounts = self.load_accounts();
+        if accounts.accounts.is_empty() {
+            return Err("이 서버에는 아직 계정이 없습니다. 한 PC에서 먼저 회원가입하세요".into());
+        }
+        let Some(account) = accounts
+            .accounts
+            .iter_mut()
+            .find(|account| account.name == name)
+        else {
+            return Err(self.wrong_login(&name, now));
+        };
+        let Ok(plaintext) = envelope::open(envelope, &account.key) else {
+            return Err(self.wrong_login(&name, now));
+        };
+        let request: LoginRequest =
+            serde_json::from_slice(&plaintext).map_err(|error| format!("bad request: {error}"))?;
+        if (now - request.sent_at).num_seconds().abs() > MAX_CLOCK_SKEW_SECONDS {
+            return Err(
+                "the request is too old (or the clocks differ by more than 10 minutes)".into(),
+            );
+        }
+        if account
+            .last_login_at
+            .is_some_and(|last| request.sent_at <= last)
+        {
+            return Err("the request was already used".into());
+        }
+        account.last_login_at = Some(request.sent_at);
+        let key = account.key.clone();
+        write_json(&self.accounts_path(), &accounts)?;
+        let code = self.join_device(&request.device_name, request.previous_device_id.as_deref())?;
+        tracing::info!("'{name}' logged in on device '{}'", code.device_id);
+        let answer = JoinAnswer {
+            request_sent_at: request.sent_at,
+            account: name,
+            device_id: code.device_id,
+            key: code.key,
+        };
+        let bytes = serde_json::to_vec(&answer).map_err(|error| error.to_string())?;
+        envelope::seal(&envelope.device_id, &key, &bytes)
+    }
+
+    /// Answer a sign-up (envelope id `signup:<device public key>`): only while the server has
+    /// no account.
+    fn handle_signup(&self, envelope: &Envelope) -> Result<Envelope, String> {
+        use crate::account::{JoinAnswer, SignupRequest};
+        let now = Utc::now();
+        let key = crate::account::server_signup_key(&envelope.device_id, &self.server_secret()?)?;
+        let plaintext = envelope::open(envelope, &key)?;
+        let request: SignupRequest =
+            serde_json::from_slice(&plaintext).map_err(|error| format!("bad request: {error}"))?;
+        if (now - request.sent_at).num_seconds().abs() > MAX_CLOCK_SKEW_SECONDS {
+            return Err(
+                "the request is too old (or the clocks differ by more than 10 minutes)".into(),
+            );
+        }
+        if !self.load_accounts().accounts.is_empty() {
+            return Err("이 서버에는 이미 계정이 있습니다. 회원가입 대신 로그인하세요".into());
+        }
+        if !request.login.is_well_formed() {
+            return Err("the login is not well formed".into());
+        }
+        envelope::seal("check", &request.account_key, b"check")?;
+        let name = request.login.name.clone();
+        write_json(
+            &self.accounts_path(),
+            &Accounts {
+                accounts: vec![Account {
+                    name: name.clone(),
+                    key: request.account_key.clone(),
+                    last_login_at: Some(request.sent_at),
+                }],
+            },
+        )?;
+        self.write_users(|users| {
+            users.put(request.login.clone());
+            Ok(())
+        })?;
+        let code = self.join_device(&request.device_name, None)?;
+        tracing::info!("'{name}' signed up on device '{}'", code.device_id);
+        let answer = JoinAnswer {
+            request_sent_at: request.sent_at,
+            account: name,
+            device_id: code.device_id,
+            key: code.key,
+        };
+        let bytes = serde_json::to_vec(&answer).map_err(|error| error.to_string())?;
+        envelope::seal(&envelope.device_id, &key, &bytes)
     }
 
     pub fn remove_device(&self, id: &str) -> Result<(), String> {
@@ -232,12 +456,35 @@ impl SyncServer {
     }
 
     /// Add a login or give it a new password (`users.json`, sent to every device).
+    /// The account key changes with it, so devices that logged in with the old password
+    /// can no longer log in again by themselves.
     pub fn set_user(&self, name: &str, password: &str) -> Result<(), String> {
-        self.change_users(|users| users.set(name, password))
+        let _busy = self.busy.lock();
+        let entry = crate::users::UserEntry::new(name, password)?;
+        let key = crate::account::account_key(&entry.name, password)?;
+        let mut accounts = self.load_accounts();
+        accounts
+            .accounts
+            .retain(|account| account.name != entry.name);
+        accounts.accounts.push(Account {
+            name: entry.name.clone(),
+            key,
+            last_login_at: None,
+        });
+        write_json(&self.accounts_path(), &accounts)?;
+        self.write_users(|users| {
+            users.put(entry);
+            Ok(())
+        })
     }
 
     pub fn remove_user(&self, name: &str) -> Result<(), String> {
-        self.change_users(|users| {
+        let _busy = self.busy.lock();
+        let clean = name.trim().to_lowercase();
+        let mut accounts = self.load_accounts();
+        accounts.accounts.retain(|account| account.name != clean);
+        write_json(&self.accounts_path(), &accounts)?;
+        self.write_users(|users| {
             if users.remove(name) {
                 Ok(())
             } else {
@@ -253,11 +500,11 @@ impl SyncServer {
             .names()
     }
 
-    fn change_users(
+    /// Change `users.json` (the caller holds `busy`).
+    fn write_users(
         &self,
         change: impl FnOnce(&mut crate::users::Users) -> Result<(), String>,
     ) -> Result<(), String> {
-        let _busy = self.busy.lock();
         let name = crate::users::USERS_DOCUMENT;
         let current = self.load_document(name);
         let mut users: crate::users::Users = current
@@ -309,7 +556,24 @@ impl SyncServer {
 
     /// Answer one sealed request with a sealed response.
     pub fn handle(&self, envelope: &Envelope) -> Result<Envelope, String> {
+        if envelope.device_id.starts_with(crate::account::LOGIN_PREFIX) {
+            let answer = {
+                let _busy = self.busy.lock();
+                self.handle_login(envelope)
+            };
+            if answer.as_ref().is_err_and(|error| error == WRONG_LOGIN) {
+                // Slows down guessing, without holding up the other devices' syncs.
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            return answer;
+        }
         let _busy = self.busy.lock();
+        if envelope
+            .device_id
+            .starts_with(crate::account::SIGNUP_PREFIX)
+        {
+            return self.handle_signup(envelope);
+        }
         let mut devices = self.load_devices();
         let Some(device) = devices
             .devices
@@ -518,7 +782,12 @@ impl SyncServer {
                 length = value.trim().parse().unwrap_or(0);
             }
         }
-        let (status, body) = if !request_line.starts_with("POST /sync ") {
+        let (status, body) = if request_line.starts_with("GET /public-key ") {
+            match self.public_key() {
+                Ok(key) => ("200 OK", json!({ "public_key": key }).to_string()),
+                Err(error) => ("500 Internal Server Error", error),
+            }
+        } else if !request_line.starts_with("POST /sync ") {
             ("200 OK", "digital wellbeing sync server".to_string())
         } else if length > MAX_BODY_BYTES {
             ("413 Payload Too Large", "too large".to_string())

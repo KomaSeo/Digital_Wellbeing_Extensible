@@ -2,7 +2,8 @@
 //! that sends this device's changes and takes in the other devices'.
 //!
 //! Files (all in the device's data folder, written only by the service):
-//! - `sync.json`: the server's address, this device's id and key ([`ClientConfig`]).
+//! - `sync.json`: the server's address, this device's id and key, and the account key when it
+//!   logged in ([`ClientConfig`]).
 //! - `sync_state.json`: the request counter and the server revision of every document
 //!   ([`SyncState`]).
 //! - `sync_base/<name>.json`: each document as the server last had it, the base of a merge.
@@ -43,6 +44,11 @@ pub struct ClientConfig {
     pub server_url: String,
     pub device_id: String,
     pub key: String,
+    /// The account this device logged in with (none when it was paired with a code): with
+    /// it, the device logs in again by itself when the server no longer knows it (the server
+    /// was set up again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<crate::account::AccountCredentials>,
 }
 
 impl ClientConfig {

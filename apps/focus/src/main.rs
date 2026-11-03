@@ -693,7 +693,8 @@ impl eframe::App for FocusApp {
                     }
                     ui.separator();
                 }
-                self.login.prompt_ui(ui, self.session, &status.login);
+                self.login
+                    .prompt_ui(ui, &status.login, status.sync.as_ref());
                 // A refused or failed request from either tab.
                 if !message.is_empty() && self.tab != Tab::Settings {
                     ui.colored_label(RED, &message);
@@ -703,7 +704,13 @@ impl eframe::App for FocusApp {
                     Tab::Assistant => self.assistant.ui(ui),
                     Tab::Blocking => self.blocking_tab(ui, &status),
                     Tab::Settings => {
-                        self.login.account_ui(ui, self.session, &status.login);
+                        self.login.account_ui(
+                            ui,
+                            self.session,
+                            &status.login,
+                            status.sync.as_ref(),
+                            status.settings_protected,
+                        );
                         self.settings.ui(
                             ui,
                             status.settings_protected,

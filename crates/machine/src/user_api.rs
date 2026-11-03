@@ -609,14 +609,6 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .assign(Utc::now())
                 .map_err(|error| error.to_string())?;
         }
-        "login" => {
-            let user = crate::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;
-            let name = params["name"].as_str().unwrap_or_default();
-            let password = params["password"].as_str().unwrap_or_default();
-            let login = crate::login::log_in(&crate::data_dir(), &user, name, password)?;
-            tracing::info!("{user} logged in as {login}");
-            crate::login::changed();
-        }
         "logout" => {
             let user = crate::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;
             crate::login::log_out(&crate::data_dir(), &user)?;

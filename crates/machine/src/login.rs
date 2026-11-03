@@ -4,7 +4,9 @@
 //! - The logins (`users.json`) come from the sync server; only its administrator makes them
 //!   (`sync-add-user`). Without sync there are none, and nothing here changes anything.
 //! - `logins.json` (this PC only) says which login each Windows account used. The Focus app
-//!   logs in once per account; the agent then starts again with the login's files.
+//!   logs in once per account, with administrator approval (the service's `sync-login`); the
+//!   agent then starts again with the login's files.
+//! - While the settings are protected, an account cannot log out.
 //! - Once the settings are protected, an account that has not logged in is locked (every
 //!   app) until it does: otherwise not logging in would be a way around the shared blocks.
 //!
@@ -34,6 +36,20 @@ pub struct LoginStatus {
     pub available: bool,
     /// The login this account uses.
     pub user: Option<String>,
+}
+
+/// Responsibility: Carry what the Focus app asks the elevated `sync-login --request` to do.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginRequestFile {
+    pub server_url: String,
+    pub name: String,
+    pub password: String,
+    /// Make the first account of an empty server instead of logging in.
+    #[serde(default)]
+    pub signup: bool,
+    /// The Windows account that logs in (its grants, blocks and usage become the login's).
+    #[serde(default)]
+    pub windows_user: Option<String>,
 }
 
 static SESSION_USER: OnceLock<String> = OnceLock::new();
@@ -151,28 +167,24 @@ pub fn required(data_directory: &Path) -> bool {
     SESSION_USER.get().is_some() && status.available && status.user.is_none()
 }
 
-/// Log `windows_user` in as `name` when `password` is right.
-pub fn log_in(
-    data_directory: &Path,
-    windows_user: &str,
-    name: &str,
-    password: &str,
-) -> Result<String, String> {
-    let Some(login) = users(data_directory).check(name, password) else {
-        // Slows down guessing.
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        return Err("이름이나 비밀번호가 맞지 않습니다".into());
-    };
+/// Log `windows_user` in as `name`. Only the service's `sync-login` calls this, with
+/// administrator rights, after the sync server (or the account key this PC keeps) checked the
+/// password.
+pub fn assign(data_directory: &Path, windows_user: &str, name: &str) -> Result<(), String> {
     let path = data_directory.join(LOGINS_FILE);
     let mut logins: Logins = read(&path);
     logins
         .accounts
-        .insert(account_key(windows_user), login.clone());
-    write(&path, &logins)?;
-    Ok(login)
+        .insert(account_key(windows_user), name.trim().to_lowercase());
+    write(&path, &logins)
 }
 
+/// Log `windows_user` out; refused while the settings are protected (logging out would be a
+/// way out of the shared grants and blocks).
 pub fn log_out(data_directory: &Path, windows_user: &str) -> Result<(), String> {
+    if crate::settings::is_protected(data_directory) {
+        return Err("설정이 보호되어 있는 동안에는 로그아웃할 수 없습니다".into());
+    }
     let path = data_directory.join(LOGINS_FILE);
     let mut logins: Logins = read(&path);
     logins.accounts.remove(&account_key(windows_user));
@@ -205,8 +217,7 @@ mod tests {
         )
         .unwrap();
         assert!(status(&folder).available);
-        assert!(log_in(&folder, r"PC\Work", "me", "wrong").is_err());
-        assert_eq!(log_in(&folder, r"PC\Work", "Me", "password").unwrap(), "me");
+        assign(&folder, r"PC\Work", "Me").unwrap();
         assert_eq!(profile_for(&folder, "work"), "me");
         assert_eq!(profile_for(&folder, "other"), "other");
 
@@ -218,6 +229,12 @@ mod tests {
             serde_json::to_string(&users).unwrap(),
         )
         .unwrap();
+        // While the settings are protected, the account cannot log out.
+        let protection = folder.join(crate::settings::PROTECTION_FILE);
+        std::fs::write(&protection, r#"{"protected_since":"2026-01-01T00:00:00Z"}"#).unwrap();
+        assert!(log_out(&folder, "work").is_err());
+        assert_eq!(profile_for(&folder, "work"), "me");
+        std::fs::remove_file(&protection).unwrap();
         log_out(&folder, "work").unwrap();
         assert_eq!(profile_for(&folder, "work"), "work");
         let _ = std::fs::remove_dir_all(&folder);

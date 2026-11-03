@@ -171,8 +171,16 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
 
     let grants = monitor.grants().clone();
     let reload_monitor = Arc::clone(&monitor);
+    let login = (user.clone(), profile.clone());
     thread::spawn(move || {
-        reload_loop(list_store, ai_store, planner_config, grants, reload_monitor)
+        reload_loop(
+            list_store,
+            ai_store,
+            planner_config,
+            grants,
+            reload_monitor,
+            login,
+        )
     });
 
     enforce.join().ok();
@@ -272,6 +280,7 @@ fn reload_loop(
     planner_config: JsonStore<PlannerConfig>,
     grants: JsonStore<GrantState>,
     monitor: Arc<FocusMonitor>,
+    (windows_user, profile): (String, String),
 ) {
     let data_directory = machine::data_dir();
     let mut was_protected = machine::settings::is_protected(&data_directory);
@@ -293,6 +302,11 @@ fn reload_loop(
             info!("settings protection turned off; every block lifted");
         }
         was_protected = protected;
+        // Logged in or out outside this agent (the elevated `sync-login`, or the logins arriving
+        // by sync): start again with the login's files.
+        if machine::login::profile_for(&data_directory, &windows_user) != profile {
+            machine::login::changed();
+        }
         let now = (
             modified(&policy_path),
             modified(&ai_focus_path),

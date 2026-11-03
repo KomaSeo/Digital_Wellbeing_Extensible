@@ -10,10 +10,12 @@
 //! - [`device_local`]: what stays on each device (its Anthropic API key).
 //! - [`server`]: the server's document store and request handling.
 //! - [`users`]: the logins (one per person), made on the server.
+//! - [`account`]: joining a device with a login name and password (sign up, log in).
 //! - [`client`]: one device's side: which files sync, and one sync round.
 //!
 //! Walkthrough (Korean): `docs/sync.md`.
 
+pub mod account;
 pub mod client;
 pub mod device_local;
 pub mod envelope;

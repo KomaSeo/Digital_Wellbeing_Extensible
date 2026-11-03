@@ -47,7 +47,7 @@ pub const EDITABLE: [(&str, &str); 3] = [
 /// "Yes" answers in a row that put a scheduled update in force.
 pub const APPROVALS_NEEDED: usize = 3;
 
-const PROTECTION_FILE: &str = "settings_protection.json";
+pub(crate) const PROTECTION_FILE: &str = "settings_protection.json";
 const RESERVATIONS_FILE: &str = "settings_reservations.json";
 /// Written by versions that had a settings lock: its presence means the settings were
 /// protected; pending edits of that time become scheduled updates.

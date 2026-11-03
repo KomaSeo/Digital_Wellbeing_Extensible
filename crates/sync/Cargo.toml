@@ -16,3 +16,4 @@ getrandom = "0.2"
 ureq = { version = "2", features = ["json"] }
 pbkdf2 = "0.12"
 sha2 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }

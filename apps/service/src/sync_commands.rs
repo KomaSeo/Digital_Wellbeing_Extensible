@@ -10,18 +10,23 @@
 //! | `sync-remove-device <id>`            | the server, administrator | unpair a device                      |
 //! | `sync-add-user <name>`               | the server, administrator | make a login (asks for its password) or give it a new password |
 //! | `sync-users` / `sync-remove-user <name>` | the server, administrator | list / remove logins          |
-//! | `sync-join <server address> <code>`  | a device, administrator   | sync this device from now on         |
-//! | `sync-leave`                         | a device, administrator   | stop syncing this device             |
+//! | `sync-signup <server address> <name>` | a device, administrator  | make the first account of an empty server (asks for a password) and sync this device |
+//! | `sync-login <server address> <name>` | a device, administrator   | log this device in to the account (asks for the password) and sync it |
+//! | `sync-login --request <file>`        | a device, administrator   | the same for the Focus app (it asks Windows for administrator approval) |
+//! | `sync-join <server address> <code>`  | a device, administrator   | sync this device from now on (a pairing code instead of a login) |
+//! | `sync-leave`                         | a device, administrator   | stop syncing this device (not while the settings are protected) |
 //! | `sync-status`                        | a device                  | show the last sync                   |
 //! | `sync-now`                           | a device, administrator   | sync once now                        |
 //!
 //! Walkthrough (Korean): `docs/sync.md`.
 
 use anyhow::{bail, Context};
+use machine::login::LoginRequestFile;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use sync::client::{self, ClientConfig, SyncClient, SyncState};
+use sync::account::{AccountCredentials, Joiner};
+use sync::client::{self, ClientConfig, SyncClient, SyncReport, SyncState};
 use sync::protocol::PairingCode;
 use sync::server::SyncServer;
 use tracing::{info, warn};
@@ -77,6 +82,8 @@ pub fn run_command(command: &str, arguments: &[String]) -> Option<anyhow::Result
         "sync-devices" => list_devices(),
         "sync-remove-device" => remove_device(arguments),
         "sync-join" => join(&machine::data_dir(), arguments),
+        "sync-signup" => login_command(&machine::data_dir(), arguments, true),
+        "sync-login" => login_command(&machine::data_dir(), arguments, false),
         "sync-leave" => leave(&machine::data_dir()),
         "sync-status" => status(&machine::data_dir()),
         "sync-now" => sync_now(&machine::data_dir()),
@@ -229,16 +236,13 @@ pub fn join(data_directory: &Path, arguments: &[String]) -> anyhow::Result<()> {
     let code = PairingCode::from_line(code).map_err(anyhow::Error::msg)?;
     // A key that does not open is better found now than at the first sync.
     sync::envelope::seal(&code.device_id, &code.key, b"check").map_err(anyhow::Error::msg)?;
-    let server_url = if server_url.starts_with("http://") || server_url.starts_with("https://") {
-        server_url.trim_end_matches('/').to_string()
-    } else {
-        format!("http://{}", server_url.trim_end_matches('/'))
-    };
+    let server_url = clean_server_url(server_url);
     forget_sync_state(data_directory)?;
     ClientConfig {
         server_url: server_url.clone(),
         device_id: code.device_id.clone(),
         key: code.key,
+        account: None,
     }
     .save(data_directory)
     .map_err(anyhow::Error::msg)?;
@@ -248,6 +252,216 @@ pub fn join(data_directory: &Path, arguments: &[String]) -> anyhow::Result<()> {
         SYNC_INTERVAL.as_secs()
     );
     Ok(())
+}
+
+/// `http://` in front of an address given without it, and no `/` at the end.
+fn clean_server_url(server_url: &str) -> String {
+    let server_url = server_url.trim().trim_end_matches('/');
+    if server_url.starts_with("http://") || server_url.starts_with("https://") {
+        server_url.to_string()
+    } else {
+        format!("http://{server_url}")
+    }
+}
+
+/// This computer's name (a new device's id comes from it).
+fn computer_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "computer".into())
+}
+
+/// The value after `option` in `arguments`, and the arguments without the two.
+fn take_option(arguments: &[String], option: &str) -> (Option<String>, Vec<String>) {
+    match arguments.iter().position(|argument| argument == option) {
+        Some(index) => {
+            let value = arguments.get(index + 1).cloned();
+            let rest = arguments
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| *position != index && *position != index + 1)
+                .map(|(_, argument)| argument.clone())
+                .collect();
+            (value, rest)
+        }
+        None => (None, arguments.to_vec()),
+    }
+}
+
+/// `sync-signup` / `sync-login`: from a terminal (the password is asked for), or from the
+/// Focus app (`--request <file>`: the file is read and deleted at once, and the outcome is
+/// written next to it as `<file>.result`).
+fn login_command(data_directory: &Path, arguments: &[String], signup: bool) -> anyhow::Result<()> {
+    let (request_path, arguments) = take_option(arguments, "--request");
+    if let Some(request_path) = request_path {
+        let request_path = PathBuf::from(request_path);
+        let outcome = (|| -> anyhow::Result<String> {
+            let text = std::fs::read_to_string(&request_path)
+                .with_context(|| format!("read {}", request_path.display()))?;
+            let _ = std::fs::remove_file(&request_path);
+            let request: LoginRequestFile = serde_json::from_str(&text)?;
+            log_in_device(data_directory, &request, &computer_name()).map_err(anyhow::Error::msg)
+        })();
+        let result = match &outcome {
+            Ok(message) => serde_json::json!({ "ok": true, "message": message }),
+            Err(error) => serde_json::json!({ "ok": false, "message": format!("{error:#}") }),
+        };
+        let mut result_path = request_path.into_os_string();
+        result_path.push(".result");
+        std::fs::write(&result_path, result.to_string())?;
+        return outcome.map(|message| println!("{message}"));
+    }
+    let (device_name, arguments) = take_option(&arguments, "--device");
+    let (windows_user, arguments) = take_option(&arguments, "--for");
+    let [server_url, name] = arguments.as_slice() else {
+        bail!(
+            "usage: sync-{} <server address, e.g. 3.35.0.1:{DEFAULT_PORT}> <login name> [--for <Windows account>] [--device <name>]",
+            if signup { "signup" } else { "login" }
+        );
+    };
+    let password = read_password("password: ")?;
+    if signup && read_password("the same password again: ")? != password {
+        bail!("the two passwords differ");
+    }
+    let request = LoginRequestFile {
+        server_url: server_url.clone(),
+        name: name.clone(),
+        password,
+        signup,
+        windows_user,
+    };
+    let message = log_in_device(
+        data_directory,
+        &request,
+        &device_name.unwrap_or_else(computer_name),
+    )
+    .map_err(anyhow::Error::msg)?;
+    println!("{message}");
+    Ok(())
+}
+
+/// Sign up or log in, sync this device with the account from now on, and log the Windows
+/// account in (when given). A device already in this account only checks the password.
+pub fn log_in_device(
+    data_directory: &Path,
+    request: &LoginRequestFile,
+    device_name: &str,
+) -> Result<String, String> {
+    let server_url = clean_server_url(&request.server_url);
+    let name = sync::users::clean_name(&request.name)?;
+    let account_key = sync::account::account_key(&name, &request.password)?;
+    let current = ClientConfig::load(data_directory);
+    let already_in = current.as_ref().is_some_and(|config| {
+        config.server_url == server_url
+            && config
+                .account
+                .as_ref()
+                .is_some_and(|account| account.name == name && account.key == account_key)
+    });
+    let mut message = String::new();
+    if !already_in || request.signup {
+        let mut transport = client::http_transport(&server_url);
+        let mut joiner = Joiner {
+            transport: &mut transport,
+        };
+        let (answer, credentials) = if request.signup {
+            let public_key = sync::account::fetch_public_key(&server_url)?;
+            joiner.sign_up(&public_key, &name, &request.password, device_name)?
+        } else {
+            let credentials = AccountCredentials {
+                name: name.clone(),
+                key: account_key,
+            };
+            // The same computer logging in again keeps its id on that server.
+            let previous = current
+                .as_ref()
+                .filter(|config| config.server_url == server_url)
+                .map(|config| config.device_id.clone());
+            (
+                joiner.log_in(&credentials, device_name, previous)?,
+                credentials,
+            )
+        };
+        forget_sync_state(data_directory).map_err(|error| error.to_string())?;
+        ClientConfig {
+            server_url: server_url.clone(),
+            device_id: answer.device_id.clone(),
+            key: answer.key,
+            account: Some(credentials),
+        }
+        .save(data_directory)?;
+        message = format!(
+            "this device syncs with {server_url} as '{}' in the account '{name}' (within {} seconds once the service runs). ",
+            answer.device_id,
+            SYNC_INTERVAL.as_secs()
+        );
+    }
+    if let Some(windows_user) = request
+        .windows_user
+        .as_deref()
+        .filter(|user| !user.is_empty())
+    {
+        machine::login::assign(data_directory, windows_user, &name)?;
+        message.push_str(&format!(
+            "The Windows account '{windows_user}' uses the login '{name}'."
+        ));
+    }
+    Ok(message.trim().to_string())
+}
+
+/// One sync; when the server no longer knows this device (it was set up again) and the device
+/// logged in with an account, it logs in again by itself and syncs from the server's state.
+pub fn sync_device(data_directory: &Path, config: &ClientConfig) -> Result<SyncReport, String> {
+    let result = SyncClient::new(data_directory.to_path_buf(), config.clone())
+        .sync_once(&mut client::http_transport(&config.server_url));
+    let Err(error) = &result else {
+        return result;
+    };
+    let Some(credentials) = config.account.as_ref() else {
+        return result;
+    };
+    if !error.contains("unknown device") {
+        return result;
+    }
+    let logged_in = Joiner {
+        transport: &mut client::http_transport(&config.server_url),
+    }
+    .log_in(
+        credentials,
+        &config.device_id,
+        Some(config.device_id.clone()),
+    );
+    let answer = match logged_in {
+        Ok(answer) => answer,
+        Err(login_error) => {
+            // The password was changed (or this device was given up): the kept key is no
+            // good, and trying it every 20 seconds would lock the name out for everyone.
+            if login_error.contains("맞지 않습니다") {
+                ClientConfig {
+                    account: None,
+                    ..config.clone()
+                }
+                .save(data_directory)?;
+            }
+            return Err(format!("{error}; logging in again: {login_error}"));
+        }
+    };
+    info!(
+        "sync: the server did not know this device; logged in again as '{}'",
+        answer.device_id
+    );
+    forget_sync_state(data_directory).map_err(|error| error.to_string())?;
+    let renewed = ClientConfig {
+        device_id: answer.device_id,
+        key: answer.key,
+        ..config.clone()
+    };
+    renewed.save(data_directory)?;
+    SyncClient::new(data_directory.to_path_buf(), renewed.clone())
+        .sync_once(&mut client::http_transport(&renewed.server_url))
 }
 
 fn forget_sync_state(data_directory: &Path) -> anyhow::Result<()> {
@@ -267,6 +481,12 @@ pub fn leave(data_directory: &Path) -> anyhow::Result<()> {
     if !config.exists() {
         println!("this device does not sync");
         return Ok(());
+    }
+    // Otherwise leaving would be a way out of the shared blocks and the shared protection.
+    if machine::settings::is_protected(data_directory) {
+        bail!(
+            "the settings are protected: this device cannot stop syncing until the protection ends"
+        );
     }
     std::fs::remove_file(config)?;
     forget_sync_state(data_directory)?;
@@ -305,9 +525,7 @@ fn status(data_directory: &Path) -> anyhow::Result<()> {
 
 fn sync_now(data_directory: &Path) -> anyhow::Result<()> {
     let config = ClientConfig::load(data_directory).context("this device does not sync")?;
-    let report = SyncClient::new(data_directory.to_path_buf(), config.clone())
-        .sync_once(&mut client::http_transport(&config.server_url))
-        .map_err(anyhow::Error::msg)?;
+    let report = sync_device(data_directory, &config).map_err(anyhow::Error::msg)?;
     println!(
         "sent {:?}, received {:?}, merged {:?}",
         report.pushed, report.pulled, report.merged
@@ -324,8 +542,7 @@ pub fn sync_loop(data_directory: PathBuf) {
     let mut last_error: Option<String> = None;
     loop {
         if let Some(config) = ClientConfig::load(&data_directory) {
-            let client = SyncClient::new(data_directory.clone(), config.clone());
-            match client.sync_once(&mut client::http_transport(&config.server_url)) {
+            match sync_device(&data_directory, &config) {
                 Ok(report) => {
                     if !report.pulled.is_empty() || !report.merged.is_empty() {
                         info!(

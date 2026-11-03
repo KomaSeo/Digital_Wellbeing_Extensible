@@ -49,6 +49,7 @@ fn setup(name: &str) -> Setup {
             server_url: "http://unused".into(),
             device_id: code.device_id,
             key: code.key,
+            account: None,
         };
         (folder.clone(), SyncClient::new(folder, config))
     };
@@ -359,6 +360,7 @@ fn a_sync_round_works_over_http() {
         server_url: format!("http://127.0.0.1:{port}"),
         device_id: code.device_id,
         key: code.key,
+        account: None,
     };
     let client = SyncClient::new(folder, config.clone());
     let report = client
