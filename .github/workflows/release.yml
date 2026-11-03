@@ -68,6 +68,29 @@ jobs:
           & $iscc installer\DigitalWellbeing.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The real setup program, silently: it installs and starts the service; its uninstaller
+      # removes the service and, when silent (no one to ask), keeps the owner's data.
+      - name: The setup program installs and uninstalls
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $setup = (Get-ChildItem dist\DigitalWellbeing-Setup-*.exe | Select-Object -First 1).FullName
+          $run = Start-Process $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          if ($run.ExitCode -ne 0) { throw "setup failed ($($run.ExitCode))" }
+          if ((Get-Service DigitalWellbeing).Status -ne "Running") { throw "the service does not run after setup" }
+          $data = "C:\ProgramData\DigitalWellbeing"
+          if (-not (Test-Path $data)) { throw "setup made no data folder" }
+          $uninstaller = "C:\Program Files\DigitalWellbeing\unins000.exe"
+          $run = Start-Process $uninstaller -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          if ($run.ExitCode -ne 0) { throw "the uninstaller failed ($($run.ExitCode))" }
+          # The uninstaller goes on from a copy of itself; wait until the service is gone.
+          $deadline = (Get-Date).AddSeconds(120)
+          while (Get-Service DigitalWellbeing -ErrorAction SilentlyContinue) {
+            if ((Get-Date) -gt $deadline) { throw "the uninstaller left the service" }
+            Start-Sleep -Seconds 2
+          }
+          if (-not (Test-Path $data)) { throw "a silent uninstall deleted the owner's data" }
+
       - name: Zip
         shell: pwsh
         run: |

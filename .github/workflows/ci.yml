@@ -178,5 +178,14 @@ jobs:
           if (Select-String -Path "$data\ai_focus.json" -Pattern "test-key" -Quiet -ErrorAction SilentlyContinue) {
             throw "settings from an open folder were kept"
           }
-          & $exe uninstall
+          Write-Host "== install --delete-data starts from nothing; the service runs again"
+          Set-Content "$data\left-by-the-last-install.txt" "old"
+          & $exe install --manage-all --delete-data
+          if ($LASTEXITCODE -ne 0) { throw "install --delete-data failed ($LASTEXITCODE)" }
+          if (Test-Path "$data\left-by-the-last-install.txt") { throw "install --delete-data kept the old data" }
+          if ((Get-Service DigitalWellbeing).Status -ne "Running") { throw "the service does not run after install --delete-data" }
+
+          Write-Host "== uninstall --delete-data removes the owner's data"
+          & $exe uninstall --delete-data
           if ($LASTEXITCODE -ne 0) { throw "final uninstall failed ($LASTEXITCODE)" }
+          if (Test-Path $data) { throw "uninstall --delete-data left $data" }

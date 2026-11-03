@@ -115,6 +115,9 @@ windows 작업의 설치 시험은 다음을 확인합니다.
 3. 데이터 폴더에 일반 사용자(Users, Everyone, Authenticated Users) 권한이 없다.
 4. 업데이트 뒤 서비스가 로그에 "service running"과 "started agent"를 남긴다. 즉 서비스가 로그인한 사용자의 세션에 agent를 띄웠다.
 5. 마지막 단계에서 `uninstall` 뒤 서비스가 돌지 않는다. 이 단계는 앞 단계가 실패해도 실행됩니다.
+6. 다시 설치한 뒤 `uninstall --delete-data`를 실행하면 데이터 폴더가 없어진다.
+
+release 작업은 실제 설치 프로그램(`DigitalWellbeing-Setup-<버전>.exe`)을 조용한 모드로 설치하고, 그 제거 프로그램으로 제거합니다. 이때 서비스가 돌았다가 없어지고, 조용한 제거는 데이터 폴더를 남겨 두는지 확인합니다.
 
 GitHub의 Windows 빌드 서버에는 작업을 실행하는 사용자(runneradmin)가 로그인한 세션이 있습니다. 그래서 서비스는 설치되자마자 그 세션에 agent를 띄웁니다.
 
