@@ -254,8 +254,13 @@ jobs:
           Write-Host $devices
           if ($devices -notmatch "ci-runner") { throw "the device is not listed" }
 
-          & $exe sync-leave
-          if ($LASTEXITCODE -ne 0) { throw "sync-leave failed ($LASTEXITCODE)" }
+          # The end-to-end step above protected the settings for good: while they are
+          # protected, this PC cannot stop syncing.
+          $leave = & $exe sync-leave 2>&1 | Out-String
+          Write-Host $leave
+          if ($LASTEXITCODE -eq 0) { throw "sync-leave worked while the settings are protected" }
+          if ($leave -notmatch "protected") { throw "sync-leave failed for another reason" }
+          Remove-Item "C:\ProgramData\DigitalWellbeing\sync.json"
           sc.exe stop DigitalWellbeingSync | Out-Null
           Start-Sleep -Seconds 2
           sc.exe delete DigitalWellbeingSync | Out-Null
