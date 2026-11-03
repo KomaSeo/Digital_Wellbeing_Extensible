@@ -48,6 +48,16 @@ const REFRESH: Duration = Duration::from_secs(3);
 /// Edits are saved to the drafts file this long after the last change.
 const AUTOSAVE_AFTER: Duration = Duration::from_secs(1);
 
+/// Responsibility: Name the protection the user is choosing (see
+/// `machine::settings::ProtectionChoice`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtectKind {
+    Until,
+    Permanent,
+    Administrator,
+    Password,
+}
+
 /// Responsibility: Name the sections of the Settings tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -257,6 +267,14 @@ pub struct SettingsTab {
     session: u32,
     error: String,
     confirm_protect: bool,
+    /// The protection the user is choosing, and its length or password.
+    protect_kind: ProtectKind,
+    protect_days: u32,
+    protect_hours: u32,
+    protect_password: String,
+    protect_password_again: String,
+    /// The password typed to turn a password protection off.
+    unlock_password: String,
     /// The last `settings_get` answer.
     latest: Option<SettingsSnapshot>,
     fetched_at: Option<Instant>,
@@ -320,6 +338,12 @@ impl SettingsTab {
             session,
             error: String::new(),
             confirm_protect: false,
+            protect_kind: ProtectKind::Until,
+            protect_days: 7,
+            protect_hours: 0,
+            protect_password: String::new(),
+            protect_password_again: String::new(),
+            unlock_password: String::new(),
             latest: None,
             fetched_at: None,
             message: String::new(),
@@ -344,6 +368,7 @@ impl SettingsTab {
         &mut self,
         ui: &mut egui::Ui,
         protected: bool,
+        protection: Option<&machine::user_api::ProtectionView>,
         lockdown: Option<&Lockdown>,
         sync: Option<&machine::user_api::SyncStatus>,
     ) {
@@ -359,17 +384,7 @@ impl SettingsTab {
                  간격으로 {APPROVALS_NEEDED}번 연속 \"예\"라고 답하면 적용되고, 한 번이라도 \
                  \"아니요\"라고 답하면 거절됩니다."
             ));
-            if machine::TEST_EDITION {
-                ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(YELLOW, "테스트판에만 있는 버튼입니다:");
-                    if ui.button("보호 풀기(설정 단계로 돌아가기)").clicked() {
-                        match call_value(self.session, "settings_unprotect", json!({})) {
-                            Ok(_) => self.fetched_at = None,
-                            Err(error) => self.error = error,
-                        }
-                    }
-                });
-            }
+            self.unlock_ui(ui, protection);
         } else {
             self.protect_ui(ui);
         }
@@ -465,19 +480,159 @@ impl SettingsTab {
         );
         ui.label(format!(
             "모두 정했으면 설정을 보호하세요. 그 뒤로는 규칙을 더 엄격하게 만드는 변경만 바로 \
-             적용되고, 그 밖의 변경은 이틀 간격으로 {APPROVALS_NEEDED}번 확인해야 적용됩니다."
+             적용되고, 그 밖의 변경은 이틀 간격으로 {APPROVALS_NEEDED}번 확인해야 적용됩니다. 보호를 \
+             풀면 설정 단계로 돌아가고, 걸린 차단도 모두 풀립니다."
         ));
+        ui.label("보호를 어떻게 풀 수 있게 할지 고르세요.");
+        ui.radio_value(
+            &mut self.protect_kind,
+            ProtectKind::Until,
+            "기간: 정한 시간이 지나기 전에는 풀 수 없습니다",
+        );
+        if self.protect_kind == ProtectKind::Until {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.add(egui::DragValue::new(&mut self.protect_days).range(0..=365));
+                ui.label("일");
+                ui.add(egui::DragValue::new(&mut self.protect_hours).range(0..=23));
+                ui.label("시간 동안");
+            });
+            let until = self.protect_until();
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.small(format!(
+                    "{}까지 풀 수 없습니다.",
+                    until.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                ));
+            });
+        }
+        ui.radio_value(
+            &mut self.protect_kind,
+            ProtectKind::Permanent,
+            "영구: 프로그램 안에서는 풀 수 없습니다",
+        );
+        ui.radio_value(
+            &mut self.protect_kind,
+            ProtectKind::Administrator,
+            "관리자 권한: Windows가 관리자 승인을 물을 때 승인할 수 있어야 풀 수 있습니다",
+        );
+        ui.radio_value(
+            &mut self.protect_kind,
+            ProtectKind::Password,
+            "비밀번호: 지금 정하는 비밀번호를 넣어야 풀 수 있습니다",
+        );
+        if self.protect_kind == ProtectKind::Password {
+            egui::Grid::new("protect_password").show(ui, |ui| {
+                ui.label("비밀번호");
+                ui.add(egui::TextEdit::singleline(&mut self.protect_password).password(true));
+                ui.end_row();
+                ui.label("한 번 더");
+                ui.add(egui::TextEdit::singleline(&mut self.protect_password_again).password(true));
+                ui.end_row();
+            });
+            ui.small(
+                "다른 사람에게 비밀번호를 정하고 갖고 있게 하면, 스스로는 풀 수 없게 됩니다. \
+                 비밀번호는 되돌릴 수 없는 값(해시)으로만 저장됩니다.",
+            );
+        }
+        let mode = match self.protect_kind {
+            ProtectKind::Until => Some(json!({ "kind": "until", "until": self.protect_until() })),
+            ProtectKind::Permanent => Some(json!({ "kind": "permanent" })),
+            ProtectKind::Administrator => Some(json!({ "kind": "administrator" })),
+            ProtectKind::Password => {
+                let password = self.protect_password.clone();
+                (password.chars().count() >= 4 && password == self.protect_password_again)
+                    .then(|| json!({ "kind": "password", "password": password }))
+            }
+        };
+        if self.protect_kind == ProtectKind::Password && mode.is_none() {
+            ui.small("비밀번호는 4글자 이상이고, 두 칸이 같아야 합니다.");
+        }
         ui.checkbox(
             &mut self.confirm_protect,
-            "프로그램 안의 어떤 것도 보호를 끄지 못한다는 것을 이해했습니다.",
+            "고른 방법이 아니면 보호를 풀 수 없다는 것을 이해했습니다.",
         );
         if ui
-            .add_enabled(self.confirm_protect, egui::Button::new("설정 보호하기"))
+            .add_enabled(
+                self.confirm_protect && mode.is_some(),
+                egui::Button::new("설정 보호하기"),
+            )
             .clicked()
         {
-            match call_value(self.session, "settings_protect", json!({})) {
+            match call_value(self.session, "settings_protect", json!({ "mode": mode })) {
                 Ok(_) => {
                     self.confirm_protect = false;
+                    self.protect_password.clear();
+                    self.protect_password_again.clear();
+                    self.fetched_at = None;
+                }
+                Err(error) => self.error = error,
+            }
+        }
+    }
+
+    /// The end of a time protection chosen now.
+    fn protect_until(&self) -> DateTime<Utc> {
+        let hours = i64::from(self.protect_days) * 24 + i64::from(self.protect_hours);
+        Utc::now() + chrono::Duration::hours(hours.max(1))
+    }
+
+    /// How the protection in force may end, and the way to end it.
+    fn unlock_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        protection: Option<&machine::user_api::ProtectionView>,
+    ) {
+        let Some(protection) = protection else {
+            return;
+        };
+        let mut unlock: Option<Value> = None;
+        match protection.kind.as_str() {
+            "until" => {
+                let until = protection.until.unwrap_or_else(Utc::now);
+                if Utc::now() < until {
+                    ui.label(format!(
+                        "기간 보호입니다. {}까지는 풀 수 없습니다.",
+                        until.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                    ));
+                } else if ui.button("기간이 끝났습니다: 보호 풀기").clicked() {
+                    unlock = Some(json!({}));
+                }
+            }
+            "administrator" => {
+                ui.label("관리자 권한 보호입니다. Windows의 관리자 승인 창에서 승인해야 풀립니다.");
+                if ui.button("관리자 권한으로 보호 풀기").clicked() {
+                    match crate::elevate::run_settings_unlock() {
+                        Ok(()) => {
+                            self.message =
+                                "관리자 승인 창에서 승인하면 몇 초 안에 보호가 풀립니다.".into();
+                            self.fetched_at = None;
+                        }
+                        Err(error) => self.error = error,
+                    }
+                }
+            }
+            "password" => {
+                ui.label("비밀번호 보호입니다. 보호할 때 정한 비밀번호를 넣으면 풀립니다.");
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.unlock_password).password(true));
+                    if ui.button("보호 풀기").clicked() {
+                        unlock = Some(json!({ "password": self.unlock_password }));
+                    }
+                });
+            }
+            _ => {
+                ui.label("영구 보호입니다. 프로그램 안에서는 풀 수 없습니다.");
+            }
+        }
+        if protection.kind != "permanent" {
+            ui.small("보호를 풀면 설정 단계로 돌아가고, 걸린 차단도 모두 풀립니다.");
+        }
+        if let Some(params) = unlock {
+            match call_value(self.session, "settings_unprotect", params) {
+                Ok(_) => {
+                    self.unlock_password.clear();
+                    self.message = "설정 보호를 풀었습니다. 걸린 차단도 모두 풀었습니다.".into();
                     self.fetched_at = None;
                 }
                 Err(error) => self.error = error,

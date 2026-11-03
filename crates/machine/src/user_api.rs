@@ -28,7 +28,8 @@
 //! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…}, "via": "…" }` | [`crate::settings::PutOutcome`] (what is in force now, what was scheduled) |
 //! | `settings_answer` | `{ "id": "…", "approve": true\|false }` (once the question is due) | [`crate::settings::AnswerOutcome`] |
 //! | `settings_withdraw` | `{ "id": "…" }`                        | `{ "ok": true }` |
-//! | `settings_protect` | `{}` (one way)                         | [`crate::settings::Protection`] |
+//! | `settings_protect` | `{ mode? }` ([`crate::settings::ProtectionChoice`]; permanent without) | [`ProtectionView`] |
+//! | `settings_unprotect` | `{ password? }` (time over, or the password) | `{ protected: false }`; every block lifted |
 //! | `program_update` | `{ "program": "Kakao.KakaoTalk" }` (listed in `updatable_programs`) | [`crate::system_care::CareStatus`] |
 //! | `system_care_status` | `{}`                                 | [`crate::system_care::CareStatus`] |
 //! | `assistant_send` | `{ "text": "…" }` (starts a turn and returns at once) | [`crate::assistant::AssistantView`] |
@@ -125,6 +126,9 @@ pub struct Status {
     /// Setup is over: settings edits are scheduled and need three confirmations.
     #[serde(default)]
     pub settings_protected: bool,
+    /// How the protection may end (`None` during setup).
+    #[serde(default)]
+    pub settings_protection: Option<ProtectionView>,
     /// Scheduled settings updates whose "is this update really right?" question is due.
     #[serde(default)]
     pub settings_questions_due: usize,
@@ -217,6 +221,34 @@ pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
     })
 }
 
+/// Responsibility: Show the Focus app how the protection may end, without the password hash.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProtectionView {
+    pub since: Option<DateTime<Utc>>,
+    /// `permanent`, `until`, `administrator` or `password`.
+    pub kind: String,
+    /// The end of a time protection.
+    #[serde(default)]
+    pub until: Option<DateTime<Utc>>,
+}
+
+impl ProtectionView {
+    pub fn of(protection: &crate::settings::Protection) -> Self {
+        use crate::settings::ProtectionMode;
+        let (kind, until) = match &protection.mode {
+            ProtectionMode::Permanent => ("permanent", None),
+            ProtectionMode::Until { until } => ("until", Some(*until)),
+            ProtectionMode::Administrator => ("administrator", None),
+            ProtectionMode::Password { .. } => ("password", None),
+        };
+        Self {
+            since: protection.protected_since,
+            kind: kind.to_string(),
+            until,
+        }
+    }
+}
+
 /// Responsibility: Hold what the agent exposes (focus monitor, optional planner) and tell
 /// whether the planner restricts a request.
 pub struct AgentApi {
@@ -270,6 +302,8 @@ fn status(api: &AgentApi) -> Status {
         last_proposal: None,
         last_todo_change: None,
         settings_protected: crate::settings::is_protected(&crate::data_dir()),
+        settings_protection: crate::settings::protection(&crate::data_dir())
+            .map(|protection| ProtectionView::of(&protection)),
         settings_questions_due: crate::settings::questions_due(&crate::data_dir(), Utc::now()),
         ai_cost_today_usd: monitor.usage().map(|usage| usage.today_cost()),
         daily_budget_usd: config.daily_budget_usd,
@@ -467,14 +501,35 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             return Err("assistant_send needs the shared agent (dispatch_shared)".into());
         }
         "settings_protect" => {
-            let protection = crate::settings::protect(&data_directory, Utc::now())?;
-            tracing::info!("settings protected since {:?}", protection.protected_since);
-            return serde_json::to_value(protection).map_err(|error| error.to_string());
+            // Without a choice (older callers, tests): permanent.
+            let choice: crate::settings::ProtectionChoice = match params.get("mode") {
+                Some(mode) => serde_json::from_value(mode.clone())
+                    .map_err(|error| format!("params.mode: {error}"))?,
+                None => crate::settings::ProtectionChoice::Permanent,
+            };
+            let protection = crate::settings::protect(&data_directory, Utc::now(), choice)?;
+            tracing::info!(
+                "settings protected since {:?} ({:?})",
+                protection.protected_since,
+                ProtectionView::of(&protection).kind
+            );
+            return serde_json::to_value(ProtectionView::of(&protection))
+                .map_err(|error| error.to_string());
         }
-        // Test edition only (the main edition refuses inside `unprotect`).
+        // A time protection whose time is over, or a password protection with its password.
+        // An administrator protection ends only through `settings-unlock` run as administrator.
         "settings_unprotect" => {
-            crate::settings::unprotect(&data_directory)?;
-            tracing::warn!("settings protection turned off (test edition)");
+            let unlock = match params["password"].as_str() {
+                Some(password) => crate::settings::Unlock::Password(password),
+                None => crate::settings::Unlock::Press,
+            };
+            if let Err(error) = crate::settings::unprotect(&data_directory, Utc::now(), unlock) {
+                // Slows down guessing a password.
+                std::thread::sleep(Duration::from_secs(1));
+                return Err(error);
+            }
+            api.monitor.lift_all_blocks();
+            tracing::warn!("settings protection turned off; every block lifted");
             return Ok(json!({ "protected": false }));
         }
         _ => {}

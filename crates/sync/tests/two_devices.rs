@@ -33,9 +33,14 @@ struct Setup {
     desktop: (PathBuf, SyncClient),
 }
 
+/// The same as [`setup`], for a test whose `setup` variable hides that function.
+fn setup_named(name: &str) -> Setup {
+    setup(name)
+}
+
 fn setup(name: &str) -> Setup {
     let root = temporary_folder(name);
-    let server = Arc::new(SyncServer::new(root.join("server"), false));
+    let server = Arc::new(SyncServer::new(root.join("server")));
     let device = |device_name: &str| {
         let code = server.add_device(device_name).unwrap();
         let folder = root.join(device_name);
@@ -272,7 +277,7 @@ fn send_raw(
 #[test]
 fn the_server_refuses_strangers_replays_old_requests_and_foreign_files() {
     let root = temporary_folder("rules");
-    let server = SyncServer::new(root.join("server"), false);
+    let server = SyncServer::new(root.join("server"));
     let code = server.add_device("laptop").unwrap();
     let request = |counter: u64, pushes: Vec<Push>| SyncRequest {
         sent_at: chrono::Utc::now(),
@@ -335,7 +340,7 @@ fn the_server_refuses_strangers_replays_old_requests_and_foreign_files() {
 #[test]
 fn a_sync_round_works_over_http() {
     let root = temporary_folder("http");
-    let server = Arc::new(SyncServer::new(root.join("server"), false));
+    let server = Arc::new(SyncServer::new(root.join("server")));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -437,7 +442,7 @@ fn each_device_keeps_its_own_api_key() {
 #[test]
 fn a_device_with_an_older_version_stops_syncing_until_it_is_updated() {
     let root = temporary_folder("versions");
-    let server = SyncServer::new(root.join("server"), false);
+    let server = SyncServer::new(root.join("server"));
     let newer = server.add_device("laptop").unwrap();
     let older = server.add_device("desktop").unwrap();
     let request = |counter: u64, version: &str| SyncRequest {
@@ -521,42 +526,87 @@ fn an_old_answer_sent_again_is_refused_and_protection_stays() {
 }
 
 #[test]
-fn a_protected_device_keeps_its_protection_whatever_the_server_sends() {
-    let root = temporary_folder("test_server");
-    // A test-edition server lets a device turn the protection off.
-    let server = SyncServer::new(root.join("server"), true);
-    let device = |name: &str| {
-        let code = server.add_device(name).unwrap();
-        let folder = root.join(name);
-        fs::create_dir_all(&folder).unwrap();
-        let client = SyncClient::new(
-            folder.clone(),
-            ClientConfig {
-                server_url: String::new(),
-                device_id: code.device_id,
-                key: code.key,
-            },
-        );
-        (folder, client)
-    };
-    let (laptop_folder, laptop) = device("laptop");
-    let (desktop_folder, desktop) = device("desktop");
-    let protected = json!({ "protected_since": "2026-11-01T00:00:00Z" });
-    write(&laptop_folder, "settings_protection.json", &protected);
-    sync(&server, &laptop);
-    sync(&server, &desktop);
-    // The test-edition laptop turns it off; the main-edition desktop does not follow.
-    let laptop = laptop.allowing_unprotect(true);
+fn a_protection_ends_on_every_device_only_the_way_it_allows() {
+    let setup = setup("protection_modes");
+    let (laptop_folder, laptop) = &setup.laptop;
+    let (desktop_folder, desktop) = &setup.desktop;
+    let off = |mode: Value| json!({ "protected_since": null, "mode": mode });
+    let on = |mode: Value| json!({ "protected_since": "2026-11-01T00:00:00Z", "mode": mode });
+
+    // A password protection ended on the laptop (its service checked the password) ends on
+    // the desktop too.
+    let password =
+        json!({ "kind": "password", "password": { "salt": "", "hash": "", "rounds": 1 } });
     write(
-        &laptop_folder,
+        laptop_folder,
         "settings_protection.json",
-        &json!({ "protected_since": null }),
+        &on(password.clone()),
     );
-    sync(&server, &laptop);
-    sync(&server, &desktop);
+    sync(&setup.server, laptop);
+    sync(&setup.server, desktop);
+    write(
+        laptop_folder,
+        "settings_protection.json",
+        &off(password.clone()),
+    );
+    sync(&setup.server, laptop);
+    sync(&setup.server, desktop);
     assert_eq!(
-        read(&desktop_folder, "settings_protection.json").unwrap(),
-        protected
+        read(desktop_folder, "settings_protection.json").unwrap(),
+        off(password)
+    );
+
+    // A time protection does not end before its time: the server refuses, and the laptop
+    // takes the protected version back.
+    let later = json!({ "kind": "until", "until": "2099-01-01T00:00:00Z" });
+    write(
+        laptop_folder,
+        "settings_protection.json",
+        &on(later.clone()),
+    );
+    sync(&setup.server, laptop);
+    sync(&setup.server, desktop);
+    write(
+        laptop_folder,
+        "settings_protection.json",
+        &off(later.clone()),
+    );
+    let report = sync(&setup.server, laptop);
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+    assert_eq!(
+        read(laptop_folder, "settings_protection.json").unwrap(),
+        on(later.clone())
+    );
+    assert_eq!(
+        read(desktop_folder, "settings_protection.json").unwrap(),
+        on(later)
+    );
+
+    // How it ends cannot be changed while it is on.
+    let permanent = json!({ "kind": "permanent" });
+    write(laptop_folder, "settings_protection.json", &on(permanent));
+    let report = sync(&setup.server, laptop);
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+
+    // One whose time is over may end.
+    let setup = setup_named("protection_over");
+    let (laptop_folder, laptop) = &setup.laptop;
+    let (desktop_folder, desktop) = &setup.desktop;
+    let over = json!({ "kind": "until", "until": "2020-01-01T00:00:00Z" });
+    write(laptop_folder, "settings_protection.json", &on(over.clone()));
+    sync(&setup.server, laptop);
+    sync(&setup.server, desktop);
+    write(
+        laptop_folder,
+        "settings_protection.json",
+        &off(over.clone()),
+    );
+    let report = sync(&setup.server, laptop);
+    assert!(report.refused.is_empty(), "{report:?}");
+    sync(&setup.server, desktop);
+    assert_eq!(
+        read(desktop_folder, "settings_protection.json").unwrap(),
+        off(over)
     );
 }
 

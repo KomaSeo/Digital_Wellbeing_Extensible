@@ -48,7 +48,7 @@ pub fn server_folder() -> PathBuf {
 }
 
 fn server() -> SyncServer {
-    SyncServer::new(server_folder(), machine::TEST_EDITION)
+    SyncServer::new(server_folder())
 }
 
 fn port_option(arguments: &[String]) -> anyhow::Result<u16> {
@@ -299,7 +299,6 @@ fn status(data_directory: &Path) -> anyhow::Result<()> {
 fn sync_now(data_directory: &Path) -> anyhow::Result<()> {
     let config = ClientConfig::load(data_directory).context("this device does not sync")?;
     let report = SyncClient::new(data_directory.to_path_buf(), config.clone())
-        .allowing_unprotect(machine::TEST_EDITION)
         .sync_once(&mut client::http_transport(&config.server_url))
         .map_err(anyhow::Error::msg)?;
     println!(
@@ -318,8 +317,7 @@ pub fn sync_loop(data_directory: PathBuf) {
     let mut last_error: Option<String> = None;
     loop {
         if let Some(config) = ClientConfig::load(&data_directory) {
-            let client = SyncClient::new(data_directory.clone(), config.clone())
-                .allowing_unprotect(machine::TEST_EDITION);
+            let client = SyncClient::new(data_directory.clone(), config.clone());
             match client.sync_once(&mut client::http_transport(&config.server_url)) {
                 Ok(report) => {
                     if !report.pulled.is_empty() || !report.merged.is_empty() {

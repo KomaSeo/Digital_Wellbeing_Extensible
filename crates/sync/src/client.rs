@@ -20,8 +20,8 @@ use crate::envelope::{self, Envelope};
 use crate::merge::merge;
 use crate::protocol::{Push, Rejected, SyncRequest, SyncResponse};
 use crate::server::{
-    allowed_name, read_json, write_json, DEVICE_FOLDER, SERVER_DOCUMENTS, SHARED_DOCUMENTS,
-    SHARED_FOLDERS,
+    allowed_name, protected, protection_may_end, read_json, write_json, DEVICE_FOLDER,
+    SERVER_DOCUMENTS, SHARED_DOCUMENTS, SHARED_FOLDERS,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -184,16 +184,6 @@ fn read_value(path: &Path) -> Option<Value> {
 pub struct SyncClient {
     data_directory: PathBuf,
     config: ClientConfig,
-    /// A test-edition device may take in a turned-off protection; any other keeps its
-    /// protection whatever the server sends.
-    allow_unprotect: bool,
-}
-
-/// Is the protection on in this `settings_protection.json` content?
-fn protected(content: &Value) -> bool {
-    content
-        .get("protected_since")
-        .is_some_and(|since| !since.is_null())
 }
 
 /// Held while one sync runs on a data folder (`sync.lock`), so the service's loop and a
@@ -242,14 +232,7 @@ impl SyncClient {
         Self {
             data_directory,
             config,
-            allow_unprotect: false,
         }
-    }
-
-    /// For the test edition, which can turn the protection off itself.
-    pub fn allowing_unprotect(mut self, allow: bool) -> Self {
-        self.allow_unprotect = allow;
-        self
     }
 
     pub fn config(&self) -> &ClientConfig {
@@ -300,14 +283,14 @@ impl SyncClient {
             }
             _ => remote.clone(),
         };
-        // A protected device stays protected, whatever comes (an old answer sent again, a
-        // test-edition server): its protected version is sent back at the next round.
-        if document_name == "settings_protection.json"
-            && !self.allow_unprotect
-            && current.as_ref().is_some_and(protected)
-            && !protected(&next_shared)
-        {
-            return Ok(false);
+        // A protected device stays protected unless its protection may end now (the same
+        // rule as the server's): its protected version is sent back at the next round.
+        if document_name == "settings_protection.json" {
+            if let Some(local) = current.as_ref().filter(|local| protected(local)) {
+                if !protected(&next_shared) && !protection_may_end(local, Utc::now()) {
+                    return Ok(false);
+                }
+            }
         }
         // This device's own parts (its API key) stay as they are.
         let next = with_local_part(document_name, &next_shared, current_whole.as_ref());

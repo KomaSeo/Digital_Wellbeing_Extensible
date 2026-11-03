@@ -9,7 +9,7 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 - **AI 검사**: AI(Claude)가 열린 창과 화면을 보고, 그 창이 지금 할 일에 필요한지 판정하는 것입니다.
 - **차단**: AI가 지금 할 일과 상관없다고 판정한 앱을 끄거나 브라우저 탭을 닫는 것입니다. 차단은 시간이 지나도 풀리지 않습니다.
 - **접근 요청**: 차단된 앱이나 웹사이트가 일에 필요하다고 AI에게 목적을 적어 보내는 것입니다. AI가 허용하면 정한 시간 동안 쓸 수 있습니다.
-- **설정 보호**: 설정 단계를 끝내는 것입니다. 보호된 뒤에는 규칙을 더 엄격하게 만드는 변경만 바로 적용되고, 느슨하게 만드는 변경은 이틀 간격으로 세 번 확인해야 적용됩니다. 보호는 프로그램 안에서 끌 수 없습니다.
+- **설정 보호**: 설정 단계를 끝내는 것입니다. 보호된 뒤에는 규칙을 더 엄격하게 만드는 변경만 바로 적용되고, 느슨하게 만드는 변경은 이틀 간격으로 세 번 확인해야 적용됩니다. 보호를 푸는 방법은 보호할 때 기간, 영구, 관리자 권한, 비밀번호 중에서 고르고, 보호를 풀면 걸린 차단도 모두 풀립니다.
 - **서비스와 agent**: 서비스는 관리자 권한(SYSTEM)으로 도는 Windows 서비스입니다. 서비스는 로그인한 계정마다 agent를 하나씩 띄우고, agent가 그 계정의 앱을 감시하고 차단합니다.
 - **Focus 앱**: 사용자가 보는 창입니다. 할 일, AI 비서, 차단, 설정, 통계, 도움말 탭이 있습니다.
 
@@ -25,9 +25,9 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 ## 3. 설치하기
 
 1. 작업에 쓰는 Windows 계정을 표준 사용자로 바꿉니다. 작업 계정이 관리자이면 이 프로그램의 보호를 모두 풀 수 있습니다.
-2. [릴리스 페이지](https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases)에서 `DigitalWellbeing-Setup-<버전>.exe`를 내려받아 실행하고, 관리자 비밀번호를 넣습니다. 이름이 `-TEST`로 끝나는 파일은 설정 보호를 풀 수 있는 시험용 테스트판이므로, 실제로 쓸 때는 고르지 않습니다.
+2. [릴리스 페이지](https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases)에서 `DigitalWellbeing-Setup-<버전>.exe`를 내려받아 실행하고, 관리자 비밀번호를 넣습니다.
 3. 작업 계정으로 로그인하면 Focus 앱이 뜹니다. 설정 탭에서 Anthropic API 키를 넣고, 생활 규칙과 항상 막을 프로그램을 정하고, 할 일 탭에서 할 일을 넣습니다.
-4. 며칠 써 보고 원하는 대로 동작하면, 설정 탭 맨 위에서 설정을 보호합니다.
+4. 며칠 써 보고 원하는 대로 동작하면, 설정 탭 맨 위에서 푸는 방법을 골라 설정을 보호합니다.
 
 설치와 우회 막기의 자세한 방법은 Focus 앱의 도움말 탭과 [`docs/multi_account.md`](docs/multi_account.md)에 있습니다. 버전마다 바뀐 것은 [`installer/RELEASE_NOTES.md`](installer/RELEASE_NOTES.md)에 있습니다.
 
@@ -71,7 +71,6 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 ```sh
 cargo build --workspace
 cargo test --workspace                 # 리눅스에서는 xvfb-run -a cargo test --workspace
-cargo test -p machine --features test-edition
 ```
 
 - 리눅스에서는 X11에서 agent가 돌기 때문에 개발과 끝에서 끝까지 테스트를 할 수 있습니다. 서비스 설치와 설치 파일은 Windows에서만 동작합니다([`docs/linux_and_tests.md`](docs/linux_and_tests.md)).
@@ -79,4 +78,4 @@ cargo test -p machine --features test-edition
 
 ## 7. 배포
 
-`installer/RELEASE_VERSION`의 버전을 올려 push하면 `release.yml`이 Windows에서 빌드하고 시험한 뒤, 본편과 테스트판의 설치 파일과 zip을 GitHub 릴리스에 올립니다. 릴리스 노트는 `installer/RELEASE_NOTES.md`의 내용이 그대로 쓰입니다.
+`installer/RELEASE_VERSION`의 버전을 올려 push하면 `release.yml`이 Windows에서 빌드하고 시험한 뒤, 설치 파일과 zip을 GitHub 릴리스에 올립니다. 릴리스 노트는 `installer/RELEASE_NOTES.md`의 내용이 그대로 쓰입니다.

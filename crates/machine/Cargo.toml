@@ -3,11 +3,6 @@ name = "machine"
 version.workspace = true
 edition.workspace = true
 
-[features]
-# The test edition: built and released separately (DigitalWellbeing-Setup-<version>-TEST.exe);
-# it can turn the settings protection off again ("보호 풀기"). The main edition cannot.
-test-edition = []
-
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -18,6 +13,10 @@ list_based_rule = { workspace = true }
 task_planner = { workspace = true }
 enforcer = { workspace = true }
 sync = { workspace = true }
+base64 = "0.22"
+getrandom = "0.2"
+pbkdf2 = "0.12"
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

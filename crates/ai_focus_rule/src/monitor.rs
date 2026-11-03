@@ -924,6 +924,18 @@ impl FocusMonitor {
         self
     }
 
+    /// Lift every block (the settings protection was turned off: without it a block means
+    /// nothing) and save that.
+    pub fn lift_all_blocks(&self) {
+        {
+            let mut state = self.state.lock();
+            state.blocked_processes.clear();
+            state.blocked_tabs.clear();
+            state.other_scopes.clear();
+        }
+        self.save_blocks();
+    }
+
     /// Save the blocks if they changed since the last save. Blocks another process wrote to
     /// the file meanwhile (another device's, through sync) are taken in first.
     fn save_blocks(&self) {
@@ -3043,6 +3055,21 @@ mod tests {
             .processes
             .contains_key("code.exe"));
         assert_eq!(merged.scope, "thesis");
+    }
+
+    #[test]
+    fn lifting_every_block_empties_memory_and_the_file() {
+        let mut config = session("thesis");
+        config.strikes_to_block = 1;
+        let saved = JsonStore::in_memory(SavedBlocks::default());
+        let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
+        let monitor = fixture.monitor.with_block_store(saved.clone());
+        monitor.step(Utc::now());
+        monitor.save_blocks();
+        assert_eq!(saved.get().processes.len(), 1);
+        monitor.lift_all_blocks();
+        assert!(monitor.state().process_blocks().is_empty());
+        assert!(saved.get().processes.is_empty());
     }
 
     #[test]

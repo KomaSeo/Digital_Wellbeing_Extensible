@@ -2300,11 +2300,15 @@ name = "machine"
 version = "0.1.0"
 dependencies = [
  "ai_focus_rule",
+ "base64",
  "chrono",
  "enforcer",
+ "getrandom 0.2.17",
  "list_based_rule",
+ "pbkdf2",
  "serde",
  "serde_json",
+ "sha2",
  "sync",
  "task_planner",
  "tracing",

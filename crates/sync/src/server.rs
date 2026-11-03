@@ -8,8 +8,8 @@
 //!   written only by that device.
 //! - A push must start from the server's current revision; otherwise it is refused as a
 //!   conflict, and the device merges and tries again.
-//! - Once the settings are protected (`settings_protection.json` has `protected_since`), no
-//!   push can turn the protection off (except a test-edition server).
+//! - Once the settings are protected (`settings_protection.json` has `protected_since`), a
+//!   push turns the protection off only the way it allows ([`protection_may_end`]).
 //!
 //! Storage: `<folder>/devices.json` and `<folder>/documents/<name with / as ~>.json`.
 
@@ -81,6 +81,28 @@ struct Stored {
     content: Value,
 }
 
+/// Is the protection on in this `settings_protection.json` content?
+pub fn protected(content: &Value) -> bool {
+    content
+        .get("protected_since")
+        .is_some_and(|since| !since.is_null())
+}
+
+/// May this protection (as `settings_protection.json` holds it) end now? Never a permanent
+/// one (nor one saved before there were options); a time one once its time is over; an
+/// administrator or password one when a device ended it (that device's service checked the
+/// administrator rights or the password, which neither the server nor another device can).
+pub fn protection_may_end(protection: &Value, now: DateTime<Utc>) -> bool {
+    match protection.pointer("/mode/kind").and_then(Value::as_str) {
+        Some("until") => protection
+            .pointer("/mode/until")
+            .and_then(|until| serde_json::from_value::<DateTime<Utc>>(until.clone()).ok())
+            .is_some_and(|until| now >= until),
+        Some("administrator") | Some("password") => true,
+        _ => false,
+    }
+}
+
 /// Is `name` a document the server keeps? `usage/<device>/<file>` only for `device_id`.
 pub fn allowed_name(name: &str, device_id: Option<&str>) -> bool {
     let safe_part = |part: &str| {
@@ -119,16 +141,13 @@ pub struct SyncServer {
     folder: PathBuf,
     /// One request at a time: rounds are short, and this keeps revisions simple.
     busy: Mutex<()>,
-    /// A test-edition server lets a device turn the protection off (the test edition can).
-    allow_unprotect: bool,
 }
 
 impl SyncServer {
-    pub fn new(folder: PathBuf, allow_unprotect: bool) -> Self {
+    pub fn new(folder: PathBuf) -> Self {
         Self {
             folder,
             busy: Mutex::new(()),
-            allow_unprotect,
         }
     }
 
@@ -386,18 +405,17 @@ impl SyncServer {
         if push.base_revision != revision {
             return Err("conflict".into());
         }
-        if push.name == "settings_protection.json" && !self.allow_unprotect {
-            let protected = |content: &Value| {
-                content
-                    .get("protected_since")
-                    .is_some_and(|since| !since.is_null())
-            };
-            if current
-                .as_ref()
-                .is_some_and(|stored| protected(&stored.content))
-                && !protected(&push.content)
-            {
-                return Err("the protection cannot be turned off".into());
+        if push.name == "settings_protection.json" {
+            if let Some(stored) = current.as_ref().filter(|stored| protected(&stored.content)) {
+                if !protected(&push.content) && !protection_may_end(&stored.content, now) {
+                    return Err("the protection cannot be turned off".into());
+                }
+                // How a protection ends is chosen once, when protecting.
+                if protected(&push.content)
+                    && push.content.get("mode") != stored.content.get("mode")
+                {
+                    return Err("the protection cannot be changed".into());
+                }
             }
         }
         let stored = Stored {
