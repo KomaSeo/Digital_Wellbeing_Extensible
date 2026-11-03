@@ -30,8 +30,11 @@ pub(crate) struct BlockPrompt {
     asking_access: bool,
     /// When the access request was sent, to show its answer.
     access_sent_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Whether the closed tab was opened again after access was granted (`None`: not tried).
+    /// Whether the closed tab was opened again after access was granted (`None`: not tried
+    /// or not done yet).
     reopened: Option<bool>,
+    /// The answer of the thread opening the tab again (it waits for the browser window).
+    reopening: Option<std::sync::mpsc::Receiver<bool>>,
 }
 
 impl BlockPrompt {
@@ -46,6 +49,7 @@ impl BlockPrompt {
             asking_access: false,
             access_sent_at: None,
             reopened: None,
+            reopening: None,
         }
     }
 }
@@ -246,15 +250,40 @@ impl FocusApp {
                 ui.label(&entry.message);
             });
             if approved && prompt.block.is_tab {
-                let reopened = *prompt
-                    .reopened
-                    .get_or_insert_with(|| crate::reopen::reopen_closed_tab(prompt.block.window));
-                ui.small(if reopened {
-                    "닫힌 탭을 다시 열었습니다. 다른 탭이 열렸다면 그 브라우저에서 Ctrl+Shift+T를 \
-                     한 번 더 누르세요."
-                } else {
-                    "그 브라우저에서 Ctrl+Shift+T를 눌러 닫힌 탭을 다시 여세요."
-                });
+                if prompt.reopened.is_none() && prompt.reopening.is_none() {
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    let (window, context) = (prompt.block.window, ui.ctx().clone());
+                    std::thread::spawn(move || {
+                        let _ = sender.send(crate::reopen::reopen_closed_tab(window));
+                        context.request_repaint();
+                    });
+                    prompt.reopening = Some(receiver);
+                }
+                if let Some(result) = prompt
+                    .reopening
+                    .as_ref()
+                    .and_then(|receiver| receiver.try_recv().ok())
+                {
+                    prompt.reopened = Some(result);
+                    prompt.reopening = None;
+                }
+                match prompt.reopened {
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.small("닫힌 탭을 다시 여는 중입니다.");
+                        });
+                    }
+                    Some(true) => {
+                        ui.small(
+                            "닫힌 탭을 다시 열었습니다. 다른 탭이 열렸다면 그 브라우저에서 \
+                             Ctrl+Shift+T를 한 번 더 누르세요.",
+                        );
+                    }
+                    Some(false) => {
+                        ui.small("그 브라우저에서 Ctrl+Shift+T를 눌러 닫힌 탭을 다시 여세요.");
+                    }
+                }
             } else if approved {
                 ui.small("이제 그 앱을 다시 켜면 됩니다.");
             } else {

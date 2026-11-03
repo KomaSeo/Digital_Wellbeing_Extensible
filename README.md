@@ -1,306 +1,82 @@
-# Digital Wellbeing (Windows)
+# Digital Wellbeing
 
-Windows desktop app that enforces a **blacklist** or **whitelist** of programs. Unauthorized processes are terminated as soon as they appear. Policies can be changed in the UI or via live **function calls** (JSON-RPC on `127.0.0.1:8765`).
+Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Windows 프로그램입니다. 이 문서는 이 프로그램이 무엇을 하는지, 어떻게 설치하는지, 저장소가 어떻게 이루어져 있는지 설명합니다. 자세한 설명은 `docs/` 폴더의 문서에 있습니다.
 
-## Requirements
+## 1. 낱말
 
-- Rust (Cargo)
-- Windows 10/11
-- Run as Administrator (needed to terminate many processes)
+- **할 일**: 사용자가 할 일 탭에 넣는 일입니다. 제목, 메모, 마감, 중요도, 예상 시간을 가집니다.
+- **지금 할 일**: 할 일 목록에서 AI가 고른, 지금 해야 하는 일 하나입니다. 사용자가 "할 일 받기"를 누르면 AI가 고릅니다.
+- **AI 검사**: AI(Claude)가 열린 창과 화면을 보고, 그 창이 지금 할 일에 필요한지 판정하는 것입니다.
+- **차단**: AI가 지금 할 일과 상관없다고 판정한 앱을 끄거나 브라우저 탭을 닫는 것입니다. 차단은 시간이 지나도 풀리지 않습니다.
+- **접근 요청**: 차단된 앱이나 웹사이트가 일에 필요하다고 AI에게 목적을 적어 보내는 것입니다. AI가 허용하면 정한 시간 동안 쓸 수 있습니다.
+- **설정 보호**: 설정 단계를 끝내는 것입니다. 보호된 뒤에는 규칙을 더 엄격하게 만드는 변경만 바로 적용되고, 느슨하게 만드는 변경은 이틀 간격으로 세 번 확인해야 적용됩니다. 보호는 프로그램 안에서 끌 수 없습니다.
+- **서비스와 agent**: 서비스는 관리자 권한(SYSTEM)으로 도는 Windows 서비스입니다. 서비스는 로그인한 계정마다 agent를 하나씩 띄우고, agent가 그 계정의 앱을 감시하고 차단합니다.
+- **Focus 앱**: 사용자가 보는 창입니다. 할 일, AI 비서, 차단, 설정, 통계, 도움말 탭이 있습니다.
 
-## Build & run
+## 2. 이 프로그램이 하는 일
 
-```powershell
-cargo run -p digital-wellbeing
+- 사용자가 할 일을 넣으면, AI가 생활 규칙과 마감을 보고 지금 할 일을 고르고 그 일에 쓸 시간을 정합니다.
+- AI가 열린 창을 보고 지금 할 일과 상관없는 앱은 끄고, 상관없는 탭은 닫습니다. 막는 순간 "맞는 차단인가요?" 창이 떠서, 사용자는 그 자리에서 접근을 요청할 수 있습니다.
+- 할 일을 끝냈거나, 막혔거나, 시간이 더 필요하면 사용자는 변경 요청을 보내고 AI가 생활 규칙에 비추어 정합니다.
+- 항상 막을 프로그램과 웹사이트, 약속(시각이 정해진 일), 컴퓨터 없이 하는 일, 사용 중지 같은 기능이 있습니다.
+- Focus 앱의 AI 비서 탭이나 Claude Desktop으로, 말로 이 프로그램을 쓸 수 있습니다.
+- 설정이 보호된 뒤에는 API 키를 망가뜨리거나, 할 일을 받지 않거나, 시간대를 바꾸는 식으로 규칙을 피할 수 없게 막습니다.
+
+## 3. 설치하기
+
+1. 작업에 쓰는 Windows 계정을 표준 사용자로 바꿉니다. 작업 계정이 관리자이면 이 프로그램의 보호를 모두 풀 수 있습니다.
+2. [릴리스 페이지](https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases)에서 `DigitalWellbeing-Setup-<버전>.exe`를 내려받아 실행하고, 관리자 비밀번호를 넣습니다. 이름이 `-TEST`로 끝나는 파일은 설정 보호를 풀 수 있는 시험용 테스트판이므로, 실제로 쓸 때는 고르지 않습니다.
+3. 작업 계정으로 로그인하면 Focus 앱이 뜹니다. 설정 탭에서 Anthropic API 키를 넣고, 생활 규칙과 항상 막을 프로그램을 정하고, 할 일 탭에서 할 일을 넣습니다.
+4. 며칠 써 보고 원하는 대로 동작하면, 설정 탭 맨 위에서 설정을 보호합니다.
+
+설치와 우회 막기의 자세한 방법은 Focus 앱의 도움말 탭과 [`docs/multi_account.md`](docs/multi_account.md)에 있습니다. 버전마다 바뀐 것은 [`installer/RELEASE_NOTES.md`](installer/RELEASE_NOTES.md)에 있습니다.
+
+## 4. 문서
+
+| 문서 | 내용 |
+|---|---|
+| [`docs/multi_account.md`](docs/multi_account.md) | 서비스와 agent의 구조, 설치, 데이터 폴더, 설정 보호, 우회 막기 |
+| [`docs/ai_focus_rule.md`](docs/ai_focus_rule.md) | AI 검사, 차단, 차단 창, 도우미 프로그램, 모든 앱 잠금 |
+| [`docs/task_planner.md`](docs/task_planner.md) | 할 일, 지금 할 일 고르기, 변경 요청, 약속 |
+| [`docs/access_grants.md`](docs/access_grants.md) | 접근 요청과 허용 |
+| [`docs/assistant.md`](docs/assistant.md) | Focus 앱의 AI 비서 탭 |
+| [`docs/claude_desktop.md`](docs/claude_desktop.md) | Claude Desktop으로 이 프로그램 쓰기 |
+| [`docs/cost_reduction_options.md`](docs/cost_reduction_options.md) | AI 비용을 줄이는 방법과 소유자의 결정 |
+| [`docs/linux_and_tests.md`](docs/linux_and_tests.md) | 리눅스에서 개발하고 시험하는 방법 |
+| [`docs/design_decisions.md`](docs/design_decisions.md) | 기능마다 소유자가 요청한 것과 AI가 정한 세부 |
+
+여러 기기 동기화는 아직 브랜치 `claude/multi-device-sync`에서 만들고 있고, 설명은 그 브랜치의 `docs/sync.md`에 있습니다.
+
+## 5. 저장소 구성
+
+이 저장소는 Rust 작업 공간(workspace)입니다.
+
+| 경로 | 하는 일 |
+|---|---|
+| `apps/service` | `digital-wellbeing-service.exe`. 설치와 제거, Windows 서비스, 계정마다의 agent |
+| `apps/focus` | `digital-wellbeing-focus.exe`. 사용자가 보는 Focus 앱(egui) |
+| `apps/mcp` | `digital-wellbeing-mcp.exe`. Claude Desktop이 쓰는 MCP 서버 |
+| `apps/desktop` | 예전의 독립 실행 창. 설치 파일에는 들어가지 않고, 개발할 때만 씁니다 |
+| `crates/enforcer` | 프로세스를 살펴보고, 규칙이 막으라는 프로그램과 그 도우미를 끕니다 |
+| `crates/list_based_rule` | 항상 막을 프로그램(블랙리스트와 화이트리스트) |
+| `crates/ai_focus_rule` | AI 검사, 차단, 접근 허용, Claude API 호출, 사용량 기록 |
+| `crates/task_planner` | 할 일 목록과 지금 할 일, 변경 요청과 그 AI 심사 |
+| `crates/machine` | 데이터 폴더, 설정 보호, 모든 앱 잠금, agent의 사용자 API, AI 비서 |
+| `crates/rule_ui`, `crates/tool-api` | 예전 독립 실행 창의 화면과 함수 호출 API |
+| `installer/` | Inno Setup 설치 스크립트, 릴리스 버전과 릴리스 노트 |
+| `.github/workflows/` | `ci.yml`(리눅스와 Windows의 테스트, 실제 설치 시험), `release.yml`(배포) |
+
+## 6. 빌드와 테스트
+
+```sh
+cargo build --workspace
+cargo test --workspace                 # 리눅스에서는 xvfb-run -a cargo test --workspace
+cargo test -p machine --features test-edition
 ```
 
-Policy file:
+- 리눅스에서는 X11에서 agent가 돌기 때문에 개발과 끝에서 끝까지 테스트를 할 수 있습니다. 서비스 설치와 설치 파일은 Windows에서만 동작합니다([`docs/linux_and_tests.md`](docs/linux_and_tests.md)).
+- 끝에서 끝까지 테스트는 Claude API 대신 테스트 안의 가짜 서버를 씁니다. 진짜 API로 하는 테스트는 `DW_E2E_ANTHROPIC_API_KEY` 환경 변수가 있을 때만 돕니다.
 
-`%AppData%\DigitalWellbeing\DigitalWellbeing\config\policy.json`
+## 7. 배포
 
-## Modes
-
-| Mode | Behavior |
-|------|----------|
-| `blacklist` | Kill processes whose executable name is on the blacklist |
-| `whitelist` | Kill everything **not** on the whitelist (system-critical names are always protected) |
-
-A list entry is a program name, or a case-insensitive regular expression that must
-match the whole name when it contains any of `* + ? ( ) [ ] { } | ^ $ \` (e.g.
-`.*game.*\.exe`; a lone dot does not count, so `steam.exe` stays a plain name; an
-invalid expression is matched as plain text). Windows essentials and this program's
-own executables are never killed, whatever a pattern matches.
-
-## AI focus rule
-
-The AI checks judge every window against the current task ("daily wellbeing").
-In a machine install the task planner's AI always picks that task from the to-do
-list and turns the checks on; the user never types it (the Focus app's UI is in
-Korean; the change request 「AI 검사 멈추기」 pauses the checks if the AI approves
-the reason). In the standalone app the user types the task and presses **Start
-session** in the *AI focus* tab. While the AI checks are on:
-
-1. Every 3 s the open windows are sampled; the foreground one goes into an activity history.
-2. Any app or page without a verdict for the current task is judged at once: the task,
-   that history, a downscaled screenshot of the foreground monitor and the titles of the
-   other open windows go to Claude, which answers `on_task` / `off_task` / `unsure` for
-   each. A verdict comes due again after *recheck minutes* (on_task, default 15) or the
-   *check interval* (unsure, or an app still collecting strikes; default 60 s).
-3. A browser tab judged `off_task` is closed (Ctrl+W) and its site blocked at once
-   (YouTube: the channel). An app needs *N* consecutive `off_task` verdicts (default 2);
-   then the enforcer kills it on sight.
-
-`unsure` never blocks. Blocks do not expire and survive task changes; an approved
-access request (or `unblock`) lifts them.
-
-**Always-blocked websites** (`always_blocked_sites` in `ai_focus.json`): a browser
-tab whose title contains an entry (plain text, or a regular expression searched in
-the title; case-insensitive; the trailing browser name such as " - Google Chrome"
-is ignored) is closed at once without asking the AI, whether or not the AI checks
-are on, and background browser windows showing one are minimized. Access requests
-do not lift it.
-
-Settings (`%AppData%\DigitalWellbeing\DigitalWellbeing\config\ai_focus.json`):
-
-| Setting | Meaning |
-|---------|---------|
-| API key | `ANTHROPIC_API_KEY` env var, or saved in settings (plain text) |
-| Model | default `claude-opus-5-5`; any Claude model id works |
-| Always allow | never judged or blocked |
-| Private apps | judged from name + title only, never screenshotted (password managers by default) |
-| Send screenshot | turn off to send titles only |
-
-Each check is one Messages API call with one image (~1.2k input tokens at 1280 px wide),
-so the interval is the main cost knob.
-
-Code walkthrough (Korean): [`docs/ai_focus_rule.md`](docs/ai_focus_rule.md).
-
-## Machine install (standard work account; administrator only to install)
-
-**Easiest:** download `DigitalWellbeing-Setup-<version>.exe` from the GitHub
-Releases page and run it; it registers the service for every Windows account,
-the administrators included (it no longer asks for a work account). (Releases are built by `.github/workflows/release.yml` when a `v*`
-tag is pushed, or when a branch push changes `installer/RELEASE_VERSION` — the
-workflow then creates the `v<version>` tag itself.)
-
-Run the blocker as a Windows service so a standard account cannot stop it, and
-start it at boot:
-
-```powershell
-cargo build --release
-# administrator terminal:
-.\target\release\digital-wellbeing-service.exe install --manage <work-account-user>
-```
-
-The service (LocalSystem) starts a SYSTEM agent inside each managed user's
-session; the agent enforces the rules and runs the AI check there. The user
-works in **Digital Wellbeing Focus** (starts at logon; Korean UI; tabs 할 일
-(to-do), AI 비서 (AI assistant: say what you want in your own words, e.g. "add
-these three to-dos", and Claude does it with the same tools Claude Desktop gets;
-see [`docs/assistant.md`](docs/assistant.md)), 차단 (blocking), 설정 (settings), 통계 (statistics: AI usage, today,
-finished to-dos, requests and answers, recent AI verdicts) and 도움말 (help,
-including a Claude Desktop guide); tray menu 열기 / 설정 / 끝내기). Settings are stored in `%ProgramData%\DigitalWellbeing`, which
-standard users cannot read or write directly. The settings the app needs (AI connection:
-API key, model, daily budget; the rules for the AI: life rules, the planner's
-instructions; blocking: always-blocked programs and websites, blocks and unblock,
-access grants and revoke, access limits; the AI checks) are edited in the Focus
-app's **설정** (Settings) tab, from a managed (standard) account: the tab reads them through
-that session's agent, which writes the real files as SYSTEM. The program does
-not tell administrator and standard accounts apart; only the **settings
-protection** decides. During **setup** (right after installing) an edit takes
-effect at once, and anyone on the PC can make it. The user ends setup with
-「설정 보호하기」 (protect the settings) in the Settings tab; this is one way, and nothing in the
-program turns it off. From then on a saved file (from the Settings tab or
-Claude Desktop) is split field by field (`machine::setting_edits`): edits that
-make the rules **stricter** (blacklist an app, add an always-blocked website, fewer
-strikes, shorter recheck times, screenshots on, fewer always-allowed or private
-apps, revoke a grant, a larger or no daily budget, no permanent access) take effect at once;
-everything else, including what cannot be judged (API key, model, life rules,
-instructions, browser list), becomes a **scheduled update**: two days later the
-Focus app asks 「이 업데이트가 정말 맞나요?」 ("is this update really right?"), each "yes" brings the next
-question two days after the answer, and the third "yes" in a row applies the
-edits to the file as it is then (so at least six days); one "no" rejects it,
-and an unanswered question waits. Edits in the Settings tab are autosaved as
-drafts (field-level edits, never the API key) a second after each change to
-`settings_drafts.json` in the user's local app data folder and restored when the
-app starts; nothing takes effect until the user presses 「적용」 (apply) under that
-group of settings, which sends only that group's edits on top of the current file.
-Each group's bar marks every pending edit as taking effect at once or scheduled,
-and offers 저장 (save the draft now), 고친 것 버리기 (discard) and, where the
-program has a default, 기본값으로 되돌리기 (back to default). The tab shows what
-each scheduled update changes and can withdraw it. Windows cannot stop an administrator account from
-stopping the service or deleting `settings_protection.json`, so work in a
-standard account and use the administrator
-account only to install and to change which accounts are managed
-(`install --manage` / `machine.json`, which the Settings tab cannot edit).
-
-A machine install ships three executables (`digital-wellbeing-service.exe`,
-`digital-wellbeing-focus.exe`, `digital-wellbeing-mcp.exe`); it no longer ships
-the old admin settings window `digital-wellbeing.exe`, and `install` deletes a
-copy an older version left. Run on a PC with the service installed, a
-`digital-wellbeing.exe` built from source only shows a notice pointing to the
-Focus app's Settings tab (`--standalone` still forces single-account mode).
-Full guide (Korean): [`docs/multi_account.md`](docs/multi_account.md).
-
-Testing changes on your own PC (much faster than a release): from an
-administrator PowerShell, `.\scripts\dev-install.ps1 -Manage <work-account>`
-builds and (re)installs; run it again after each change, add `-Tail` to follow
-the agent log.
-
-**Task planner** (machine install): the user keeps a to-do list (deadline,
-priority, estimate, notes) in the Focus app's 할 일 (to-do) tab, and the life rules
-in the Settings tab. Every addition, edit or removal of a to-do goes to the
-AI, which reviews it against the life rules and fills in the fields of a new
-to-do the user left empty; an approved change is in force at once, even when
-the settings are protected. A rejected one can still be done by the user (not
-by Claude Desktop) after three confirmations two hours apart. The planner
-is always on (there is no switch and no mode where the user types the task): the AI
-picks the user's task from the list, and how long it runs (10 min to 12 h, its own
-judgement), only when the user presses 「할 일 받기」 (get a task); that becomes the
-task the AI checks judge against. While no task is given and the settings are
-protected, every app and site (browsers too) is locked until the user asks for one,
-so the clock does not run while the user is away. When the task's time is up, the
-user must report — done (AI-reviewed) or not finished (the to-do stays) — before
-anything else; then nothing is given until the next 「할 일 받기」. Routines (sleep,
-getting ready, exercise) are marked "repeat" and stay on the list when done. The
-blocks the AI makes belong to the to-do they were made for and change with it.
-To-dos done away from the computer (sleep, exercise) lock every app while they run,
-and leaving them early needs an urgent reason. Appointments (fixed clock times; the
-AI accepts them by the owner's appointment rules) replace the task at their start
-and end by themselves. 「⏻ 사용 중지」 (stop using) ends the task, locks everything and
-stops all but the blocking until 「다시 사용하기」. The model is chosen from the list
-the Models API gives (refreshed weekly) and checked before it is applied; the
-Statistics tab shows the AI cost per feature (options to cut it:
-[`docs/cost_reduction_options.md`](docs/cost_reduction_options.md)). Finishing the task, getting something else or pausing the AI checks
-needs a reason the AI approves; the user never chooses what comes next. "Something
-else" (「다른 일 받기」, change kind `repick`) carries only the reason, and once
-approved the AI picks the next task with that reason in view. The To-do tab shows
-the progress to the task's planned end, notes and steps (saved at once and shown to
-the AI when it reviews 「끝냈다」, "done") and the time spent on the current to-do;
-today's summary, finished to-dos and every request with its answer are in the
-Statistics tab. There is no plan for the whole day: the AI decides what to do now,
-each time, from the life rules. The
-three instructions the planner's AI follows (picking a task, reviewing a change
-request, reviewing a to-do change) are settings: empty means the built-in text, and an edit is scheduled like any
-looser edit. Guide (Korean): [`docs/task_planner.md`](docs/task_planner.md).
-
-**Access requests**: from the Focus app the user can ask for an app or site
-the AI check blocks, stating the purpose; the AI decides for how long (within the
-limits in the settings).
-If the AI approves, the block is lifted, but the app stays observed and is
-judged against that purpose; off-purpose use revokes the grant and blocks
-again. Blocks do not expire: an approved request lifts them, or the unblock
-button in the Settings tab (it lists every user's blocks; once the settings are
-protected, an unblock is a scheduled update). The Settings tab also sets the
-limits and can revoke grants (revoking takes effect at once); always-blocked
-programs (the blacklist) and always-blocked websites are never lifted this way. Guide (Korean):
-[`docs/access_grants.md`](docs/access_grants.md).
-
-**Claude Desktop** (machine install): `digital-wellbeing-mcp.exe` is an MCP
-server for Claude Desktop in the work account. Its tools show the list and the
-current task, add a to-do (`propose_todo`, returning it as the AI completed
-it), edit or remove one (`change_todo`), ask for a change of the task
-(`request_change`: done, `repick` — the app's AI picks what comes next, neither
-the user nor Claude chooses it — or pause; the former `switch_todo` and
-`switch_free` are gone, though the agent API still accepts them), read the
-settings (without the API key) and, once they are protected, save them (stricter
-edits at once, the rest scheduled), all through the agent API the Focus app
-uses, so the assistant can do nothing the user cannot. To-do changes take
-effect only if the agent's AI approves them against the life rules; no tool
-pushes a rejected one through. A scheduled update takes effect only after the
-user confirms it three times in the Focus app; no tool answers those questions.
-The Focus app's Help tab has a setup guide with a button that copies the
-Claude Desktop config. Setup (Korean): [`docs/claude_desktop.md`](docs/claude_desktop.md).
-
-**AI usage**: every Claude call's token counts are recorded per day and purpose
-with an estimated cost (price table in `crates/ai_focus_rule/src/usage.rs`); the
-Statistics tab shows this account's cost today against the budget and all users'
-calls and cost today and this month, and an optional daily budget (Settings tab, AI
-connection) pauses
-focus checks (not planner or access requests) once it is spent. The API has no
-way to read the remaining credit; the Claude Console shows it.
-
-**Linux and tests**: everything but the Windows service, installer and tray runs
-on Linux too; the focus monitor uses X11 there (`platform/x11.rs`; Wayland is not
-supported) and the agent runs as `digital-wellbeing-service agent`.
-`xvfb-run -a cargo test --workspace` includes an X11 test and an end-to-end test
-that runs the real agent against real windows and a local stand-in for the Claude
-API. CI (`.github/workflows/ci.yml`) runs that on Linux and, on Windows, the tests
-plus a real install, upgrade (checking the data-folder ACLs) and uninstall.
-Guide (Korean): [`docs/linux_and_tests.md`](docs/linux_and_tests.md).
-
-## Function call API
-
-JSON-RPC over TCP `127.0.0.1:8765`. One JSON object per connection.
-
-### Methods
-
-| Method | Params | Description |
-|--------|--------|-------------|
-| `ping` | `{}` | Health check |
-| `get_policy` | `{}` | Current mode + lists + strategies |
-| `set_mode` | `{ "mode": "blacklist" \| "whitelist" }` | Switch enforcement mode |
-| `add_blacklist` | `{ "name": "steam.exe" }` | Add to blacklist |
-| `remove_blacklist` | `{ "name": "steam.exe" }` | Remove from blacklist |
-| `set_blacklist` | `{ "names": ["steam.exe", "discord.exe"] }` | Replace entire blacklist |
-| `add_whitelist` | `{ "name": "code.exe" }` | Add to whitelist |
-| `remove_whitelist` | `{ "name": "code.exe" }` | Remove (protected names rejected) |
-| `set_whitelist` | `{ "names": ["code.exe", "notepad.exe"] }` | Replace entire whitelist (protected names kept) |
-| `list_processes` | `{}` | Running process snapshot |
-| `list_blocks` | `{ "limit": 50 }` | Recent terminations (name, pid, time) |
-| `save_strategy` | `{ "name": "focus" }` | Snapshot current lists as a named strategy |
-| `apply_strategy` | `{ "name": "focus" }` | Load a saved strategy |
-
-### Example (PowerShell helper)
-
-```powershell
-# App must be running first
-.\scripts\call.ps1 -Method ping
-.\scripts\call.ps1 -Method set_mode -Params @{ mode = "blacklist" }
-.\scripts\call.ps1 -Method add_blacklist -Params @{ name = "steam.exe" }
-.\scripts\call.ps1 -Method set_blacklist -Params @{ names = @("steam.exe", "discord.exe") }
-.\scripts\call.ps1 -Method set_whitelist -Params @{ names = @("code.exe", "notepad.exe") }
-.\scripts\call.ps1 -Method get_policy
-.\scripts\call.ps1 -Method save_strategy -Params @{ name = "evening" }
-.\scripts\call.ps1 -Method apply_strategy -Params @{ name = "evening" }
-```
-
-### Example (raw)
-
-```powershell
-$json = '{"id":1,"method":"add_blacklist","params":{"name":"discord.exe"}}'
-# send $json to 127.0.0.1:8765 and read one JSON response line
-```
-
-## Project layout
-
-```
-apps/desktop           egui shell: rule tabs + shared process/block views (standalone only; with the service installed it only shows a notice)
-crates/list_based_rule blacklist/whitelist BlockRule + RuleUi settings
-crates/ai_focus_rule   AI-judged focus BlockRule + RuleUi (activity sampler, Claude judge)
-crates/task_planner    AI picks the task from a to-do list; reviews change requests and to-do changes
-crates/machine         machine-install paths, managed users, session ids, agent<->Focus API, settings protection (stricter/looser edits)
-apps/service           Windows service, per-session agent, installer
-apps/focus             Focus app for standard users (Korean UI: to-do, blocking, settings, statistics and help tabs; tray icon)
-apps/mcp               MCP server for Claude Desktop (to-dos through the agent API)
-crates/enforcer        process loop + BlockRule registry
-crates/rule_ui         RuleUi trait (per-rule settings panels)
-crates/tool-api        JSON-RPC function-call router
-scripts/call.ps1       convenience client
-```
-
-`Enforcer` has **no** dependency on `ListStore`. Callers register one or more
-`BlockRule` implementations (`ListBasedRule` today; browser-extension grace
-rules later). A process is terminated when **any** rule returns `Block`.
-With zero rules registered, the enforcer terminates nothing (aside from never
-touching OS-critical / self processes).
-
-The desktop shell lists each registered [`RuleUi`] tab and asks that rule to
-draw its own settings. New extensible rules should implement both `BlockRule`
-and `RuleUi`, then register `rule()` with the enforcer and `ui()` with the app.
-
-## Safety notes
-
-- Critical Windows processes (`csrss.exe`, `winlogon.exe`, `explorer.exe`, …) are never killed.
-- **Whitelist mode is aggressive** — only allowlisted apps (plus protected system processes) may run.
-- Changes via function call are written to disk immediately and applied on the next enforcer tick (~0.8s).
+`installer/RELEASE_VERSION`의 버전을 올려 push하면 `release.yml`이 Windows에서 빌드하고 시험한 뒤, 본편과 테스트판의 설치 파일과 zip을 GitHub 릴리스에 올립니다. 릴리스 노트는 `installer/RELEASE_NOTES.md`의 내용이 그대로 쓰입니다.

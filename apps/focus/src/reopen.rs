@@ -6,13 +6,14 @@
 //! Ctrl+Shift+T opens the tab closed last in that window, so a tab the user closed after the
 //! block would come back instead. The check window says so.
 
-/// `true` when the keys were sent to `window` (Windows only).
+/// `true` when the keys were sent to `window` (Windows only). Waits a quarter second for the
+/// window to come to the front, so call it off the UI thread.
 #[cfg(windows)]
 pub(crate) fn reopen_closed_tab(window: isize) -> bool {
     use std::mem::size_of;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-        VK_CONTROL, VK_SHIFT, VK_T,
+        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_T,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, IsWindow, SetForegroundWindow, ShowWindow, SW_RESTORE,
@@ -43,6 +44,16 @@ pub(crate) fn reopen_closed_tab(window: isize) -> bool {
         SetForegroundWindow(handle);
         std::thread::sleep(std::time::Duration::from_millis(250));
         if GetForegroundWindow() != handle {
+            return false;
+        }
+        // Keys the user holds would combine with ours (Alt makes it Ctrl+Alt+Shift+T, which
+        // reopens nothing): the user is asked to press it instead, as the agent does for Ctrl+W.
+        let held =
+            |virtual_key: VIRTUAL_KEY| (GetAsyncKeyState(virtual_key as i32) as u16 & 0x8000) != 0;
+        if [VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN, VK_CONTROL]
+            .into_iter()
+            .any(held)
+        {
             return false;
         }
         let inputs = [

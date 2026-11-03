@@ -208,6 +208,15 @@ impl BlockRule for LockdownRule {
             })
             .collect()
     }
+
+    /// What a lockdown leaves running (Claude Desktop, Windows' own programs, always-allowed
+    /// programs, browsers) is never closed as another program's helper.
+    fn keeps(&self, process: &ProcessSnapshot) -> bool {
+        let config = self.settings.get();
+        spared(process, |name| {
+            config.is_always_allowed(name) || config.is_browser(name)
+        })
+    }
 }
 
 #[cfg(test)]

@@ -128,11 +128,14 @@ mod tests {
         ] {
             let blocked = process(1, exe);
             let neighbour_folder = exe.rsplit_once(['\\', '/']).unwrap().0;
-            let sep = if exe.contains('\\') { "\\" } else { "/" };
+            let separator = if exe.contains('\\') { "\\" } else { "/" };
             let all = vec![
                 blocked.clone(),
-                process(2, &format!("{neighbour_folder}{sep}other.exe")),
-                process(3, &format!("{neighbour_folder}{sep}sub{sep}deep.exe")),
+                process(2, &format!("{neighbour_folder}{separator}other.exe")),
+                process(
+                    3,
+                    &format!("{neighbour_folder}{separator}sub{separator}deep.exe"),
+                ),
             ];
             assert!(helpers_of(&blocked, &all).is_empty(), "{exe}");
         }
