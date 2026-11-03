@@ -21,6 +21,13 @@
   request quoted word for word, the reason the owner gave (or "(말하지 않음)"), and the details the AI chose itself.
   This lets the owner tell later what they ordered and what the AI added.
 
+## Tests
+
+- A test that calls the real Claude API gives each step its own prompts: the life rules, the to-dos and the
+  user's messages that step needs, written so the expected answer holds at any hour the test runs and does
+  not depend on what an earlier step left behind (e.g. sleep hours in the rules make "give me another task"
+  fail at night).
+
 ## Releases
 
 - The owner is the only user. After finishing a requested change (tests pass, pushed), release it without asking:
