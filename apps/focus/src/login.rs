@@ -126,7 +126,7 @@ impl LoginForm {
                     ui.label("서버 주소");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.server_url)
-                            .hint_text("예: 3.35.0.1:47820"),
+                            .hint_text("예: 3.35.0.1 (포트를 빼면 47820)"),
                     );
                     ui.end_row();
                 }
@@ -149,16 +149,30 @@ impl LoginForm {
     pub(crate) fn welcome_ui(&mut self, ui: &mut egui::Ui, sync: Option<&SyncStatus>) -> bool {
         self.poll();
         let done = *self.welcome_done.get_or_insert_with(welcome_answered);
-        // A PC that already syncs is not asked (unless it joined here just now: the outcome
-        // is shown here once more, also while the login command is still ending).
-        if done || (sync.is_some() && !self.joined_from_welcome && self.pending.is_none()) {
+        // A PC that already syncs with an account is not asked (unless it joined here just
+        // now: the outcome is shown here once more, also while the login command is ending).
+        // A PC paired with a code is asked: with an account it comes back by itself after
+        // the server is set up again.
+        let with_account = sync.is_some_and(|sync| sync.account.is_some());
+        if done || (with_account && !self.joined_from_welcome && self.pending.is_none()) {
             return false;
         }
-        if sync.is_some() || matches!(self.message, Some(Ok(_))) {
+        if with_account || matches!(self.message, Some(Ok(_))) {
             self.joined_from_welcome = true;
         }
+        self.prefill_server(sync);
         ui.heading("Digital Wellbeing에 오신 것을 환영합니다");
         ui.add_space(6.0);
+        if let Some(sync) = sync.filter(|_| !self.joined_from_welcome) {
+            ui.label(format!(
+                "이 PC는 예전 방법(짝 코드)으로 {} 서버에 붙어 있습니다. 계정으로 로그인하면, 서버를 \
+                 처음부터 다시 만들어도 이 PC가 저절로 다시 붙습니다.",
+                sync.server_url
+            ));
+            if let Some(error) = &sync.last_error {
+                ui.colored_label(RED, format!("마지막 동기화가 실패했습니다: {error}"));
+            }
+        }
         if self.joined_from_welcome {
             self.message_ui(ui);
             ui.label(
@@ -208,10 +222,20 @@ impl LoginForm {
         self.message_ui(ui);
         ui.add_space(6.0);
         ui.weak(
-            "나중에 붙이려면 설정 탭 맨 위의 \"여러 기기 동기화: 서버에 로그인하거나 회원가입하기\"를 \
+            "서버 주소는 동기화 서버의 고정 IP(AWS Lightsail이면 인스턴스의 네트워킹 탭에 있는 고정 \
+             IP)나 도메인입니다. 나중에 붙이려면 설정 탭 맨 위의 \"여러 기기 동기화: 서버에 로그인하거나 회원가입하기\"를 \
              엽니다.",
         );
         true
+    }
+
+    /// The address this PC already syncs with, when the box is still empty.
+    fn prefill_server(&mut self, sync: Option<&SyncStatus>) {
+        if self.server_url.trim().is_empty() {
+            if let Some(sync) = sync {
+                self.server_url = sync.server_url.trim_start_matches("http://").to_string();
+            }
+        }
     }
 
     /// The login box, shown above every tab while this PC syncs, the server has logins, and
@@ -260,10 +284,18 @@ impl LoginForm {
         settings_protected: bool,
     ) {
         self.poll();
-        if sync.is_none() {
+        // Not syncing, or paired with a code (no account to come back with).
+        if sync.is_none_or(|sync| sync.account.is_none()) {
+            self.prefill_server(sync);
             egui::CollapsingHeader::new("여러 기기 동기화: 서버에 로그인하거나 회원가입하기")
                 .id_salt("sync_join")
                 .show(ui, |ui| {
+                    if sync.is_some() {
+                        ui.label(
+                            "이 PC는 예전 방법(짝 코드)으로 서버에 붙어 있습니다. 계정으로 로그인하면 \
+                             서버를 처음부터 다시 만들어도 저절로 다시 붙습니다.",
+                        );
+                    }
                     ui.label(
                         "동기화 서버에 로그인하면 이 PC가 다른 PC와 설정, 할 일, 차단을 같이 씁니다. \
                          서버를 새로 만들었다면 한 PC에서 먼저 회원가입하고(이 PC의 설정이 서버로 \
@@ -290,7 +322,9 @@ impl LoginForm {
                     });
                     self.message_ui(ui);
                 });
-            return;
+            if sync.is_none() {
+                return;
+            }
         }
         let Some(user) = &login.user else {
             return;

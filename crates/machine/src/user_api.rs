@@ -171,6 +171,9 @@ pub struct SyncStatus {
     pub outdated_devices: Vec<String>,
     /// Every paired device: (id, name), as the server last told.
     pub devices: Vec<(String, String)>,
+    /// The account this PC logged in with; none when it was paired with a code (then it does
+    /// not come back by itself after the server is set up again).
+    pub account: Option<String>,
 }
 
 /// Read from `sync.json` and `sync_state.json` (written by the service).
@@ -183,6 +186,7 @@ pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
     let text = |value: &Value| value.as_str().map(str::to_string);
     Some(SyncStatus {
         devices: serde_json::from_value(state["devices"].clone()).unwrap_or_default(),
+        account: text(&config["account"]["name"]),
         server_url: text(&config["server_url"]).unwrap_or_default(),
         device_id: text(&config["device_id"]).unwrap_or_default(),
         last_success: serde_json::from_value(state["last_success"].clone())

@@ -254,13 +254,21 @@ pub fn join(data_directory: &Path, arguments: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `http://` in front of an address given without it, and no `/` at the end.
+/// `http://` in front of an address given without it, the default port when none is given,
+/// and no `/` at the end: `3.35.0.1` -> `http://3.35.0.1:47820`.
 fn clean_server_url(server_url: &str) -> String {
     let server_url = server_url.trim().trim_end_matches('/');
-    if server_url.starts_with("http://") || server_url.starts_with("https://") {
-        server_url.to_string()
+    let (scheme, host) = match server_url.split_once("://") {
+        Some((scheme, host)) => (scheme, host),
+        None => ("http", server_url),
+    };
+    let has_port = host.rsplit_once(':').is_some_and(|(_, port)| {
+        !port.is_empty() && port.chars().all(|character| character.is_ascii_digit())
+    });
+    if has_port {
+        format!("{scheme}://{host}")
     } else {
-        format!("http://{server_url}")
+        format!("{scheme}://{host}:{DEFAULT_PORT}")
     }
 }
 
@@ -589,6 +597,12 @@ mod tests {
         .unwrap();
         let config = ClientConfig::load(&folder).unwrap();
         assert_eq!(config.server_url, "http://192.168.0.10:47820");
+        assert_eq!(clean_server_url("3.35.0.1"), "http://3.35.0.1:47820");
+        assert_eq!(
+            clean_server_url("http://sync.example.com/"),
+            "http://sync.example.com:47820"
+        );
+        assert_eq!(clean_server_url("3.35.0.1:50000"), "http://3.35.0.1:50000");
         assert_eq!(config.device_id, "laptop");
         assert!(!folder.join(client::STATE_FILE).exists());
         assert!(!folder.join(client::BASE_FOLDER).exists());
