@@ -693,6 +693,9 @@ impl eframe::App for FocusApp {
                     }
                     ui.separator();
                 }
+                if self.login.welcome_ui(ui, status.sync.as_ref()) {
+                    return;
+                }
                 self.login
                     .prompt_ui(ui, &status.login, status.sync.as_ref());
                 // A refused or failed request from either tab.

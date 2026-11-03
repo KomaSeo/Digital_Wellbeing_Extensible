@@ -2,6 +2,9 @@
 //! account log in to the login (and out again), so its access grants, blocks and AI usage are
 //! the same on every PC (`machine::login`, `docs/sync.md`).
 //!
+//! The first time the Focus app opens on a PC that does not sync, it asks first whether to
+//! join a sync server (log in / sign up / later) before anything else ([`LoginForm::welcome_ui`]).
+//!
 //! Signing up and logging in run the service's `sync-login` with administrator approval
 //! ([`crate::elevate::run_sync_login`]). Logging out is refused while the settings are
 //! protected.
@@ -25,6 +28,31 @@ pub(crate) struct LoginForm {
     message: Option<Result<String, String>>,
     /// The elevated `sync-login` running on its own thread.
     pending: Option<mpsc::Receiver<Result<String, String>>>,
+    /// The first-run question was answered (read from [`welcome_path`] on first use).
+    welcome_done: Option<bool>,
+    /// This PC just joined from the first-run question: show the outcome there once more.
+    joined_from_welcome: bool,
+}
+
+/// Where this Windows account notes that it answered the first-run question (the Focus app's
+/// own folder; an uninstall that deletes the owner's data deletes it too, so a fresh install
+/// asks again).
+fn welcome_path() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
+        .map(|project_directories| project_directories.data_local_dir().join("welcome.json"))
+}
+
+fn welcome_answered() -> bool {
+    welcome_path().is_some_and(|path| path.exists())
+}
+
+fn note_welcome_answered() {
+    if let Some(path) = welcome_path() {
+        if let Some(folder) = path.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        let _ = std::fs::write(&path, r#"{ "sync_question_answered": true }"#);
+    }
 }
 
 /// This Windows account's name.
@@ -114,6 +142,76 @@ impl LoginForm {
                     ui.end_row();
                 }
             });
+    }
+
+    /// The first screen on a PC that does not sync yet: join a sync server now (log in or sign
+    /// up), or later (the same is in the Settings tab). Returns whether it took the screen.
+    pub(crate) fn welcome_ui(&mut self, ui: &mut egui::Ui, sync: Option<&SyncStatus>) -> bool {
+        self.poll();
+        let done = *self.welcome_done.get_or_insert_with(welcome_answered);
+        // A PC that already syncs is not asked (unless it joined here just now: the outcome
+        // is shown here once more, also while the login command is still ending).
+        if done || (sync.is_some() && !self.joined_from_welcome && self.pending.is_none()) {
+            return false;
+        }
+        if sync.is_some() || matches!(self.message, Some(Ok(_))) {
+            self.joined_from_welcome = true;
+        }
+        ui.heading("Digital Wellbeing에 오신 것을 환영합니다");
+        ui.add_space(6.0);
+        if self.joined_from_welcome {
+            self.message_ui(ui);
+            ui.label(
+                "이 PC가 동기화 서버에 붙었습니다. 20초 안에 첫 동기화가 일어나고, 설정 탭의 \"기기 동기화\"에서 마지막 동기화 시각을 볼 수 있습니다. 새 PC라면 설정 탭에서 이 PC의 Anthropic API 키를 넣으세요.",
+            );
+            if ui.button("시작하기").clicked() {
+                note_welcome_answered();
+                self.welcome_done = Some(true);
+            }
+            return true;
+        }
+        ui.label(
+            "이 PC를 여러 기기 동기화 서버에 붙일까요? 서버에 붙으면 이 PC가 다른 PC와 설정, 할 일 \
+             목록, 지금 할 일, 차단을 같이 씁니다.",
+        );
+        ui.label(
+            "• 서버를 새로 만들었다면, 가장 잘 설정해 둔 PC에서 먼저 회원가입합니다. 그 PC의 설정이 \
+             서버로 올라갑니다.\n• 다른 PC에서는 같은 이름과 비밀번호로 로그인합니다. 그 PC는 서버의 \
+             설정을 받아 옵니다.\n• 둘 다 관리자 승인(Windows가 관리자 비밀번호를 묻는 창)이 필요합니다. \
+             비밀번호는 8자 이상이고, 관리자 비밀번호처럼 따로 보관합니다.",
+        );
+        ui.add_space(6.0);
+        self.credentials_ui(ui, true, true);
+        let busy = self.pending.is_some();
+        ui.horizontal(|ui| {
+            let server_url = self.server_url.clone();
+            if ui
+                .add_enabled(!busy, egui::Button::new("로그인 (관리자 승인)"))
+                .clicked()
+            {
+                self.start(ui, &server_url, false);
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("회원가입 (관리자 승인)"))
+                .clicked()
+            {
+                self.start(ui, &server_url, true);
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("나중에 (동기화 없이 쓰기)"))
+                .clicked()
+            {
+                note_welcome_answered();
+                self.welcome_done = Some(true);
+            }
+        });
+        self.message_ui(ui);
+        ui.add_space(6.0);
+        ui.weak(
+            "나중에 붙이려면 설정 탭 맨 위의 \"여러 기기 동기화: 서버에 로그인하거나 회원가입하기\"를 \
+             엽니다.",
+        );
+        true
     }
 
     /// The login box, shown above every tab while this PC syncs, the server has logins, and
