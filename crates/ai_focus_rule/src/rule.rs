@@ -620,6 +620,20 @@ impl BlockRule for AiFocusRule {
             })
             .collect()
     }
+
+    /// Always-allowed programs, browsers (their tabs are judged instead) and programs with
+    /// an access grant are never closed as another program's helper.
+    fn keeps(&self, process: &ProcessSnapshot) -> bool {
+        let config = self.monitor.store().get();
+        config.is_always_allowed(&process.name)
+            || config.is_browser(&process.name)
+            || self
+                .monitor
+                .grants()
+                .get()
+                .covering(Utc::now(), &config, &process.name, "")
+                .is_some()
+    }
 }
 
 impl RuleUi for AiFocusRule {

@@ -394,6 +394,11 @@ fn collect_blocks(rules: &[Arc<dyn BlockRule>], processes: &[ProcessSnapshot]) -
             continue;
         };
         for helper in helpers::helpers_of(blocked, processes) {
+            // A process some rule keeps (an allowed app, a kept browser) is not a helper to
+            // close, even in a blocked program's folder.
+            if rules.iter().any(|rule| rule.keeps(helper)) {
+                continue;
+            }
             if seen.insert(helper.pid) {
                 helpers.push(BlockEvent::new(
                     helper,
@@ -435,6 +440,51 @@ mod tests {
             "{}",
             blocks[1].reason
         );
+    }
+
+    /// Responsibility: Test rule that keeps one process name and blocks nothing.
+    struct KeepRule(&'static str);
+
+    impl BlockRule for KeepRule {
+        fn id(&self) -> &str {
+            "keep"
+        }
+        fn name(&self) -> &str {
+            "Keep rule"
+        }
+        fn description(&self) -> &str {
+            "Keeps one process"
+        }
+        fn evaluate(&self, _processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
+            Vec::new()
+        }
+        fn keeps(&self, process: &ProcessSnapshot) -> bool {
+            process.name == self.0
+        }
+    }
+
+    #[test]
+    fn a_process_a_rule_keeps_is_not_closed_as_a_helper() {
+        let flag: Arc<dyn BlockRule> = Arc::new(FlagRule {
+            id: "flag",
+            block: Arc::new(AtomicBool::new(true)),
+        });
+        let keep: Arc<dyn BlockRule> = Arc::new(KeepRule("browser.exe"));
+        let process = |pid: u32, name: &str, exe: &str| ProcessSnapshot {
+            pid,
+            name: name.into(),
+            exe: Some(exe.into()),
+        };
+        let processes = [
+            process(1, "evil.exe", "/opt/evil/evil.exe"),
+            process(2, "browser.exe", "/opt/evil/browser.exe"),
+            process(3, "evilhelper.exe", "/opt/evil/evilhelper.exe"),
+        ];
+        let pids: Vec<u32> = collect_blocks(&[flag, keep], &processes)
+            .iter()
+            .map(|event| event.pid)
+            .collect();
+        assert_eq!(pids, vec![1, 3]);
     }
     use std::sync::atomic::{AtomicBool, Ordering};
 

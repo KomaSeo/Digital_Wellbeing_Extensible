@@ -69,6 +69,12 @@ impl BlockRule for ListBasedRule {
             .map(|process| BlockEvent::new(process, reason))
             .collect()
     }
+
+    /// A whitelisted program is never closed as another program's helper.
+    fn keeps(&self, process: &ProcessSnapshot) -> bool {
+        let config = self.store.get();
+        config.mode == ListMode::Whitelist && !config.should_block(&process.name)
+    }
 }
 
 impl RuleUi for ListBasedRule {

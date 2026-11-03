@@ -58,6 +58,13 @@ pub trait BlockRule: Send + Sync {
     /// Inspect the full process snapshot list and return every process this rule
     /// wants blocked. Batching lets rules amortize shared work (lookups, heartbeats, …).
     fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent>;
+
+    /// A process this rule deliberately leaves running (an allowed or granted app, a kept
+    /// browser). Such a process is never closed as a helper of a blocked program
+    /// (`helpers.rs`), whichever rule blocked that program.
+    fn keeps(&self, _process: &ProcessSnapshot) -> bool {
+        false
+    }
 }
 
 /// Responsibility: Describe a registered rule for listings.
