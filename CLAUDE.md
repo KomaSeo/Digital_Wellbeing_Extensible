@@ -31,6 +31,8 @@
 ## Releases
 
 - The owner is the only user. After finishing a requested change (tests pass, pushed), release it without asking:
-  bump the rc number in `installer/RELEASE_VERSION`, add the change to the top section of
+  bump the rc number in `installer/RELEASE_VERSION`, write the change in the section "이번 버전에서 바뀐 것" of
   `installer/RELEASE_NOTES.md`, commit "Release <version>" and push; `.github/workflows/release.yml` publishes it.
   Then check that the release run succeeded. Several changes in one session may share one release.
+- The release notes hold only what changed in this version (the owner reads older changes on the older releases):
+  for a new version, replace that section's content instead of keeping earlier versions' sections below it.
