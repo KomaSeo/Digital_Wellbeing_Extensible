@@ -302,6 +302,25 @@ fn end_to_end(real_key: Option<String>) {
             &[todo("p-mail", "Mail the signed form", "", Some(0), 3)],
             "",
         );
+        // The timetable of today holds the running task (as a task done at the computer).
+        let today = chrono::Local::now().date_naive().to_string();
+        let timetable: Vec<task_planner::TimetableEntry> = serde_json::from_value(
+            call_value(session, "timetable", json!({ "from": today, "to": today })).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            timetable
+                .iter()
+                .any(|entry| entry.todo_id.as_deref() == Some("p-mail")
+                    && entry.kind == task_planner::TimetableKind::Task),
+            "{timetable:?}"
+        );
+        assert!(call_value(
+            session,
+            "timetable",
+            json!({ "from": "nonsense", "to": today })
+        )
+        .is_err());
         // The overview of this week is kept and shown with the status.
         let planned = call(session, "plan_week", json!({})).unwrap();
         let week = planned

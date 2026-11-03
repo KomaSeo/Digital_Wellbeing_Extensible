@@ -307,6 +307,25 @@ impl Desktop for X11Desktop {
         })
     }
 
+    fn idle_seconds(&self) -> Option<u64> {
+        use x11rb::connection::RequestConnection;
+        self.with(|display| {
+            // Without the extension (some X servers) the time is unknown, not an error that
+            // would drop the connection.
+            if display
+                .connection
+                .extension_information(x11rb::protocol::screensaver::X11_EXTENSION_NAME)?
+                .is_none()
+            {
+                return Ok(None);
+            }
+            let info = x11rb::protocol::screensaver::query_info(&display.connection, display.root)?
+                .reply()?;
+            Ok(Some(u64::from(info.ms_since_user_input) / 1000))
+        })
+        .flatten()
+    }
+
     fn visible_processes(&self) -> Vec<String> {
         self.open_windows()
             .into_iter()
@@ -405,6 +424,26 @@ mod tests {
     };
     use x11rb::protocol::Event;
     use x11rb::wrapper::ConnectionExt as _;
+
+    #[test]
+    fn x11_desktop_tells_how_long_the_user_has_been_idle() {
+        if std::env::var_os("DISPLAY").is_none() {
+            eprintln!("skipped: no DISPLAY (run under xvfb-run)");
+            return;
+        }
+        // Xvfb has the screen-saver extension. Another test may press keys meanwhile (which
+        // starts the count again), so only "a time is known" is checked; a connection that
+        // failed once is opened again on the next call.
+        let desktop = X11Desktop::new();
+        let known = (0..3).any(|_| {
+            let idle = desktop.idle_seconds();
+            if idle.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            idle.is_some()
+        });
+        assert!(known, "no idle time from the X server");
+    }
 
     #[test]
     fn x11_desktop_sees_and_controls_a_window() {

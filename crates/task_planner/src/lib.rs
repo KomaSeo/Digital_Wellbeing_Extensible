@@ -31,12 +31,12 @@ pub use ai_focus_rule::store::JsonStore;
 pub use deadline::parse_deadline;
 pub use model::{
     Appointment, AppointmentInput, Assignment, AssignmentSource, AssignmentSpan, ChangeKind,
-    ChangeRecord, DoneRecord, Evidence, ExtensionOffer, PlannerConfig, PlannerInstructions,
-    PlannerState, PlannerStatus, PolishItem, ProposalInput, ProposalRecord, TaskNotes, TaskStep,
-    TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan, WeekPlanDay, WeekPlanTodo,
-    WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
+    ChangeRecord, DoneRecord, Evidence, ExtensionOffer, IdleSpan, PlannerConfig,
+    PlannerInstructions, PlannerState, PlannerStatus, PolishItem, ProposalInput, ProposalRecord,
+    TaskNotes, TaskStep, TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem,
+    TodoListWrite, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
-pub use planner::{PlannerError, TaskPlanner};
+pub use planner::{PlannerError, TaskPlanner, IDLE_PAUSE_MINUTES};
 
 #[cfg(test)]
 mod tests;

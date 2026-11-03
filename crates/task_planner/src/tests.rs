@@ -1790,3 +1790,103 @@ fn an_approved_done_can_add_a_follow_up_and_set_steps() {
         .unwrap();
     assert!(rejected.list_writes.is_empty());
 }
+
+#[test]
+fn the_time_stands_still_while_the_user_is_away_from_a_computer_task() {
+    let fixture = harness(true, &["a"]);
+    let start = Utc::now();
+    let assignment = fixture.planner.assign(start).unwrap();
+    let planned_end = assignment.until.unwrap();
+    assert_eq!((planned_end - start).num_minutes(), 45);
+
+    // Ten minutes in, nothing touched for six minutes: the time stands still from the last
+    // touch (four minutes in).
+    let ten = start + chrono::Duration::minutes(10);
+    fixture.planner.track_idle(ten, Some(6 * 60)).unwrap();
+    let paused = fixture.planner.status().assignment.unwrap();
+    assert_eq!(
+        paused.paused_since,
+        Some(start + chrono::Duration::minutes(4))
+    );
+    // Even past the planned end, the time is not up while it stands still.
+    assert!(!paused.time_is_up(planned_end + chrono::Duration::minutes(5)));
+
+    // Back at 64 minutes: 60 minutes away are added to the end.
+    let back = start + chrono::Duration::minutes(64);
+    fixture.planner.track_idle(back, Some(0)).unwrap();
+    let running = fixture.planner.status().assignment.unwrap();
+    assert_eq!(running.paused_since, None);
+    assert_eq!(
+        running.until,
+        Some(planned_end + chrono::Duration::minutes(60))
+    );
+    assert_eq!(running.idle.len(), 1);
+
+    // Time spent counts only the time at the computer: 4 + 6 minutes so far at 74 minutes.
+    let later = start + chrono::Duration::minutes(74);
+    let timetable = fixture
+        .planner
+        .timetable(start - chrono::Duration::hours(1), later, later);
+    let kinds: Vec<(TimetableKind, i64)> = timetable
+        .iter()
+        .map(|entry| (entry.kind, (entry.end - entry.start).num_minutes()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            (TimetableKind::Task, 4),
+            (TimetableKind::Unknown, 60),
+            (TimetableKind::Task, 10)
+        ]
+    );
+    assert_eq!(
+        fixture
+            .planner
+            .status()
+            .assignment
+            .unwrap()
+            .span_until(later)
+            .minutes(),
+        14
+    );
+}
+
+#[test]
+fn a_task_away_from_the_computer_never_stands_still() {
+    let fixture = harness(true, &["a"]);
+    fixture.advisor.judges_away.store(true, Ordering::SeqCst);
+    let start = Utc::now();
+    fixture.planner.assign(start).unwrap();
+    fixture
+        .planner
+        .track_idle(start + chrono::Duration::minutes(30), Some(30 * 60))
+        .unwrap();
+    let assignment = fixture.planner.status().assignment.unwrap();
+    assert!(assignment.away_from_computer);
+    assert_eq!(assignment.paused_since, None);
+    let timetable = fixture.planner.timetable(
+        start,
+        start + chrono::Duration::minutes(30),
+        start + chrono::Duration::minutes(30),
+    );
+    assert_eq!(timetable.len(), 1);
+    assert_eq!(timetable[0].kind, TimetableKind::AwayFromComputer);
+}
+
+#[test]
+fn an_ended_task_keeps_its_unknown_stretch_in_the_timetable() {
+    let fixture = harness(true, &["a", "b"]);
+    let start = Utc::now();
+    fixture.planner.assign(start).unwrap();
+    fixture
+        .planner
+        .track_idle(start + chrono::Duration::minutes(20), Some(10 * 60))
+        .unwrap();
+    // The task ends while the user is still away (e.g. "사용 중지" from another place).
+    let end = start + chrono::Duration::minutes(30);
+    fixture.planner.stop_use(end).unwrap();
+    let timetable = fixture.planner.timetable(start, end, end);
+    let kinds: Vec<TimetableKind> = timetable.iter().map(|entry| entry.kind).collect();
+    assert_eq!(kinds, vec![TimetableKind::Task, TimetableKind::Unknown]);
+    assert_eq!((timetable[1].end - timetable[1].start).num_minutes(), 20);
+}

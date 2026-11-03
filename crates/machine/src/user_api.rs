@@ -28,6 +28,7 @@
 //! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…}, "via": "…" }` | [`crate::settings::PutOutcome`] (what is in force now, what was scheduled) |
 //! | `settings_answer` | `{ "id": "…", "approve": true\|false }` (once the question is due) | [`crate::settings::AnswerOutcome`] |
 //! | `settings_withdraw` | `{ "id": "…" }`                        | `{ "ok": true }` |
+//! | `timetable` | `{ "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" }` | [`task_planner::TimetableEntry`] list |
 //! | `settings_protect` | `{ mode? }` ([`crate::settings::ProtectionChoice`]; permanent without) | [`ProtectionView`] |
 //! | `settings_unprotect` | `{ password? }` (time over, or the password) | `{ protected: false }`; every block lifted |
 //! | `program_update` | `{ "program": "Kakao.KakaoTalk" }` (listed in `updatable_programs`) | [`crate::system_care::CareStatus`] |
@@ -461,6 +462,33 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     }
     match method {
         "status" => {}
+        // What the user did between two local dates (inclusive): `{ "from": "YYYY-MM-DD",
+        // "to": "YYYY-MM-DD" }`.
+        "timetable" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            let date = |key: &str| -> Result<chrono::NaiveDate, String> {
+                params[key]
+                    .as_str()
+                    .and_then(|text| text.parse().ok())
+                    .ok_or(format!("params.{key}: a date like 2026-11-03"))
+            };
+            let (from, to) = (date("from")?, date("to")?);
+            if to < from || (to - from).num_days() > 366 {
+                return Err("the period is one day to a year".into());
+            }
+            let start_of = |day: chrono::NaiveDate| {
+                day.and_hms_opt(0, 0, 0)
+                    .and_then(|midnight| midnight.and_local_timezone(chrono::Local).earliest())
+                    .map(|midnight| midnight.with_timezone(&Utc))
+                    .ok_or("a day without a midnight")
+            };
+            let entries = planner.timetable(
+                start_of(from)?,
+                start_of(to + chrono::Duration::days(1))?,
+                Utc::now(),
+            );
+            return serde_json::to_value(entries).map_err(|error| error.to_string());
+        }
         // Cheap, for the Focus app to ask several times a second and show its check window
         // the moment a block is made.
         "last_block" => return Ok(json!(api.monitor.state().last_block)),

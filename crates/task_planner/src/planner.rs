@@ -21,9 +21,10 @@ use crate::advisor::{
 };
 use crate::model::{
     Appointment, Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord,
-    DoneRecord, Evidence, ExtensionOffer, PlannerConfig, PlannerState, PlannerStatus, PolishItem,
-    ProposalInput, TaskNotes, TaskStep, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite,
-    WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
+    DoneRecord, Evidence, ExtensionOffer, IdleSpan, PlannerConfig, PlannerState, PlannerStatus,
+    PolishItem, ProposalInput, TaskNotes, TaskStep, TimetableEntry, TimetableKind, TodoChange,
+    TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp,
+    APPOINTMENT_GRACE_MINUTES,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -124,7 +125,14 @@ pub struct TaskPlanner {
     /// Held for a whole assign/review, so two clicks cannot race. The AI call
     /// happens under it, but no data lock is held during the call.
     busy: Mutex<()>,
+    /// Seconds since the user last touched the keyboard or mouse (`None`: unknown, the time
+    /// never stands still). The agent asks the desktop; tests set their own.
+    idle_source: Box<dyn Fn() -> Option<u64> + Send + Sync>,
 }
+
+/// Minutes without touching the computer after which a task done at the computer stops its
+/// time (from the last touch on).
+pub const IDLE_PAUSE_MINUTES: i64 = 5;
 
 impl TaskPlanner {
     pub fn new(
@@ -139,7 +147,17 @@ impl TaskPlanner {
             focus,
             advisor,
             busy: Mutex::new(()),
+            idle_source: Box::new(|| None),
         }
+    }
+
+    /// Where the planner learns how long the user has not touched the computer.
+    pub fn with_idle_source(
+        mut self,
+        source: impl Fn() -> Option<u64> + Send + Sync + 'static,
+    ) -> Self {
+        self.idle_source = Box::new(source);
+        self
     }
 
     pub fn config_store(&self) -> &JsonStore<PlannerConfig> {
@@ -185,13 +203,13 @@ impl TaskPlanner {
             .assignment_log
             .iter()
             .filter(|span| span.todo_id.as_deref() == Some(todo_id))
-            .map(|span| (span.ended - span.started).num_minutes().max(0))
+            .map(AssignmentSpan::minutes)
             .sum();
         let running = state
             .assignment
             .as_ref()
             .filter(|assignment| assignment.todo_id.as_deref() == Some(todo_id))
-            .map_or(0, |assignment| (now - assignment.at).num_minutes().max(0));
+            .map_or(0, |assignment| assignment.span_until(now).minutes());
         finished + running
     }
 
@@ -336,6 +354,8 @@ impl TaskPlanner {
             away_from_computer: running.away_from_computer,
             appointment_id: Some(running.id.clone()),
             open: Vec::new(),
+            paused_since: None,
+            idle: Vec::new(),
         };
         info!("appointment started: {}", running.title);
         self.apply(assignment.clone())?;
@@ -365,12 +385,7 @@ impl TaskPlanner {
         // Finished spans plus the one running now.
         let mut spans: Vec<AssignmentSpan> = state.assignment_log.iter().cloned().collect();
         if let Some(current) = &state.assignment {
-            spans.push(AssignmentSpan {
-                todo_id: current.todo_id.clone(),
-                task: current.task.clone(),
-                started: current.at,
-                ended: now,
-            });
+            spans.push(current.span_until(now));
         }
         let start_of_today = Local::now()
             .date_naive()
@@ -399,7 +414,7 @@ impl TaskPlanner {
                         Some(done_at) => span.started.max(done_at),
                         None => span.started,
                     };
-                    (span.ended - started).num_minutes().max(0)
+                    span.minutes_within(started, span.ended)
                 })
                 .sum();
             minutes_this_round.insert(todo.id.clone(), spent);
@@ -408,11 +423,9 @@ impl TaskPlanner {
             let Some(todo_id) = &span.todo_id else {
                 continue;
             };
-            let total = (span.ended - span.started).num_minutes().max(0);
+            let total = span.minutes();
             *minutes_total.entry(todo_id.clone()).or_insert(0) += total;
-            let today = (span.ended - span.started.max(start_of_today))
-                .num_minutes()
-                .max(0);
+            let today = span.minutes_within(start_of_today, span.ended);
             if today > 0 {
                 *minutes_today.entry(todo_id.clone()).or_insert(0) += today;
             }
@@ -896,7 +909,117 @@ impl TaskPlanner {
                 self.start_focus(&current)?;
             }
         }
+        let idle_seconds = (self.idle_source)();
+        self.track_idle(now, idle_seconds)?;
         Ok(())
+    }
+
+    /// Stop the time of a task done at the computer while the user does not touch it, and
+    /// let it run on when they are back (`until` moves later by the time they were away).
+    /// Tasks done away from the computer and appointments (fixed times) never stop.
+    pub fn track_idle(
+        &self,
+        now: DateTime<Utc>,
+        idle_seconds: Option<u64>,
+    ) -> Result<(), PlannerError> {
+        let Some(idle_seconds) = idle_seconds else {
+            return Ok(());
+        };
+        let Some(current) = self.state.get().assignment else {
+            return Ok(());
+        };
+        if current.away_from_computer || current.appointment_id.is_some() {
+            return Ok(());
+        }
+        let idle_seconds = i64::try_from(idle_seconds).unwrap_or(i64::MAX / 2_000_000);
+        let away = idle_seconds >= IDLE_PAUSE_MINUTES * 60;
+        let last_touch = (now - Duration::seconds(idle_seconds)).max(current.at);
+        match current.paused_since {
+            // Gone: the time stands still from the last touch (unless it was up by then).
+            None if away && !current.time_is_up(last_touch) => {
+                self.state.update(|planner_state| {
+                    if let Some(assignment) = planner_state.assignment.as_mut() {
+                        assignment.paused_since = Some(last_touch);
+                    }
+                })?;
+                info!("no input since {last_touch}: the task's time stands still");
+            }
+            // Back: the time away is logged and added to the end.
+            Some(since) if !away => {
+                let back = last_touch.max(since);
+                self.state.update(|planner_state| {
+                    if let Some(assignment) = planner_state.assignment.as_mut() {
+                        assignment.idle.push(IdleSpan {
+                            start: since,
+                            end: back,
+                        });
+                        assignment.paused_since = None;
+                        assignment.until = assignment.until.map(|until| until + (back - since));
+                    }
+                })?;
+                info!("back at {back}: the task's time runs again");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// What the user did between `from` and `to`, in order: each assignment as one stretch,
+    /// and the times they did not touch the computer during a task done at it as "unknown".
+    pub fn timetable(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Vec<TimetableEntry> {
+        let state = self.state.get();
+        let spans = state.assignment_log.iter().cloned().chain(
+            state
+                .assignment
+                .as_ref()
+                .map(|current| current.span_until(now)),
+        );
+        let mut entries = Vec::new();
+        for span in spans {
+            if span.ended <= from || span.started >= to {
+                continue;
+            }
+            let kind = if span.appointment {
+                TimetableKind::Appointment
+            } else if span.away_from_computer {
+                TimetableKind::AwayFromComputer
+            } else {
+                TimetableKind::Task
+            };
+            let mut idle = span.idle.clone();
+            idle.sort_by_key(|stretch| stretch.start);
+            let end = span.ended.min(to);
+            let mut cursor = span.started.max(from);
+            let mut push = |start: DateTime<Utc>, finish: DateTime<Utc>, kind: TimetableKind| {
+                if finish > start {
+                    entries.push(TimetableEntry {
+                        start,
+                        end: finish,
+                        kind,
+                        task: span.task.clone(),
+                        todo_id: span.todo_id.clone(),
+                    });
+                }
+            };
+            for stretch in idle {
+                let idle_start = stretch.start.max(cursor);
+                let idle_end = stretch.end.min(end);
+                if idle_end <= idle_start {
+                    continue;
+                }
+                push(cursor, idle_start, kind);
+                push(idle_start, idle_end, TimetableKind::Unknown);
+                cursor = idle_end;
+            }
+            push(cursor, end, kind);
+        }
+        entries.sort_by_key(|entry| entry.start);
+        entries
     }
 
     /// The user asks to change the assignment. Returns the AI's decision;
@@ -1398,6 +1521,8 @@ impl TaskPlanner {
                     away_from_computer: todo.away_from_computer.unwrap_or(false),
                     appointment_id: None,
                     open: Vec::new(),
+                    paused_since: None,
+                    idle: Vec::new(),
                 })?;
             }
             ChangeKind::SwitchFree { task } => {
@@ -1417,6 +1542,8 @@ impl TaskPlanner {
                     away_from_computer: false,
                     appointment_id: None,
                     open: Vec::new(),
+                    paused_since: None,
+                    idle: Vec::new(),
                 })?;
             }
             ChangeKind::Repick => {
@@ -1483,6 +1610,8 @@ impl TaskPlanner {
                 .filter(|url| url.starts_with("https://") && url.len() <= 300 && !url.contains(' '))
                 .take(5)
                 .collect(),
+            paused_since: None,
+            idle: Vec::new(),
         };
         info!(
             "assigned for {} min: {}",
@@ -1555,7 +1684,7 @@ fn close_span(planner_state: &mut PlannerState, ended: DateTime<Utc>) {
             .as_deref()
             .and_then(|todo_id| todo_id.strip_prefix(POLISH_PREFIX))
         {
-            let spent = (ended - current.at).num_minutes().max(0);
+            let spent = current.span_until(ended).minutes();
             if let Some(polish) = planner_state.polish.get_mut(base_id) {
                 polish.minutes_left -= spent;
                 if polish.minutes_left < MIN_POLISH_MINUTES {
@@ -1566,12 +1695,9 @@ fn close_span(planner_state: &mut PlannerState, ended: DateTime<Utc>) {
         if planner_state.assignment_log.len() >= ASSIGNMENT_LOG_CAPACITY {
             planner_state.assignment_log.pop_front();
         }
-        planner_state.assignment_log.push_back(AssignmentSpan {
-            todo_id: current.todo_id.clone(),
-            task: current.task.clone(),
-            started: current.at,
-            ended: ended.max(current.at),
-        });
+        planner_state
+            .assignment_log
+            .push_back(current.span_until(ended));
     }
 }
 
@@ -1588,13 +1714,13 @@ fn minutes_on_day(state: &PlannerState, day: NaiveDate, now: DateTime<Utc>) -> i
     let running = state
         .assignment
         .as_ref()
-        .map(|assignment| (assignment.at, now));
+        .map(|assignment| assignment.span_until(now));
     state
         .assignment_log
         .iter()
-        .map(|span| (span.started, span.ended))
+        .cloned()
         .chain(running)
-        .map(|(started, ended)| (ended.min(end) - started.max(start)).num_minutes().max(0))
+        .map(|span| span.minutes_within(start, end))
         .sum()
 }
 

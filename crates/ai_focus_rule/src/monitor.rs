@@ -853,6 +853,11 @@ impl FocusMonitor {
         self
     }
 
+    /// Seconds since the user last used the keyboard or mouse (`None`: unknown).
+    pub fn idle_seconds(&self) -> Option<u64> {
+        self.desktop.idle_seconds()
+    }
+
     /// Lift every block (the settings protection was turned off: without it a block means
     /// nothing) and save that.
     pub fn lift_all_blocks(&self) {

@@ -354,9 +354,21 @@ impl FocusApp {
                 local_time(assignment.at)
             ));
             if let Some(until) = assignment.until {
+                // While the user is away from a computer task, its time stands still.
+                let clock = assignment.paused_since.unwrap_or_else(Utc::now);
                 let total = (until - assignment.at).num_seconds().max(1) as f32;
-                let elapsed = (Utc::now() - assignment.at).num_seconds().max(0) as f32;
-                let minutes_left = (until - Utc::now()).num_minutes();
+                let elapsed = (clock - assignment.at).num_seconds().max(0) as f32;
+                let minutes_left = (until - clock).num_minutes();
+                if let Some(since) = assignment.paused_since {
+                    ui.colored_label(
+                        YELLOW,
+                        format!(
+                            "{}부터 키보드와 마우스를 쓰지 않아 시간이 멈춰 있습니다. 다시 쓰면 \
+                             멈춘 만큼 끝나는 시각이 늦춰집니다.",
+                            local_time(since)
+                        ),
+                    );
+                }
                 ui.add(egui::ProgressBar::new((elapsed / total).min(1.0)).text(
                     if minutes_left >= 0 {
                         format!(

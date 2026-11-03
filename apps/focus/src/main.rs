@@ -27,6 +27,7 @@ mod help;
 mod reopen;
 mod settings;
 mod statistics;
+mod timetable;
 mod todo;
 mod tray;
 
@@ -166,6 +167,7 @@ struct FocusApp {
     opened_for: Option<Option<String>>,
     time_up_prompt: Option<block_prompt::TimeUpPrompt>,
     access: AccessForm,
+    timetable: timetable::TimetableView,
     todo_ui: todo::TodoUiState,
     /// Settings questions due at the last status; more than before brings the window up.
     questions_due: usize,
@@ -245,6 +247,7 @@ impl FocusApp {
             opened_for: None,
             time_up_prompt: None,
             access: AccessForm::default(),
+            timetable: timetable::TimetableView::default(),
             todo_ui: todo::TodoUiState::default(),
             questions_due: 0,
             seen_block: None,

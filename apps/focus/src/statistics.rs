@@ -1,5 +1,6 @@
-//! Responsibility: Show what already happened (the Statistics tab): AI usage and cost, today's
-//! summary, finished to-dos, change requests with the AI's answers, and recent AI verdicts.
+//! Responsibility: Show what already happened (the Statistics tab): the timetable of a chosen
+//! period (`timetable.rs`), AI usage and cost, today's summary, finished to-dos, change
+//! requests with the AI's answers, and recent AI verdicts.
 
 use crate::{FocusApp, GREEN, RED};
 use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
@@ -21,6 +22,9 @@ impl FocusApp {
             ui.separator();
             self.week_ui(ui, &planner);
         }
+
+        ui.separator();
+        self.timetable.ui(ui, self.session);
 
         ui.separator();
         ui.heading("AI 사용량");

@@ -243,14 +243,62 @@ pub struct Assignment {
     /// starts.
     #[serde(default)]
     pub open: Vec<String>,
+    /// The user has not touched the computer since this time, during a task done at the
+    /// computer: the task's time stands still until they are back (then `until` moves later
+    /// by the time they were away).
+    #[serde(default)]
+    pub paused_since: Option<DateTime<Utc>>,
+    /// Earlier times during this task when the user did not touch the computer.
+    #[serde(default)]
+    pub idle: Vec<IdleSpan>,
 }
 
 impl Assignment {
     /// The time the AI gave is up: the user reports whether the to-do is finished before
-    /// anything else happens.
+    /// anything else happens. Never while the time stands still.
     pub fn time_is_up(&self, now: DateTime<Utc>) -> bool {
-        self.until.is_some_and(|until| now >= until)
+        self.paused_since.is_none() && self.until.is_some_and(|until| now >= until)
     }
+
+    /// This assignment as a span up to `now`: the stretch away from the computer still going
+    /// on ends at `now`.
+    pub fn span_until(&self, now: DateTime<Utc>) -> AssignmentSpan {
+        let ended = now.max(self.at);
+        let mut idle = self.idle.clone();
+        if let Some(since) = self.paused_since {
+            idle.push(IdleSpan {
+                start: since,
+                end: ended.max(since),
+            });
+        }
+        AssignmentSpan {
+            todo_id: self.todo_id.clone(),
+            task: self.task.clone(),
+            started: self.at,
+            ended,
+            away_from_computer: self.away_from_computer,
+            appointment: self.appointment_id.is_some(),
+            idle,
+        }
+    }
+}
+
+/// Responsibility: Record a stretch of time when the user did not touch the computer during
+/// a task done at the computer ("알 수 없음" in the timetable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdleSpan {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
+/// The part of `start..end` inside `from..to`.
+fn overlap(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> chrono::Duration {
+    (end.min(to) - start.max(from)).max(chrono::Duration::zero())
 }
 
 /// Responsibility: Name what a change request asks for.
@@ -446,6 +494,65 @@ pub struct AssignmentSpan {
     pub task: String,
     pub started: DateTime<Utc>,
     pub ended: DateTime<Utc>,
+    /// Done away from the computer (spans logged before this field: `false`).
+    #[serde(default)]
+    pub away_from_computer: bool,
+    #[serde(default)]
+    pub appointment: bool,
+    /// Stretches when the user did not touch the computer (they do not count as time spent).
+    #[serde(default)]
+    pub idle: Vec<IdleSpan>,
+}
+
+impl AssignmentSpan {
+    /// Minutes of this span inside `from..to` that count as time spent on the task: the
+    /// stretches away from the computer do not.
+    pub fn minutes_within(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> i64 {
+        let whole = overlap(self.started, self.ended, from, to);
+        let idle = self
+            .idle
+            .iter()
+            .map(|idle| {
+                overlap(
+                    idle.start,
+                    idle.end,
+                    from.max(self.started),
+                    to.min(self.ended),
+                )
+            })
+            .fold(chrono::Duration::zero(), |sum, part| sum + part);
+        (whole - idle).num_minutes().max(0)
+    }
+
+    /// Minutes that count as time spent, the whole span.
+    pub fn minutes(&self) -> i64 {
+        self.minutes_within(self.started, self.ended)
+    }
+}
+
+/// Responsibility: Name what one stretch of the timetable was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimetableKind {
+    /// A task done at the computer.
+    Task,
+    /// A task done away from the computer.
+    AwayFromComputer,
+    Appointment,
+    /// A task done at the computer, but the user did not touch the computer: what they did
+    /// is not known.
+    Unknown,
+}
+
+/// Responsibility: Hold one stretch of the timetable (the Statistics tab).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimetableEntry {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub kind: TimetableKind,
+    /// The task (for "알 수 없음": the task it interrupted).
+    pub task: String,
+    pub todo_id: Option<String>,
 }
 
 /// Responsibility: Hold the user's own working notes and steps for one to-do.
