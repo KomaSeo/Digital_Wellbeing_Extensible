@@ -6,13 +6,17 @@
 # - a branch push changes installer/RELEASE_VERSION: the workflow then
 #   creates the tag `v<version>` itself (unless that tag already exists).
 # A manual run (workflow_dispatch) only builds and uploads the artifacts.
+#
+# On the sync branch (this copy of the file) every push runs it, and instead of a numbered
+# release it publishes the setup program to the release `sync-windows-latest` as
+# `DigitalWellbeing-Setup-<version>-<commit>.exe`, where the Settings tab's update button of a
+# sync build looks (`machine::self_update`). It never publishes a `v*` release.
 name: release
 
 on:
   push:
     tags: ["v*"]
     branches: ["**"]
-    paths: ["installer/RELEASE_VERSION"]
   workflow_dispatch:
 
 permissions:
@@ -53,7 +57,7 @@ jobs:
             $v = (Get-Content installer\RELEASE_VERSION -Raw).Trim()
             # A branch push publishes only a version that has no tag yet.
             $existing = git ls-remote --tags origin "refs/tags/v$v"
-            $publish = if ("${{ github.event_name }}" -eq "push" -and -not $existing) { "true" } else { "false" }
+            $publish = if ("${{ github.event_name }}" -eq "push" -and -not $existing -and "${{ github.ref_name }}" -ne "claude/multi-device-sync") { "true" } else { "false" }
           }
           "value=$v" >> $env:GITHUB_OUTPUT
           "publish=$publish" >> $env:GITHUB_OUTPUT
@@ -101,6 +105,26 @@ jobs:
           Copy-Item docs\*.md "$stage\docs"
           Compress-Archive -Path "$stage\*" -DestinationPath "dist\DigitalWellbeing-$v-windows-x64.zip"
           Remove-Item -Recurse $stage
+
+      - name: Publish to the release "sync-windows-latest" (sync branch)
+        if: github.ref == 'refs/heads/claude/multi-device-sync'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.version.outputs.value }}"
+          $build = "${{ github.sha }}".Substring(0, 7)
+          New-Item -ItemType Directory -Force dist-sync | Out-Null
+          Copy-Item "dist\DigitalWellbeing-Setup-$v.exe" "dist-sync\DigitalWellbeing-Setup-$v-$build.exe"
+          Copy-Item "dist\DigitalWellbeing-$v-windows-x64.zip" "dist-sync\DigitalWellbeing-$v-$build-windows-x64.zip"
+          # One build at a time: the old files go with the old release.
+          gh release delete sync-windows-latest --yes --cleanup-tag 2>$null
+          $global:LASTEXITCODE = 0
+          $files = (Get-ChildItem dist-sync).FullName
+          gh release create sync-windows-latest @files --prerelease --latest=false --target "${{ github.sha }}" `
+            --title "Sync PC build (latest)" `
+            --notes "동기화 브랜치의 최신 PC 빌드입니다. 설정 탭의 '이 프로그램 업데이트'가 여기서 받습니다. 설치 파일을 직접 받아 실행해도 됩니다."
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4
         with:

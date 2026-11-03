@@ -12,6 +12,9 @@
 //! | `run`       | the Service Control Manager     | supervisor: keep one agent per managed session |
 //! | `agent`     | the supervisor (as SYSTEM)      | enforce rules inside one user's session        |
 //! | `sync-…`    | an administrator / the SCM      | multi-device sync (see `sync_commands`)        |
+//! | `self-update-guard <setup>` | the service (a copy in the data folder) | install an update while every app stays closed (`update_guard`) |
+//! | `version`   | anyone                          | print the release version                      |
+//! | `self-update-check` | anyone                  | say whether GitHub has a newer release (changes nothing) |
 //!
 //! See `docs/multi_account.md` for the full picture.
 
@@ -23,6 +26,8 @@ mod service;
 #[cfg(windows)]
 mod spawn;
 mod sync_commands;
+#[cfg(windows)]
+mod update_guard;
 
 use std::fs::{self, OpenOptions};
 use std::sync::Mutex;
@@ -56,6 +61,26 @@ fn main() -> anyhow::Result<()> {
         Some(command) if command.starts_with("sync-") => {
             sync_commands::run_command(command, &arguments[1..])
                 .unwrap_or_else(|| anyhow::bail!("unknown command '{command}' (see docs/sync.md)"))
+        }
+        #[cfg(windows)]
+        Some("self-update-guard") => {
+            init_logging("update.log");
+            update_guard::run(&arguments[1..])
+        }
+        Some("self-update-check") => {
+            let releases = machine::self_update::fetch_releases().map_err(anyhow::Error::msg)?;
+            match machine::self_update::newest_available(&releases) {
+                Some(release) => println!("newer: {} ({})", release.version, release.setup_url),
+                None => println!(
+                    "up to date ({})",
+                    machine::self_update::this_version_and_build()
+                ),
+            }
+            Ok(())
+        }
+        Some("version") => {
+            println!("{}", machine::self_update::this_version_and_build());
+            Ok(())
         }
         _ => {
             eprintln!(

@@ -33,6 +33,8 @@
 //! | `settings_unprotect` | `{ password? }` (time over, or the password) | `{ protected: false }`; every block lifted |
 //! | `program_update` | `{ "program": "Kakao.KakaoTalk" }` (listed in `updatable_programs`) | [`crate::system_care::CareStatus`] |
 //! | `system_care_status` | `{}`                                 | [`crate::system_care::CareStatus`] |
+//! | `self_update` | `{ "action": "check"\|"install" }` (the service does it; see `crate::self_update`) | [`crate::self_update::UpdateStatus`] |
+//! | `self_update_status` | `{}`                                 | [`crate::self_update::UpdateStatus`] |
 //! | `assistant_send` | `{ "text": "…" }` (starts a turn and returns at once) | [`crate::assistant::AssistantView`] |
 //! | `assistant_view` | `{}`                                     | [`crate::assistant::AssistantView`] |
 //! | `assistant_reset` | `{}` (new conversation)                 | [`crate::assistant::AssistantView`] |
@@ -496,6 +498,23 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             )?;
             tracing::info!("update of {} requested by {user}", request.program);
             return serde_json::to_value(crate::system_care::status(&data_directory, &config))
+                .map_err(|error| error.to_string());
+        }
+        "self_update" => {
+            let kind = match params["action"].as_str() {
+                Some("check") => crate::self_update::RequestKind::Check,
+                Some("install") => crate::self_update::RequestKind::Install,
+                _ => return Err("params.action is \"check\" or \"install\"".into()),
+            };
+            let user = crate::session::session_user(crate::session::current_session_id())
+                .unwrap_or_default();
+            crate::self_update::request(&data_directory, kind, &user, Utc::now())?;
+            tracing::info!("self-update {kind:?} requested by {user}");
+            return serde_json::to_value(crate::self_update::status(&data_directory))
+                .map_err(|error| error.to_string());
+        }
+        "self_update_status" => {
+            return serde_json::to_value(crate::self_update::status(&data_directory))
                 .map_err(|error| error.to_string());
         }
         "system_care_status" => {

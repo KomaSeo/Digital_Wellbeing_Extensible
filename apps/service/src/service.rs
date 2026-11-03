@@ -122,6 +122,7 @@ fn run_service() -> anyhow::Result<()> {
     thread::spawn(|| care_loop(CareJob::Updates));
     // Other devices' changes in, this device's out (only after `sync-join`).
     thread::spawn(|| crate::sync_commands::sync_loop(machine::data_dir()));
+    thread::spawn(|| care_loop(CareJob::SelfUpdate));
     let mut supervisor = Supervisor::new(std::env::current_exe()?);
     loop {
         supervisor.tick();
@@ -143,6 +144,9 @@ enum CareJob {
     TimeZone,
     /// Run requested and daily program updates (each may take minutes).
     Updates,
+    /// Check for an update of this program, or install it through the update guard, when the
+    /// owner asked (`machine::self_update`).
+    SelfUpdate,
 }
 
 /// How often each care job looks again.
@@ -173,6 +177,12 @@ fn care_loop(job: CareJob) {
                 &config,
                 chrono::Local::now(),
                 &system_care::winget_upgrade,
+            ),
+            CareJob::SelfUpdate => machine::self_update::handle_request(
+                &data_directory,
+                &machine::self_update::fetch_releases,
+                &|release| machine::self_update::download_setup(&data_directory, release),
+                &crate::update_guard::start,
             ),
         }
         thread::sleep(CARE_INTERVAL);

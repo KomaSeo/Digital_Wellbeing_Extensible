@@ -308,6 +308,12 @@ pub struct SettingsTab {
     care_fetched_at: Option<Instant>,
     /// What the last "지금 업데이트" did.
     care_message: String,
+    /// The last `self_update_status` answer (this program's own update).
+    self_update: Option<Result<machine::self_update::UpdateStatus, String>>,
+    /// What the last "업데이트 확인" / "지금 업데이트" request did.
+    self_update_message: String,
+    /// "지금 업데이트" was pressed once: the next press installs.
+    confirming_install: bool,
 }
 
 /// Responsibility: Hold the editable copies of the three files and what they were when loaded
@@ -367,6 +373,9 @@ impl SettingsTab {
             care: None,
             care_fetched_at: None,
             care_message: String::new(),
+            self_update: None,
+            self_update_message: String::new(),
+            confirming_install: false,
         }
     }
 
@@ -1312,12 +1321,112 @@ impl SettingsTab {
     /// saved, and the 저장 / 적용 / 고친 것 버리기 / 기본값으로 되돌리기 buttons.
     // --- what the service does as administrator ----------------------------------------
 
+    /// This program's own update: check, then install through the update guard (every app
+    /// stays closed while it installs). Open whether the settings are protected or not.
+    fn self_update_ui(&mut self, ui: &mut egui::Ui) {
+        use machine::self_update::RequestKind;
+        ui.heading("이 프로그램 업데이트");
+        let status = match &self.self_update {
+            Some(Ok(status)) => status.clone(),
+            Some(Err(error)) => {
+                ui.colored_label(RED, error);
+                return;
+            }
+            None => return,
+        };
+        let state = &status.state;
+        ui.label(format!("지금 버전: {}", status.version));
+        ui.small(
+            "새 버전은 GitHub의 릴리스 페이지에서 받습니다. 업데이트는 저절로 하지 않고, 아래 버튼으로만 \
+             합니다. 설치하는 동안(보통 1분 안) 이 PC의 모든 앱과 브라우저가 닫히고 Focus 앱도 \
+             닫힙니다. 그래서 설정이 보호되어 있어도 업데이트로 규칙을 피할 수는 없습니다. 끝나면 \
+             시작 메뉴에서 Focus 앱을 다시 엽니다. 할 일, 설정, 로그인은 그대로 남습니다.",
+        );
+        let busy = status.pending.is_some() || state.busy.is_some();
+        if let Some(since) = state.installing_since {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(format!(
+                    "{}부터 업데이트를 설치하고 있습니다. 모든 앱이 잠시 닫힙니다.",
+                    local(since)
+                ));
+            });
+        } else if busy {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(match status.pending.or(state.busy) {
+                    Some(RequestKind::Install) => "새 버전을 받는 중입니다…",
+                    _ => "새 버전이 있는지 확인하는 중입니다…",
+                });
+            });
+        } else {
+            match (&state.available, state.last_check) {
+                (Some(release), _) => {
+                    ui.colored_label(YELLOW, format!("새 버전 {}이 있습니다.", release.version));
+                    ui.horizontal_wrapped(|ui| {
+                        if !self.confirming_install {
+                            if ui.button("지금 업데이트").clicked() {
+                                self.confirming_install = true;
+                            }
+                        } else {
+                            ui.label("모든 앱과 브라우저가 닫힙니다. 저장하지 않은 것을 먼저 저장하세요.");
+                            if ui.button("닫고 업데이트하기").clicked() {
+                                self.confirming_install = false;
+                                self.request_self_update("install");
+                            }
+                            if ui.button("취소").clicked() {
+                                self.confirming_install = false;
+                            }
+                        }
+                    });
+                }
+                (None, Some(checked)) => {
+                    ui.colored_label(GREEN, format!("최신 버전입니다({} 확인).", local(checked)));
+                }
+                (None, None) => {}
+            }
+            if ui.button("업데이트 확인").clicked() {
+                self.request_self_update("check");
+            }
+        }
+        if !state.error.is_empty() {
+            ui.colored_label(RED, format!("마지막 확인이 실패했습니다: {}", state.error));
+        }
+        if let Some(run) = &state.last_install {
+            ui.colored_label(
+                if run.succeeded { GREEN } else { RED },
+                format!(
+                    "마지막 업데이트({}): {}",
+                    local(run.finished_at),
+                    run.message
+                ),
+            );
+        }
+        if !self.self_update_message.is_empty() {
+            ui.small(&self.self_update_message);
+        }
+    }
+
+    fn request_self_update(&mut self, action: &str) {
+        self.self_update_message =
+            match call_value(self.session, "self_update", json!({ "action": action })) {
+                Ok(_) => String::new(),
+                Err(error) => error,
+            };
+        self.care_fetched_at = None;
+    }
+
     fn system_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
         if self
             .care_fetched_at
             .is_none_or(|fetched_at| fetched_at.elapsed() >= REFRESH)
         {
             self.care_fetched_at = Some(Instant::now());
+            self.self_update = Some(
+                call_value(self.session, "self_update_status", json!({})).and_then(|reply| {
+                    serde_json::from_value(reply).map_err(|error| error.to_string())
+                }),
+            );
             self.care = Some(
                 call_value(self.session, "system_care_status", json!({})).and_then(|reply| {
                     serde_json::from_value(reply).map_err(|error| error.to_string())
@@ -1333,6 +1442,9 @@ impl SettingsTab {
             None => None,
         };
 
+        self.self_update_ui(ui);
+
+        ui.separator();
         ui.heading("프로그램 업데이트");
         ui.small(
             "카카오톡처럼 업데이트에 관리자 권한이 필요한 프로그램을 여기에 넣습니다. 사용자에게 \
