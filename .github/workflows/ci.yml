@@ -50,6 +50,16 @@ jobs:
       - name: Build
         run: cargo build --release --workspace --locked
 
+      - name: The update check reads GitHub's releases
+        shell: pwsh
+        env:
+          DW_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $answer = & target\release\digital-wellbeing-service.exe self-update-check | Out-String
+          Write-Host $answer
+          if ($LASTEXITCODE -ne 0) { throw "self-update-check failed ($LASTEXITCODE)" }
+          if ($answer -notmatch "up to date|newer: ") { throw "unexpected answer" }
+
       - name: Install and upgrade the service
         shell: pwsh
         run: |

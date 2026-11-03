@@ -16,6 +16,7 @@ base64 = "0.22"
 getrandom = "0.2"
 pbkdf2 = "0.12"
 sha2 = "0.10"
+ureq = { version = "2", features = ["json", "native-certs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
