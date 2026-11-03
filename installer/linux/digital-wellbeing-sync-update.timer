@@ -1,0 +1,12 @@
+# Responsibility: Check for a new sync server build once a day (04:30 Korean time, when
+# nobody is likely to be syncing), and after a boot that missed it.
+[Unit]
+Description=Daily update check of the Digital Wellbeing sync server
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 Asia/Seoul
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

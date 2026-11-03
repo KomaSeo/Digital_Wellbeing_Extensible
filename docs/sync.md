@@ -89,40 +89,50 @@ Claude API는 지금처럼 각 기기가 직접 부릅니다. 서버는 Claude�
 4. 네트워킹 탭 → IPv4 방화벽: **사용자 지정, TCP, 47820** 규칙을 더합니다. SSH(22)는 "Lightsail 브라우저 SSH/RDP만 허용"으로 좁힙니다.
 5. 스냅샷 탭: **자동 스냅샷**을 켭니다.
 
-**2. 서버 프로그램 받기 (PC에서)**
-- GitHub에 로그인한 브라우저에서, 이 브랜치의 최근 `ci` 실행(Actions 탭)을 열고 Artifacts의 `digital-wellbeing-sync-server-linux-x64`를 내려받아 풉니다. 안에 `digital-wellbeing-service`(리눅스용 프로그램, 다른 파일이 필요 없는 정적 실행 파일)와 `digital-wellbeing-sync.service`(systemd 서비스 파일)가 있습니다.
+**2. 서버 프로그램 받기와 켜기 (서버의 브라우저 SSH에서)**
 
-**3. 서버에 올리고 켜기**
-1. Lightsail 계정 페이지에서 기본 SSH 키(`LightsailDefaultKey-ap-northeast-2.pem`)를 내려받고, PC의 PowerShell에서 두 파일을 올립니다.
+이 저장소는 공개되어 있으므로, 서버가 GitHub 릴리스 `sync-latest`에서 바로 받을 수 있습니다. 이 릴리스에는 동기화 브랜치의 테스트를 모두 통과한 최신 빌드만 올라옵니다. Lightsail의 "SSH를 사용하여 연결"(브라우저 SSH)에서 다음을 실행합니다.
 
-   ```
-   scp -i LightsailDefaultKey-ap-northeast-2.pem digital-wellbeing-service digital-wellbeing-sync.service ubuntu@<고정 IP>:~/
-   ```
+```
+cd /tmp
+base=https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases/download/sync-latest
+for file in digital-wellbeing-service digital-wellbeing-service.sha256 digital-wellbeing-sync.service \
+            digital-wellbeing-sync-update digital-wellbeing-sync-update.service digital-wellbeing-sync-update.timer; do
+  curl -fsSLO "$base/$file"
+done
+sha256sum -c digital-wellbeing-service.sha256
+sudo install -m 755 digital-wellbeing-service digital-wellbeing-sync-update /usr/local/bin/
+sudo install -m 644 digital-wellbeing-sync.service digital-wellbeing-sync-update.service digital-wellbeing-sync-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now digital-wellbeing-sync digital-wellbeing-sync-update.timer
+systemctl status digital-wellbeing-sync
+```
 
-   (SSH를 브라우저 SSH만 허용으로 좁혔다면, 이때만 잠깐 내 IP의 22번을 열고 끝나면 닫습니다.)
-2. Lightsail의 "SSH를 사용하여 연결"(브라우저 SSH)에서 다음을 실행합니다.
+**3. (예전 방법) PC에서 올리기**
 
-   ```
-   sudo install -m 755 ~/digital-wellbeing-service /usr/local/bin/
-   sudo install -m 644 ~/digital-wellbeing-sync.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now digital-wellbeing-sync
-   systemctl status digital-wellbeing-sync
-   ```
+GitHub Actions의 artifact `digital-wellbeing-sync-server-linux-x64`를 받아 `scp`로 올려도 됩니다. 그때도 서버에서는 위의 `install`과 `systemctl` 줄을 실행합니다.
 
-   서비스는 서버가 켜질 때 저절로 시작하고, 멈추면 5초 뒤에 다시 시작합니다. 문서와 기기 열쇠는 `/var/lib/digital-wellbeing-sync`에 있고, root만 읽을 수 있습니다.
-3. 같은 창에서 로그인과 기기를 만듭니다(7장, 5장).
+서버 서비스는 서버가 켜질 때 저절로 시작하고, 멈추면 5초 뒤에 다시 시작합니다. 문서와 기기 열쇠는 `/var/lib/digital-wellbeing-sync`에 있고, root만 읽을 수 있습니다.
 
-   ```
-   sudo digital-wellbeing-service sync-add-user me
-   sudo digital-wellbeing-service sync-add-device laptop
-   ```
+**4. 로그인과 기기 만들기 (같은 창에서, 7장과 5장)**
 
-   나온 `sync-join` 줄의 `<this server's address>`에 고정 IP를 넣어 각 PC에서 실행합니다.
+```
+sudo digital-wellbeing-service sync-add-user me
+sudo digital-wellbeing-service sync-add-device laptop
+```
+
+나온 `sync-join` 줄의 `<this server's address>`에 고정 IP(또는 도메인)를 넣어 그 PC에서 실행합니다.
 
 **운영**
 - 기록 보기: `journalctl -u digital-wellbeing-sync -f`
-- 새 버전으로 바꾸기: 새 `digital-wellbeing-service`를 올리고 `sudo install -m 755 ~/digital-wellbeing-service /usr/local/bin/` 뒤에 `sudo systemctl restart digital-wellbeing-sync`. 서버와 PC는 같은 버전으로 맞춥니다(8장).
+- **자동 업데이트:** `digital-wellbeing-sync-update.timer`가 날마다 한국 시간 새벽 4시 30분쯤(10분 안에서 무작위로) 릴리스 `sync-latest`를 확인합니다. 그 사이 서버가 꺼져 있었으면 켜진 뒤에 확인합니다.
+  - 받은 파일의 SHA-256이 릴리스에 함께 올린 값과 다르면(받다가 끊기거나 깨지면) 설치하지 않습니다.
+  - 지금 설치된 파일과 같으면 아무것도 하지 않습니다.
+  - 새 빌드를 설치하고 서버를 다시 시작한 뒤 30초 안에 서버가 답하지 않으면, 예전 빌드를 다시 설치합니다. 그래서 업데이트가 서버를 멈춘 채로 두지 않습니다.
+  - 지금 바로 업데이트하려면 `sudo systemctl start digital-wellbeing-sync-update`, 결과는 `journalctl -u digital-wellbeing-sync-update`로 봅니다.
+  - 자동 업데이트를 끄려면 `sudo systemctl disable --now digital-wellbeing-sync-update.timer`.
+  - 서버의 버전은 PC의 버전과 비교하지 않습니다(8장의 버전 맞추기는 PC끼리입니다). 그래서 서버가 먼저 업데이트되어도 PC들은 그대로 동기화합니다.
+- 이 릴리스를 바꿀 수 있는 사람(저장소에 push할 수 있는 사람)은 서버의 프로그램을 바꿀 수 있습니다. 자동 업데이트를 쓰면 GitHub 계정도 관리자 비밀번호처럼 지켜야 합니다.
 - 백업: 자동 스냅샷이 매일 서버 전체를 남깁니다.
 
 **서버의 내용을 마음대로 바꾸지 못하게 하려면** 클라우드에서는 AWS 계정이 "관리자 비밀번호"입니다. AWS 계정의 비밀번호와 MFA 장치, 그리고 SSH 키(`.pem` 파일)를 관리자 비밀번호처럼 물리적으로 따로 보관하고, PC에 남은 `.pem` 파일은 지웁니다. 이것들이 있는 사람은 서버의 파일을 바꿀 수 있습니다.
