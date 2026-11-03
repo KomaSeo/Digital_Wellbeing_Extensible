@@ -59,8 +59,17 @@ pub fn install_dir() -> PathBuf {
     base.join("DigitalWellbeing")
 }
 
+/// `install [--manage <user>]... | [--manage-all] [--delete-data]`: with `--delete-data`, the
+/// owner's data an earlier install left ([`delete_user_data`]) is deleted first, and the PC
+/// starts from nothing; without it, the data is kept.
 pub fn install(arguments: &[String]) -> anyhow::Result<()> {
-    let managed = parse_manage(arguments)?;
+    let delete_data = arguments.iter().any(|argument| argument == "--delete-data");
+    let arguments: Vec<String> = arguments
+        .iter()
+        .filter(|argument| *argument != "--delete-data")
+        .cloned()
+        .collect();
+    let managed = parse_manage(&arguments)?;
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -75,7 +84,13 @@ pub fn install(arguments: &[String]) -> anyhow::Result<()> {
     }
     let upgrade = existing.is_some();
 
-    let result = install_steps(&manager, managed, upgrade);
+    let result = (|| {
+        if delete_data {
+            // The service is stopped, so no agent has a file open.
+            delete_user_data()?;
+        }
+        install_steps(&manager, managed, upgrade)
+    })();
     if result.is_err() {
         // Never leave the PC unprotected because an upgrade failed half-way.
         if let Some(old) = &existing {
@@ -205,11 +220,16 @@ fn install_steps(
     Ok(())
 }
 
-pub fn uninstall() -> anyhow::Result<()> {
+/// Remove the service. With `delete_data`, also delete what this PC kept of the owner: the data
+/// folder (settings, to-dos, life rules, the current task, records, the API key, the
+/// protection, logs) and each Windows account's Focus app folder (unsent setting drafts).
+/// Without it they stay, and installing again takes them up where they were.
+pub fn uninstall(delete_data: bool) -> anyhow::Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("cannot open the service manager — run this from an administrator terminal")?;
     match manager.open_service(SERVICE_NAME, service_access()) {
         Ok(service) => {
+            // Stopping the service also ends every agent, so no file stays open.
             stop_and_wait(&service)?;
             service.delete()?;
             println!("service removed");
@@ -217,12 +237,74 @@ pub fn uninstall() -> anyhow::Result<()> {
         Err(_) => println!("service was not installed"),
     }
     let _ = run(Command::new("reg").args(["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]));
-    println!(
-        "left in place: {} and {} (delete them by hand if you want)",
-        install_dir().display(),
-        machine::data_dir().display()
-    );
+    if !delete_data {
+        println!(
+            "kept: {} (the settings, to-dos and records; installing again uses them). {} stays until the uninstaller removes it",
+            machine::data_dir().display(),
+            install_dir().display()
+        );
+        return Ok(());
+    }
+    delete_user_data()
+}
+
+/// Delete what this PC kept of the owner: the data folder (settings, to-dos, life rules, the
+/// current task, records, the API key, the protection, logs) and each Windows account's Focus
+/// app folders (unsent setting drafts; older versions kept settings there).
+fn delete_user_data() -> anyhow::Result<()> {
+    let mut folders = vec![machine::data_dir()];
+    folders.extend(account_app_folders());
+    let mut failed = Vec::new();
+    for folder in folders.iter().filter(|folder| folder.exists()) {
+        match remove_folder(folder) {
+            Ok(()) => println!("deleted {}", folder.display()),
+            Err(error) => {
+                eprintln!("could not delete {}: {error}", folder.display());
+                failed.push(folder.display().to_string());
+            }
+        }
+    }
+    if !failed.is_empty() {
+        bail!("delete these by hand: {}", failed.join(", "));
+    }
     Ok(())
+}
+
+/// Each Windows account's `AppData\Local\DigitalWellbeing` and `AppData\Roaming\DigitalWellbeing`
+/// (the Focus app's drafts; older versions kept settings there).
+fn account_app_folders() -> Vec<PathBuf> {
+    let profiles = std::env::var_os("PUBLIC")
+        .map(PathBuf::from)
+        .and_then(|public| public.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users"));
+    let Ok(entries) = fs::read_dir(&profiles) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|profile| !is_reparse_point(profile))
+        .flat_map(|profile| {
+            ["Local", "Roaming"]
+                .map(|kind| profile.join("AppData").join(kind).join("DigitalWellbeing"))
+        })
+        .filter(|folder| folder.exists() && !is_reparse_point(folder))
+        .collect()
+}
+
+/// Delete `folder`, trying again for a few seconds while a file in it is still open.
+fn remove_folder(folder: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match fs::remove_dir_all(folder) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt >= 10 => return Err(error),
+            Err(_) => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+    }
 }
 
 /// Make `data` a fresh, trusted folder. On a first install anything already

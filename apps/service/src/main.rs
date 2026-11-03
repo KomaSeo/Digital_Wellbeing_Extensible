@@ -8,7 +8,7 @@
 //! | command     | who runs it                     | what it does                                   |
 //! |-------------|---------------------------------|------------------------------------------------|
 //! | `install`   | an administrator, once          | copy binaries, lock down data, register service |
-//! | `uninstall` | an administrator                | stop + remove the service                      |
+//! | `uninstall [--delete-data]` | an administrator | stop + remove the service; with the option also the owner's data |
 //! | `run`       | the Service Control Manager     | supervisor: keep one agent per managed session |
 //! | `agent`     | the supervisor (as SYSTEM)      | enforce rules inside one user's session        |
 //! | `sync-…`    | an administrator / the SCM      | multi-device sync (see `sync_commands`)        |
@@ -46,7 +46,11 @@ fn main() -> anyhow::Result<()> {
         #[cfg(windows)]
         Some("install") => install::install(&arguments[1..]),
         #[cfg(windows)]
-        Some("uninstall") => install::uninstall(),
+        Some("uninstall") => install::uninstall(
+            arguments[1..]
+                .iter()
+                .any(|argument| argument == "--delete-data"),
+        ),
         #[cfg(windows)]
         Some("run") => service::run_dispatcher(),
         Some(command) if command.starts_with("sync-") => {
@@ -56,8 +60,8 @@ fn main() -> anyhow::Result<()> {
         _ => {
             eprintln!(
                 "usage (from an administrator terminal):\n  \
-                 digital-wellbeing-service install [--manage <windows user>]... | [--manage-all]\n  \
-                 digital-wellbeing-service uninstall\n  \
+                 digital-wellbeing-service install [--manage <windows user>]... | [--manage-all] [--delete-data]\n  \
+                 digital-wellbeing-service uninstall [--delete-data]\n  \
                  digital-wellbeing-service sync-… (multi-device sync, see docs/sync.md)"
             );
             Ok(())
