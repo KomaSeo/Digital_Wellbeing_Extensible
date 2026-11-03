@@ -670,7 +670,38 @@ fn injection_attempts_are_rejected(session: u32) {
 
 /// The AI assistant tab: one sentence adds two to-dos, each reviewed by the app's AI as
 /// usual. With the real AI, a "give me something else" goes to the app's AI as a repick.
+///
+/// With the real AI this step sets its own rules and to-dos (none from an earlier step, and
+/// nothing that depends on the hour the test runs): the current task must be one that
+/// "the material has not come yet, I'm stuck" fits, or the assistant is right not to ask.
 fn the_assistant_does_what_the_user_says(session: u32, real: bool) {
+    if real {
+        let waiting_on_data = assign(
+            session,
+            &[
+                todo(
+                    "s-survey",
+                    "Analyze the lab survey results",
+                    "Due to the professor tonight. Uses the survey data file from a colleague.",
+                    Some(0),
+                    5,
+                ),
+                todo(
+                    "s-review",
+                    "Review a paper for the reading group",
+                    "Can be done any time this week.",
+                    Some(5),
+                    2,
+                ),
+            ],
+            "Work is fine at any hour; there are no fixed sleep or rest hours. Do the work that \
+             is due first.",
+        );
+        assert_eq!(
+            waiting_on_data, "s-survey",
+            "the work due today comes first, so being stuck on its data fits"
+        );
+    }
     let send = |text: &str| -> machine::assistant::AssistantView {
         let sent = call_value(session, "assistant_send", json!({ "text": text })).unwrap();
         assert_eq!(sent["busy"], true);
