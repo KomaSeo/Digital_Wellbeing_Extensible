@@ -27,6 +27,7 @@ mod help;
 mod reopen;
 mod settings;
 mod statistics;
+mod style;
 mod timetable;
 mod todo;
 mod tray;
@@ -58,7 +59,7 @@ fn main() -> eframe::Result<()> {
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([560.0, 680.0])
+            .with_inner_size([620.0, 780.0])
             .with_title(TITLE),
         ..Default::default()
     };
@@ -67,6 +68,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|creation_context| {
             rule_ui::install_system_fonts(&creation_context.egui_ctx);
+            style::apply(&creation_context.egui_ctx);
             Ok(Box::new(FocusApp::new(creation_context.egui_ctx.clone())))
         }),
     )
@@ -353,7 +355,7 @@ impl FocusApp {
     }
 
     fn access_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
-        ui.heading("앱이나 웹사이트가 필요한가요?");
+        crate::style::section(ui, "앱이나 웹사이트가 필요한가요?");
         if !status.session_active {
             ui.label("AI 검사가 멈춰 있으므로 따로 요청할 것이 없습니다.");
             return;
@@ -455,7 +457,7 @@ impl FocusApp {
 impl FocusApp {
     /// The Blocking tab: what the AI checks, what is blocked, and asking for access.
     fn blocking_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
-        ui.heading("AI 검사");
+        crate::style::section(ui, "AI 검사");
         if status.session_active {
             match status.last_check {
                 Some(at) => ui.label(format!(
@@ -470,8 +472,7 @@ impl FocusApp {
         if let Some(error) = &status.last_error {
             ui.colored_label(RED, format!("AI 검사가 실패했습니다: {error}"));
         }
-        ui.separator();
-        ui.heading("지금 걸린 차단");
+        crate::style::section(ui, "지금 걸린 차단");
         if status.blocked.is_empty() {
             ui.label("없습니다.");
         }
@@ -484,7 +485,6 @@ impl FocusApp {
             });
         }
 
-        ui.separator();
         self.access_ui(ui, status);
 
         ui.separator();
@@ -664,13 +664,10 @@ impl eframe::App for FocusApp {
                     }
                 };
                 if let Some(lockdown) = &status.lockdown {
-                    ui.colored_label(
-                        RED,
-                        egui::RichText::new(format!(
-                            "모든 앱과 웹사이트가 잠겨 있습니다. {}",
-                            lockdown.reason
-                        ))
-                        .strong(),
+                    style::notice(
+                        ui,
+                        style::Tone::Error,
+                        format!("모든 앱과 웹사이트가 잠겨 있습니다. {}", lockdown.reason),
                     );
                     ui.label(
                         "설정이 보호된 상태에서 AI 연결이 끊기면, 연결될 때까지 Claude Desktop과 \

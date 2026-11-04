@@ -13,21 +13,18 @@ use task_planner::{PlannerStatus, WeekPlan};
 impl FocusApp {
     /// The Statistics tab.
     pub(crate) fn statistics_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
-        ui.heading("통계");
+        crate::style::section(ui, "통계");
         ui.label(
             "이 탭은 앞으로 7일 동안 일이 얼마나 남았는지와 지난 기록을 보여 줍니다. 설정이나 할 \
              일은 여기서 바꾸지 않습니다.",
         );
         if let Some(planner) = status.planner.clone() {
-            ui.separator();
             self.week_ui(ui, &planner);
         }
 
-        ui.separator();
         self.timetable.ui(ui, self.session);
 
-        ui.separator();
-        ui.heading("AI 사용량");
+        crate::style::section(ui, "AI 사용량");
         if let Some(cost) = status.ai_cost_today_usd {
             ui.label(if status.daily_budget_usd > 0.0 {
                 format!(
@@ -46,15 +43,13 @@ impl FocusApp {
         }
 
         if let Some(planner) = status.planner.clone() {
-            ui.separator();
-            ui.heading("할 일");
+            crate::style::section(ui, "할 일");
             self.today_ui(ui, status, &planner);
             crate::todo::done_ui(ui, &planner);
             crate::todo::log_ui(ui, &planner);
         }
 
-        ui.separator();
-        ui.heading("최근 AI 판정");
+        crate::style::section(ui, "최근 AI 판정");
         if status.verdicts.is_empty() {
             ui.label("아직 판정이 없습니다.");
         }
@@ -89,7 +84,7 @@ impl FocusApp {
     /// This week: the work left by deadline (counted here, no AI), and the AI's overview of
     /// how much work each day needs and how much free time is left. No clock times.
     fn week_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
-        ui.heading("앞으로 7일");
+        crate::style::section(ui, "앞으로 7일");
         let today = Local::now().date_naive();
         let last_day = today + Duration::days(6);
         // Minutes still needed per to-do: its estimate minus the time already spent.

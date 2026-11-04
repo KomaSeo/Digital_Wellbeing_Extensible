@@ -96,7 +96,7 @@ fn minute_of_day(time: DateTime<Utc>) -> f32 {
 
 impl TimetableView {
     pub(crate) fn ui(&mut self, ui: &mut egui::Ui, session: u32) {
-        ui.heading("시간표");
+        crate::style::section(ui, "시간표");
         ui.label(
             "고른 기간에 어떤 할 일을 언제 했는지 보여 줍니다. 컴퓨터로 하는 일을 하는 동안 \
              5분 넘게 키보드와 마우스를 쓰지 않은 시간은 \"알 수 없음\"으로 나오고, 그동안은 \
