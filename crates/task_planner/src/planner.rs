@@ -37,10 +37,6 @@ use thiserror::Error;
 use tracing::info;
 
 const REQUEST_LOG_CAPACITY: usize = 50;
-/// Most proposals per day (each costs an AI call), and most approved
-/// proposals waiting on the list at once.
-const PROPOSALS_PER_DAY: usize = 30;
-const MAX_OPEN_PROPOSED: usize = 50;
 const MAX_TITLE_CHARS: usize = 120;
 const MAX_NOTES_CHARS: usize = 1000;
 const MIN_REASON_CHARS: usize = 4;
@@ -79,8 +75,6 @@ pub enum PlannerError {
     BadProposal,
     #[error("\"{0}\"은(는) 이미 목록에 있습니다")]
     Duplicate(String),
-    #[error("할 일 변경이 너무 많습니다: 하루 {PROPOSALS_PER_DAY}개, 남은 추가 할 일 {MAX_OPEN_PROPOSED}개까지입니다")]
-    TooManyProposals,
     #[error("\"{0}\"은(는) 일찍 끝낸 일을 다듬도록 앱이 만든 할 일입니다. 끝내거나 다듬기 시간을 다 쓰면 없어집니다")]
     MadeByTheApp(String),
     #[error("할 일 시간이 다 됐습니다. 먼저 끝냈는지 보고하세요(끝냈다 또는 다 못 했다)")]
@@ -555,15 +549,9 @@ impl TaskPlanner {
             .take(MAX_NOTES_CHARS)
             .collect::<String>();
         let open = self.open_todos();
+        // No count limit: what may be added or changed is the AI's call, by the owner's life
+        // rules and instructions (the AI also sees the recent to-do changes).
         let state = self.state.get();
-        let today = state
-            .todo_changes
-            .iter()
-            .filter(|record| now - record.at < Duration::days(1))
-            .count();
-        if today >= PROPOSALS_PER_DAY {
-            return Err(PlannerError::TooManyProposals);
-        }
         let change = clean_change(change, now)?;
         let target = match &change {
             TodoChange::Add { todo } => {
@@ -572,9 +560,6 @@ impl TaskPlanner {
                     .find(|existing| existing.title.trim().eq_ignore_ascii_case(&todo.title))
                 {
                     return Err(PlannerError::Duplicate(duplicate.title.clone()));
-                }
-                if open.iter().filter(|existing| existing.proposed).count() >= MAX_OPEN_PROPOSED {
-                    return Err(PlannerError::TooManyProposals);
                 }
                 None
             }
