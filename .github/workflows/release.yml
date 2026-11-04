@@ -22,6 +22,12 @@ on:
 permissions:
   contents: write
 
+# One run of a branch at a time: two runs replacing the release `sync-windows-latest` at once
+# would delete each other's files. A newer push waits for the running one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   windows:
     runs-on: windows-latest
