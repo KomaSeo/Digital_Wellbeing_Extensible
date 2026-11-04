@@ -6,7 +6,10 @@
 //! its own that the stopping service does not take down. The guard
 //! 1. closes every app in the users' sessions (browsers too) but Windows' own programs and the
 //!    always-allowed ones, every half second, like the "lock every app" lockdown;
-//! 2. runs the setup program silently (it keeps the owner's data);
+//! 2. runs the setup program silently (it keeps the owner's data), with this program's own
+//!    windows closed too: the Focus app (where the update was asked for) and the MCP server
+//!    Claude Desktop runs. The enforcer never closes them, and a program file in use makes
+//!    the silent setup give up (exit code 5). The setup's log goes to `logs\setup.log`;
 //! 3. starts the service if the setup left it stopped, waits until the new agents run, and
 //!    only then stops closing apps and records the outcome (`self_update.json`).
 //!
@@ -135,21 +138,59 @@ pub fn run(arguments: &[String]) -> anyhow::Result<()> {
 }
 
 /// Run the setup program silently (a silent setup keeps the owner's data).
+/// This program's own programs that run in the users' sessions and hold files the setup
+/// replaces (the enforcer never closes them).
+const OWN_USER_PROGRAMS: [&str; 3] = [
+    "digital-wellbeing-focus.exe",
+    "digital-wellbeing-mcp.exe",
+    "digital-wellbeing.exe",
+];
+
+/// Close this program's own windows and servers in every session.
+fn close_own_programs() {
+    let mut command = Command::new("taskkill.exe");
+    command.arg("/F");
+    for program in OWN_USER_PROGRAMS {
+        command.args(["/IM", program]);
+    }
+    // "Not found" is fine: nothing of ours was running.
+    let _ = command.creation_flags(CREATE_NO_WINDOW).output();
+}
+
 fn run_setup(setup: &Path) -> anyhow::Result<()> {
+    close_own_programs();
+    let log = machine::log_dir().join("setup.log");
     let mut child = Command::new(setup)
-        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"])
+        .args([
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/SP-",
+            "/CLOSEAPPLICATIONS",
+            "/FORCECLOSEAPPLICATIONS",
+        ])
+        .arg(format!("/LOG={}", log.display()))
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .with_context(|| format!("start {}", setup.display()))?;
     let started = Instant::now();
+    let mut closed_at = Instant::now();
     loop {
+        // Opened again while the setup runs (the Focus app starts at logon): closed again.
+        if closed_at.elapsed() > Duration::from_secs(2) {
+            close_own_programs();
+            closed_at = Instant::now();
+        }
         if let Some(status) = child.try_wait()? {
             if status.success() {
                 return Ok(());
             }
             // The service may be left stopped: start it again, the old version or the new.
             let _ = start_service();
-            anyhow::bail!("the setup program ended with {status}");
+            anyhow::bail!(
+                "the setup program ended with {status} (its log: {})",
+                log.display()
+            );
         }
         if started.elapsed() > SETUP_TIME_LIMIT {
             let _ = child.kill();
