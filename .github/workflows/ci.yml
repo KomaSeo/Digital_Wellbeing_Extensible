@@ -199,3 +199,20 @@ jobs:
           & $exe uninstall --delete-data
           if ($LASTEXITCODE -ne 0) { throw "final uninstall failed ($LASTEXITCODE)" }
           if (Test-Path $data) { throw "uninstall --delete-data left $data" }
+
+      # The setup page's option shuts the ways into safe mode; uninstall opens them again.
+      - name: Safe mode is shut and opened again
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "target\release\digital-wellbeing-service.exe"
+          & $exe install --manage-all --block-safe-mode
+          if ($LASTEXITCODE -ne 0) { throw "install --block-safe-mode failed ($LASTEXITCODE)" }
+          $boot = bcdedit /enum "{default}" | Out-String
+          Write-Host $boot
+          if ($boot -notmatch "recoveryenabled\s+No") { throw "the recovery screen was not turned off" }
+          & $exe uninstall --restore-safe-mode --delete-data
+          if ($LASTEXITCODE -ne 0) { throw "uninstall --restore-safe-mode failed ($LASTEXITCODE)" }
+          $boot = bcdedit /enum "{default}" | Out-String
+          Write-Host $boot
+          if ($boot -match "recoveryenabled\s+No") { throw "the recovery screen was not turned on again" }

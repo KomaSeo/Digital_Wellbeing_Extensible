@@ -131,8 +131,10 @@ fn bypass_guide(ui: &mut egui::Ui) {
          맡깁니다.",
         "• BIOS(UEFI)에 관리자 비밀번호를 걸고, USB와 네트워크 부팅을 끄고, Secure Boot를 켭니다. 디스크를 \
          빼서 읽는 것까지 막으려면 BitLocker로 암호화합니다.",
-        "• 안전 모드로 들어가는 길(Shift+다시 시작의 고급 시작 옵션)을 끕니다. 관리자 PowerShell에서 \
-         reagentc /disable과 bcdedit 명령을 실행합니다. 명령은 docs\\multi_account.md 4.4절에 있습니다.",
+        "• 안전 모드로 들어가는 길(Shift+다시 시작의 고급 시작 옵션)을 끕니다. 설치 프로그램의 \
+         \"안전 모드 막기\" 칸을 체크하면 설치하면서 끄고, 제거할 때 다시 켭니다. 직접 하려면 관리자 \
+         PowerShell에서 reagentc /disable과 bcdedit 명령을 실행합니다. 명령은 docs\\multi_account.md \
+         4.4절에 있습니다.",
         "• Microsoft 계정의 가족 기능이나 공유기에서 다른 기기(휴대폰)의 사용을 따로 막습니다. 이 프로그램은 \
          이 PC만 지킵니다.",
     ] {

@@ -307,7 +307,9 @@ BIOS(요즘 PC에서는 UEFI)는 Windows보다 먼저 실행되는 펌웨어 설
 안전 모드는 Windows를 최소한의 드라이버와 서비스로만 켜는 방식입니다. 안전 모드에서는 이 프로그램의 서비스가 시작되지 않습니다.
 표준 계정은 `msconfig`나 `bcdedit`로 다음 부팅을 안전 모드로 정할 수 없습니다. 그 일에는 관리자 권한이 필요하기 때문입니다.
 남은 길은 로그인 화면이나 시작 메뉴에서 Shift를 누른 채 "다시 시작"을 눌러 들어가는 **고급 시작 옵션**(Windows 복구 환경, WinRE)과, 부팅에 여러 번 실패하면 자동으로 뜨는 복구 화면입니다.
-관리자는 **관리자 권한 PowerShell**에서 다음 명령으로 이 길을 막습니다.
+**설치 프로그램으로 막기:** 설치 프로그램의 "안전 모드 막기 (선택)" 화면에서 체크 칸을 체크하면, 설치하면서 아래 명령을 실행합니다. 이 칸은 처음에 체크되어 있지 않고, 화면에 아래 "알아 둘 점"과 같은 경고가 나옵니다. 조용한 모드로 설치하면 막지 않습니다. 명령으로는 `install --manage-all --block-safe-mode`입니다.
+
+**직접 막기:** 관리자는 **관리자 권한 PowerShell**에서 다음 명령으로 이 길을 막습니다.
 
 ```powershell
 reagentc /disable                                          # Windows 복구 환경(WinRE)을 끕니다. Shift+다시 시작으로 안전 모드에 들어갈 수 없게 됩니다.
@@ -319,7 +321,7 @@ reagentc /info                                             # "Windows RE status:
 
 알아 둘 점:
 - WinRE를 끄면 "이 PC 초기화", 시스템 복원, 자동 복구도 쓸 수 없습니다. Windows가 고장 나면 관리자는 Windows 설치 USB로 복구해야 합니다. 그래서 관리자는 설치 USB를 미리 만들어 두는 편이 안전합니다.
-- 되돌리려면 관리자가 `reagentc /enable`과 `bcdedit /set "{default}" recoveryenabled Yes`, `bcdedit /deletevalue "{default}" bootstatuspolicy`, `bcdedit /set "{bootmgr}" displaybootmenu Yes`를 실행합니다.
+- 되돌리려면 관리자가 `reagentc /enable`과 `bcdedit /set "{default}" recoveryenabled Yes`, `bcdedit /deletevalue "{default}" bootstatuspolicy`, `bcdedit /deletevalue "{bootmgr}" displaybootmenu`를 실행합니다. 프로그램을 제거할 때 "안전 모드와 Windows 복구 환경을 다시 열기"(처음에 체크되어 있음)를 그대로 두면, 제거 프로그램이 이 명령들을 대신 실행합니다(6.3절).
 - 설치 USB로 부팅하면 복구 도구를 다시 쓸 수 있습니다. 그래서 2번(BIOS 비밀번호와 USB 부팅 끄기)을 함께 해야 이 길도 막힙니다.
 - 이 명령들은 사용자가 예전에 커뮤니티(Reddit)에서 찾은 방법을 개발자가 정리한 것입니다. 개발자는 이 명령들을 실제 PC에서 시험하지 않았습니다. 관리자는 실행하기 전에 중요한 파일을 백업합니다.
 
@@ -409,19 +411,21 @@ agent가 뜨지 않으면, 관리자는 관리자 계정에서 `C:\ProgramData\D
 
 이 절에서 **사용자 정보**는 이 PC에 남은 소유자의 정보를 말합니다. 사용자 정보에는 할 일 목록, 생활 규칙, 지금 할 일, 설정, 걸린 차단과 접근 허용, 통계 기록, Anthropic API 키, 설정 보호, 로그가 있습니다. 사용자 정보는 데이터 폴더(`C:\ProgramData\DigitalWellbeing`)에 있고, Focus 앱이 아직 적용하지 않은 설정 초안은 각 Windows 계정의 `AppData\Local\DigitalWellbeing`에 있습니다.
 
-**Windows의 "앱 제거"로 지울 때:** 관리자는 Windows 설정의 "앱"에서 Digital Wellbeing을 제거합니다. 제거 프로그램은 먼저 "이 PC에 남은 사용자 정보를 지울까요?"라고 묻습니다.
-- **아니요**(기본값): 사용자 정보를 남겨 둡니다. 나중에 다시 설치하면 서비스가 남은 데이터 폴더를 그대로 이어서 씁니다. 그래서 할 일 목록, 생활 규칙, API 키, 설정 보호가 그대로 돌아옵니다.
-- **예**: 데이터 폴더와 모든 Windows 계정의 `AppData\Local\DigitalWellbeing`, `AppData\Roaming\DigitalWellbeing`을 지웁니다. 지운 정보는 되돌릴 수 없습니다.
-- 제거 프로그램을 조용한 모드(`/VERYSILENT`)로 실행하면 물을 사람이 없으므로 사용자 정보를 남겨 둡니다.
+**Windows의 "앱 제거"로 지울 때:** 관리자는 Windows 설정의 "앱"에서 Digital Wellbeing을 제거합니다. 제거 프로그램은 먼저 체크 칸 두 개가 있는 창을 보여 줍니다.
+- **이 PC에 남은 사용자 정보도 지우기**(처음에 체크 해제): 체크하면 데이터 폴더와 모든 Windows 계정의 `AppData\Local\DigitalWellbeing`, `AppData\Roaming\DigitalWellbeing`을 지웁니다. 지운 정보는 되돌릴 수 없습니다. 체크하지 않으면 사용자 정보를 남겨 두고, 나중에 다시 설치하면 할 일 목록, 생활 규칙, API 키, 설정 보호가 그대로 돌아옵니다.
+- **안전 모드와 Windows 복구 환경을 다시 열기**(처음에 체크): 설치할 때 막은 안전 모드로 들어가는 길을 다시 엽니다(4.4절). 막은 적이 없어도 그대로 두면 됩니다.
+- **취소**를 누르면 제거하지 않습니다.
+- 제거 프로그램을 조용한 모드(`/VERYSILENT`)로 실행하면 물을 사람이 없으므로 사용자 정보는 남기고, 안전 모드는 다시 엽니다.
 
 **명령으로 지울 때:** 관리자는 관리자 권한 PowerShell에서 다음 명령을 입력합니다.
 
 ```powershell
 & "C:\Program Files\DigitalWellbeing\digital-wellbeing-service.exe" uninstall
 & "C:\Program Files\DigitalWellbeing\digital-wellbeing-service.exe" uninstall --delete-data
+& "C:\Program Files\DigitalWellbeing\digital-wellbeing-service.exe" uninstall --restore-safe-mode
 ```
 
-첫 번째 명령은 서비스와 Focus 앱 자동 실행 등록을 지우고, 사용자 정보는 남겨 둡니다. 두 번째 명령은 그와 함께 사용자 정보도 지웁니다. 두 명령 모두 프로그램 폴더는 지우지 않습니다. 프로그램 폴더는 Windows의 "앱 제거"가 지웁니다.
+첫 번째 명령은 서비스와 Focus 앱 자동 실행 등록을 지우고, 사용자 정보는 남겨 둡니다. 두 번째 명령은 그와 함께 사용자 정보도 지웁니다. 세 번째 명령은 안전 모드로 들어가는 길도 다시 엽니다. 옵션은 함께 쓸 수 있습니다. 세 명령 모두 프로그램 폴더는 지우지 않습니다. 프로그램 폴더는 Windows의 "앱 제거"가 지웁니다.
 
 동기화를 쓰는 PC에서 사용자 정보를 지워도 동기화 서버의 정보는 남습니다.
 
