@@ -159,7 +159,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "schedule_settings_update",
-            "description": "Schedule an update of one settings file: send the whole new file (start from get_settings). Accepted only once the settings are protected. The update takes effect only after the user answers \"is this update really right?\" with yes in the app three times, two days apart (the first question comes two days from now); one no rejects it. Edits that make the rules stricter (blocking more, allowing less, checking more closely) take effect at once; the others become the scheduled update. Start from files_with_scheduled_updates in get_settings: leaving out a change that is already scheduled withdraws it, and changing it replaces the scheduled update and its confirmations start over; tell the user.",
+            "description": "Change or schedule an update of one settings file: send the whole new file (start from get_settings). In the setup stage (the settings are not protected yet) every change takes effect at once, like the Settings tab's Apply. Once the settings are protected, the update takes effect only after the user answers \"is this update really right?\" with yes in the app three times, two days apart (the first question comes two days from now); one no rejects it. Edits that make the rules stricter (blocking more, allowing less, checking more closely) take effect at once; the others become the scheduled update. Start from files_with_scheduled_updates in get_settings: leaving out a change that is already scheduled withdraws it, and changing it replaces the scheduled update and its confirmations start over; tell the user.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -507,14 +507,9 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                 return Err("content must be the whole settings file (an object)".into());
             }
             let current = agent("settings_get", json!({}))?;
-            if current["protected"] != json!(true) {
-                return Err(
-                    "the settings are not protected yet (setup): the user changes them \
-                            in the app's Settings tab; an assistant can schedule updates once \
-                            they are protected"
-                        .into(),
-                );
-            }
+            // In the setup stage the change takes effect at once, as the Settings tab's Apply
+            // does: anyone may change anything then, so an assistant may as well.
+            let protected = current["protected"] == json!(true);
             if name == "ai_focus" && content.get("api_key").is_none() {
                 content["api_key"] = current["files"]["ai_focus"]["api_key"].clone();
             }
@@ -524,7 +519,11 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
             )?;
             Ok(pretty(&json!({
                 "scheduled": outcome,
-                "note": "It takes effect only after the user confirms it in the app three times, two days apart.",
+                "note": if protected {
+                    "Stricter edits are in force now; the others take effect only after the user confirms them in the app three times, two days apart."
+                } else {
+                    "Setup stage (the settings are not protected yet): every edit is in force now."
+                },
             })))
         }
         other => Err(format!("unknown tool '{other}'")),
@@ -591,4 +590,41 @@ pub fn summary(status: &Status) -> Value {
 
 pub fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// In the setup stage a settings change goes through (and is in force at once); once the
+    /// settings are protected it still goes to the agent, which schedules what is looser.
+    #[test]
+    fn settings_can_be_changed_in_the_setup_stage_too() {
+        for protected in [false, true] {
+            let put = RefCell::new(Vec::new());
+            let agent = |method: &str, params: Value| -> Result<Value, String> {
+                match method {
+                    "settings_get" => Ok(
+                        json!({ "protected": protected, "files": { "ai_focus": { "api_key": "kept" } } }),
+                    ),
+                    "settings_put" => {
+                        put.borrow_mut().push(params);
+                        Ok(json!({ "applied": [], "scheduled": null }))
+                    }
+                    other => Err(format!("unexpected {other}")),
+                }
+            };
+            let reply = call_tool(
+                "schedule_settings_update",
+                &json!({ "name": "planner", "content": { "life_rules": "Rest on Sundays." } }),
+                &agent,
+                "test",
+            )
+            .unwrap();
+            assert_eq!(put.borrow().len(), 1, "{reply}");
+            assert_eq!(put.borrow()[0]["content"]["life_rules"], "Rest on Sundays.");
+            assert_eq!(reply.contains("Setup stage"), !protected, "{reply}");
+        }
+    }
 }

@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_updates_are_scheduled_only_once_protected_and_keep_the_key() {
+    fn settings_updates_are_accepted_in_setup_and_once_protected_and_keep_the_key() {
         let protected = RefCell::new(false);
         let seen = RefCell::new(Vec::new());
         let agent = |method: &str, params: Value| {
@@ -246,25 +246,18 @@ mod tests {
             )
             .unwrap()
         };
-        // Setup: refused, nothing is written.
-        assert_eq!(
-            schedule(json!({ "model": "other" }))["result"]["isError"],
-            true
-        );
-        assert!(seen
-            .borrow()
-            .iter()
-            .all(|(method, _)| method == "settings_get"));
-
-        *protected.borrow_mut() = true;
-        assert_ne!(
-            schedule(json!({ "model": "other" }))["result"]["isError"],
-            true
-        );
-        let (method, params) = seen.borrow().last().unwrap().clone();
-        assert_eq!(method, "settings_put");
-        assert_eq!(params["via"], "claude desktop");
-        assert_eq!(params["content"]["api_key"], "secret");
+        // Setup stage and protected settings alike: the update reaches the agent, key kept.
+        for is_protected in [false, true] {
+            *protected.borrow_mut() = is_protected;
+            assert_ne!(
+                schedule(json!({ "model": "other" }))["result"]["isError"],
+                true
+            );
+            let (method, params) = seen.borrow().last().unwrap().clone();
+            assert_eq!(method, "settings_put");
+            assert_eq!(params["via"], "claude desktop");
+            assert_eq!(params["content"]["api_key"], "secret");
+        }
 
         // The key is never shown to the assistant.
         let read = handle(
