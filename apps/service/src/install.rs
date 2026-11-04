@@ -62,11 +62,16 @@ pub fn install_dir() -> PathBuf {
 /// `install [--manage <user>]... | [--manage-all] [--delete-data]`: with `--delete-data`, the
 /// owner's data an earlier install left ([`delete_user_data`]) is deleted first, and the PC
 /// starts from nothing; without it, the data is kept.
+///
+/// With `--block-safe-mode`, the ways into safe mode are also shut ([`block_safe_mode`]).
 pub fn install(arguments: &[String]) -> anyhow::Result<()> {
     let delete_data = arguments.iter().any(|argument| argument == "--delete-data");
+    let block_safe = arguments
+        .iter()
+        .any(|argument| argument == "--block-safe-mode");
     let arguments: Vec<String> = arguments
         .iter()
-        .filter(|argument| *argument != "--delete-data")
+        .filter(|argument| *argument != "--delete-data" && *argument != "--block-safe-mode")
         .cloned()
         .collect();
     let managed = parse_manage(&arguments)?;
@@ -91,6 +96,9 @@ pub fn install(arguments: &[String]) -> anyhow::Result<()> {
         }
         install_steps(&manager, managed, upgrade)
     })();
+    if result.is_ok() && block_safe {
+        block_safe_mode();
+    }
     if result.is_err() {
         // Never leave the PC unprotected because an upgrade failed half-way.
         if let Some(old) = &existing {
@@ -259,7 +267,8 @@ fn install_steps(
 /// folder (settings, to-dos, life rules, the current task, records, the API key, the
 /// protection, logs) and each Windows account's Focus app folder (unsent setting drafts).
 /// Without it they stay, and installing again takes them up where they were.
-pub fn uninstall(delete_data: bool) -> anyhow::Result<()> {
+/// With `restore_safe_mode`, the ways into safe mode are opened again ([`restore_safe_mode`]).
+pub fn uninstall(delete_data: bool, restore_safe: bool) -> anyhow::Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("cannot open the service manager — run this from an administrator terminal")?;
     match manager.open_service(SERVICE_NAME, service_access()) {
@@ -272,6 +281,9 @@ pub fn uninstall(delete_data: bool) -> anyhow::Result<()> {
         Err(_) => println!("service was not installed"),
     }
     let _ = run(Command::new("reg").args(["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]));
+    if restore_safe {
+        restore_safe_mode();
+    }
     if !delete_data {
         println!(
             "kept: {} (the settings, to-dos and records; installing again uses them). {} stays until the uninstaller removes it",
@@ -338,6 +350,47 @@ fn remove_folder(folder: &Path) -> std::io::Result<()> {
                 attempt += 1;
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
+        }
+    }
+}
+
+/// Shut the ways into safe mode, where this program's service does not start (the commands
+/// of `docs/multi_account.md` 4.4): the Windows recovery environment (Shift + restart), the
+/// recovery screen after failed starts, and the boot menu. Each one that fails is reported and
+/// the rest still run; the install does not fail for them.
+fn block_safe_mode() {
+    run_each(&[
+        &["reagentc", "/disable"],
+        &["bcdedit", "/set", "{default}", "recoveryenabled", "No"],
+        &[
+            "bcdedit",
+            "/set",
+            "{default}",
+            "bootstatuspolicy",
+            "IgnoreAllFailures",
+        ],
+        &["bcdedit", "/set", "{bootmgr}", "displaybootmenu", "No"],
+    ]);
+    println!("the ways into safe mode are shut (undo: uninstall --restore-safe-mode)");
+}
+
+/// Open the ways into safe mode again: what [`block_safe_mode`] changed goes back to Windows'
+/// own settings. Harmless on a PC where they were never shut.
+fn restore_safe_mode() {
+    run_each(&[
+        &["reagentc", "/enable"],
+        &["bcdedit", "/set", "{default}", "recoveryenabled", "Yes"],
+        &["bcdedit", "/deletevalue", "{default}", "bootstatuspolicy"],
+        &["bcdedit", "/deletevalue", "{bootmgr}", "displaybootmenu"],
+    ]);
+    println!("the ways into safe mode are open again");
+}
+
+fn run_each(commands: &[&[&str]]) {
+    for command in commands {
+        let (program, arguments) = command.split_first().expect("a command");
+        if let Err(error) = run(Command::new(program).args(arguments)) {
+            println!("warning: {error:#}");
         }
     }
 }

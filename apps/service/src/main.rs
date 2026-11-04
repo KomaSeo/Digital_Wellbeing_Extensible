@@ -8,7 +8,7 @@
 //! | command     | who runs it                     | what it does                                   |
 //! |-------------|---------------------------------|------------------------------------------------|
 //! | `install`   | an administrator, once          | copy binaries, lock down data, register service |
-//! | `uninstall [--delete-data]` | an administrator | stop + remove the service; with the option also the owner's data |
+//! | `uninstall [--delete-data] [--restore-safe-mode]` | an administrator | stop + remove the service; optionally the owner's data, and open safe mode again |
 //! | `run`       | the Service Control Manager     | supervisor: keep one agent per managed session |
 //! | `agent`     | the supervisor (as SYSTEM)      | enforce rules inside one user's session        |
 //! | `self-update-guard <setup>` | the service (a copy in the data folder) | install an update while every app stays closed (`update_guard`) |
@@ -53,6 +53,9 @@ fn main() -> anyhow::Result<()> {
             arguments[1..]
                 .iter()
                 .any(|argument| argument == "--delete-data"),
+            arguments[1..]
+                .iter()
+                .any(|argument| argument == "--restore-safe-mode"),
         ),
         #[cfg(windows)]
         Some("run") => service::run_dispatcher(),
@@ -79,8 +82,8 @@ fn main() -> anyhow::Result<()> {
         _ => {
             eprintln!(
                 "usage (from an administrator terminal):\n  \
-                 digital-wellbeing-service install [--manage <windows user>]... | [--manage-all] [--delete-data]\n  \
-                 digital-wellbeing-service uninstall [--delete-data]"
+                 digital-wellbeing-service install [--manage <windows user>]... | [--manage-all] [--delete-data] [--block-safe-mode]\n  \
+                 digital-wellbeing-service uninstall [--delete-data] [--restore-safe-mode]"
             );
             Ok(())
         }
