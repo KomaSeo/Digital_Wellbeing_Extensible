@@ -9,7 +9,8 @@
 //! During setup a save takes effect at once. Once protected (`settings_protect`, one way) the
 //! agent puts the stricter edits in force at once and schedules the looser ones; the tab says
 //! which is which before and after saving. Scheduled updates are asked about here
-//! (`settings_answer`: three "yes" answers put one in force, one "no" rejects it) and can be
+//! (`settings_answer`: the set number of "yes" answers, by default three, put one in force;
+//! one "no" rejects it) and can be
 //! withdrawn (`settings_withdraw`). The to-do list itself is edited in the To-do tab.
 //! Rules: `machine::settings`, `machine::setting_edits`; guide: `docs/multi_account.md` 6.4.
 
@@ -21,8 +22,7 @@ use list_based_rule::ListConfig;
 use machine::lockdown::Lockdown;
 use machine::setting_edits::{self, Direction, Edit};
 use machine::settings::{
-    AnswerOutcome, PutOutcome, Reservation, ReservationOrigin, SettingsSnapshot, APPROVALS_NEEDED,
-    EDITABLE,
+    AnswerOutcome, PutOutcome, Reservation, ReservationOrigin, SettingsSnapshot, EDITABLE,
 };
 use machine::system_care::{CareStatus, UpdateOutcome};
 use machine::user_api::call_value;
@@ -36,8 +36,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use task_planner::{
-    PlannerConfig, APPOINTMENT_PROMPT, EXTENSION_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT,
-    REVIEW_PROMPT, WEEK_PLAN_PROMPT,
+    Confirmations, PlannerConfig, APPOINTMENT_PROMPT, EXTENSION_PROMPT, PICK_PROMPT,
+    PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
 };
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
@@ -217,6 +217,17 @@ const PROGRAM_UPDATES: Block = Block {
     paths: &[&["updatable_programs"], &["auto_update_programs"]],
     has_default: true,
 };
+const CONFIRMATIONS: Block = Block {
+    id: "confirmations",
+    file: "planner",
+    paths: &[
+        &["confirmations", "settings_times"],
+        &["confirmations", "settings_interval_hours"],
+        &["confirmations", "todo_change_times"],
+        &["confirmations", "todo_change_interval_hours"],
+    ],
+    has_default: true,
+};
 const TIME_ZONE: Block = Block {
     id: "time_zone",
     file: "ai_focus",
@@ -224,7 +235,7 @@ const TIME_ZONE: Block = Block {
     has_default: false,
 };
 /// Every group; an edit outside them (such as a timestamp) is not the user's.
-const BLOCKS: [&Block; 22] = [
+const BLOCKS: [&Block; 23] = [
     &API_KEY,
     &MODEL,
     &BUDGET,
@@ -246,6 +257,7 @@ const BLOCKS: [&Block; 22] = [
     &PRIVATE_APPS,
     &BROWSERS,
     &PROGRAM_UPDATES,
+    &CONFIRMATIONS,
     &TIME_ZONE,
 ];
 
@@ -393,11 +405,14 @@ impl SettingsTab {
         self.refresh();
         crate::style::section(ui, "설정 보호(잠금)");
         if protected {
+            let numbers = self.numbers_in_force();
+            let every = interval_text(numbers.settings_interval_seconds());
             ui.label(format!(
                 "설정이 보호되어 있습니다. 규칙을 더 엄격하게 만드는 변경은 바로 적용됩니다. 그 밖의 \
-                 변경은 예약되고, 이틀 뒤부터 \"이 업데이트가 정말 맞나요?\"라는 질문이 옵니다. 이틀 \
-                 간격으로 {APPROVALS_NEEDED}번 연속 \"예\"라고 답하면 적용되고, 한 번이라도 \
-                 \"아니요\"라고 답하면 거절됩니다."
+                 변경은 예약되고, {every} 뒤부터 \"이 업데이트가 정말 맞나요?\"라는 질문이 옵니다. \
+                 {every} 간격으로 {}번 연속 \"예\"라고 답하면 적용되고, 한 번이라도 \"아니요\"라고 \
+                 답하면 거절됩니다. 이 횟수와 간격은 \"시스템\"의 \"확인 횟수와 간격\"에서 바꿉니다.",
+                numbers.settings_times()
             ));
             self.unlock_ui(ui, protection, sync);
         } else {
@@ -451,6 +466,17 @@ impl SettingsTab {
         self.autosave(ui.ctx());
     }
 
+    /// The confirmation numbers in force (the defaults until the settings are fetched).
+    pub(crate) fn numbers_in_force(&self) -> Confirmations {
+        self.latest
+            .as_ref()
+            .map(|snapshot| {
+                from_value::<PlannerConfig>(snapshot.files.get("planner").unwrap_or(&Value::Null))
+                    .confirmations
+            })
+            .unwrap_or_default()
+    }
+
     /// The settings as last fetched (fetched again when due), for the Statistics tab.
     pub(crate) fn latest_snapshot(&mut self) -> Option<SettingsSnapshot> {
         self.refresh();
@@ -493,10 +519,14 @@ impl SettingsTab {
             crate::style::Tone::Warning,
             "설정 단계: 변경이 바로 적용되고, 이 PC를 쓰는 누구나 설정을 바꿀 수 있습니다.",
         );
+        let numbers = self.numbers_in_force();
         ui.label(format!(
             "모두 정했으면 설정을 보호하세요. 그 뒤로는 규칙을 더 엄격하게 만드는 변경만 바로 \
-             적용되고, 그 밖의 변경은 이틀 간격으로 {APPROVALS_NEEDED}번 확인해야 적용됩니다. 보호를 \
-             풀면 설정 단계로 돌아가고, 걸린 차단도 모두 풀립니다."
+             적용되고, 그 밖의 변경은 {} 간격으로 {}번 확인해야 적용됩니다(횟수와 간격은 \
+             \"시스템\"의 \"확인 횟수와 간격\"에서 바꿉니다). 보호를 풀면 설정 단계로 돌아가고, \
+             걸린 차단도 모두 풀립니다.",
+            interval_text(numbers.settings_interval_seconds()),
+            numbers.settings_times()
         ));
         ui.label("보호를 어떻게 풀 수 있게 할지 고르세요.");
         ui.radio_value(
@@ -1404,6 +1434,67 @@ impl SettingsTab {
         self.care_fetched_at = None;
     }
 
+    /// How many "yes" answers a scheduled update needs, and how far apart the questions are.
+    fn confirmations_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &SettingsSnapshot,
+        protected: bool,
+    ) {
+        crate::style::section(ui, "확인 횟수와 간격");
+        ui.small(
+            "설정을 보호한 뒤에 규칙을 느슨하게 만드는 변경은 예약되고, 아래 간격마다 \"이 \
+             업데이트가 정말 맞나요?\"라고 묻습니다. 아래 횟수만큼 연속으로 \"예\"라고 답해야 \
+             적용됩니다. 횟수를 늘리거나 간격을 늘리는 변경은 바로 적용되고, 줄이는 변경은 지금의 \
+             횟수와 간격으로 확인해야 적용됩니다. 이미 예약된 업데이트는 예약할 때의 횟수와 \
+             간격을 그대로 씁니다.",
+        );
+        if let Some(drafts) = &mut self.drafts {
+            let numbers = &mut drafts.planner.confirmations;
+            egui::Grid::new("confirmations")
+                .num_columns(3)
+                .show(ui, |ui| {
+                    ui.label("");
+                    ui.strong("확인 횟수");
+                    ui.strong("질문 간격(시간)");
+                    ui.end_row();
+                    ui.label("설정 업데이트");
+                    ui.add(
+                        egui::DragValue::new(&mut numbers.settings_times)
+                            .range(Confirmations::TIMES_RANGE)
+                            .suffix("번"),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut numbers.settings_interval_hours)
+                            .range(Confirmations::HOURS_RANGE)
+                            .suffix("시간"),
+                    );
+                    ui.end_row();
+                    ui.label("AI 없이 하는 할 일 변경");
+                    ui.add(
+                        egui::DragValue::new(&mut numbers.todo_change_times)
+                            .range(Confirmations::TIMES_RANGE)
+                            .suffix("번"),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut numbers.todo_change_interval_hours)
+                            .range(Confirmations::HOURS_RANGE)
+                            .suffix("시간"),
+                    );
+                    ui.end_row();
+                });
+            ui.small(format!(
+                "지금 고른 값: 설정 업데이트는 {} 간격으로 {}번, 할 일 변경은 {} 간격으로 {}번 \
+                 묻습니다. 기본값은 이틀(48시간) 간격으로 3번, 2시간 간격으로 3번입니다.",
+                interval_text(numbers.settings_interval_seconds()),
+                numbers.settings_times(),
+                interval_text(numbers.todo_change_interval_seconds()),
+                numbers.todo_change_times()
+            ));
+        }
+        self.block_bar(ui, &CONFIRMATIONS, snapshot, protected);
+    }
+
     fn system_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
         if self
             .care_fetched_at
@@ -1431,6 +1522,7 @@ impl SettingsTab {
         };
 
         self.self_update_ui(ui);
+        self.confirmations_ui(ui, snapshot, protected);
 
         crate::style::section(ui, "프로그램 업데이트");
         ui.small(
@@ -1810,20 +1902,17 @@ impl SettingsTab {
                 ReservationOrigin::Settings => file_name(&reservation.name).to_string(),
                 ReservationOrigin::TodoChange => "할 일 변경".to_string(),
             };
-            let every = if reservation.interval_seconds >= 24 * 3600 {
-                format!("{}일", reservation.interval_seconds / (24 * 3600))
-            } else {
-                format!("{}시간", (reservation.interval_seconds / 3600).max(1))
-            };
+            let every = interval_text(reservation.interval_seconds);
             ui.group(|ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
                     ui.strong(&what);
                     ui.label(format!(
-                        "{} 예약 · 예약한 곳: {} · {}/{APPROVALS_NEEDED}번 확인 · {every}마다 질문",
+                        "{} 예약 · 예약한 곳: {} · {}/{}번 확인 · {every}마다 질문",
                         local(reservation.scheduled_at),
                         via_label(&reservation.via),
-                        reservation.approvals.len()
+                        reservation.approvals.len(),
+                        reservation.approvals_needed
                     ));
                 });
                 if !reservation.note.is_empty() {
@@ -1866,10 +1955,11 @@ impl SettingsTab {
 
     /// "이 업데이트가 정말 맞나요?" with yes and no. Returns whether it was answered.
     fn question_ui(&mut self, ui: &mut egui::Ui, reservation: &Reservation, what: &str) -> bool {
+        let needed = reservation.approvals_needed;
         ui.colored_label(
             RED,
             format!(
-                "{what}의 이 업데이트가 정말 맞나요? ({}/{APPROVALS_NEEDED}번째 질문)",
+                "{what}의 이 업데이트가 정말 맞나요? ({}/{needed}번째 질문)",
                 reservation.approvals.len() + 1
             ),
         );
@@ -1900,12 +1990,12 @@ impl SettingsTab {
                 next_question_at,
             }) => {
                 self.message = format!(
-                    "{what}: {approvals}/{APPROVALS_NEEDED}번 확인했습니다. 다음 질문: {}.",
+                    "{what}: {approvals}/{needed}번 확인했습니다. 다음 질문: {}.",
                     local(next_question_at)
                 )
             }
             Ok(AnswerOutcome::Applied) => {
-                self.message = format!("{what}: {APPROVALS_NEEDED}번 확인되어 지금 적용되었습니다.")
+                self.message = format!("{what}: {needed}번 확인되어 지금 적용되었습니다.")
             }
             Ok(AnswerOutcome::Rejected) => {
                 self.message = format!("{what}: 업데이트를 거절했습니다.")
@@ -1913,6 +2003,17 @@ impl SettingsTab {
             Err(error) => self.error = error,
         }
         true
+    }
+}
+
+/// `48 * 3600` → "이틀", `72 * 3600` → "3일", `5 * 3600` → "5시간".
+pub(crate) fn interval_text(seconds: i64) -> String {
+    let hours = (seconds / 3600).max(1);
+    match hours {
+        24 => "하루".to_string(),
+        48 => "이틀".to_string(),
+        _ if hours % 24 == 0 => format!("{}일", hours / 24),
+        _ => format!("{hours}시간"),
     }
 }
 

@@ -759,7 +759,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
         }
         "todo_change_schedule" => {
             // The user's way around an AI that said no (or could not answer): the change
-            // takes effect after three confirmations, two hours apart.
+            // takes effect after the to-do change confirmations set in the settings.
             let planner = api.planner.as_ref().ok_or("no task planner")?;
             let id = params["id"].as_str().ok_or("params.id required")?;
             let record = planner
@@ -787,7 +787,6 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 "planner",
                 todo_list_edits(&planner.writes_for(&record)),
                 &record.via,
-                crate::settings::TODO_QUESTION_INTERVAL_SECONDS,
                 &note,
             )?;
             planner

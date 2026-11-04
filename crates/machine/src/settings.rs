@@ -1,6 +1,7 @@
 //! Responsibility: Let users edit the settings through their agent; once the settings are
-//! protected, keep every edit as a scheduled update that takes effect only after the user
-//! confirmed it three times, two days apart; and turn the protection on (one way).
+//! protected, keep every looser edit as a scheduled update that takes effect only after the
+//! user confirmed it the number of times set in `planner.json` (`confirmations`; by default
+//! three times, two days apart); and turn the protection on (one way).
 //!
 //! The settings (`policy.json`, `ai_focus.json`, `planner.json` — the last one also holds the
 //! planner's AI instructions and the life rules) sit in the data folder, which only SYSTEM and
@@ -14,13 +15,14 @@
 //! - **protected** ([`protect`], one way; nothing in the program turns it off): a saved file
 //!   is split into edits ([`crate::setting_edits`]). Edits that make the rules stricter (block
 //!   more, allow less, check more closely) take effect at once. The others are kept as a
-//!   scheduled update ([`Reservation`], `settings_reservations.json`). Two days after it was
-//!   scheduled the Focus app asks "is this update really right?"; each "yes" ([`answer`])
-//!   brings the next question two days after the answer, and the third "yes" in a row puts
-//!   it in force. One "no" rejects it. A question waits until it is answered. Saving the same
+//!   scheduled update ([`Reservation`], `settings_reservations.json`). The set interval (by
+//!   default two days) after it was scheduled the Focus app asks "is this update really
+//!   right?"; each "yes" ([`answer`]) brings the next question the same interval after the
+//!   answer, and the set number of "yes" answers in a row (by default three) puts it in
+//!   force. The update keeps the numbers in force when it was scheduled. One "no" rejects it. A question waits until it is answered. Saving the same
 //!   file again with other looser edits replaces the scheduled update and starts over.
 //! - A to-do change the AI rejected can be scheduled the same way ([`schedule`]), with
-//!   questions two hours apart.
+//!   with its own numbers (by default three questions, two hours apart).
 //!
 //! So a change made in an irrational moment cannot take effect before the user has stood by
 //! it on three different days. (Windows cannot stop an administrator account from deleting
@@ -44,8 +46,9 @@ pub const EDITABLE: [(&str, &str); 3] = [
     ("planner", "planner.json"),
 ];
 
-/// "Yes" answers in a row that put a scheduled update in force.
-pub const APPROVALS_NEEDED: usize = 3;
+/// "Yes" answers in a row that put a scheduled update in force, for updates scheduled by
+/// versions that did not record their own number.
+const OLD_APPROVALS_NEEDED: usize = 3;
 
 pub(crate) const PROTECTION_FILE: &str = "settings_protection.json";
 const RESERVATIONS_FILE: &str = "settings_reservations.json";
@@ -56,10 +59,17 @@ const OLD_PENDING_FILE: &str = "settings_pending.json";
 const HISTORY_CAPACITY: usize = 50;
 
 /// Time between scheduling a settings update and its first question, and between an answer
-/// and the next question.
-pub const SETTINGS_QUESTION_INTERVAL_SECONDS: i64 = 2 * 24 * 3600;
-/// The same for a to-do change the AI rejected and the user scheduled anyway.
-pub const TODO_QUESTION_INTERVAL_SECONDS: i64 = 2 * 3600;
+/// and the next question, for updates of versions that did not record their own.
+const SETTINGS_QUESTION_INTERVAL_SECONDS: i64 = 2 * 24 * 3600;
+
+/// The confirmation numbers in force (`planner.json`'s `confirmations`).
+pub fn confirmations(data_directory: &Path) -> task_planner::Confirmations {
+    serde_json::from_value::<task_planner::PlannerConfig>(read_json(
+        &data_directory.join(file_of("planner").expect("planner is editable")),
+    ))
+    .map(|planner| planner.confirmations)
+    .unwrap_or_default()
+}
 
 /// `DW_SETTINGS_CONFIRM_INTERVAL_SECONDS` replaces every interval, for tests; only an
 /// administrator can set the service's environment.
@@ -84,6 +94,10 @@ fn write_lock() -> std::sync::MutexGuard<'static, ()> {
 
 fn settings_interval() -> i64 {
     SETTINGS_QUESTION_INTERVAL_SECONDS
+}
+
+fn old_approvals_needed() -> usize {
+    OLD_APPROVALS_NEEDED
 }
 
 /// Responsibility: Record when the settings were protected, and how the protection may end.
@@ -188,9 +202,13 @@ pub struct Reservation {
     pub approvals: Vec<DateTime<Utc>>,
     #[serde(default)]
     pub origin: ReservationOrigin,
-    /// Seconds between questions: two days for settings, two hours for a to-do change.
+    /// Seconds between questions (by default two days for settings, two hours for a to-do
+    /// change), as set when it was scheduled.
     #[serde(default = "settings_interval")]
     pub interval_seconds: i64,
+    /// "Yes" answers that put it in force (by default three), as set when it was scheduled.
+    #[serde(default = "old_approvals_needed")]
+    pub approvals_needed: usize,
     /// What the user wrote about it (a to-do change's request and reason).
     #[serde(default)]
     pub note: String,
@@ -221,11 +239,11 @@ impl Reservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReservationOutcome {
-    /// Confirmed three times: in force.
+    /// Confirmed the needed number of times: in force.
     Applied,
     /// The user answered "no".
     Rejected,
-    /// The user withdrew it before it was answered three times.
+    /// The user withdrew it before it was confirmed enough times.
     Withdrawn,
     /// The same file was saved again; the newer update replaced this one.
     Replaced,
@@ -556,13 +574,18 @@ pub fn put(
         None => {}
     }
     if !looser.is_empty() {
+        // The numbers in force now, stricter edits of them included.
+        let numbers = confirmations(data_directory);
         let reservation = new_reservation(
             now,
             name,
             looser,
             via,
             ReservationOrigin::Settings,
-            SETTINGS_QUESTION_INTERVAL_SECONDS,
+            (
+                numbers.settings_interval_seconds(),
+                numbers.settings_times(),
+            ),
             "",
         );
         outcome.scheduled = Some(ScheduledUpdate {
@@ -599,14 +622,13 @@ fn apply_edits(data_directory: &Path, name: &str, edits: &[Edit]) -> Result<(), 
 }
 
 /// Schedule `edits` of `name` as their own update (a to-do change the AI did not approve),
-/// asked about every `interval_seconds`. Returns the update.
+/// confirmed as the to-do change numbers in force say. Returns the update.
 pub fn schedule(
     data_directory: &Path,
     now: DateTime<Utc>,
     name: &str,
     edits: Vec<Edit>,
     via: &str,
-    interval_seconds: i64,
     note: &str,
 ) -> Result<ScheduledUpdate, String> {
     let _write = write_lock();
@@ -615,13 +637,17 @@ pub fn schedule(
     setting_edits::apply(&mut preview, &edits);
     validate(name, &preview)?;
     let mut reservations = read_reservations(data_directory);
+    let numbers = confirmations(data_directory);
     let mut reservation = new_reservation(
         now,
         name,
         edits,
         via,
         ReservationOrigin::TodoChange,
-        interval_seconds,
+        (
+            numbers.todo_change_interval_seconds(),
+            numbers.todo_change_times(),
+        ),
         note,
     );
     // Two in the same millisecond would share an id.
@@ -648,7 +674,7 @@ fn new_reservation(
     edits: Vec<Edit>,
     via: &str,
     origin: ReservationOrigin,
-    interval_seconds: i64,
+    (interval_seconds, approvals_needed): (i64, usize),
     note: &str,
 ) -> Reservation {
     Reservation {
@@ -660,6 +686,7 @@ fn new_reservation(
         approvals: Vec::new(),
         origin,
         interval_seconds,
+        approvals_needed,
         note: note.trim().chars().take(500).collect(),
         content: None,
     }
@@ -698,7 +725,8 @@ pub fn answer(
         return Ok(AnswerOutcome::Rejected);
     }
     reservations.scheduled[index].approvals.push(now);
-    if reservations.scheduled[index].approvals.len() < APPROVALS_NEEDED {
+    let approvals_needed = reservations.scheduled[index].approvals_needed.max(1);
+    if reservations.scheduled[index].approvals.len() < approvals_needed {
         let reservation = &reservations.scheduled[index];
         let outcome = AnswerOutcome::Approved {
             approvals: reservation.approvals.len(),
@@ -800,7 +828,7 @@ fn read_reservations(data_directory: &Path) -> Reservations {
                 Vec::new(),
                 "settings tab (older version)",
                 ReservationOrigin::Settings,
-                SETTINGS_QUESTION_INTERVAL_SECONDS,
+                (SETTINGS_QUESTION_INTERVAL_SECONDS, OLD_APPROVALS_NEEDED),
                 "",
             );
             reservation.id = format!("u{}{}", pending.saved_at.timestamp_millis(), name.len());
@@ -1485,7 +1513,6 @@ mod tests {
             "planner",
             edits,
             "to-do tab",
-            TODO_QUESTION_INTERVAL_SECONDS,
             "add: the AI said no",
         )
         .unwrap();
@@ -1514,6 +1541,94 @@ mod tests {
             .unwrap();
         }
         assert_eq!(in_force(&data_directory, "planner")["todos"], json!([todo]));
+    }
+
+    #[test]
+    fn the_confirmation_numbers_come_from_the_settings_and_loosening_them_is_confirmed_too() {
+        let data_directory = temp_dir("numbers");
+        let start = Utc::now();
+        let numbers = |settings_times: u32, settings_hours: u32| {
+            json!({ "confirmations": {
+                "settings_times": settings_times, "settings_interval_hours": settings_hours,
+                "todo_change_times": 2, "todo_change_interval_hours": 5,
+            } })
+        };
+        // Setup: one question a day for settings updates.
+        put(&data_directory, start, "planner", &numbers(1, 24), "", &[]).unwrap();
+        protect(&data_directory, start, ProtectionChoice::Permanent).unwrap();
+
+        // Asking more often is stricter: in force now.
+        let mut stricter = numbers(2, 24);
+        stricter["life_rules"] = json!("games ok");
+        let outcome = put(
+            &data_directory,
+            start,
+            "planner",
+            &stricter,
+            "settings tab",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(confirmations(&data_directory).settings_times(), 2);
+        // The life rules are scheduled with the numbers now in force: twice, a day apart.
+        let scheduled = outcome.scheduled.expect("life rules are scheduled");
+        assert_eq!(scheduled.first_question_at, start + Duration::hours(24));
+        let reservations = snapshot(&data_directory).unwrap().reservations.scheduled;
+        assert_eq!(reservations[0].approvals_needed, 2);
+        answer(
+            &data_directory,
+            start + Duration::hours(24),
+            &scheduled.id,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            answer(
+                &data_directory,
+                start + Duration::hours(48),
+                &scheduled.id,
+                true
+            )
+            .unwrap(),
+            AnswerOutcome::Applied
+        );
+
+        // Asking less often is looser: scheduled like any looser edit.
+        let later = start + Duration::days(3);
+        let outcome = put(
+            &data_directory,
+            later,
+            "planner",
+            &{
+                let mut looser = numbers(2, 1);
+                looser["life_rules"] = json!("games ok");
+                looser
+            },
+            "settings tab",
+            &[],
+        )
+        .unwrap();
+        assert!(outcome.scheduled.is_some());
+        assert_eq!(
+            confirmations(&data_directory).settings_interval_seconds(),
+            24 * 3600
+        );
+
+        // A to-do change uses its own numbers.
+        let scheduled = schedule(
+            &data_directory,
+            later,
+            "planner",
+            vec![Edit::PutListItem {
+                path: vec!["todos".into()],
+                id: "t1".into(),
+                item: Some(json!({ "id": "t1", "title": "Read" })),
+            }],
+            "to-do tab",
+            "",
+        )
+        .unwrap();
+        assert_eq!(scheduled.first_question_at, later + Duration::hours(5));
     }
 
     #[test]

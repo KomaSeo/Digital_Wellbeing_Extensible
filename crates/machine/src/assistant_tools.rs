@@ -23,8 +23,9 @@ the user asks for it (get_my_task). Tasks done away from the computer (sleep, ex
 lock every app until they are reported, and appointments (add_appointment; the app's AI \
 accepts them by the owner's appointment rules) replace the task at their time; leaving \
 either early needs an urgent reason. A \
-scheduled settings update takes effect only after the user confirms it in the app three \
-times, two days apart; tell the user that, and never press them to confirm.";
+scheduled settings update takes effect only after the user confirms it in the app as often \
+and as far apart as the settings say (planner's confirmations; by default three times, two \
+days apart); tell the user that, and never press them to confirm.";
 
 /// Responsibility: Reach the agent (the real one in production, a fake in tests).
 pub type Agent<'a> = &'a dyn Fn(&str, Value) -> Result<Value, String>;
@@ -159,7 +160,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "schedule_settings_update",
-            "description": "Change or schedule an update of one settings file: send the whole new file (start from get_settings). In the setup stage (the settings are not protected yet) every change takes effect at once, like the Settings tab's Apply. Once the settings are protected, the update takes effect only after the user answers \"is this update really right?\" with yes in the app three times, two days apart (the first question comes two days from now); one no rejects it. Edits that make the rules stricter (blocking more, allowing less, checking more closely) take effect at once; the others become the scheduled update. Start from files_with_scheduled_updates in get_settings: leaving out a change that is already scheduled withdraws it, and changing it replaces the scheduled update and its confirmations start over; tell the user.",
+            "description": "Change or schedule an update of one settings file: send the whole new file (start from get_settings). In the setup stage (the settings are not protected yet) every change takes effect at once, like the Settings tab's Apply. Once the settings are protected, the update takes effect only after the user answers \"is this update really right?\" with yes in the app as many times and as far apart as the planner file's confirmations say (settings_times answers, settings_interval_hours apart; by default three times, 48 hours apart; the first question comes one interval from now); one no rejects it. More answers or longer intervals are stricter; fewer or shorter are looser. Edits that make the rules stricter (blocking more, allowing less, checking more closely) take effect at once; the others become the scheduled update. Start from files_with_scheduled_updates in get_settings: leaving out a change that is already scheduled withdraws it, and changing it replaces the scheduled update and its confirmations start over; tell the user.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -517,12 +518,19 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                 "settings_put",
                 json!({ "name": name, "content": content, "via": via }),
             )?;
+            let numbers: task_planner::Confirmations =
+                serde_json::from_value(current["files"]["planner"]["confirmations"].clone())
+                    .unwrap_or_default();
             Ok(pretty(&json!({
                 "scheduled": outcome,
                 "note": if protected {
-                    "Stricter edits are in force now; the others take effect only after the user confirms them in the app three times, two days apart."
+                    format!(
+                        "Stricter edits are in force now; the others take effect only after the user confirms them in the app {} times, {} hours apart.",
+                        numbers.settings_times(),
+                        numbers.settings_interval_seconds() / 3600
+                    )
                 } else {
-                    "Setup stage (the settings are not protected yet): every edit is in force now."
+                    "Setup stage (the settings are not protected yet): every edit is in force now.".to_string()
                 },
             })))
         }

@@ -392,6 +392,11 @@ pub fn direction(name: &str, edit: &Edit, in_force: &Value) -> Direction {
         // An id no longer blocked is dropped from the list: that lifts nothing.
         ("ai_focus", ["unblocked"]) => removing_is_stricter(),
         ("planner", ["enabled"]) => true_is_stricter(),
+        // More answers, and more time between the questions, make a looser edit harder.
+        ("planner", ["confirmations", _]) => match (old_number, new_number) {
+            (Some(old_value), Some(new_value)) if new_value >= old_value => Stricter,
+            _ => Looser,
+        },
         _ => Looser,
     }
 }

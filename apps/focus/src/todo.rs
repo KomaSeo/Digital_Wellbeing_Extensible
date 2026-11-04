@@ -6,7 +6,8 @@
 //! The app runs all day; the user-facing name of the AI checks is "daily wellbeing".
 //! Every change of the list goes to the planner's AI (`todo_change`); when it says no or
 //! cannot answer, the user may schedule the change anyway (`todo_change_schedule`), which
-//! takes effect after three confirmations two hours apart (Settings tab). Notes and steps
+//! takes effect after the to-do change confirmations set in the Settings tab (by default three,
+//! two hours apart). Notes and steps
 //! change nothing the rules depend on and are saved at once (`task_notes_put`).
 
 use crate::{ChangeChoice, FocusApp, Tab, GREEN, RED};
@@ -1038,16 +1039,16 @@ impl FocusApp {
         }
         match &record.scheduled_update {
             Some(_) => {
-                ui.small("예약됨: 설정 탭이 두 시간 간격으로 세 번 묻습니다.");
+                ui.small("예약됨: 설정 탭이 정해진 간격으로 정해진 횟수만큼 묻습니다.");
             }
             None => {
-                if ui
-                    .add_enabled(
-                        idle,
-                        egui::Button::new("AI 없이 하기(두 시간 간격으로 세 번 확인)"),
-                    )
-                    .clicked()
-                {
+                let numbers = self.settings.numbers_in_force();
+                let label = format!(
+                    "AI 없이 하기({} 간격으로 {}번 확인)",
+                    crate::settings::interval_text(numbers.todo_change_interval_seconds()),
+                    numbers.todo_change_times()
+                );
+                if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
                     self.send("todo_change_schedule", json!({ "id": record.id }));
                 }
             }

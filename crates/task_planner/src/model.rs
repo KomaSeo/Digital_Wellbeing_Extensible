@@ -103,8 +103,8 @@ pub struct AppointmentInput {
 /// Responsibility: Hold the admin's planner settings and to-do list (planner.json).
 ///
 /// Part of the settings (`planner.json`): edited in the Focus app's Settings tab (while the
-/// settings are protected, an edit takes effect only after three confirmations two days
-/// apart), never by a planner request.
+/// settings are protected, a looser edit takes effect only after the confirmations set in
+/// [`Confirmations`]), never by a planner request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlannerConfig {
@@ -130,6 +130,65 @@ pub struct PlannerConfig {
     pub dismissed: BTreeSet<String>,
     /// The instructions the planner's AI follows; empty texts mean the built-in ones.
     pub instructions: PlannerInstructions,
+    /// How often, and how far apart, a scheduled update is confirmed before it takes effect.
+    pub confirmations: Confirmations,
+}
+
+/// Responsibility: Hold how many "yes" answers a scheduled update needs, and the hours
+/// between its questions: one pair for settings updates, one for to-do changes the user
+/// makes without the AI.
+///
+/// Kept in planner.json (a protected settings file) so that, like every setting, loosening it
+/// is itself a scheduled update confirmed under the numbers in force.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Confirmations {
+    /// "Yes" answers a settings update needs.
+    pub settings_times: u32,
+    /// Hours from scheduling a settings update to its first question, and between questions.
+    pub settings_interval_hours: u32,
+    /// "Yes" answers a to-do change the AI did not approve needs.
+    pub todo_change_times: u32,
+    /// Hours between the questions about such a to-do change.
+    pub todo_change_interval_hours: u32,
+}
+
+impl Confirmations {
+    /// The fewest and most answers; fewer than one would be no confirmation at all.
+    pub const TIMES_RANGE: std::ops::RangeInclusive<u32> = 1..=10;
+    /// One hour to 60 days.
+    pub const HOURS_RANGE: std::ops::RangeInclusive<u32> = 1..=1440;
+
+    pub fn settings_times(&self) -> usize {
+        clamp(self.settings_times, Self::TIMES_RANGE) as usize
+    }
+
+    pub fn settings_interval_seconds(&self) -> i64 {
+        i64::from(clamp(self.settings_interval_hours, Self::HOURS_RANGE)) * 3600
+    }
+
+    pub fn todo_change_times(&self) -> usize {
+        clamp(self.todo_change_times, Self::TIMES_RANGE) as usize
+    }
+
+    pub fn todo_change_interval_seconds(&self) -> i64 {
+        i64::from(clamp(self.todo_change_interval_hours, Self::HOURS_RANGE)) * 3600
+    }
+}
+
+impl Default for Confirmations {
+    fn default() -> Self {
+        Self {
+            settings_times: 3,
+            settings_interval_hours: 48,
+            todo_change_times: 3,
+            todo_change_interval_hours: 2,
+        }
+    }
+}
+
+fn clamp(value: u32, range: std::ops::RangeInclusive<u32>) -> u32 {
+    value.clamp(*range.start(), *range.end())
 }
 
 /// Responsibility: Hold the owner's own versions of the planner's three AI instructions.

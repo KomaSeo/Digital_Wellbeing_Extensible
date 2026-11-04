@@ -121,7 +121,8 @@ impl Panel for PlannerAdminUi {
             "Standing rules the AI follows when it picks a task, reviews a change and \
              reviews a to-do the user proposes. They can be changed only here (or scheduled from \
              Claude Desktop); once the settings are protected, a change takes effect only after \
-             you confirm it three times, two days apart.",
+             you confirm it as often and as far apart as the settings say (by default three \
+             times, two days apart).",
         );
         draft.dirty |= ui
             .add(

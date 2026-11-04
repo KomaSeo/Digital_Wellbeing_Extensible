@@ -6,9 +6,10 @@
 //! call to [`machine::user_api`], the same API the Focus app uses, so the assistant gains no
 //! power the user does not already have. A proposed to-do joins the list only if the agent's
 //! own AI approves it against the owner's life rules. The assistant may also schedule an
-//! update of the settings (life rules, the planner's AI instructions, any other setting) once
-//! they are protected; such an update takes effect only after the user answered "is this
-//! update really right?" with yes three times, two days apart, in the Focus app. No tool
+//! update of the settings (life rules, the planner's AI instructions, any other setting): in
+//! the setup stage it takes effect at once; once they are protected, such an update takes effect only after the user answered "is this
+//! update really right?" with yes as often and as far apart as the settings say (by default
+//! three times, two days apart), in the Focus app. No tool
 //! answers that question.
 //!
 //! Setup and tool reference (Korean): `docs/claude_desktop.md`.

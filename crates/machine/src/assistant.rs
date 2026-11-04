@@ -60,7 +60,8 @@ leisure that could happen any time is a to-do. The app's AI decides whether to a
 appointment by the owner's appointment rules. Leave away_from_computer out unless the \
 user said; the app's AI judges it.
 - A scheduled settings update takes effect only after the user confirms it in the app's \
-Settings tab three times, two days apart. Tell the user that, and never press them to \
+Settings tab as often and as far apart as the settings say (planner's confirmations; by \
+default three times, two days apart). Tell the user that, and never press them to \
 confirm.
 - You cannot pick the next task, lift a block directly, turn off the settings \
 protection, answer the confirmation questions of a scheduled update, push a rejected \
