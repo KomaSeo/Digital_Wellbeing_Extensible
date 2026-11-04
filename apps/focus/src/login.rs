@@ -4,6 +4,8 @@
 //!
 //! The first time the Focus app opens on a PC that does not sync, it asks first whether to
 //! join a sync server (log in / sign up / later) before anything else ([`LoginForm::welcome_ui`]).
+//! Once the PC joined with an account, every Windows account of the PC uses that login
+//! without logging in again (`machine::login::login_of`).
 //!
 //! Signing up and logging in run the service's `sync-login` with administrator approval
 //! ([`crate::elevate::run_sync_login`]). Logging out is refused while the settings are
@@ -333,6 +335,19 @@ impl LoginForm {
         let Some(user) = &login.user else {
             return;
         };
+        // Every Windows account of a PC joined with an account uses that login: there is
+        // nothing to log out of (leaving the server is `sync-leave`).
+        let this_pc_account = sync
+            .and_then(|sync| sync.account.as_deref())
+            .map(|account| account.trim().to_lowercase());
+        if this_pc_account.as_deref() == Some(user.as_str()) {
+            ui.label(format!(
+                "이 PC는 \"{user}\"로 동기화 서버에 붙어 있어서, 이 PC의 모든 Windows 계정이 \
+                 \"{user}\"로 로그인됩니다."
+            ));
+            self.message_ui(ui);
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("이 Windows 계정은 \"{user}\"로 로그인했습니다."));
             if !settings_protected && ui.button("로그아웃").clicked() {

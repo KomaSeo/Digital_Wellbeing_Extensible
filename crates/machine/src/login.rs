@@ -3,9 +3,13 @@
 //!
 //! - The logins (`users.json`) come from the sync server; only its administrator makes them
 //!   (`sync-add-user`). Without sync there are none, and nothing here changes anything.
-//! - `logins.json` (this PC only) says which login each Windows account used. The Focus app
-//!   logs in once per account, with administrator approval (the service's `sync-login`); the
-//!   agent then starts again with the login's files.
+//! - A PC joined to the sync server with an account (`sync.json`) uses that account's login
+//!   for every Windows account of the PC: one PC is one person (the owner's request), so no
+//!   account has to log in again.
+//! - `logins.json` (this PC only) says which login a Windows account chose instead (from
+//!   versions that asked every account to log in, or a PC paired with a code). The Focus app
+//!   logs in with administrator approval (the service's `sync-login`); the agent then starts
+//!   again with the login's files.
 //! - While the settings are protected, an account cannot log out.
 //! - Once the settings are protected, an account that has not logged in is locked (every
 //!   app) until it does: otherwise not logging in would be a way around the shared blocks.
@@ -94,14 +98,27 @@ pub fn users(data_directory: &Path) -> Users {
     read(&data_directory.join(USERS_DOCUMENT))
 }
 
-/// The login `windows_user` uses, if it still exists.
+/// The login `windows_user` uses, if it still exists: the one it logged in with, or else the
+/// account this PC joined the sync server with.
 pub fn login_of(data_directory: &Path, windows_user: &str) -> Option<String> {
     let logins: Logins = read(&data_directory.join(LOGINS_FILE));
+    let users = users(data_directory);
     logins
         .accounts
         .get(&account_key(windows_user))
-        .filter(|name| users(data_directory).contains(name))
         .cloned()
+        .filter(|name| users.contains(name))
+        .or_else(|| this_pc_account(data_directory).filter(|name| users.contains(name)))
+}
+
+/// The account this PC joined the sync server with (`sync.json`), lower case; none when it
+/// does not sync or was paired with a code.
+pub fn this_pc_account(data_directory: &Path) -> Option<String> {
+    let config: serde_json::Value = read(&data_directory.join("sync.json"));
+    config["account"]["name"]
+        .as_str()
+        .map(|name| name.trim().to_lowercase())
+        .filter(|name| !name.is_empty())
 }
 
 /// Whose files `windows_user` uses: its login, or else the Windows account.
@@ -120,26 +137,22 @@ fn signature(path: &Path) -> FileSignature {
 
 /// The last [`status`] and what it was read from. The lockdown asks several times a second,
 /// and the two files change only on a login, a logout or a sync.
-type StatusCache = Option<(
-    std::path::PathBuf,
-    FileSignature,
-    FileSignature,
-    bool,
-    LoginStatus,
-)>;
+type StatusCache = Option<(std::path::PathBuf, [FileSignature; 3], bool, LoginStatus)>;
 static STATUS_CACHE: std::sync::Mutex<StatusCache> = std::sync::Mutex::new(None);
 
 pub fn status(data_directory: &Path) -> LoginStatus {
-    let users_signature = signature(&data_directory.join(USERS_DOCUMENT));
-    let logins_signature = signature(&data_directory.join(LOGINS_FILE));
+    let signatures = [
+        signature(&data_directory.join(USERS_DOCUMENT)),
+        signature(&data_directory.join(LOGINS_FILE)),
+        signature(&data_directory.join("sync.json")),
+    ];
     let session_known = SESSION_USER.get().is_some();
     let mut cache = STATUS_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some((folder, users_seen, logins_seen, session_seen, cached)) = cache.as_ref() {
+    if let Some((folder, signatures_seen, session_seen, cached)) = cache.as_ref() {
         if folder == data_directory
-            && *users_seen == users_signature
-            && *logins_seen == logins_signature
+            && *signatures_seen == signatures
             && *session_seen == session_known
         {
             return cached.clone();
@@ -153,8 +166,7 @@ pub fn status(data_directory: &Path) -> LoginStatus {
     };
     *cache = Some((
         data_directory.to_path_buf(),
-        users_signature,
-        logins_signature,
+        signatures,
         session_known,
         fresh.clone(),
     ));
@@ -237,6 +249,39 @@ mod tests {
         std::fs::remove_file(&protection).unwrap();
         log_out(&folder, "work").unwrap();
         assert_eq!(profile_for(&folder, "work"), "work");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn every_windows_account_of_a_joined_pc_uses_the_pcs_login() {
+        let folder = std::env::temp_dir().join(format!("dw_login_pc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut users = Users::default();
+        users.add("me").unwrap();
+        users.add("friend").unwrap();
+        std::fs::write(
+            folder.join(USERS_DOCUMENT),
+            serde_json::to_string(&users).unwrap(),
+        )
+        .unwrap();
+        // Paired with a code: no account, so an account that did not log in has none.
+        std::fs::write(folder.join("sync.json"), r#"{"server_url":"http://x"}"#).unwrap();
+        assert_eq!(login_of(&folder, "admin"), None);
+        // Joined with the account "Me": every Windows account uses it.
+        std::fs::write(
+            folder.join("sync.json"),
+            r#"{"server_url":"http://x","account":{"name":"Me"}}"#,
+        )
+        .unwrap();
+        assert_eq!(login_of(&folder, "admin").as_deref(), Some("me"));
+        assert_eq!(profile_for(&folder, r"PC\Work"), "me");
+        // A login an account chose itself still wins.
+        assign(&folder, "work", "friend").unwrap();
+        assert_eq!(profile_for(&folder, "work"), "friend");
+        // A login the server no longer has does not count.
+        std::fs::write(folder.join(USERS_DOCUMENT), r#"{"users":[]}"#).unwrap();
+        assert_eq!(profile_for(&folder, "admin"), "admin");
         let _ = std::fs::remove_dir_all(&folder);
     }
 }
