@@ -798,7 +798,9 @@ fn the_week_plan_is_an_overview_of_this_week(session: u32) {
     slides["estimate_minutes"] = json!(120);
     let mut walk = todo("w-walk", "Take a 30-minute walk", "Rest.", None, 2);
     walk["estimate_minutes"] = json!(30);
-    assign(
+    // Only the overview is asked for: no task is assigned, so the sleep hours in the rules
+    // shape the plan whatever hour the test runs.
+    load_planner(
         session,
         &[thesis, slides, walk],
         "Sleep from 23:00 to 7:00. At most 6 hours of focused work a day.",
@@ -909,9 +911,8 @@ fn todo(id: &str, title: &str, notes: &str, due_in_days: Option<i64>, priority: 
     json!({ "id": id, "title": title, "notes": notes, "deadline": deadline, "priority": priority })
 }
 
-/// Turn the planner on with `todos` and `life_rules`, ask the AI what to do now, print its
-/// choice and return the chosen to-do's id.
-fn assign(session: u32, todos: &[Value], life_rules: &str) -> String {
+/// Turn the planner on with `todos` and `life_rules`, and wait until the agent has them.
+fn load_planner(session: u32, todos: &[Value], life_rules: &str) {
     call_value(
         session,
         "settings_put",
@@ -926,6 +927,12 @@ fn assign(session: u32, todos: &[Value], life_rules: &str) -> String {
         (planner.active && planner.open_todos.iter().any(|todo| todo.id == first)).then_some(())
     })
     .expect("the agent picked up the planner settings");
+}
+
+/// [`load_planner`], then ask the AI what to do now, print its choice and return the chosen
+/// to-do's id.
+fn assign(session: u32, todos: &[Value], life_rules: &str) -> String {
+    load_planner(session, todos, life_rules);
     let status = call(session, "assign", json!({})).unwrap();
     let assignment = status
         .planner
