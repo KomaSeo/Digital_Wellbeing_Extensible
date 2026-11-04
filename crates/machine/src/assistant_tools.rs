@@ -62,7 +62,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "change_todo",
-            "description": "Ask to edit or remove an open to-do (ids from get_status). The app's AI reviews the reason against the owner's life rules; an approved change takes effect at once. For an edit, give only the fields that change. When the AI says no, tell the user its reason; only the user, in the app, can push a rejected change through.",
+            "description": "Ask to edit or remove an open to-do (ids from get_status). In the setup stage (the settings are not protected yet) the change takes effect at once without review. Once they are protected, the app's AI reviews the reason against the owner's life rules; an approved change takes effect at once. For an edit, give only the fields that change. When the AI says no, tell the user its reason; only the user, in the app, can push a rejected change through.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

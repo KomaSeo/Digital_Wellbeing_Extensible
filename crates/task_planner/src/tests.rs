@@ -645,6 +645,56 @@ fn bad_duplicate_and_reasonless_changes_are_refused_without_asking_the_ai() {
 }
 
 #[test]
+fn in_the_setup_stage_edits_and_removals_need_neither_the_ai_nor_a_reason() {
+    // An AI that says no to everything: it must not be asked.
+    let fixture = harness(true, &["a", "b"]);
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let edit = TodoChange::Edit {
+        todo_id: "a".into(),
+        todo: ProposalInput {
+            priority: Some(1),
+            ..Default::default()
+        },
+    };
+    let record = fixture
+        .planner
+        .todo_change_without_review(Utc::now(), edit, "", "to-do tab")
+        .unwrap();
+    assert!(record.approved && !record.ai_failed);
+    assert_eq!(record.after.unwrap().priority, 1);
+    let remove = TodoChange::Remove {
+        todo_id: "b".into(),
+    };
+    let record = fixture
+        .planner
+        .todo_change_without_review(Utc::now(), remove, "", "to-do tab")
+        .unwrap();
+    assert!(record.approved);
+    assert_eq!(
+        fixture.planner.writes_for(&record),
+        [TodoListWrite::Remove("b".into())]
+    );
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+    // An unknown to-do is still refused, and an addition still goes to the AI.
+    let remove_unknown = TodoChange::Remove {
+        todo_id: "zzz".into(),
+    };
+    assert!(matches!(
+        fixture
+            .planner
+            .todo_change_without_review(Utc::now(), remove_unknown, "", "x")
+            .unwrap_err(),
+        PlannerError::UnknownTodo(_)
+    ));
+    let record = fixture
+        .planner
+        .todo_change_without_review(Utc::now(), add("Play games"), "", "to-do tab")
+        .unwrap();
+    assert!(!record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn edits_and_removals_write_the_list_or_hide_an_older_proposed_todo() {
     let fixture = harness(true, &["a", "b"]);
     let edit = TodoChange::Edit {

@@ -44,6 +44,9 @@ pub struct TodoUiState {
     /// The to-do the user is asking to remove, and why.
     removing: Option<String>,
     remove_reason: String,
+    /// The settings are not protected yet: editing and removing a to-do take effect at once,
+    /// without the AI (set each frame from the status).
+    without_review: bool,
     /// Notes and steps being edited, for this to-do.
     notes_for: Option<String>,
     notes: TaskNotes,
@@ -170,6 +173,7 @@ impl TodoForm {
 impl FocusApp {
     /// The To-do tab.
     pub(crate) fn todo_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
+        self.todo_ui.without_review = !status.settings_protected;
         if status.settings_questions_due > 0 {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(
@@ -772,17 +776,26 @@ impl FocusApp {
                 }
             });
             if self.todo_ui.removing.as_deref() == Some(todo.id.as_str()) {
+                let without_review = self.todo_ui.without_review;
                 ui.add(
                     egui::TextEdit::singleline(&mut self.todo_ui.remove_reason)
                         .desired_width(f32::INFINITY)
-                        .hint_text("왜 지우나요? AI가 정합니다"),
+                        .hint_text(if without_review {
+                            "이유(선택) — 설정 단계라서 AI 없이 바로 지워집니다"
+                        } else {
+                            "왜 지우나요? AI가 정합니다"
+                        }),
                 );
                 ui.horizontal(|ui| {
-                    let ready = idle && self.todo_ui.remove_reason.trim().chars().count() >= 4;
-                    if ui
-                        .add_enabled(ready, egui::Button::new("지우기 요청"))
-                        .clicked()
-                    {
+                    let ready = idle
+                        && (without_review
+                            || self.todo_ui.remove_reason.trim().chars().count() >= 4);
+                    let label = if without_review {
+                        "지우기"
+                    } else {
+                        "지우기 요청"
+                    };
+                    if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
                         self.send(
                             "todo_change",
                             json!({
@@ -886,7 +899,11 @@ impl FocusApp {
                         .iter()
                         .find(|todo| &todo.id == todo_id)
                         .map_or(todo_id.as_str(), |todo| todo.title.as_str());
-                    ui.strong(format!("\"{title}\" 고치기 — AI가 심사합니다"));
+                    if self.todo_ui.without_review {
+                        ui.strong(format!("\"{title}\" 고치기 — 설정 단계라서 바로 적용됩니다"));
+                    } else {
+                        ui.strong(format!("\"{title}\" 고치기 — AI가 심사합니다"));
+                    }
                 }
                 None => {
                     ui.strong("할 일 추가 — 비워 둔 칸은 AI가 채웁니다");
@@ -946,10 +963,10 @@ impl FocusApp {
                 ui.add(
                     egui::TextEdit::singleline(&mut form.reason)
                         .desired_width(320.0)
-                        .hint_text(if editing.is_some() {
-                            "왜 고치나요? AI가 정합니다"
-                        } else {
-                            "선택"
+                        .hint_text(match (&editing, self.todo_ui.without_review) {
+                            (Some(_), false) => "왜 고치나요? AI가 정합니다",
+                            (Some(_), true) => "선택 — 설정 단계라서 AI 없이 바로 고쳐집니다",
+                            (None, _) => "선택",
                         }),
                 );
                 ui.end_row();
@@ -966,7 +983,9 @@ impl FocusApp {
                 && !bad_deadline
                 && match &editing {
                     None => form.title.trim().chars().count() >= 2,
-                    Some(_) => form.reason.trim().chars().count() >= 4,
+                    Some(_) => {
+                        self.todo_ui.without_review || form.reason.trim().chars().count() >= 4
+                    }
                 };
             let change = match &editing {
                 None => json!({ "kind": "add", "todo": form.draft() }),
@@ -976,9 +995,14 @@ impl FocusApp {
             };
             let reason = form.reason.trim().to_string();
             let mut close = false;
+            let send_label = if editing.is_some() && self.todo_ui.without_review {
+                "바로 고치기"
+            } else {
+                "AI에게 보내기"
+            };
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(ready, egui::Button::new("AI에게 보내기"))
+                    .add_enabled(ready, egui::Button::new(send_label))
                     .clicked()
                 {
                     self.send("todo_change", json!({ "change": change, "reason": reason }));

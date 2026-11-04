@@ -712,11 +712,17 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             };
             let via = params["via"].as_str().unwrap_or("to-do tab");
             let reason = params["reason"].as_str().unwrap_or_default();
-            let record = planner
-                .review_todo_change(Utc::now(), change, reason, via)
-                .map_err(|error| error.to_string())?;
+            // In the setup stage anyone may change anything at once, so editing and removing
+            // a to-do needs no AI there (the owner's request); additions still go to the AI,
+            // which also fills in the new to-do.
+            let record = if crate::settings::is_protected(&data_directory) {
+                planner.review_todo_change(Utc::now(), change, reason, via)
+            } else {
+                planner.todo_change_without_review(Utc::now(), change, reason, via)
+            }
+            .map_err(|error| error.to_string())?;
             if record.approved {
-                // Approved by the AI: in force at once, protected or not.
+                // Approved (by the AI, or in the setup stage): in force at once.
                 crate::settings::apply_now(
                     &data_directory,
                     "planner",

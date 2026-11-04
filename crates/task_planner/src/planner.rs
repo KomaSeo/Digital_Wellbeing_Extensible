@@ -539,6 +539,36 @@ impl TaskPlanner {
         reason: &str,
         via: &str,
     ) -> Result<TodoChangeRecord, PlannerError> {
+        self.todo_change_with(now, change, reason, via, TodoChangeReview::ByTheAi)
+    }
+
+    /// Edit or remove an open to-do without the AI's review, approved at once and logged like
+    /// a reviewed change; the caller puts it in force. For the setup stage (the settings are
+    /// not protected yet), when anyone may change anything anyway. An addition or an
+    /// appointment still goes to the AI ([`Self::review_todo_change`]).
+    pub fn todo_change_without_review(
+        &self,
+        now: DateTime<Utc>,
+        change: TodoChange,
+        reason: &str,
+        via: &str,
+    ) -> Result<TodoChangeRecord, PlannerError> {
+        self.todo_change_with(now, change, reason, via, TodoChangeReview::None)
+    }
+
+    fn todo_change_with(
+        &self,
+        now: DateTime<Utc>,
+        change: TodoChange,
+        reason: &str,
+        via: &str,
+        review_by: TodoChangeReview,
+    ) -> Result<TodoChangeRecord, PlannerError> {
+        if review_by == TodoChangeReview::None
+            && !matches!(change, TodoChange::Edit { .. } | TodoChange::Remove { .. })
+        {
+            return self.todo_change_with(now, change, reason, via, TodoChangeReview::ByTheAi);
+        }
         let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
         if self.stopped() {
             return Err(PlannerError::Stopped);
@@ -587,7 +617,9 @@ impl TaskPlanner {
                 if is_polish(todo_id) {
                     return Err(PlannerError::MadeByTheApp(todo_id.clone()));
                 }
-                if reason.chars().count() < MIN_REASON_CHARS {
+                if review_by == TodoChangeReview::ByTheAi
+                    && reason.chars().count() < MIN_REASON_CHARS
+                {
                     return Err(PlannerError::ReasonTooShort);
                 }
                 Some(
@@ -608,6 +640,28 @@ impl TaskPlanner {
             TodoChange::AddAppointment { .. } | TodoChange::RemoveAppointment { .. }
         ) {
             return self.review_appointment_change(now, change, reason, via, &open, &recent);
+        }
+        if review_by == TodoChangeReview::None {
+            let after = match &change {
+                TodoChange::Edit { todo, .. } => target.as_ref().map(|before| edited(before, todo)),
+                _ => None,
+            };
+            let record = TodoChangeRecord {
+                id: format!("c{}", now.timestamp_millis()),
+                at: now,
+                change,
+                reason,
+                via: via.trim().chars().take(40).collect(),
+                approved: true,
+                reply: "설정이 아직 보호되지 않아 AI 심사 없이 바로 적용했습니다.".to_string(),
+                ai_failed: false,
+                before: target,
+                after,
+                scheduled_update: None,
+                appointment: None,
+            };
+            self.log_todo_change(&record)?;
+            return Ok(record);
         }
         let review = (self.advisor)(&self.focus.store().get()).and_then(|advisor| {
             advisor.review_todo_change(&TodoChangeRequest {
@@ -1826,6 +1880,14 @@ fn end_after(now: DateTime<Utc>, minutes: u32) -> DateTime<Utc> {
 }
 
 /// Trim the texts of a change and refuse an addition without a usable title.
+/// Responsibility: Say whether a to-do change goes to the AI.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TodoChangeReview {
+    ByTheAi,
+    /// The settings are not protected yet: edits and removals take effect without review.
+    None,
+}
+
 fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, PlannerError> {
     let clean = |mut todo: ProposalInput| {
         todo.title = todo.title.split_whitespace().collect::<Vec<_>>().join(" ");
