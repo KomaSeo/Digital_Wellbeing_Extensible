@@ -12,6 +12,7 @@ ai_focus_rule = { workspace = true }
 list_based_rule = { workspace = true }
 task_planner = { workspace = true }
 enforcer = { workspace = true }
+sync = { workspace = true }
 base64 = "0.22"
 getrandom = "0.2"
 pbkdf2 = "0.12"

@@ -1,0 +1,57 @@
+#!/bin/sh
+# Responsibility: Keep the Linux sync server up to date by itself: fetch the newest build from
+# the GitHub release "sync-latest", check its SHA-256, install it and restart the server; if
+# the new build does not answer, put the old one back. Run daily by
+# digital-wellbeing-sync-update.timer, or by hand: sudo digital-wellbeing-sync-update
+# See docs/sync.md 4장.
+set -eu
+
+# Tests point this at a local copy.
+BASE="${DW_SYNC_UPDATE_URL:-https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases/download/sync-latest}"
+PROGRAM=/usr/local/bin/digital-wellbeing-service
+SERVICE=digital-wellbeing-sync
+STATE=/var/lib/digital-wellbeing-sync
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+curl -fsSL --retry 3 -o "$WORK/digital-wellbeing-service" "$BASE/digital-wellbeing-service"
+curl -fsSL --retry 3 -o "$WORK/digital-wellbeing-service.sha256" "$BASE/digital-wellbeing-service.sha256"
+# A broken or half download is never installed.
+(cd "$WORK" && sha256sum -c --quiet digital-wellbeing-service.sha256)
+
+NEW=$(cut -d' ' -f1 "$WORK/digital-wellbeing-service.sha256")
+OLD=$(sha256sum "$PROGRAM" 2>/dev/null | cut -d' ' -f1 || true)
+if [ "$NEW" = "$OLD" ]; then
+    echo "already the newest build"
+    exit 0
+fi
+
+# The port the server runs on (it notes it when it starts), else the default.
+PORT=$(sed -n 's/.*"port": *\([0-9][0-9]*\).*/\1/p' "$STATE/server.json" 2>/dev/null || true)
+PORT=${PORT:-47820}
+
+answers() {
+    curl -fsS --max-time 5 "http://127.0.0.1:$PORT/" | grep -q "sync server"
+}
+
+if [ -f "$PROGRAM" ]; then
+    cp -p "$PROGRAM" "$PROGRAM.previous"
+fi
+install -m 755 "$WORK/digital-wellbeing-service" "$PROGRAM"
+systemctl restart "$SERVICE"
+
+for _ in 1 2 3 4 5 6; do
+    sleep 5
+    if systemctl is-active --quiet "$SERVICE" && answers; then
+        echo "updated to $NEW"
+        exit 0
+    fi
+done
+
+echo "the new build did not answer; putting the previous one back" >&2
+if [ -f "$PROGRAM.previous" ]; then
+    install -m 755 "$PROGRAM.previous" "$PROGRAM"
+    systemctl restart "$SERVICE"
+fi
+exit 1

@@ -71,12 +71,23 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     let ai_store = AiFocusStore::open_read_only(machine::ai_focus_path())?;
     let user =
         machine::session::session_user(session).unwrap_or_else(|| format!("session{session}"));
-    let grants = JsonStore::<GrantState>::open(machine::grants_path_for(&user), true)?;
-    let blocks = JsonStore::<SavedBlocks>::open(machine::blocks_path_for(&user), true)?;
+    // With sync logins, the files of the login this account used (the same on every PC);
+    // after logging in or out the agent starts again (the service restarts it) to switch.
+    machine::login::set_session_user(&user);
+    machine::login::on_change(|| {
+        thread::spawn(|| {
+            thread::sleep(Duration::from_millis(500));
+            info!("the login changed; starting again with its files");
+            std::process::exit(0);
+        });
+    });
+    let profile = machine::login::profile_for(&machine::data_dir(), &user);
+    let grants = JsonStore::<GrantState>::open(machine::grants_path_for(&profile), true)?;
+    let blocks = JsonStore::<SavedBlocks>::open(machine::blocks_path_for(&profile), true)?;
     // Every Claude call of this agent (focus checks, planner, access reviews) is counted;
     // the daily budget adds up every user's file.
     let usage = Arc::new(UsageRecorder::new(
-        JsonStore::open(machine::usage_path_for(&user), true)?,
+        JsonStore::open(machine::usage_path_for(&profile), true)?,
         Some(machine::usage_dir()),
     ));
     ai_focus_rule::usage::install(Arc::clone(&usage));
@@ -158,8 +169,19 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         }
     });
 
+    let grants = monitor.grants().clone();
     let reload_monitor = Arc::clone(&monitor);
-    thread::spawn(move || reload_loop(list_store, ai_store, planner_config, reload_monitor));
+    let login = (user.clone(), profile.clone());
+    thread::spawn(move || {
+        reload_loop(
+            list_store,
+            ai_store,
+            planner_config,
+            grants,
+            reload_monitor,
+            login,
+        )
+    });
 
     enforce.join().ok();
     Ok(())
@@ -256,7 +278,9 @@ fn reload_loop(
     list_store: ListStore,
     ai_store: AiFocusStore,
     planner_config: JsonStore<PlannerConfig>,
+    grants: JsonStore<GrantState>,
     monitor: Arc<FocusMonitor>,
+    (windows_user, profile): (String, String),
 ) {
     let data_directory = machine::data_dir();
     let mut was_protected = machine::settings::is_protected(&data_directory);
@@ -278,6 +302,11 @@ fn reload_loop(
             info!("settings protection turned off; every block lifted");
         }
         was_protected = protected;
+        // Logged in or out outside this agent (the elevated `sync-login`, or the logins arriving
+        // by sync): start again with the login's files.
+        if machine::login::profile_for(&data_directory, &windows_user) != profile {
+            machine::login::changed();
+        }
         let now = (
             modified(&policy_path),
             modified(&ai_focus_path),
@@ -301,6 +330,14 @@ fn reload_loop(
                     seen.1 = now.1;
                 }
                 Err(error) => warn!("reload {}: {error}; retrying", ai_focus_path.display()),
+            }
+        }
+        // Grants another device gave (taken in by sync); the planner state and the blocks
+        // take theirs in on their own (`TaskPlanner::resume`, `FocusMonitor::save_blocks`).
+        if grants.changed_on_disk() {
+            match grants.reload() {
+                Ok(()) => info!("took in changed grants"),
+                Err(error) => warn!("reload grants: {error}; retrying"),
             }
         }
         if now.2 != seen.2 {

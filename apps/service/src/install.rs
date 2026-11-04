@@ -21,7 +21,7 @@
 //! If a later step fails during an upgrade, the previous service is started
 //! again. Running executables are renamed to `*.old` before the new copy.
 
-use crate::service::SERVICE_NAME;
+use crate::service::{SERVICE_NAME, SYNC_SERVICE_NAME};
 use crate::{FOCUS_EXE, LEGACY_ADMIN_EXE, MCP_EXE, SERVICE_EXE};
 use anyhow::{bail, Context};
 use machine::MachineConfig;
@@ -161,42 +161,7 @@ fn install_steps(
     // 3. data dir, locked down
     let data = machine::data_dir();
     prepare_data_dir(&data, upgrade)?;
-    // Owner first: an owner can always rewrite the ACL, so a folder owned by
-    // someone else would not stay locked.
-    run(Command::new("icacls").arg(&data).args([
-        "/setowner",
-        SID_ADMINISTRATORS,
-        "/T",
-        "/C",
-        "/L",
-        "/Q",
-    ]))
-    .context("set data dir owner")?;
-    // The folder alone gets the explicit, inheritable ACL. (Applying this with
-    // /T also hit every existing file: the (OI)(CI) grant does not apply to a
-    // file, so files kept no ACE at all and even SYSTEM could not open them.)
-    run(Command::new("icacls").arg(&data).args([
-        "/inheritance:r",
-        "/grant:r",
-        &format!("{SID_SYSTEM}:(OI)(CI)F"),
-        "/grant:r",
-        &format!("{SID_ADMINISTRATORS}:(OI)(CI)F"),
-        "/L",
-        "/Q",
-    ]))
-    .context("restrict data dir")?;
-    // Everything inside inherits that ACL; this also repairs files an earlier
-    // version left without any ACE.
-    if let Err(error) = run(Command::new("icacls")
-        .arg(data.join("*"))
-        .args(["/reset", "/T", "/C", "/L", "/Q"]))
-    {
-        println!(
-            "warning: could not reset the ACLs inside {}: {error:#}",
-            data.display()
-        );
-    }
-    println!("locked {} to SYSTEM + Administrators", data.display());
+    lock_data_folder(&data)?;
 
     // 4. managed users.
     let mut config = MachineConfig::load();
@@ -516,6 +481,155 @@ fn is_locked_down(path: &Path) -> bool {
     // SAFETY: allocated by GetNamedSecurityInfoW.
     unsafe { LocalFree(descriptor) };
     locked
+}
+
+/// Owner Administrators; SYSTEM and Administrators only (users can neither read nor change
+/// anything inside); everything inside inherits this.
+fn lock_data_folder(data: &Path) -> anyhow::Result<()> {
+    // Owner first: an owner can always rewrite the ACL, so a folder owned by
+    // someone else would not stay locked.
+    run(Command::new("icacls").arg(data).args([
+        "/setowner",
+        SID_ADMINISTRATORS,
+        "/T",
+        "/C",
+        "/L",
+        "/Q",
+    ]))
+    .context("set data dir owner")?;
+    // The folder alone gets the explicit, inheritable ACL. (Applying this with
+    // /T also hit every existing file: the (OI)(CI) grant does not apply to a
+    // file, so files kept no ACE at all and even SYSTEM could not open them.)
+    run(Command::new("icacls").arg(data).args([
+        "/inheritance:r",
+        "/grant:r",
+        &format!("{SID_SYSTEM}:(OI)(CI)F"),
+        "/grant:r",
+        &format!("{SID_ADMINISTRATORS}:(OI)(CI)F"),
+        "/L",
+        "/Q",
+    ]))
+    .context("restrict data dir")?;
+    // Everything inside inherits that ACL; this also repairs files an earlier
+    // version left without any ACE.
+    if let Err(error) = run(Command::new("icacls")
+        .arg(data.join("*"))
+        .args(["/reset", "/T", "/C", "/L", "/Q"]))
+    {
+        println!(
+            "warning: could not reset the ACLs inside {}: {error:#}",
+            data.display()
+        );
+    }
+    println!("locked {} to SYSTEM + Administrators", data.display());
+    Ok(())
+}
+
+/// `sync-server-setup`: make this computer the sync server (see `docs/sync.md`).
+///
+/// 1. copy this program to `%ProgramFiles%\DigitalWellbeingSync` (only administrators may
+///    change it, since the service runs it as SYSTEM);
+/// 2. create `%ProgramData%\DigitalWellbeingSync` for SYSTEM and Administrators only (the
+///    shared documents and the device keys are there);
+/// 3. register the `DigitalWellbeingSync` service (automatic start, LocalSystem, restart on
+///    failure) and start it;
+/// 4. allow the port through Windows Firewall.
+pub fn install_sync_server(port: u16) -> anyhow::Result<()> {
+    let manager = ServiceManager::local_computer(
+        None::<&str>,
+        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+    )
+    .context("cannot open the service manager — run this from an administrator terminal")?;
+    let existing = manager
+        .open_service(SYNC_SERVICE_NAME, service_access())
+        .ok();
+    if let Some(existing) = &existing {
+        println!("stopping the running sync server…");
+        stop_and_wait(existing)?;
+    }
+
+    let program_folder = install_dir().with_file_name("DigitalWellbeingSync");
+    fs::create_dir_all(&program_folder)
+        .with_context(|| format!("create {}", program_folder.display()))?;
+    let executable = program_folder.join(SERVICE_EXE);
+    let current = std::env::current_exe()?;
+    if !same_file(&current, &executable) {
+        replace_file(&current, &executable)
+            .with_context(|| format!("copy {}", executable.display()))?;
+    }
+    lock_program_dir(&program_folder)?;
+
+    let data = crate::sync_commands::server_folder();
+    if is_reparse_point(&data) {
+        bail!("{} is a link; remove it first", data.display());
+    }
+    fs::create_dir_all(&data).with_context(|| format!("create {}", data.display()))?;
+    lock_data_folder(&data)?;
+
+    let service_info = ServiceInfo {
+        name: OsString::from(SYNC_SERVICE_NAME),
+        display_name: OsString::from("Digital Wellbeing Sync Server"),
+        service_type: ServiceType::OWN_PROCESS,
+        start_type: ServiceStartType::AutoStart,
+        error_control: ServiceErrorControl::Normal,
+        executable_path: executable,
+        launch_arguments: vec![
+            OsString::from("sync-service"),
+            OsString::from("--port"),
+            OsString::from(port.to_string()),
+        ],
+        dependencies: vec![],
+        account_name: None, // LocalSystem
+        account_password: None,
+    };
+    let service = match existing {
+        Some(service) => {
+            service.change_config(&service_info)?;
+            service
+        }
+        None => manager.create_service(&service_info, service_access())?,
+    };
+    service.set_description(
+        "Keeps the settings, to-dos and tasks of every paired Digital Wellbeing device the same.",
+    )?;
+    let restart = ServiceAction {
+        action_type: ServiceActionType::Restart,
+        delay: Duration::from_secs(5),
+    };
+    service.update_failure_actions(ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 3600)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(vec![restart.clone(), restart.clone(), restart]),
+    })?;
+
+    let rule = "Digital Wellbeing Sync";
+    let _ = run(Command::new("netsh").args([
+        "advfirewall",
+        "firewall",
+        "delete",
+        "rule",
+        &format!("name={rule}"),
+    ]));
+    if let Err(error) = run(Command::new("netsh").args([
+        "advfirewall",
+        "firewall",
+        "add",
+        "rule",
+        &format!("name={rule}"),
+        "dir=in",
+        "action=allow",
+        "protocol=TCP",
+        &format!("localport={port}"),
+    ])) {
+        println!("warning: could not open port {port} in Windows Firewall: {error:#}");
+    } else {
+        println!("Windows Firewall lets other devices reach port {port}");
+    }
+
+    service.start::<&str>(&[])?;
+    println!("sync server running on port {port}. Pair a device: digital-wellbeing-service sync-add-device <name>");
+    Ok(())
 }
 
 /// Owner Administrators; SYSTEM and Administrators full control, Users read and run only;

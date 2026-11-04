@@ -35,6 +35,91 @@ jobs:
       - name: Test (with a virtual X server)
         run: xvfb-run -a cargo test --workspace --locked
 
+  # The sync server for a Linux machine (a cloud server): one static program that runs on any
+  # 64-bit Linux, with its systemd service file. Download it from the run's artifacts.
+  linux-sync-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Published only after the whole Linux test suite passed: servers update themselves from it.
+    needs: linux
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-musl
+      - name: Build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          cargo build --release --locked --target x86_64-unknown-linux-musl -p digital-wellbeing-service
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/digital-wellbeing-service installer/linux/digital-wellbeing-sync* dist/
+          (cd dist && sha256sum digital-wellbeing-service > digital-wellbeing-service.sha256)
+      - name: The server answers
+        run: |
+          export DW_SYNC_SERVER_DIR="$RUNNER_TEMP/sync"
+          dist/digital-wellbeing-service sync-serve --port 47900 &
+          sleep 2
+          curl -fsS http://127.0.0.1:47900/ | grep -q "sync server"
+          dist/digital-wellbeing-service sync-add-device ci | grep -q "sync-join http://"
+          kill %1
+      # The self-update on a real systemd: an older build is running; the updater fetches the
+      # new one (here from a local copy of the release), checks it, installs it, restarts the
+      # server and sees it answer.
+      - name: The server updates itself
+        run: |
+          sudo install -m 755 dist/digital-wellbeing-sync-update /usr/local/bin/
+          sudo install -m 644 dist/digital-wellbeing-sync.service /etc/systemd/system/
+          cp dist/digital-wellbeing-service old-build && printf 'older' >> old-build
+          sudo install -m 755 old-build /usr/local/bin/digital-wellbeing-service
+          sudo systemctl daemon-reload
+          sudo systemctl start digital-wellbeing-sync
+          (cd dist && python3 -m http.server 8765 >/dev/null 2>&1 &)
+          sleep 2
+          sudo DW_SYNC_UPDATE_URL=http://127.0.0.1:8765 /usr/local/bin/digital-wellbeing-sync-update | tee update.log
+          grep -q "updated to" update.log
+          cmp dist/digital-wellbeing-service /usr/local/bin/digital-wellbeing-service
+          systemctl is-active digital-wellbeing-sync
+          # A second run changes nothing.
+          sudo DW_SYNC_UPDATE_URL=http://127.0.0.1:8765 /usr/local/bin/digital-wellbeing-sync-update | grep -q "already the newest"
+          # A corrupt download is refused, and the server keeps running.
+          printf 'corrupt' >> dist/digital-wellbeing-service
+          if sudo DW_SYNC_UPDATE_URL=http://127.0.0.1:8765 /usr/local/bin/digital-wellbeing-sync-update; then
+            echo "a corrupt download was installed"; exit 1
+          fi
+          systemctl is-active digital-wellbeing-sync
+      # The corrupt copy above is rebuilt from the tested build before anything is published.
+      - name: Restore the tested build
+        run: |
+          cp target/x86_64-unknown-linux-musl/release/digital-wellbeing-service dist/
+          (cd dist && sha256sum -c digital-wellbeing-service.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digital-wellbeing-sync-server-linux-x64
+          path: dist/*
+      # The rolling release servers update themselves from (public: no login needed).
+      - name: Publish to the release "sync-latest"
+        if: github.event_name == 'push' && github.ref == 'refs/heads/claude/digital-wellness-app-dfj98x'
+        run: |
+          git tag -f sync-latest
+          git push -f origin refs/tags/sync-latest
+      - uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/claude/digital-wellness-app-dfj98x'
+        with:
+          tag_name: sync-latest
+          name: Sync server (latest build)
+          prerelease: true
+          make_latest: false
+          body: |
+            동기화 서버(리눅스)의 최신 빌드입니다. 동기화 브랜치의 테스트를 모두 통과한 빌드만 올라옵니다.
+            서버의 자동 업데이트(digital-wellbeing-sync-update)가 하루 한 번 이 파일을 받습니다. 설명은 docs/sync.md 4장에 있습니다.
+          files: dist/*
+
   windows:
     runs-on: windows-latest
     timeout-minutes: 60
@@ -134,6 +219,63 @@ jobs:
           $env:DW_E2E_CLAUDE_ADDR = $addr
           cargo test --release --locked -p digital-wellbeing-service --test e2e_windows -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw "end-to-end test failed" }
+
+      # Multi-device sync (docs/sync.md): the sync server installed as its own service, this
+      # PC paired with it, and the installed service's sync loop filling the server.
+      - name: Sync server and a paired device
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "target\release\digital-wellbeing-service.exe"
+          $port = 47821
+          & $exe sync-server-setup --port $port
+          if ($LASTEXITCODE -ne 0) { throw "sync-server-setup failed ($LASTEXITCODE)" }
+          $svc = Get-Service DigitalWellbeingSync
+          if ($svc.Status -ne "Running") { throw "the sync server is $($svc.Status)" }
+          if ($svc.StartType -ne "Automatic") { throw "the sync server starts $($svc.StartType)" }
+          $serverData = "C:\ProgramData\DigitalWellbeingSync"
+          $folder = (Get-Acl $serverData).AccessToString
+          Write-Host $folder
+          if ($folder -match "Users|Everyone|Authenticated") { throw "standard users can reach $serverData" }
+          if (-not (Test-Path "C:\Program Files\DigitalWellbeingSync\digital-wellbeing-service.exe")) {
+            throw "the server program was not copied"
+          }
+
+          $out = & $exe sync-add-device ci-runner
+          if ($LASTEXITCODE -ne 0) { throw "sync-add-device failed ($LASTEXITCODE)" }
+          $code = (($out | Select-String "sync-join").Line.Trim() -split "\s+")[-1]
+          & $exe sync-join "http://127.0.0.1:$port" $code
+          if ($LASTEXITCODE -ne 0) { throw "sync-join failed ($LASTEXITCODE)" }
+
+          # The installed service syncs every 20 seconds.
+          $deadline = (Get-Date).AddSeconds(90)
+          while (-not (Test-Path "$serverData\documents\planner.json")) {
+            if ((Get-Date) -gt $deadline) {
+              & $exe sync-status
+              throw "the service did not sync this PC to the server"
+            }
+            Start-Sleep -Seconds 3
+          }
+          $status = & $exe sync-status | Out-String
+          Write-Host $status
+          if ($status -match "last sync: never") { throw "sync-status shows no sync" }
+          $devices = & $exe sync-devices | Out-String
+          Write-Host $devices
+          if ($devices -notmatch "ci-runner") { throw "the device is not listed" }
+
+          # The end-to-end step above protected the settings for good: while they are
+          # protected, this PC cannot stop syncing.
+          $leave = & $exe sync-leave 2>&1 | Out-String
+          Write-Host $leave
+          if ($LASTEXITCODE -eq 0) { throw "sync-leave worked while the settings are protected" }
+          if ($leave -notmatch "protected") { throw "sync-leave failed for another reason" }
+          Remove-Item "C:\ProgramData\DigitalWellbeing\sync.json"
+          sc.exe stop DigitalWellbeingSync | Out-Null
+          Start-Sleep -Seconds 2
+          sc.exe delete DigitalWellbeingSync | Out-Null
+          netsh advfirewall firewall delete rule name="Digital Wellbeing Sync" | Out-Null
+          exit 0
 
       - name: Service and agent logs
         if: always()

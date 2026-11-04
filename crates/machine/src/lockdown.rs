@@ -36,6 +36,8 @@ pub enum LockdownCause {
     AwayFromComputer,
     /// The user pressed "사용 중지".
     Stopped,
+    /// This Windows account has not logged in to the owner's sync login yet.
+    LoginRequired,
 }
 
 /// Responsibility: Say why the planner wants every app locked.
@@ -48,6 +50,9 @@ pub enum TaskLock {
     /// The user stopped using the computer ("사용 중지"). Locks even during setup: the user
     /// asked for it, and one button undoes it.
     Stopped,
+    /// The PC syncs and has logins, and this Windows account has not logged in
+    /// (`crate::login`).
+    LoginRequired,
 }
 
 /// Responsibility: Describe a lockdown in force for the Focus app and the settings.
@@ -114,6 +119,11 @@ pub fn lockdown(
             "지금 할 일이 없습니다. 준비되면 \"할 일 받기\"를 누르세요".to_string(),
         ),
         TaskLock::Stopped => unreachable!("handled first"),
+        TaskLock::LoginRequired => (
+            LockdownCause::LoginRequired,
+            "이 PC는 여러 기기 동기화를 씁니다. 쓰려면 먼저 로그인하세요(Focus 앱 맨 위)"
+                .to_string(),
+        ),
         TaskLock::AwayFromComputer { task } => (
             LockdownCause::AwayFromComputer,
             format!(
@@ -270,6 +280,10 @@ mod tests {
         .unwrap();
         assert_eq!(away.cause, LockdownCause::AwayFromComputer);
         // Stopping locks even during setup and before a broken connection.
+        let login = lockdown(true, &Connection::Working, Some(TaskLock::LoginRequired)).unwrap();
+        assert_eq!(login.cause, LockdownCause::LoginRequired);
+        assert!(!login.browsers_allowed);
+        assert!(lockdown(false, &Connection::Working, Some(TaskLock::LoginRequired)).is_none());
         let stopped = lockdown(false, &broken, Some(TaskLock::Stopped)).unwrap();
         assert_eq!(stopped.cause, LockdownCause::Stopped);
         assert!(!stopped.browsers_allowed);

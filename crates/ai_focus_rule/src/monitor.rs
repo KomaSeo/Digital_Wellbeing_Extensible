@@ -124,6 +124,77 @@ pub struct BlockSet {
     pub tabs: HashMap<String, BlockedEntry>,
 }
 
+/// Every block by to-do, the current to-do's included.
+fn blocks_by_scope(saved: &SavedBlocks) -> HashMap<String, BlockSet> {
+    let mut all = saved.other_scopes.clone();
+    let current = all.entry(saved.scope.clone()).or_default();
+    current.processes.extend(saved.processes.clone());
+    current.tabs.extend(saved.tabs.clone());
+    all
+}
+
+/// Three-way merge of block lists: `memory`'s changes since `last_saved` laid over `on_disk`
+/// (which another process changed). The scope stays `memory`'s (it follows this device's
+/// current to-do).
+fn merge_saved_blocks(
+    last_saved: &SavedBlocks,
+    memory: &SavedBlocks,
+    on_disk: &SavedBlocks,
+) -> SavedBlocks {
+    fn merge_entries(
+        last_saved: Option<&HashMap<String, BlockedEntry>>,
+        memory: Option<&HashMap<String, BlockedEntry>>,
+        on_disk: Option<&HashMap<String, BlockedEntry>>,
+    ) -> HashMap<String, BlockedEntry> {
+        let empty = HashMap::new();
+        let (last_saved, memory) = (last_saved.unwrap_or(&empty), memory.unwrap_or(&empty));
+        let mut merged = on_disk.cloned().unwrap_or_default();
+        for key in last_saved.keys().chain(memory.keys()) {
+            if last_saved.get(key) == memory.get(key) {
+                continue;
+            }
+            match memory.get(key) {
+                Some(entry) => merged.insert(key.clone(), entry.clone()),
+                None => merged.remove(key),
+            };
+        }
+        merged
+    }
+    let (last_saved, memory_all, on_disk) = (
+        blocks_by_scope(last_saved),
+        blocks_by_scope(memory),
+        blocks_by_scope(on_disk),
+    );
+    let mut scopes: Vec<&String> = on_disk.keys().chain(memory_all.keys()).collect();
+    scopes.sort();
+    scopes.dedup();
+    let mut merged: HashMap<String, BlockSet> = HashMap::new();
+    for scope in scopes {
+        let set = BlockSet {
+            processes: merge_entries(
+                last_saved.get(scope).map(|set| &set.processes),
+                memory_all.get(scope).map(|set| &set.processes),
+                on_disk.get(scope).map(|set| &set.processes),
+            ),
+            tabs: merge_entries(
+                last_saved.get(scope).map(|set| &set.tabs),
+                memory_all.get(scope).map(|set| &set.tabs),
+                on_disk.get(scope).map(|set| &set.tabs),
+            ),
+        };
+        if !set.processes.is_empty() || !set.tabs.is_empty() {
+            merged.insert(scope.clone(), set);
+        }
+    }
+    let current = merged.remove(&memory.scope).unwrap_or_default();
+    SavedBlocks {
+        processes: current.processes,
+        tabs: current.tabs,
+        scope: memory.scope.clone(),
+        other_scopes: merged,
+    }
+}
+
 /// Responsibility: Tell the caller what to do right after a judgement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -870,9 +941,10 @@ impl FocusMonitor {
         self.save_blocks();
     }
 
-    /// Save the blocks if they changed since the last save.
+    /// Save the blocks if they changed since the last save. Blocks another process wrote to
+    /// the file meanwhile (another device's, through sync) are taken in first.
     fn save_blocks(&self) {
-        let current = {
+        let mut current = {
             let state = self.state.lock();
             SavedBlocks {
                 processes: state.blocked_processes.clone(),
@@ -881,6 +953,20 @@ impl FocusMonitor {
                 other_scopes: state.other_scopes.clone(),
             }
         };
+        if self.blocks.changed_on_disk() {
+            let last_saved = self.blocks.get();
+            match self.blocks.reload() {
+                Ok(()) => {
+                    let on_disk = self.blocks.get();
+                    current = merge_saved_blocks(&last_saved, &current, &on_disk);
+                    let mut state = self.state.lock();
+                    state.blocked_processes = current.processes.clone();
+                    state.blocked_tabs = current.tabs.clone();
+                    state.other_scopes = current.other_scopes.clone();
+                }
+                Err(error) => warn!("could not read the changed blocks file: {error}"),
+            }
+        }
         if current != self.blocks.get() {
             if let Err(error) = self.blocks.update(|saved| *saved = current) {
                 warn!("could not save blocks: {error}");
@@ -2933,6 +3019,47 @@ mod tests {
             .monitor
             .step(start_time + ChronoDuration::seconds(5));
         assert!(fixture.monitor.state().process_blocks().is_empty());
+    }
+
+    #[test]
+    fn blocks_another_device_wrote_are_merged_with_this_ones() {
+        let entry = |reason: &str| -> BlockedEntry {
+            serde_json::from_value(serde_json::json!({ "reason": reason, "until": null })).unwrap()
+        };
+        let mut last_saved = SavedBlocks {
+            scope: "thesis".into(),
+            ..Default::default()
+        };
+        last_saved
+            .processes
+            .insert("steam.exe".into(), entry("games"));
+        last_saved
+            .processes
+            .insert("discord.exe".into(), entry("chat"));
+        // Here: discord was unblocked, lol blocked.
+        let mut memory = last_saved.clone();
+        memory.processes.remove("discord.exe");
+        memory.processes.insert("lol.exe".into(), entry("games"));
+        // The other device: a tab blocked, and a block for another to-do.
+        let mut on_disk = last_saved.clone();
+        on_disk
+            .tabs
+            .insert("chrome.exe|youtube.com".into(), entry("video"));
+        on_disk
+            .other_scopes
+            .entry("rest".into())
+            .or_default()
+            .processes
+            .insert("code.exe".into(), entry("work"));
+        let merged = merge_saved_blocks(&last_saved, &memory, &on_disk);
+        let mut processes: Vec<&String> = merged.processes.keys().collect();
+        processes.sort();
+        assert_eq!(processes, ["lol.exe", "steam.exe"]);
+        assert!(merged.tabs.contains_key("chrome.exe|youtube.com"));
+        assert!(merged.other_scopes["rest"]
+            .processes
+            .contains_key("code.exe"));
+        assert_eq!(merged.scope, "thesis");
     }
 
     #[test]

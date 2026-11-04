@@ -8,6 +8,7 @@ members = [
     "crates/ai_focus_rule",
     "crates/task_planner",
     "crates/machine",
+    "crates/sync",
     "apps/service",
     "apps/focus",
     "apps/desktop",
@@ -41,3 +42,14 @@ tool-api = { path = "crates/tool-api" }
 ai_focus_rule = { path = "crates/ai_focus_rule" }
 machine = { path = "crates/machine" }
 task_planner = { path = "crates/task_planner" }
+sync = { path = "crates/sync" }
+
+# Password hashing (sync logins) is slow unoptimized; tests check passwords.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3

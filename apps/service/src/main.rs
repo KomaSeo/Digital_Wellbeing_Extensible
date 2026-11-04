@@ -11,6 +11,7 @@
 //! | `uninstall [--delete-data] [--restore-safe-mode]` | an administrator | stop + remove the service; optionally the owner's data, and open safe mode again |
 //! | `run`       | the Service Control Manager     | supervisor: keep one agent per managed session |
 //! | `agent`     | the supervisor (as SYSTEM)      | enforce rules inside one user's session        |
+//! | `sync-…`    | an administrator / the SCM      | multi-device sync (see `sync_commands`)        |
 //! | `self-update-guard <setup>` | the service (a copy in the data folder) | install an update while every app stays closed (`update_guard`) |
 //! | `version`   | anyone                          | print the release version                      |
 //! | `self-update-check` | anyone                  | say whether GitHub has a newer release (changes nothing) |
@@ -24,6 +25,7 @@ mod install;
 mod service;
 #[cfg(windows)]
 mod spawn;
+mod sync_commands;
 #[cfg(windows)]
 mod update_guard;
 
@@ -59,6 +61,10 @@ fn main() -> anyhow::Result<()> {
         ),
         #[cfg(windows)]
         Some("run") => service::run_dispatcher(),
+        Some(command) if command.starts_with("sync-") => {
+            sync_commands::run_command(command, &arguments[1..])
+                .unwrap_or_else(|| anyhow::bail!("unknown command '{command}' (see docs/sync.md)"))
+        }
         #[cfg(windows)]
         Some("self-update-guard") => {
             init_logging("update.log");
@@ -66,24 +72,25 @@ fn main() -> anyhow::Result<()> {
         }
         Some("self-update-check") => {
             let releases = machine::self_update::fetch_releases().map_err(anyhow::Error::msg)?;
-            match machine::self_update::newest_release(
-                &releases,
-                machine::self_update::this_version(),
-            ) {
+            match machine::self_update::newest_available(&releases) {
                 Some(release) => println!("newer: {} ({})", release.version, release.setup_url),
-                None => println!("up to date ({})", machine::self_update::this_version()),
+                None => println!(
+                    "up to date ({})",
+                    machine::self_update::this_version_and_build()
+                ),
             }
             Ok(())
         }
         Some("version") => {
-            println!("{}", machine::self_update::this_version());
+            println!("{}", machine::self_update::this_version_and_build());
             Ok(())
         }
         _ => {
             eprintln!(
                 "usage (from an administrator terminal):\n  \
                  digital-wellbeing-service install [--manage <windows user>]... | [--manage-all] [--delete-data] [--block-safe-mode]\n  \
-                 digital-wellbeing-service uninstall [--delete-data] [--restore-safe-mode]"
+                 digital-wellbeing-service uninstall [--delete-data] [--restore-safe-mode]\n  \
+                 digital-wellbeing-service sync-… (multi-device sync, see docs/sync.md)"
             );
             Ok(())
         }
@@ -100,7 +107,9 @@ fn settings_unlock() -> anyhow::Result<()> {
     machine::settings::unprotect(
         &data_directory,
         chrono::Utc::now(),
-        machine::settings::Unlock::Administrator,
+        machine::settings::Unlock::Administrator {
+            device: machine::settings::this_device_id(&data_directory),
+        },
     )
     .map_err(anyhow::Error::msg)?;
     println!("설정 보호를 풀었습니다. 걸린 차단도 모두 풀립니다.");

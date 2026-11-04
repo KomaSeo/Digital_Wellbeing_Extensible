@@ -6,6 +6,12 @@
 # - a branch push changes installer/RELEASE_VERSION: the workflow then
 #   creates the tag `v<version>` itself (unless that tag already exists).
 # A manual run (workflow_dispatch) only builds and uploads the artifacts.
+#
+#
+# The old sync branch (`claude/multi-device-sync`, now merged) never publishes a `v*` release:
+# a push of it that changes the version publishes its setup program to the release
+# `sync-windows-latest`, where builds made on that branch look for updates. Its last such
+# build has the numbered releases' update check, so those PCs move over to them.
 name: release
 
 on:
@@ -17,6 +23,12 @@ on:
 
 permissions:
   contents: write
+
+# One run of a branch at a time: two runs replacing the release `sync-windows-latest` at once
+# would delete each other's files. A newer push waits for the running one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   windows:
@@ -53,7 +65,7 @@ jobs:
             $v = (Get-Content installer\RELEASE_VERSION -Raw).Trim()
             # A branch push publishes only a version that has no tag yet.
             $existing = git ls-remote --tags origin "refs/tags/v$v"
-            $publish = if ("${{ github.event_name }}" -eq "push" -and -not $existing) { "true" } else { "false" }
+            $publish = if ("${{ github.event_name }}" -eq "push" -and -not $existing -and "${{ github.ref_name }}" -ne "claude/multi-device-sync") { "true" } else { "false" }
           }
           "value=$v" >> $env:GITHUB_OUTPUT
           "publish=$publish" >> $env:GITHUB_OUTPUT
@@ -101,6 +113,26 @@ jobs:
           Copy-Item docs\*.md "$stage\docs"
           Compress-Archive -Path "$stage\*" -DestinationPath "dist\DigitalWellbeing-$v-windows-x64.zip"
           Remove-Item -Recurse $stage
+
+      - name: Publish to the release "sync-windows-latest" (sync branch)
+        if: github.ref == 'refs/heads/claude/multi-device-sync'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.version.outputs.value }}"
+          $build = "${{ github.sha }}".Substring(0, 7)
+          New-Item -ItemType Directory -Force dist-sync | Out-Null
+          Copy-Item "dist\DigitalWellbeing-Setup-$v.exe" "dist-sync\DigitalWellbeing-Setup-$v-$build.exe"
+          Copy-Item "dist\DigitalWellbeing-$v-windows-x64.zip" "dist-sync\DigitalWellbeing-$v-$build-windows-x64.zip"
+          # One build at a time: the old files go with the old release.
+          gh release delete sync-windows-latest --yes --cleanup-tag 2>$null
+          $global:LASTEXITCODE = 0
+          $files = (Get-ChildItem dist-sync).FullName
+          gh release create sync-windows-latest @files --prerelease --latest=false --target "${{ github.sha }}" `
+            --title "Sync PC build (latest)" `
+            --notes "동기화 브랜치의 최신 PC 빌드입니다. 설정 탭의 '이 프로그램 업데이트'가 여기서 받습니다. 설치 파일을 직접 받아 실행해도 됩니다."
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4
         with:

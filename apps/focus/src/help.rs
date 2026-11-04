@@ -40,6 +40,9 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
     egui::CollapsingHeader::new("모든 앱이 잠겼을 때 (AI 연결이 끊겼을 때)")
         .default_open(false)
         .show(ui, lockdown_guide);
+    egui::CollapsingHeader::new("여러 기기 동기화 (서버 설치, 회원가입과 로그인)")
+        .default_open(false)
+        .show(ui, sync_guide);
     egui::CollapsingHeader::new("카카오톡처럼 관리자 권한이 필요한 프로그램 업데이트하기")
         .default_open(false)
         .show(ui, updates_guide);
@@ -483,6 +486,52 @@ fn claude_desktop_guide(ui: &mut egui::Ui) {
          연결해도 차단을 피할 새 길은 생기지 않습니다. 이 프로그램의 AI가 요청을 거절하면, Claude는 그 \
          이유를 전하고 말을 바꿔 다시 요청하지 않습니다. 자세한 설명은 설치 폴더의 \
          docs\\claude_desktop.md에 있습니다.",
+    );
+}
+
+/// Multi-device sync in short; `docs/sync.md` has every step.
+fn sync_guide(ui: &mut egui::Ui) {
+    paragraph(
+        ui,
+        "동기화는 여러 PC가 같은 설정, 같은 할 일 목록, 같은 지금 할 일을 쓰게 합니다. 동기화 서버는 모든 \
+         PC가 공유하는 파일을 보관하는 프로그램이고, 서버가 도는 PC를 서버 PC라고 부릅니다. 서버 PC는 \
+         기기 중 한 대여도 됩니다. 각 PC의 서비스는 20초마다 서버와 바뀐 것을 주고받습니다. AI 사용량은 PC마다 \
+         따로 기록되고, 통계 탭은 모든 PC의 합계를 보여 줍니다.",
+    );
+    paragraph(
+        ui,
+        "1. 서버 PC에서 관리자 터미널(관리자 권한으로 연 명령 창)을 열고 \
+         \"C:\\Program Files\\DigitalWellbeing\\digital-wellbeing-service.exe\" sync-server-setup 을 \
+         실행합니다. 이 명령은 서버를 Windows 서비스로 설치하고, 서버의 폴더를 관리자만 열 수 있게 잠그고, \
+         방화벽에서 47820번 포트를 엽니다.",
+    );
+    paragraph(
+        ui,
+        "2. 가장 잘 설정해 둔 PC의 설정 탭 맨 위에서 \"여러 기기 동기화: 서버에 로그인하거나 \
+         회원가입하기\"를 열고(설치한 뒤 Focus 앱을 처음 열 때의 첫 화면에서도 됩니다), 서버 주소(예: 3.35.0.1:47820), 이름, 비밀번호(8자 이상)를 넣은 뒤 \
+         \"회원가입 (관리자 승인)\"을 누릅니다. Windows가 관리자 승인을 묻습니다. 회원가입은 계정이 없는 \
+         서버에서 한 번만 됩니다. 이 PC의 설정이 서버로 올라갑니다.",
+    );
+    paragraph(
+        ui,
+        "3. 다른 PC에서는 같은 곳에서 같은 이름과 비밀번호로 \"로그인 (관리자 승인)\"을 누릅니다. 그 PC는 \
+         서버의 설정을 받습니다. Anthropic API 키는 모든 PC가 하나를 함께 쓰므로 새 PC에서 따로 넣지 않아도 \
+         됩니다(서버에는 서버도 읽지 못하게 암호화되어 보관됩니다). 서버를 처음부터 다시 만들면, 한 PC에서 다시 회원가입하기만 하면 나머지 PC는 저절로 \
+         다시 로그인합니다.",
+    );
+    paragraph(
+        ui,
+        "4. 로그인하면 그 Windows 계정의 접근 허용, 걸린 차단, AI 사용량이 Windows 계정 이름과 상관없이 \
+         모든 PC에서 같아집니다. 같은 PC의 다른 Windows 계정은 Focus 앱 맨 위의 로그인 칸에서 한 번 \
+         로그인합니다. 설정이 보호된 뒤에는 로그인하기 전까지 모든 앱이 잠기고, 로그아웃할 수 없습니다. \
+         모든 PC는 같은 버전이어야 하고, 옛 버전의 PC는 업데이트할 때까지 동기화를 멈춥니다.",
+    );
+    paragraph(
+        ui,
+        "이 비밀번호를 아는 사람은 새 기기를 로그인시켜 설정을 바꿀 수 있으므로, 관리자 비밀번호처럼 따로 \
+         보관합니다. 서버의 파일과 각 PC의 열쇠는 관리자만 열 수 있는 폴더에 있으므로, 관리자 비밀번호가 \
+         없으면 서버의 내용을 바꿀 수 없습니다. 설정 보호가 한 번 켜지면 서버는 보호를 끄는 변경을 받지 않습니다. 집 밖의 \
+         PC를 동기화하는 방법, 리눅스 서버, 그 밖의 명령은 설치 폴더의 docs\\sync.md에 있습니다.",
     );
 }
 

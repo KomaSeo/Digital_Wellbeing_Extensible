@@ -151,6 +151,84 @@ pub struct Status {
     /// ones, AI blocks and the lockdown alike, windowless background programs included.
     #[serde(default)]
     pub recent_kills: Vec<enforcer::BlockEvent>,
+    /// Multi-device sync of this PC (`None`: it does not sync). See `docs/sync.md`.
+    #[serde(default)]
+    pub sync: Option<SyncStatus>,
+    /// The login of this Windows account (sync logins; see `crate::login`).
+    #[serde(default)]
+    pub login: crate::login::LoginStatus,
+}
+
+/// Responsibility: Tell the Focus app how this PC's sync went.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncStatus {
+    pub server_url: String,
+    pub device_id: String,
+    pub last_success: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    /// Changes the server refused (e.g. turning the protection off), with the reason.
+    pub refused: Vec<String>,
+    /// Other PCs on an older version (they wait for an update): "<device> (<version>)".
+    pub outdated_devices: Vec<String>,
+    /// Every paired device: (id, name), as the server last told.
+    pub devices: Vec<(String, String)>,
+    /// The account this PC logged in with; none when it was paired with a code (then it does
+    /// not come back by itself after the server is set up again).
+    pub account: Option<String>,
+}
+
+/// Read from `sync.json` and `sync_state.json` (written by the service).
+pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
+    let read = |name: &str| -> Option<Value> {
+        serde_json::from_str(&std::fs::read_to_string(data_directory.join(name)).ok()?).ok()
+    };
+    let config = read("sync.json")?;
+    let state = read("sync_state.json").unwrap_or(Value::Null);
+    let text = |value: &Value| value.as_str().map(str::to_string);
+    Some(SyncStatus {
+        devices: serde_json::from_value(state["devices"].clone()).unwrap_or_default(),
+        account: text(&config["account"]["name"]),
+        server_url: text(&config["server_url"]).unwrap_or_default(),
+        device_id: text(&config["device_id"]).unwrap_or_default(),
+        last_success: serde_json::from_value(state["last_success"].clone())
+            .ok()
+            .flatten(),
+        last_error: text(&state["last_error"]),
+        refused: state["refused"]
+            .as_array()
+            .map(|refusals| {
+                refusals
+                    .iter()
+                    .map(|refusal| {
+                        format!(
+                            "{} ({})",
+                            refusal["name"].as_str().unwrap_or_default(),
+                            refusal["reason"].as_str().unwrap_or_default()
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        outdated_devices: state["outdated_devices"]
+            .as_array()
+            .map(|devices| {
+                devices
+                    .iter()
+                    .map(|device| {
+                        format!(
+                            "{} ({})",
+                            device[0].as_str().unwrap_or_default(),
+                            device[1]
+                                .as_str()
+                                .filter(|version| !version.is_empty())
+                                .unwrap_or("버전 모름")
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
 }
 
 /// Responsibility: Show the Focus app how the protection may end, without the password hash.
@@ -162,21 +240,26 @@ pub struct ProtectionView {
     /// The end of a time protection.
     #[serde(default)]
     pub until: Option<DateTime<Utc>>,
+    /// The sync device whose administrator may turn an administrator protection off
+    /// (`None`: any computer's).
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 impl ProtectionView {
     pub fn of(protection: &crate::settings::Protection) -> Self {
         use crate::settings::ProtectionMode;
-        let (kind, until) = match &protection.mode {
-            ProtectionMode::Permanent => ("permanent", None),
-            ProtectionMode::Until { until } => ("until", Some(*until)),
-            ProtectionMode::Administrator => ("administrator", None),
-            ProtectionMode::Password { .. } => ("password", None),
+        let (kind, until, device) = match &protection.mode {
+            ProtectionMode::Permanent => ("permanent", None, None),
+            ProtectionMode::Until { until } => ("until", Some(*until), None),
+            ProtectionMode::Administrator { device } => ("administrator", None, device.clone()),
+            ProtectionMode::Password { .. } => ("password", None, None),
         };
         Self {
             since: protection.protected_since,
             kind: kind.to_string(),
             until,
+            device,
         }
     }
 }
@@ -246,11 +329,13 @@ fn status(api: &AgentApi) -> Status {
             .as_ref()
             .map(|enforcer| enforcer.recent_blocks(30))
             .unwrap_or_default(),
+        sync: sync_status(&crate::data_dir()),
+        login: crate::login::status(&crate::data_dir()),
     }
 }
 
-/// The lockdown in force now (see [`crate::lockdown`]): a broken AI connection, to-dos with
-/// none assigned, or a task done away from the computer.
+/// The lockdown in force now (see [`crate::lockdown`]): a broken AI connection, a sync login
+/// not made yet, to-dos with none assigned, or a task done away from the computer.
 pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lockdown> {
     crate::lockdown::lockdown(
         crate::settings::is_protected(&crate::data_dir()),
@@ -258,6 +343,8 @@ pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lo
         planner.and_then(|planner| {
             if planner.stopped() {
                 Some(crate::lockdown::TaskLock::Stopped)
+            } else if crate::login::required(&crate::data_dir()) {
+                Some(crate::lockdown::TaskLock::LoginRequired)
             } else if let Some(task) = planner.away_from_computer_task() {
                 Some(crate::lockdown::TaskLock::AwayFromComputer { task })
             } else {
@@ -544,6 +631,12 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             planner
                 .assign(Utc::now())
                 .map_err(|error| error.to_string())?;
+        }
+        "logout" => {
+            let user = crate::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;
+            crate::login::log_out(&crate::data_dir(), &user)?;
+            tracing::info!("{user} logged out");
+            crate::login::changed();
         }
         "stop_use" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;

@@ -43,9 +43,8 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 | [`docs/claude_desktop.md`](docs/claude_desktop.md) | Claude Desktop으로 이 프로그램 쓰기 |
 | [`docs/cost_reduction_options.md`](docs/cost_reduction_options.md) | AI 비용을 줄이는 방법과 소유자의 결정 |
 | [`docs/linux_and_tests.md`](docs/linux_and_tests.md) | 리눅스에서 개발하고 시험하는 방법 |
+| [`docs/sync.md`](docs/sync.md) | 여러 기기 동기화: 서버 설치, 기기 짝짓기, 로그인, 버전 맞추기 |
 | [`docs/design_decisions.md`](docs/design_decisions.md) | 기능마다 소유자가 요청한 것과 AI가 정한 세부 |
-
-여러 기기 동기화는 아직 브랜치 `claude/multi-device-sync`에서 만들고 있고, 설명은 그 브랜치의 `docs/sync.md`에 있습니다.
 
 ## 5. 저장소 구성
 
@@ -61,7 +60,8 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 | `crates/list_based_rule` | 항상 막을 프로그램(블랙리스트와 화이트리스트) |
 | `crates/ai_focus_rule` | AI 검사, 차단, 접근 허용, Claude API 호출, 사용량 기록 |
 | `crates/task_planner` | 할 일 목록과 지금 할 일, 변경 요청과 그 AI 심사 |
-| `crates/machine` | 데이터 폴더, 설정 보호, 모든 앱 잠금, agent의 사용자 API, AI 비서 |
+| `crates/machine` | 데이터 폴더, 설정 보호, 모든 앱 잠금, 로그인, agent의 사용자 API, AI 비서 |
+| `crates/sync` | 여러 기기 동기화의 서버와 클라이언트, 암호화, 병합, 로그인 목록 |
 | `crates/rule_ui`, `crates/tool-api` | 예전 독립 실행 창의 화면과 함수 호출 API |
 | `installer/` | Inno Setup 설치 스크립트, 릴리스 버전과 릴리스 노트 |
 | `.github/workflows/` | `ci.yml`(리눅스와 Windows의 테스트, 실제 설치 시험), `release.yml`(배포) |

@@ -1,0 +1,9 @@
+# Responsibility: Run the sync server's self-update once (see digital-wellbeing-sync-update).
+[Unit]
+Description=Update the Digital Wellbeing sync server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/digital-wellbeing-sync-update

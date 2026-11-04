@@ -885,17 +885,41 @@ impl TaskPlanner {
         let Some(_busy) = self.busy.try_lock() else {
             return Ok(());
         };
+        // Another device's changes (taken in by sync) count at once.
+        if self.state.changed_on_disk() {
+            self.state.reload()?;
+        }
+        self.follow_assignment()?;
         if self.stopped() {
             return Ok(());
         }
         self.keep_appointments(now)?;
-        if let Some(current) = self.state.get().assignment {
-            if !self.focus.store().get().session_active {
-                self.start_focus(&current)?;
-            }
-        }
         let idle_seconds = (self.idle_source)();
         self.track_idle(now, idle_seconds)?;
+        Ok(())
+    }
+
+    /// Make the focus check watch the current assignment: after logon, and when another
+    /// device (through sync) assigned, ended or stopped a task.
+    fn follow_assignment(&self) -> Result<(), PlannerError> {
+        let focus = self.focus.store().get();
+        match self.state.get().assignment {
+            Some(current) => {
+                let scope = current.todo_id.as_deref().unwrap_or("free");
+                if !focus.session_active || focus.task != current.task || focus.task_scope != scope
+                {
+                    self.start_focus(&current)?;
+                }
+            }
+            // Without the planner a session is started by hand: leave it alone.
+            None if focus.session_active && self.is_active() => {
+                self.focus
+                    .store()
+                    .update(|config| config.session_active = false)
+                    .map_err(|error| PlannerError::Io(std::io::Error::other(error.to_string())))?;
+            }
+            None => {}
+        }
         Ok(())
     }
 

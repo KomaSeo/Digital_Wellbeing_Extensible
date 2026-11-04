@@ -11,6 +11,8 @@
 //!   its agents again. So an update is never a way around the rules, whether the settings are
 //!   protected or not.
 //! - There is no automatic update: the owner chose to update by hand.
+//! - Builds made on the old sync branch (`sync-windows-latest`) show a build after their
+//!   version; they update to the numbered releases like any other.
 //!
 //! Files in the data folder: `self_update_request.json` (agent -> service),
 //! `self_update.json` (written by the service and the guard), `self_update\` (the downloaded
@@ -29,6 +31,25 @@ pub const WORK_FOLDER: &str = "self_update";
 /// Where the releases are published.
 pub const RELEASES_API: &str =
     "https://api.github.com/repos/KomaSeo/Digital_Wellbeing_Extensible/releases?per_page=30";
+
+/// The commit this program was built from (the first 7 characters; GitHub Actions sets
+/// `GITHUB_SHA` while it builds), or `None` for a build made elsewhere.
+pub fn this_build() -> Option<&'static str> {
+    option_env!("GITHUB_SHA").and_then(|commit| commit.get(..7))
+}
+
+/// This version with its build, as the Settings tab shows it.
+pub fn this_version_and_build() -> String {
+    match this_build() {
+        Some(build) => format!("{} ({build})", this_version()),
+        None => this_version().to_string(),
+    }
+}
+
+/// What this build updates to: the newest numbered release newer than this one.
+pub fn newest_available(fetched: &Value) -> Option<Release> {
+    newest_release(fetched, this_version())
+}
 
 /// This program's release version (`installer/RELEASE_VERSION`, e.g. `0.1.0-rc.36`).
 pub fn this_version() -> &'static str {
@@ -144,7 +165,7 @@ pub fn pending_request(data_directory: &Path) -> Option<UpdateRequest> {
 
 pub fn status(data_directory: &Path) -> UpdateStatus {
     UpdateStatus {
-        version: this_version().to_string(),
+        version: this_version_and_build(),
         pending: pending_request(data_directory).map(|request| request.kind),
         state: read_state(data_directory),
     }
@@ -226,12 +247,14 @@ pub fn fetch_releases() -> Result<Value, String> {
     {
         request = request.set("Authorization", &format!("Bearer {token}"));
     }
-    request
-        .timeout(std::time::Duration::from_secs(60))
-        .call()
-        .map_err(|error| format!("GitHub에 닿지 못했습니다: {error}"))?
-        .into_json()
-        .map_err(|error| format!("GitHub의 답을 읽지 못했습니다: {error}"))
+    match request.timeout(std::time::Duration::from_secs(60)).call() {
+        Ok(response) => response
+            .into_json()
+            .map_err(|error| format!("GitHub의 답을 읽지 못했습니다: {error}")),
+        // No build published yet (or CI is replacing it this minute): nothing to update to.
+        Err(ureq::Error::Status(404, _)) => Ok(serde_json::json!({ "assets": [] })),
+        Err(error) => Err(format!("GitHub에 닿지 못했습니다: {error}")),
+    }
 }
 
 /// Lower-case hex SHA-256 of `bytes`.
@@ -271,7 +294,13 @@ pub fn download_setup(data_directory: &Path, release: &Release) -> Result<PathBu
     }
     let folder = data_directory.join(WORK_FOLDER);
     fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
-    let path = folder.join(format!("DigitalWellbeing-Setup-{}.exe", release.version));
+    let file_name = release
+        .setup_url
+        .rsplit('/')
+        .next()
+        .filter(|name| name.ends_with(".exe") && !name.contains(['\\', ':']))
+        .unwrap_or("DigitalWellbeing-Setup.exe");
+    let path = folder.join(file_name);
     fs::write(&path, &bytes).map_err(|error| error.to_string())?;
     Ok(path)
 }
@@ -295,7 +324,7 @@ pub fn handle_request(
         request.kind,
         request.requested_by
     );
-    let checked = fetch().map(|releases| newest_release(&releases, this_version()));
+    let checked = fetch().map(|releases| newest_available(&releases));
     let outcome = match (request.kind, checked) {
         (_, Err(error)) => Err(error),
         (RequestKind::Check, Ok(available)) => {
@@ -380,8 +409,8 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("dw_self_update_{}", std::process::id()));
         let _ = fs::remove_dir_all(&folder);
         fs::create_dir_all(&folder).unwrap();
-        let newer = format!("v{}9", this_version());
-        let releases = json!([release(&newer, false)]);
+        let newer = format!("{}9", this_version());
+        let releases = json!([release(&format!("v{newer}"), false)]);
         let fetch = || Ok(releases.clone());
         let download = |release: &Release| Ok(PathBuf::from(format!("setup-{}", release.version)));
         let started = std::cell::RefCell::new(Vec::new());
@@ -403,7 +432,7 @@ mod tests {
                 .available
                 .as_ref()
                 .map(|release| release.version.clone()),
-            Some(newer.trim_start_matches('v').to_string())
+            Some(newer.clone())
         );
         assert!(started.borrow().is_empty());
 
