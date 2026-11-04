@@ -161,7 +161,7 @@ impl LoginForm {
             self.joined_from_welcome = true;
         }
         self.prefill_server(sync);
-        ui.heading("Digital Wellbeing에 오신 것을 환영합니다");
+        crate::style::section(ui, "Digital Wellbeing에 오신 것을 환영합니다");
         ui.add_space(6.0);
         if let Some(sync) = sync.filter(|_| !self.joined_from_welcome) {
             ui.label(format!(
@@ -170,7 +170,11 @@ impl LoginForm {
                 sync.server_url
             ));
             if let Some(error) = &sync.last_error {
-                ui.colored_label(RED, format!("마지막 동기화가 실패했습니다: {error}"));
+                crate::style::notice(
+                    ui,
+                    crate::style::Tone::Error,
+                    format!("마지막 동기화가 실패했습니다: {error}"),
+                );
             }
         }
         if self.joined_from_welcome {
@@ -178,7 +182,7 @@ impl LoginForm {
             ui.label(
                 "이 PC가 동기화 서버에 붙었습니다. 20초 안에 첫 동기화가 일어나고, 설정 탭의 \"기기 동기화\"에서 마지막 동기화 시각을 볼 수 있습니다. Anthropic API 키는 다른 PC가 쓰는 키를 받아 오므로 따로 넣지 않아도 됩니다. 이 PC가 처음이라면 설정 탭에서 키를 넣으면 다른 PC도 그 키를 씁니다.",
             );
-            if ui.button("시작하기").clicked() {
+            if ui.add(crate::style::primary("시작하기", true)).clicked() {
                 note_welcome_answered();
                 self.welcome_done = Some(true);
             }
@@ -200,7 +204,7 @@ impl LoginForm {
         ui.horizontal(|ui| {
             let server_url = self.server_url.clone();
             if ui
-                .add_enabled(!busy, egui::Button::new("로그인 (관리자 승인)"))
+                .add_enabled(!busy, crate::style::primary("로그인 (관리자 승인)", !busy))
                 .clicked()
             {
                 self.start(ui, &server_url, false);
@@ -254,7 +258,7 @@ impl LoginForm {
             return;
         }
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.heading("로그인");
+            crate::style::section(ui, "로그인");
             ui.label(
                 "이 PC는 여러 기기 동기화를 씁니다. 로그인하면 접근 허용, 걸린 차단, AI 사용량이 \
                  모든 PC에서 같아집니다. 로그인하려면 관리자 승인이 필요하고, 이 Windows 계정은 \
@@ -263,7 +267,7 @@ impl LoginForm {
             self.credentials_ui(ui, false, false);
             let busy = self.pending.is_some();
             if ui
-                .add_enabled(!busy, egui::Button::new("로그인 (관리자 승인)"))
+                .add_enabled(!busy, crate::style::primary("로그인 (관리자 승인)", !busy))
                 .clicked()
             {
                 self.start(ui, &sync.server_url, false);
@@ -308,7 +312,7 @@ impl LoginForm {
                     ui.horizontal(|ui| {
                         let server_url = self.server_url.clone();
                         if ui
-                            .add_enabled(!busy, egui::Button::new("로그인 (관리자 승인)"))
+                            .add_enabled(!busy, crate::style::primary("로그인 (관리자 승인)", !busy))
                             .clicked()
                         {
                             self.start(ui, &server_url, false);

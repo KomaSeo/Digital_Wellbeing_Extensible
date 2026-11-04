@@ -489,7 +489,10 @@ impl FocusApp {
                         );
                         let ready = idle && prompt.reason.trim().chars().count() >= 4;
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(ready, egui::Button::new("보내기")).clicked() {
+                            if ui
+                                .add_enabled(ready, crate::style::primary("보내기", ready))
+                                .clicked()
+                            {
                                 prompt.sent_at = Some(chrono::Utc::now());
                                 let request = if more_time {
                                     json!({ "kind": "extend", "minutes": prompt.minutes })

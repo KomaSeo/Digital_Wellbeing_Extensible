@@ -391,7 +391,7 @@ impl SettingsTab {
             .map(|lockdown| lockdown.fix_now.clone())
             .unwrap_or_default();
         self.refresh();
-        ui.heading("설정 보호(잠금)");
+        crate::style::section(ui, "설정 보호(잠금)");
         if protected {
             ui.label(format!(
                 "설정이 보호되어 있습니다. 규칙을 더 엄격하게 만드는 변경은 바로 적용됩니다. 그 밖의 \
@@ -441,7 +441,6 @@ impl SettingsTab {
             "고친 내용은 자동으로 임시 저장됩니다. 각 항목 아래의 \"적용\"을 눌러야 설정에 \
              반영됩니다.",
         );
-        ui.separator();
         match self.section {
             Section::Connection => self.connection_ui(ui, &snapshot, protected),
             Section::Rules => self.rules_ui(ui, &snapshot, protected),
@@ -489,8 +488,9 @@ impl SettingsTab {
 
     /// Setup: changes take effect at once until the user protects the settings.
     fn protect_ui(&mut self, ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
-        ui.colored_label(
-            YELLOW,
+        crate::style::notice(
+            ui,
+            crate::style::Tone::Warning,
             "설정 단계: 변경이 바로 적용되고, 이 PC를 쓰는 누구나 설정을 바꿀 수 있습니다.",
         );
         ui.label(format!(
@@ -625,7 +625,7 @@ impl SettingsTab {
         if ui
             .add_enabled(
                 self.confirm_protect && mode.is_some(),
-                egui::Button::new("설정 보호하기"),
+                crate::style::primary("설정 보호하기", self.confirm_protect && mode.is_some()),
             )
             .clicked()
         {
@@ -742,13 +742,14 @@ impl SettingsTab {
     // --- AI connection ------------------------------------------------------------------
 
     fn connection_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
-        ui.heading("Anthropic API 키");
+        crate::style::section(ui, "Anthropic API 키");
         if let Some(drafts) = &mut self.drafts {
             let config = &mut drafts.ai_focus;
             let saved = config.api_key.trim();
             if saved.is_empty() {
-                ui.colored_label(
-                    RED,
+                crate::style::notice(
+                    ui,
+                    crate::style::Tone::Error,
                     "키가 없습니다. AI가 아무것도 판정하거나 고르지 못합니다.",
                 );
             } else {
@@ -818,8 +819,7 @@ impl SettingsTab {
         }
         self.block_bar(ui, &API_KEY, snapshot, protected);
 
-        ui.separator();
-        ui.heading("모델");
+        crate::style::section(ui, "모델");
         if let Some(drafts) = &mut self.drafts {
             // A choice, not a typed name: no typos, no made-up model. The agent refreshes the
             // list from the Models API once a week, and checks a new model before applying.
@@ -941,8 +941,7 @@ impl SettingsTab {
         }
         self.block_bar(ui, &MODEL, snapshot, protected);
 
-        ui.separator();
-        ui.heading("AI 하루 예산");
+        crate::style::section(ui, "AI 하루 예산");
         if let Some(drafts) = &mut self.drafts {
             ui.horizontal(|ui| {
                 ui.label("AI 검사의 하루 예산(USD, 0 = 제한 없음)");
@@ -960,7 +959,7 @@ impl SettingsTab {
     // --- rules for the AI ---------------------------------------------------------------
 
     fn rules_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
-        ui.heading("생활 규칙");
+        crate::style::section(ui, "생활 규칙");
         ui.label(
             "AI의 모든 결정(지금 할 일 고르기, 변경 요청 심사, 할 일 변경 심사, 앞으로 7일 계획)이 따르는 \
              규칙입니다.",
@@ -977,8 +976,7 @@ impl SettingsTab {
         }
         self.block_bar(ui, &LIFE_RULES, snapshot, protected);
 
-        ui.separator();
-        ui.heading("약속 규칙");
+        crate::style::section(ui, "약속 규칙");
         ui.label(
             "약속은 정해진 시간에 하던 일을 밀어내고, 그동안 다른 일을 받지 않습니다. 그래서 일을 피하는 데 \
              쓰일 수 있습니다. 사용자가 약속을 추가하면 AI가 이 규칙과 생활 규칙에 따라 받을지 정합니다.",
@@ -996,8 +994,7 @@ impl SettingsTab {
         }
         self.block_bar(ui, &APPOINTMENT_RULES, snapshot, protected);
 
-        ui.separator();
-        ui.heading("AI 지시문");
+        crate::style::section(ui, "AI 지시문");
         ui.label(
             "플래너의 AI에게 무엇을 어떤 기준으로 판단하라고 알려 주는 글입니다. 정확도를 위해 \
              영어로 씁니다. 비어 있으면 프로그램에 들어 있는 기본 지시문을 씁니다.",
@@ -1075,7 +1072,7 @@ impl SettingsTab {
     // --- blocking -----------------------------------------------------------------------
 
     fn blocking_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
-        ui.heading("항상 막을 프로그램");
+        crate::style::section(ui, "항상 막을 프로그램");
         ui.small(
             "목록의 프로그램은 켜질 때마다 꺼집니다. 이름은 정규식으로도 적을 수 있습니다(대소문자 \
              무시, 이름 전체가 맞아야 함). 예: steam.exe, .*game.*\\.exe. 넣기는 바로 적용되고, \
@@ -1093,8 +1090,7 @@ impl SettingsTab {
         }
         self.block_bar(ui, &BLACKLIST, snapshot, protected);
 
-        ui.separator();
-        ui.heading("항상 막을 웹사이트");
+        crate::style::section(ui, "항상 막을 웹사이트");
         ui.small(
             "브라우저 탭의 제목에 이 말이 들어 있으면, 데일리 웰빙이 꺼져 있어도 AI에게 묻지 않고 \
              그 탭을 닫습니다. 정규식으로도 적을 수 있습니다(대소문자 무시, 제목의 일부와 맞으면 \
@@ -1111,8 +1107,7 @@ impl SettingsTab {
         }
         self.block_bar(ui, &BLOCKED_SITES, snapshot, protected);
 
-        ui.separator();
-        ui.heading("걸린 차단");
+        crate::style::section(ui, "걸린 차단");
         ui.small(
             "차단은 그 차단이 생긴 할 일에 붙어 있어서, 그 할 일을 받았을 때만 적용됩니다. 차단 풀기는 \
              예약됩니다. 바로 필요하면 차단 탭에서 접근을 요청하세요.",
@@ -1191,8 +1186,7 @@ impl SettingsTab {
         }
         self.block_bar(ui, &UNBLOCK, snapshot, protected);
 
-        ui.separator();
-        ui.heading("AI가 준 접근 허용");
+        crate::style::section(ui, "AI가 준 접근 허용");
         ui.small("허용 취소는 바로 적용됩니다.");
         if let Some(drafts) = &mut self.drafts {
             let now = Utc::now();
@@ -1229,8 +1223,7 @@ impl SettingsTab {
         }
         self.block_bar(ui, &REVOKE, snapshot, protected);
 
-        ui.separator();
-        ui.heading("접근 요청");
+        crate::style::section(ui, "접근 요청");
         if let Some(drafts) = &mut self.drafts {
             let config = &mut drafts.ai_focus;
             ui.horizontal(|ui| {
@@ -1248,7 +1241,7 @@ impl SettingsTab {
     // --- AI checks ----------------------------------------------------------------------
 
     fn checks_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
-        ui.heading("검사 간격과 판정");
+        crate::style::section(ui, "검사 간격과 판정");
         ui.small("더 엄격한 값은 바로 적용되고, 더 느슨한 값은 예약됩니다.");
         if let Some(drafts) = &mut self.drafts {
             let config = &mut drafts.ai_focus;
@@ -1294,8 +1287,7 @@ impl SettingsTab {
             ),
         ];
         for (heading, list, accessor, hint, block) in lists {
-            ui.separator();
-            ui.heading(heading);
+            crate::style::section(ui, heading);
             if list == "always_allow" {
                 ui.weak(format!(
                     "작업 관리자({})는 이 목록과 상관없이 언제나 허용됩니다.",
@@ -1315,17 +1307,13 @@ impl SettingsTab {
         }
     }
 
-    // --- saving and applying ------------------------------------------------------------
-
-    /// Under a group: what applying would do (in force now or scheduled), when the edits were
-    /// saved, and the 저장 / 적용 / 고친 것 버리기 / 기본값으로 되돌리기 buttons.
     // --- what the service does as administrator ----------------------------------------
 
     /// This program's own update: check, then install through the update guard (every app
     /// stays closed while it installs). Open whether the settings are protected or not.
     fn self_update_ui(&mut self, ui: &mut egui::Ui) {
         use machine::self_update::RequestKind;
-        ui.heading("이 프로그램 업데이트");
+        crate::style::section(ui, "이 프로그램 업데이트");
         let status = match &self.self_update {
             Some(Ok(status)) => status.clone(),
             Some(Err(error)) => {
@@ -1444,8 +1432,7 @@ impl SettingsTab {
 
         self.self_update_ui(ui);
 
-        ui.separator();
-        ui.heading("프로그램 업데이트");
+        crate::style::section(ui, "프로그램 업데이트");
         ui.small(
             "카카오톡처럼 업데이트에 관리자 권한이 필요한 프로그램을 여기에 넣습니다. 사용자에게 \
              관리자 권한을 주지 않고, 이 PC의 서비스(SYSTEM)가 화면 없이 winget으로 그 프로그램만 \
@@ -1532,8 +1519,7 @@ impl SettingsTab {
             }
         }
 
-        ui.separator();
-        ui.heading("시간대 지키기");
+        crate::style::section(ui, "시간대 지키기");
         ui.small(
             "표준 사용자도 Windows의 시간대는 바꿀 수 있습니다. 시간대를 바꾸면 생활 규칙의 시각(예: \
              \"18시 전에는\")을 피할 수 있으므로, 서비스가 몇 초 안에 아래 시간대로 되돌립니다. 이 \
@@ -1578,6 +1564,10 @@ impl SettingsTab {
         }
     }
 
+    // --- saving and applying ------------------------------------------------------------
+
+    /// Under a group: what applying would do (in force now or scheduled), when the edits were
+    /// saved, and the 저장 / 적용 / 고친 것 버리기 / 기본값으로 되돌리기 buttons.
     fn block_bar(
         &mut self,
         ui: &mut egui::Ui,
@@ -1658,7 +1648,7 @@ impl SettingsTab {
                 action = Some(BarAction::Save);
             }
             if ui
-                .add_enabled(has_edits, egui::Button::new("적용"))
+                .add_enabled(has_edits, crate::style::primary("적용", has_edits))
                 .clicked()
             {
                 action = Some(BarAction::Apply);
@@ -1813,8 +1803,7 @@ impl SettingsTab {
         let now = Utc::now();
         let mut changed = false;
         if !snapshot.reservations.scheduled.is_empty() {
-            ui.separator();
-            ui.heading("예약된 업데이트");
+            crate::style::section(ui, "예약된 업데이트");
         }
         for reservation in &snapshot.reservations.scheduled {
             let what = match reservation.origin {
@@ -2316,8 +2305,7 @@ fn local(time: DateTime<Utc>) -> String {
 /// Whether this PC syncs with other devices, and how the last sync went (`docs/sync.md`).
 /// Logging in is at the top of this tab ([`crate::login`]).
 fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
-    ui.separator();
-    ui.heading("기기 동기화");
+    crate::style::section(ui, "기기 동기화");
     let Some(sync) = sync else {
         ui.weak(
             "이 PC는 다른 기기와 동기화하지 않습니다. 동기화를 켜려면 이 탭 맨 위의 \
@@ -2338,7 +2326,11 @@ fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
         None => ui.label("아직 한 번도 동기화하지 못했습니다."),
     };
     if let Some(error) = &sync.last_error {
-        ui.colored_label(RED, format!("마지막 동기화가 실패했습니다: {error}"));
+        crate::style::notice(
+            ui,
+            crate::style::Tone::Error,
+            format!("마지막 동기화가 실패했습니다: {error}"),
+        );
     }
     for refusal in &sync.refused {
         ui.colored_label(YELLOW, format!("서버가 받아들이지 않은 변경: {refusal}"));

@@ -94,7 +94,7 @@ impl AssistantTab {
         if self.view.lock().is_none() {
             self.ask("assistant_view", json!({}));
         }
-        ui.heading("AI 비서");
+        crate::style::section(ui, "AI 비서");
         ui.label(
             "이 탭에서는 하고 싶은 일을 말로 적으면 AI 비서가 이 프로그램의 기능으로 대신 \
              해 줍니다. 예를 들면 \"장보기, 빨래, 은행 가기를 할 일에 올려 줘\", \"남은 할 일 \
@@ -143,7 +143,7 @@ impl AssistantTab {
         ui.horizontal(|ui| {
             let can_send = !waiting && !self.input.trim().is_empty();
             let send_clicked = ui
-                .add_enabled(can_send, egui::Button::new("보내기"))
+                .add_enabled(can_send, crate::style::primary("보내기", can_send))
                 .clicked();
             if send_clicked || (shortcut && can_send) {
                 let text = self.input.trim().to_string();

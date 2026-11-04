@@ -15,7 +15,7 @@ const CLAUDE_DESKTOP_CONFIG: &str = r#"{
 /// The Help tab: one collapsible guide per topic. `true` when the user asked to open the
 /// Settings tab.
 pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
-    ui.heading("도움말");
+    crate::style::section(ui, "도움말");
     ui.label("이 탭은 이 프로그램을 쓰는 방법을 주제마다 설명합니다. 제목을 누르면 펼쳐집니다.");
     ui.separator();
     let mut open_settings = false;

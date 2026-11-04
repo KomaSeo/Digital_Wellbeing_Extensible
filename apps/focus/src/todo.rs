@@ -24,7 +24,7 @@ use task_planner::{
 /// Shown while there are to-dos but nothing is assigned.
 const WAITING_TEXT: &str =
     "지금 할 일이 없습니다. 준비되면 \"할 일 받기\"를 누르세요. AI가 그때 할 일을 \
-                            고르고, 그때부터 시간이 갑니다.";
+     고르고, 그때부터 시간이 갑니다.";
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
 /// Seconds between sending "I finished it" and the proof screenshot, to switch windows.
@@ -183,24 +183,21 @@ impl FocusApp {
         }
         if !status.settings_protected {
             // Setup: anyone can change anything at once until the settings are protected.
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(
-                    YELLOW,
-                    "설정 단계: 설정이 아직 보호(잠금)되지 않아서, 어떤 변경이든 바로 적용됩니다.",
-                );
-                if ui.link("설정 탭에서 보호하기").clicked() {
-                    self.tab = Tab::Settings;
-                }
-            });
-            ui.separator();
+            crate::style::notice(
+                ui,
+                crate::style::Tone::Warning,
+                "설정 단계: 설정이 아직 보호(잠금)되지 않아서, 어떤 변경이든 바로 적용됩니다.",
+            );
+            if ui.link("설정 탭에서 보호하기").clicked() {
+                self.tab = Tab::Settings;
+            }
         }
         let planner = status.planner.clone();
         if let Some(stopped_at) = planner.as_ref().and_then(|planner| planner.stopped_at) {
             self.stopped_ui(ui, stopped_at);
             return;
         }
-        ui.horizontal(|ui| {
-            ui.heading("데일리 웰빙");
+        crate::style::section_with(ui, "데일리 웰빙", |ui| {
             if planner.is_some() {
                 self.stop_button_ui(ui);
             }
@@ -227,9 +224,7 @@ impl FocusApp {
         let Some(planner) = planner else {
             return;
         };
-        ui.separator();
         self.list_ui(ui, &planner);
-        ui.separator();
         self.appointments_ui(ui, &planner);
     }
 
@@ -265,7 +260,7 @@ impl FocusApp {
     /// After "사용 중지": everything is locked until "다시 사용하기".
     fn stopped_ui(&mut self, ui: &mut egui::Ui, stopped_at: DateTime<Utc>) {
         let idle = !self.pending.load(Ordering::SeqCst);
-        ui.heading("사용 중지");
+        crate::style::section(ui, "사용 중지");
         ui.label(format!(
             "{}에 사용을 멈췄습니다. 이 앱과 Windows 말고는 모든 앱과 웹사이트가 잠겨 있고, 차단 말고는 \
              아무것도 하지 않습니다. AI 검사, 할 일 고르기, AI 비서, 약속 시작도 멈춥니다.",
@@ -319,7 +314,7 @@ impl FocusApp {
             .as_ref()
             .filter(|_| status.session_active);
         let Some(assignment) = assignment else {
-            ui.label(WAITING_TEXT);
+            crate::style::notice(ui, crate::style::Tone::Information, WAITING_TEXT);
             if status.settings_protected {
                 ui.colored_label(
                     RED,
@@ -328,10 +323,7 @@ impl FocusApp {
             }
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(
-                        idle,
-                        egui::Button::new(egui::RichText::new("할 일 받기").strong()),
-                    )
+                    .add_enabled(idle, crate::style::primary("할 일 받기", idle))
                     .clicked()
                 {
                     self.send("assign", json!({}));
@@ -659,7 +651,7 @@ impl FocusApp {
     /// The to-do list: soonest deadline first, each with details and change buttons, and the
     /// form to add one.
     fn list_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
-        ui.heading(format!("할 일 목록 ({})", planner.open_todos.len()));
+        crate::style::section(ui, format!("할 일 목록 ({})", planner.open_todos.len()));
         let today = Local::now().date_naive();
         let mut todos = planner.open_todos.clone();
         todos.sort_by_key(|todo| {
@@ -1066,7 +1058,7 @@ impl FocusApp {
     /// the AI (the owner's appointment rules); removing one needs no AI.
     fn appointments_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
         let idle = !self.pending.load(Ordering::SeqCst);
-        ui.heading(format!("약속 ({})", planner.appointments.len()));
+        crate::style::section(ui, format!("약속 ({})", planner.appointments.len()));
         ui.small(
             "약속은 시간이 정해진 일(만남, 수업, 병원)입니다. 약속 시간이 되면 하던 일 대신 약속이 \
              저절로 시작되고, 끝나는 시각에 저절로 끝납니다. 약속을 받을지는 AI가 설정의 약속 규칙에 \
