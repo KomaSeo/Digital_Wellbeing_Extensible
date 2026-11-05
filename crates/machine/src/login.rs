@@ -195,7 +195,7 @@ pub fn assign(data_directory: &Path, windows_user: &str, name: &str) -> Result<(
 /// way out of the shared grants and blocks).
 pub fn log_out(data_directory: &Path, windows_user: &str) -> Result<(), String> {
     if crate::settings::is_protected(data_directory) {
-        return Err("설정이 보호되어 있는 동안에는 로그아웃할 수 없습니다".into());
+        return Err("엄격 모드인 동안에는 로그아웃할 수 없습니다".into());
     }
     let path = data_directory.join(LOGINS_FILE);
     let mut logins: Logins = read(&path);

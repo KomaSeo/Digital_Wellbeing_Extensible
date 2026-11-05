@@ -94,6 +94,10 @@ pub struct DeviceRequest {
     pub previous_device_id: Option<String>,
     #[serde(default)]
     pub app_version: String,
+    /// This computer's hashed id ([`crate::machine_identity`]): a reinstalled PC that lost
+    /// its device id gets the entry with the same machine id back.
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 /// Responsibility: Carry the device's identity on the server (sealed with the session key).
@@ -234,6 +238,7 @@ impl Joiner<'_> {
             device_name: device_name.to_string(),
             previous_device_id,
             app_version: crate::protocol::app_version().to_string(),
+            machine_id: crate::machine_identity::get(),
         };
         let plaintext = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
         let sealed = envelope::seal(&envelope_id, &key, &plaintext)?;

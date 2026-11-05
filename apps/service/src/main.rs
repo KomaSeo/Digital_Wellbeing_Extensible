@@ -43,6 +43,13 @@ pub const MCP_EXE: &str = "digital-wellbeing-mcp.exe";
 
 fn main() -> anyhow::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    // The computer's id for the sync server, so a reinstalled PC keeps its device entry.
+    if arguments
+        .first()
+        .is_some_and(|command| command.starts_with("sync") || command == "run")
+    {
+        sync::machine_identity::set(sync::machine_identity::from_system());
+    }
     match arguments.first().map(String::as_str) {
         Some("agent") => agent::run(),
         // Run with administrator rights (the Focus app asks Windows for them): turn off a
@@ -112,7 +119,7 @@ fn settings_unlock() -> anyhow::Result<()> {
         },
     )
     .map_err(anyhow::Error::msg)?;
-    println!("설정 보호를 풀었습니다. 걸린 차단도 모두 풀립니다.");
+    println!("엄격 모드를 껐습니다. 걸린 차단도 모두 풀립니다.");
     Ok(())
 }
 

@@ -176,6 +176,15 @@ pub struct SyncStatus {
     /// The account this PC logged in with; none when it was paired with a code (then it does
     /// not come back by itself after the server is set up again).
     pub account: Option<String>,
+    /// Every paired device with its version and last sync, as the server last told.
+    #[serde(default)]
+    pub device_details: Vec<sync::protocol::DeviceSummary>,
+    /// Devices waiting to be taken off the list with the next sync.
+    #[serde(default)]
+    pub forget_waiting: Vec<String>,
+    /// Devices the last sync asked to take off the list that the server kept: (id, why).
+    #[serde(default)]
+    pub not_forgotten: Vec<(String, String)>,
 }
 
 /// Read from `sync.json` and `sync_state.json` (written by the service).
@@ -187,6 +196,9 @@ pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
     let state = read("sync_state.json").unwrap_or(Value::Null);
     let text = |value: &Value| value.as_str().map(str::to_string);
     Some(SyncStatus {
+        device_details: serde_json::from_value(state["device_details"].clone()).unwrap_or_default(),
+        forget_waiting: sync::client::ForgetRequest::load(data_directory).devices,
+        not_forgotten: serde_json::from_value(state["not_forgotten"].clone()).unwrap_or_default(),
         devices: serde_json::from_value(state["devices"].clone()).unwrap_or_default(),
         account: text(&config["account"]["name"]),
         server_url: text(&config["server_url"]).unwrap_or_default(),
@@ -628,9 +640,31 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
         }
         "assign" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
+            // The situation the user wrote next to "할 일 받기" (kept for later picks too).
+            if let Some(situation) = params["situation"].as_str() {
+                planner
+                    .set_situation(situation)
+                    .map_err(|error| error.to_string())?;
+            }
             planner
                 .assign(Utc::now())
                 .map_err(|error| error.to_string())?;
+        }
+        "sync_forget_device" => {
+            // Another device's entry (an old one of a computer installed again, or one no
+            // longer used) leaves the server's list with the next sync of this PC. It loosens
+            // nothing: a computer still in use logs in again by itself.
+            let data_directory = crate::data_dir();
+            let id = params["id"].as_str().ok_or("params.id required")?;
+            let status = sync_status(&data_directory).ok_or("이 PC는 동기화하지 않습니다")?;
+            if id == status.device_id {
+                return Err("이 PC 자신은 목록에서 지울 수 없습니다".into());
+            }
+            if !status.devices.iter().any(|(device, _)| device == id) {
+                return Err(format!("'{id}'라는 기기가 목록에 없습니다"));
+            }
+            sync::client::ForgetRequest::add(&data_directory, id)?;
+            tracing::info!("device '{id}' will be taken off the sync list");
         }
         "logout" => {
             let user = crate::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;
@@ -653,6 +687,21 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let request: ChangeKind = serde_json::from_value(params["request"].clone())
                 .map_err(|error| format!("params.request: {error}"))?;
             let reason = params["reason"].as_str().unwrap_or_default();
+            // Outside strict mode a done report needs no AI (the owner's request), so no
+            // reason and no proof either.
+            if request == ChangeKind::Done && !crate::settings::is_protected(&data_directory) {
+                let evidence = Evidence {
+                    text: params["evidence"].as_str().unwrap_or_default().to_string(),
+                    screenshot_jpeg: None,
+                };
+                let record = planner
+                    .report_done_without_review(Utc::now(), reason, evidence)
+                    .map_err(|error| error.to_string())?;
+                last_decision = Some(record);
+                let mut status = status(api);
+                status.last_decision = last_decision;
+                return serde_json::to_value(status).map_err(|error| error.to_string());
+            }
             // Refuse a request that cannot go to the AI before waiting for a screenshot.
             planner
                 .check_change(Utc::now(), &request, reason)
@@ -1104,17 +1153,20 @@ mod tests {
             dispatch(&api, "status", &json!({})).unwrap()["session_active"],
             false
         );
-        // A proposal reaches the planner; the AI cannot review it here, so it is logged
-        // (the user may schedule it) and the list does not change. Malformed params are
-        // refused before that.
+        // A change the AI decides (an appointment: even outside strict mode) reaches the
+        // planner; the AI cannot review it here, so it is logged and the list does not
+        // change. Malformed params are refused before that.
+        let start = Utc::now() + chrono::Duration::hours(2);
         let status = dispatch(
             &api,
-            "propose_todo",
-            &json!({ "todo": { "title": "장보기" }, "via": "claude desktop" }),
+            "todo_change",
+            &json!({ "change": { "kind": "add_appointment", "appointment": {
+                "title": "치과", "start": start, "end": start + chrono::Duration::hours(1),
+            } }, "via": "claude desktop" }),
         )
         .unwrap();
         assert_eq!(status["last_todo_change"]["ai_failed"], true);
-        assert_eq!(status["last_proposal"]["approved"], false);
+        assert_eq!(status["last_todo_change"]["approved"], false);
         assert_eq!(status["planner"]["open_todos"].as_array().unwrap().len(), 1);
         assert!(dispatch(&api, "propose_todo", &json!({ "todo": 5 }))
             .unwrap_err()

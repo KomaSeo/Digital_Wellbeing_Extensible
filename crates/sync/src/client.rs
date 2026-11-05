@@ -79,6 +79,36 @@ pub struct SyncState {
     pub outdated_devices: Vec<(String, String)>,
     /// Every paired device as the server last told: (id, name).
     pub devices: Vec<(String, String)>,
+    /// Every paired device with its version and last sync, as the server last told.
+    pub device_details: Vec<crate::protocol::DeviceSummary>,
+    /// Devices this PC asked to take off the list that the server kept: (id, why).
+    pub not_forgotten: Vec<(String, String)>,
+}
+
+/// Other devices the user asked to take off the server's list (`{"devices": [id, ...]}`),
+/// written by the agent and sent with the next sync, which then deletes the file.
+pub const FORGET_FILE: &str = "sync_forget.json";
+
+/// Responsibility: Hold the devices waiting to be taken off the list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ForgetRequest {
+    pub devices: Vec<String>,
+}
+
+impl ForgetRequest {
+    pub fn load(data_directory: &Path) -> Self {
+        read_json(&data_directory.join(FORGET_FILE)).unwrap_or_default()
+    }
+
+    /// Add `device_id` to the waiting list.
+    pub fn add(data_directory: &Path, device_id: &str) -> Result<(), String> {
+        let mut request = Self::load(data_directory);
+        if !request.devices.iter().any(|waiting| waiting == device_id) {
+            request.devices.push(device_id.to_string());
+        }
+        write_json(&data_directory.join(FORGET_FILE), &request)
+    }
 }
 
 impl SyncState {
@@ -103,6 +133,8 @@ pub struct SyncReport {
     pub refused: Vec<Rejected>,
     pub outdated_devices: Vec<(String, String)>,
     pub devices: Vec<(String, String)>,
+    pub device_details: Vec<crate::protocol::DeviceSummary>,
+    pub not_forgotten: Vec<(String, String)>,
 }
 
 /// Top-level values of a document that are never merged inside (one side's whole value wins).
@@ -328,6 +360,10 @@ impl SyncClient {
                 state.refused = report.refused.clone();
                 state.outdated_devices = report.outdated_devices.clone();
                 state.devices = report.devices.clone();
+                state.device_details = report.device_details.clone();
+                state.not_forgotten = report.not_forgotten.clone();
+                // The server has had the request (and said which ones it kept).
+                let _ = fs::remove_file(self.data_directory.join(FORGET_FILE));
             }
             Err(error) => state.last_error = Some(error.clone()),
         }
@@ -345,6 +381,8 @@ impl SyncClient {
         // what the server does not have yet (the first device fills an empty server).
         let mut joining = state.revisions.is_empty();
         let mut refused_names: BTreeSet<String> = BTreeSet::new();
+        // Sent with the first request only.
+        let mut forget_devices = ForgetRequest::load(&self.data_directory).devices;
         for _ in 0..MAX_ROUNDS {
             let pushes: Vec<Push> = if joining {
                 Vec::new()
@@ -368,6 +406,8 @@ impl SyncClient {
                 pushes: pushes.clone(),
                 known: state.revisions.clone(),
                 app_version: crate::protocol::app_version().to_string(),
+                machine_id: crate::machine_identity::get(),
+                forget_devices: std::mem::take(&mut forget_devices),
             };
             let plaintext = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
             let sealed = envelope::seal(&self.config.device_id, &self.config.key, &plaintext)?;
@@ -389,6 +429,10 @@ impl SyncClient {
 
             report.outdated_devices = response.outdated_devices.clone();
             report.devices = response.devices.clone();
+            report.device_details = response.device_details.clone();
+            report
+                .not_forgotten
+                .extend(response.not_forgotten.iter().cloned());
             let mut conflicts = 0;
             for refusal in &response.rejected {
                 if refusal.reason == "conflict" {

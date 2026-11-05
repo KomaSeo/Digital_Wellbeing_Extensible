@@ -675,7 +675,7 @@ fn in_the_setup_stage_edits_and_removals_need_neither_the_ai_nor_a_reason() {
         [TodoListWrite::Remove("b".into())]
     );
     assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
-    // An unknown to-do is still refused, and an addition still goes to the AI.
+    // An unknown to-do is still refused; an addition is taken as the user wrote it.
     let remove_unknown = TodoChange::Remove {
         todo_id: "zzz".into(),
     };
@@ -690,8 +690,53 @@ fn in_the_setup_stage_edits_and_removals_need_neither_the_ai_nor_a_reason() {
         .planner
         .todo_change_without_review(Utc::now(), add("Play games"), "", "to-do tab")
         .unwrap();
-    assert!(!record.approved);
+    assert!(record.approved);
+    assert_eq!(record.after.unwrap().title, "Play games");
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+    // An appointment still goes to the AI.
+    let appointment = TodoChange::AddAppointment {
+        appointment: AppointmentInput {
+            title: "Dentist".into(),
+            notes: String::new(),
+            start: Utc::now() + chrono::Duration::hours(2),
+            end: Utc::now() + chrono::Duration::hours(3),
+            away_from_computer: None,
+        },
+    };
+    let _ = fixture
+        .planner
+        .todo_change_without_review(Utc::now(), appointment, "", "to-do tab");
     assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn outside_strict_mode_a_done_report_needs_neither_the_ai_nor_a_reason() {
+    let fixture = harness(true, &["a", "b"]);
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let start = Utc::now();
+    fixture.planner.assign(start).unwrap();
+    let reviews_before = fixture.advisor.reviews.load(Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .report_done_without_review(
+            start + chrono::Duration::minutes(5),
+            "",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert!(record.approved);
+    assert_eq!(
+        fixture.advisor.reviews.load(Ordering::SeqCst),
+        reviews_before
+    );
+    assert!(fixture.planner.status().assignment.is_none());
+    // Nothing assigned: nothing to report.
+    assert!(matches!(
+        fixture
+            .planner
+            .report_done_without_review(Utc::now(), "", Evidence::default()),
+        Err(PlannerError::NothingAssigned)
+    ));
 }
 
 #[test]
@@ -852,7 +897,9 @@ fn a_question_starts_with_the_cached_rules_and_list_and_ends_with_what_changes()
         previous: None,
         history: "",
         repick_reason: None,
+        situation: "카페, 노트북만 있음",
     });
+    assert!(pick.contains("카페, 노트북만 있음"), "{pick}");
     assert!(
         pick.contains("polish:a") && !pick.contains("\"id\": \"b\""),
         "{pick}"

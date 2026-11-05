@@ -370,7 +370,7 @@ pub fn protect(
         ProtectionChoice::Until { until } => {
             if until < now + chrono::Duration::minutes(MIN_PROTECTION_MINUTES) {
                 return Err(format!(
-                    "보호 기간은 적어도 {MIN_PROTECTION_MINUTES}분이어야 합니다"
+                    "엄격 모드의 기간은 적어도 {MIN_PROTECTION_MINUTES}분이어야 합니다"
                 ));
             }
             ProtectionMode::Until { until }
@@ -401,9 +401,9 @@ pub fn may_unprotect(
     unlock: &Unlock,
 ) -> Result<(), String> {
     match (&protection.mode, unlock) {
-        (ProtectionMode::Permanent, _) => Err("영구 보호는 풀 수 없습니다".into()),
+        (ProtectionMode::Permanent, _) => Err("영구 엄격 모드는 끌 수 없습니다".into()),
         (ProtectionMode::Until { until }, _) if now < *until => Err(format!(
-            "{}까지는 보호를 풀 수 없습니다",
+            "{}까지는 엄격 모드를 끌 수 없습니다",
             until.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
         )),
         (ProtectionMode::Until { .. }, _) => Ok(()),
@@ -413,12 +413,12 @@ pub fn may_unprotect(
             },
             Unlock::Administrator { device },
         ) if device.as_deref() != Some(required.as_str()) => Err(format!(
-            "\"{required}\" 컴퓨터의 관리자 권한으로만 풀 수 있습니다"
+            "\"{required}\" 컴퓨터의 관리자 권한으로만 엄격 모드를 끌 수 있습니다"
         )),
         (ProtectionMode::Administrator { .. }, Unlock::Administrator { .. }) => Ok(()),
-        (ProtectionMode::Administrator { .. }, _) => {
-            Err("관리자 권한으로만 풀 수 있습니다(관리자 승인 창에서 승인하세요)".into())
-        }
+        (ProtectionMode::Administrator { .. }, _) => Err(
+            "관리자 권한으로만 엄격 모드를 끌 수 있습니다(관리자 승인 창에서 승인하세요)".into(),
+        ),
         (ProtectionMode::Password { password }, Unlock::Password(typed)) => {
             if password.matches(typed) {
                 Ok(())
@@ -426,7 +426,9 @@ pub fn may_unprotect(
                 Err("비밀번호가 맞지 않습니다".into())
             }
         }
-        (ProtectionMode::Password { .. }, _) => Err("비밀번호를 넣어야 풀 수 있습니다".into()),
+        (ProtectionMode::Password { .. }, _) => {
+            Err("비밀번호를 넣어야 엄격 모드를 끌 수 있습니다".into())
+        }
     }
 }
 

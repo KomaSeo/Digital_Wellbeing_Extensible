@@ -80,7 +80,15 @@ pub struct Device {
     /// The program version the device last synced with.
     #[serde(default)]
     pub version: String,
+    /// The hashed id of the computer ([`crate::machine_identity`]): a reinstalled PC that
+    /// lost its device id logs in again as this device.
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
+
+/// A device that synced this recently is in use and cannot be taken off the list from
+/// another one.
+const FORGET_AFTER_MINUTES: i64 = 10;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Devices {
@@ -294,25 +302,40 @@ impl SyncServer {
             last_counter: 0,
             last_seen: None,
             version: String::new(),
+            machine_id: None,
         });
         Ok(PairingCode { device_id: id, key })
     }
 
-    /// Join a device to the account: give `previous_device_id` a new key when it is still
-    /// paired (the same computer logging in again), or else pair a new device.
+    /// Join a device to the account: give a new key to the device it already was, found by
+    /// `previous_device_id` (the same computer logging in again) or else by `machine_id`
+    /// (the same computer installed again, which lost its device id); or else pair a new
+    /// device.
     fn join_device(
         &self,
         device_name: &str,
         previous_device_id: Option<&str>,
+        machine_id: Option<&str>,
     ) -> Result<PairingCode, String> {
         let mut devices = self.load_devices();
-        let code = match previous_device_id.and_then(|previous| {
-            devices
-                .devices
-                .iter_mut()
-                .find(|device| device.id == previous)
-        }) {
-            Some(device) => {
+        let known = previous_device_id
+            .and_then(|previous| {
+                devices
+                    .devices
+                    .iter()
+                    .position(|device| device.id == previous)
+            })
+            .or_else(|| {
+                machine_id.and_then(|machine| {
+                    devices
+                        .devices
+                        .iter()
+                        .position(|device| device.machine_id.as_deref() == Some(machine))
+                })
+            });
+        let code = match known {
+            Some(index) => {
+                let device = &mut devices.devices[index];
                 device.key = envelope::new_key()?;
                 // The device starts its counter again (it forgets its old sync state).
                 device.last_counter = 0;
@@ -323,6 +346,15 @@ impl SyncServer {
             }
             None => Self::new_device(&mut devices, device_name)?,
         };
+        if let Some(machine) = machine_id {
+            if let Some(device) = devices
+                .devices
+                .iter_mut()
+                .find(|device| device.id == code.device_id)
+            {
+                device.machine_id = Some(machine.to_string());
+            }
+        }
         self.save_devices(&devices)?;
         Ok(code)
     }
@@ -479,8 +511,11 @@ impl SyncServer {
                         ));
                     }
                 }
-                let code =
-                    self.join_device(&request.device_name, request.previous_device_id.as_deref())?;
+                let code = self.join_device(
+                    &request.device_name,
+                    request.previous_device_id.as_deref(),
+                    request.machine_id.as_deref(),
+                )?;
                 // This login ended: it no longer counts against the name.
                 if let Some(recent) = self.unfinished_logins.lock().get_mut(&pending.name) {
                     recent.pop();
@@ -621,8 +656,35 @@ impl SyncServer {
         device.last_counter = request.counter;
         device.last_seen = Some(now);
         device.version = request.app_version.clone();
+        if request.machine_id.is_some() {
+            device.machine_id = request.machine_id.clone();
+        }
         let device_id = device.id.clone();
         let key = device.key.clone();
+        // Other devices this one asks to take off the list: not itself, and not one in use.
+        let mut not_forgotten = Vec::new();
+        for forget in &request.forget_devices {
+            let reason = match devices.devices.iter().find(|device| &device.id == forget) {
+                None => continue,
+                Some(_) if *forget == device_id => "이 PC 자신은 지울 수 없습니다".to_string(),
+                Some(device)
+                    if device
+                        .last_seen
+                        .is_some_and(|seen| (now - seen).num_minutes() < FORGET_AFTER_MINUTES) =>
+                {
+                    format!(
+                        "최근 {FORGET_AFTER_MINUTES}분 안에 동기화한 기기라서 지우지 않았습니다"
+                    )
+                }
+                Some(_) => {
+                    // Not added to `removed`: a computer still in use logs in again by
+                    // itself and comes back.
+                    devices.devices.retain(|device| &device.id != forget);
+                    continue;
+                }
+            };
+            not_forgotten.push((forget.clone(), reason));
+        }
         self.save_devices(&devices)?;
 
         // Every device runs the newest version any of them runs: an older one would drop
@@ -691,6 +753,17 @@ impl SyncServer {
                 .iter()
                 .map(|device| (device.id.clone(), device.name.clone()))
                 .collect(),
+            device_details: devices
+                .devices
+                .iter()
+                .map(|device| crate::protocol::DeviceSummary {
+                    id: device.id.clone(),
+                    name: device.name.clone(),
+                    version: device.version.clone(),
+                    last_seen: device.last_seen,
+                })
+                .collect(),
+            not_forgotten,
         };
         let bytes = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
         envelope::seal(&device_id, &key, &bytes)
@@ -895,5 +968,78 @@ mod tests {
         // Only the server writes the logins; every device reads them.
         assert!(!allowed_name("users.json", Some("laptop")));
         assert!(allowed_name("users.json", None));
+    }
+
+    #[test]
+    fn a_reinstalled_computer_gets_its_entry_back_and_quiet_devices_can_be_forgotten() {
+        let folder = std::env::temp_dir().join(format!("dw_server_forget_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).unwrap();
+        let server = SyncServer::new(folder.clone());
+        let laptop = server
+            .join_device("Laptop", None, Some("machine-a"))
+            .unwrap();
+        // Installed again: no device id, the same computer.
+        let again = server
+            .join_device("Laptop", None, Some("machine-a"))
+            .unwrap();
+        assert_eq!(again.device_id, laptop.device_id);
+        let old_desktop = server
+            .join_device("Desktop", None, Some("machine-b"))
+            .unwrap();
+        let other = server
+            .join_device("Desktop", None, Some("machine-c"))
+            .unwrap();
+        assert_ne!(other.device_id, old_desktop.device_id);
+        assert_eq!(server.devices().len(), 3);
+
+        // The old desktop last synced an hour ago, the other one just now.
+        let mut devices = server.load_devices();
+        for device in &mut devices.devices {
+            if device.id == old_desktop.device_id {
+                device.last_seen = Some(Utc::now() - chrono::Duration::hours(1));
+            }
+            if device.id == other.device_id {
+                device.last_seen = Some(Utc::now());
+            }
+        }
+        server.save_devices(&devices).unwrap();
+        let request = SyncRequest {
+            sent_at: Utc::now(),
+            counter: 1,
+            pushes: vec![],
+            known: Default::default(),
+            app_version: crate::protocol::app_version().to_string(),
+            machine_id: Some("machine-a".into()),
+            forget_devices: vec![
+                old_desktop.device_id.clone(),
+                other.device_id.clone(),
+                again.device_id.clone(),
+            ],
+        };
+        let sealed = envelope::seal(
+            &again.device_id,
+            &again.key,
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        let answer = server.handle(&sealed).unwrap();
+        let response: SyncResponse =
+            serde_json::from_slice(&envelope::open(&answer, &again.key).unwrap()).unwrap();
+        let left: Vec<String> = server
+            .devices()
+            .into_iter()
+            .map(|device| device.id)
+            .collect();
+        assert!(!left.contains(&old_desktop.device_id));
+        assert!(left.contains(&other.device_id) && left.contains(&again.device_id));
+        assert_eq!(response.not_forgotten.len(), 2);
+        assert_eq!(response.device_details.len(), 2);
+        // Forgotten is not banned: that computer may log in again.
+        assert!(!server
+            .load_devices()
+            .removed
+            .contains(&old_desktop.device_id));
+        let _ = fs::remove_dir_all(&folder);
     }
 }

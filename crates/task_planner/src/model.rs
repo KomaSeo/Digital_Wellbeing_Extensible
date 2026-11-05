@@ -725,6 +725,11 @@ pub struct PlannerState {
     /// Approved extensions of appointments: the new end, by appointment id.
     #[serde(default)]
     pub appointment_extensions: BTreeMap<String, DateTime<Utc>>,
+    /// What the user wrote about their situation when they last asked for a task (where they
+    /// are, what they have with them, how they feel), in their words; every pick reads it
+    /// until they write another.
+    #[serde(default)]
+    pub situation: String,
 }
 
 impl PlannerState {
@@ -740,6 +745,9 @@ impl PlannerState {
 pub struct PlannerStatus {
     /// Planner is enabled and has open to-dos: free-text tasks are refused.
     pub active: bool,
+    /// [`PlannerState::situation`].
+    #[serde(default)]
+    pub situation: String,
     pub assignment: Option<Assignment>,
     pub open_todos: Vec<TodoItem>,
     /// Newest first.

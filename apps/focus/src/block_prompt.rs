@@ -453,7 +453,7 @@ impl FocusApp {
                 match prompt.answering {
                     None => {
                         if ui.button("끝냈어요(완료 보고하기)").clicked() {
-                            self.tab = Tab::Todo;
+                            self.tab = Tab::Work;
                             self.choice = crate::ChangeChoice::Done;
                             if self.reason.trim().is_empty() {
                                 self.reason = "끝낸 것: ".into();
@@ -466,7 +466,7 @@ impl FocusApp {
                         if ui.button("다 못 했어요(목록에 남김)").clicked() {
                             prompt.answering = Some(false);
                         }
-                        if ui.button("나중에 할 일 탭에서 보고하기").clicked() {
+                        if ui.button("나중에 일하기 탭에서 보고하기").clicked() {
                             keep = false;
                         }
                     }

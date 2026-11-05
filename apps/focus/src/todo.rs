@@ -34,6 +34,9 @@ const PROOF_SCREENSHOT_DELAY_SECONDS: u64 = 5;
 /// Responsibility: Keep what the user types into the To-do tab's forms.
 #[derive(Default)]
 pub struct TodoUiState {
+    /// What the user writes about their situation next to "할 일 받기"; `None` until it is
+    /// filled from the last one the planner kept.
+    situation: Option<String>,
     /// The to-do whose details are open in the list.
     expanded: Option<String>,
     /// Add (when `editing` is `None`) or edit form.
@@ -171,8 +174,9 @@ impl TodoForm {
 }
 
 impl FocusApp {
-    /// The To-do tab.
-    pub(crate) fn todo_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
+    /// What both tabs show first: a scheduled update waiting for an answer, and the setup
+    /// stage's notice.
+    fn planner_header_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
         self.todo_ui.without_review = !status.settings_protected;
         if status.settings_questions_due > 0 {
             ui.horizontal_wrapped(|ui| {
@@ -191,12 +195,20 @@ impl FocusApp {
             crate::style::notice(
                 ui,
                 crate::style::Tone::Warning,
-                "설정 단계: 설정이 아직 보호(잠금)되지 않아서, 어떤 변경이든 바로 적용됩니다.",
+                "설정 단계: 아직 엄격 모드를 켜지 않아서, 어떤 변경이든 바로 적용됩니다.",
             );
-            if ui.link("설정 탭에서 보호하기").clicked() {
+            if ui.link("설정 탭에서 엄격 모드 켜기").clicked() {
                 self.tab = Tab::Settings;
+                self.settings.show_protection();
             }
         }
+    }
+
+    /// The Work tab ("일하기"): the task the AI picked, its notes, asking for a change, and
+    /// "사용 중지". The list itself is managed in the To-do tab (the owner's request: "할 일
+    /// 목록 관리와 일 하기를 분리").
+    pub(crate) fn work_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
+        self.planner_header_ui(ui, status);
         let planner = status.planner.clone();
         if let Some(stopped_at) = planner.as_ref().and_then(|planner| planner.stopped_at) {
             self.stopped_ui(ui, stopped_at);
@@ -226,23 +238,41 @@ impl FocusApp {
                 }
             });
         }
-        let Some(planner) = planner else {
+    }
+
+    /// The To-do tab: the to-do list (adding, editing, removing) and the appointments.
+    pub(crate) fn todo_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
+        self.planner_header_ui(ui, status);
+        let Some(planner) = status.planner.clone() else {
+            ui.label("할 일 플래너에 연결하는 중…");
             return;
         };
+        if planner.stopped_at.is_some() {
+            ui.label("사용을 멈춘 동안에는 할 일 목록을 바꿀 수 없습니다.");
+            if ui.link("일하기 탭에서 다시 사용하기").clicked() {
+                self.tab = Tab::Work;
+            }
+            return;
+        }
         self.list_ui(ui, &planner);
         self.appointments_ui(ui, &planner);
     }
 
-    /// "사용 중지": asks once to confirm, then ends the task and locks every app.
+    /// "사용 중지": asks once to confirm, then ends the task and, in strict mode, locks every
+    /// app.
     fn stop_button_ui(&mut self, ui: &mut egui::Ui) {
         let idle = !self.pending.load(Ordering::SeqCst);
+        let locks = !self.todo_ui.without_review;
         if !self.todo_ui.confirm_stop {
             if ui
                 .add_enabled(idle, egui::Button::new("⏻ 사용 중지"))
-                .on_hover_text(
+                .on_hover_text(if locks {
                     "컴퓨터를 그만 쓸 때 누릅니다. 모든 앱과 웹사이트가 잠기고, 차단 말고는 아무것도 \
-                     하지 않습니다(AI도 부르지 않습니다).",
-                )
+                     하지 않습니다(AI도 부르지 않습니다)."
+                } else {
+                    "컴퓨터를 그만 쓸 때 누릅니다. 지금 할 일이 끝나고 AI도 부르지 않습니다. 엄격 \
+                     모드가 아니므로 앱과 웹사이트는 잠그지 않습니다."
+                })
                 .clicked()
             {
                 self.todo_ui.confirm_stop = true;
@@ -251,7 +281,11 @@ impl FocusApp {
         }
         ui.colored_label(
             RED,
-            "지금 할 일은 목록에 남고, 모든 앱과 웹사이트가 잠깁니다.",
+            if locks {
+                "지금 할 일은 목록에 남고, 모든 앱과 웹사이트가 잠깁니다."
+            } else {
+                "지금 할 일은 목록에 남습니다. 엄격 모드가 아니므로 앱과 웹사이트는 잠그지 않습니다."
+            },
         );
         if ui.button("멈추기").clicked() {
             self.todo_ui.confirm_stop = false;
@@ -267,9 +301,14 @@ impl FocusApp {
         let idle = !self.pending.load(Ordering::SeqCst);
         crate::style::section(ui, "사용 중지");
         ui.label(format!(
-            "{}에 사용을 멈췄습니다. 이 앱과 Windows 말고는 모든 앱과 웹사이트가 잠겨 있고, 차단 말고는 \
-             아무것도 하지 않습니다. AI 검사, 할 일 고르기, AI 비서, 약속 시작도 멈춥니다.",
-            stopped_at.with_timezone(&Local).format("%m-%d %H:%M")
+            "{}에 사용을 멈췄습니다. {} AI 검사, 할 일 고르기, AI 비서, 약속 시작도 멈춥니다.",
+            stopped_at.with_timezone(&Local).format("%m-%d %H:%M"),
+            if self.todo_ui.without_review {
+                "엄격 모드가 아니므로 앱과 웹사이트는 잠그지 않습니다."
+            } else {
+                "이 앱과 Windows 말고는 모든 앱과 웹사이트가 잠겨 있고, 차단 말고는 아무것도 하지 \
+                 않습니다."
+            }
         ));
         ui.horizontal(|ui| {
             if ui
@@ -292,9 +331,12 @@ impl FocusApp {
     /// never type what to do themselves.
     fn empty_list_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
         ui.label(
-            "할 일 목록이 비어 있습니다. 아래의 \"+ 할 일 추가\"로 할 일을 넣으세요. 쉬기와 놀기도 할 일로 \
-             넣을 수 있습니다. 할 일이 생기면 AI가 생활 규칙에 맞춰 지금 할 일을 고릅니다.",
+            "할 일 목록이 비어 있습니다. 할 일 탭의 \"+ 할 일 추가\"로 할 일을 넣으세요. 쉬기와 놀기도 할 \
+             일로 넣을 수 있습니다. 할 일이 생기면 AI가 생활 규칙에 맞춰 지금 할 일을 고릅니다.",
         );
+        if ui.link("할 일 탭 열기").clicked() {
+            self.tab = Tab::Todo;
+        }
         // A task typed in an older version may still be running.
         if status.session_active && !status.task.trim().is_empty() {
             let idle = !self.pending.load(Ordering::SeqCst);
@@ -326,12 +368,27 @@ impl FocusApp {
                     "할 일을 받기 전까지는 이 앱과 Windows 말고는 모든 앱과 웹사이트가 잠깁니다.",
                 );
             }
+            // The user's situation in their own words, for the AI that picks (kept until
+            // changed, and used again by "다른 일 받기").
+            let situation = self
+                .todo_ui
+                .situation
+                .get_or_insert_with(|| planner.situation.clone());
+            ui.label("지금 상황(선택)");
+            ui.add(
+                egui::TextEdit::multiline(situation)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("예: 카페에서 노트북만 있음, 1시간 뒤 약속, 조금 피곤함"),
+            );
+            ui.small("적은 상황은 AI가 할 일을 고를 때 함께 보고, 바꿀 때까지 남습니다.");
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(idle, crate::style::primary("할 일 받기", idle))
                     .clicked()
                 {
-                    self.send("assign", json!({}));
+                    let situation = self.todo_ui.situation.clone().unwrap_or_default();
+                    self.send("assign", json!({ "situation": situation }));
                 }
                 if !idle {
                     ui.spinner();
@@ -400,7 +457,7 @@ impl FocusApp {
             if assignment.away_from_computer {
                 ui.colored_label(
                     RED,
-                    "컴퓨터 없이 하는 일입니다. 설정이 보호되어 있으면 이 앱 말고는 모든 앱과 웹사이트가 \
+                    "컴퓨터 없이 하는 일입니다. 엄격 모드이면 이 앱 말고는 모든 앱과 웹사이트가 \
                      잠깁니다. 다른 일로 바꾸거나 멈추려면 급한 이유가 필요합니다.",
                 );
             }
@@ -552,6 +609,9 @@ impl FocusApp {
                 {
                     self.reason = reason_start(self.choice).to_string();
                 }
+                // Outside strict mode "끝냈다" is taken at once, with no reason needed.
+                let done_at_once =
+                    self.todo_ui.without_review && self.choice == ChangeChoice::Done;
                 match self.choice {
                     ChangeChoice::NotFinished => {
                         ui.small(
@@ -575,30 +635,42 @@ impl FocusApp {
                              할 일 목록을 보고 정합니다. 이유만 적으세요.",
                         );
                     }
-                    ChangeChoice::Done => {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.evidence)
-                                .desired_rows(2)
-                                .desired_width(f32::INFINITY)
-                                .hint_text(
-                                    "결과의 증거 — 결과가 분명한 일(메일이나 메시지 보내기, 주문하기)이면 \
-                                     필요합니다",
-                                ),
-                        );
-                        ui.checkbox(
-                            &mut self.proof_screenshot,
-                            "증거로 화면 캡처 붙이기(보내고 5초 뒤에 찍습니다. 그 사이에 결과가 보이는 \
-                             창으로 바꾸세요)",
-                        );
-                    }
                     _ => {}
                 }
+                // The text the request is judged by comes first, named, so it is not mistaken
+                // for the proof below it.
+                ui.label(match (self.choice, done_at_once) {
+                    (ChangeChoice::Done, true) => "끝낸 것(선택)",
+                    (ChangeChoice::Done, false) => "끝낸 것(4글자 이상)",
+                    (ChangeChoice::NotFinished, _) => "한 데까지(4글자 이상)",
+                    _ => "이유(4글자 이상)",
+                });
                 ui.add(
                     egui::TextEdit::multiline(&mut self.reason)
                         .desired_rows(2)
                         .desired_width(f32::INFINITY)
-                        .hint_text("이유 — 충분한 이유인지 AI가 정합니다"),
+                        .hint_text(if done_at_once {
+                            "엄격 모드가 아니라서 AI 없이 바로 끝낸 것으로 기록됩니다"
+                        } else {
+                            "충분한 이유인지 AI가 정합니다"
+                        }),
                 );
+                if self.choice == ChangeChoice::Done && !done_at_once {
+                    ui.label("증거(선택)");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.evidence)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY)
+                            .hint_text(
+                                "결과가 분명한 일(메일이나 메시지 보내기, 주문하기)이면 결과를 적으세요",
+                            ),
+                    );
+                    ui.checkbox(
+                        &mut self.proof_screenshot,
+                        "증거로 화면 캡처 붙이기(보내고 5초 뒤에 찍습니다. 그 사이에 결과가 보이는 \
+                         창으로 바꾸세요)",
+                    );
+                }
                 let request = match self.choice {
                     ChangeChoice::Done => Some(ChangeKind::Done),
                     ChangeChoice::End => Some(ChangeKind::End),
@@ -608,10 +680,26 @@ impl FocusApp {
                         minutes: self.extend_minutes,
                     }),
                 };
-                let ready = idle && request.is_some() && self.reason.trim().chars().count() >= 4;
+                // What the user wrote, without the opening words a choice puts in the box
+                // ("끝낸 것: "): those alone are no reason. The same whichever way the form was
+                // reached (before, switching choices brought them in and enabled the button).
+                let written = self.reason.trim();
+                let written = written
+                    .strip_prefix(reason_start(self.choice).trim())
+                    .unwrap_or(written)
+                    .trim();
+                let enough = written.chars().count() >= 4;
+                let ready = idle && request.is_some() && (done_at_once || enough);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(ready, egui::Button::new("요청 보내기"))
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(if done_at_once {
+                                "끝냈다고 기록하기"
+                            } else {
+                                "요청 보내기"
+                            }),
+                        )
                         .clicked()
                     {
                         if let Some(request) = request {
@@ -635,6 +723,13 @@ impl FocusApp {
                         ui.label("AI가 정하는 중…");
                     }
                 });
+                if idle && !done_at_once && !enough {
+                    ui.small(if self.choice == ChangeChoice::Done {
+                        "끝낸 것을 4글자 이상 적어야 보낼 수 있습니다."
+                    } else {
+                        "4글자 이상 적어야 보낼 수 있습니다."
+                    });
+                }
                 if let Some(decision) = &self.shared.lock().decision {
                     let (color, label) = if decision.approved {
                         (GREEN, "승인")
@@ -906,7 +1001,11 @@ impl FocusApp {
                     }
                 }
                 None => {
-                    ui.strong("할 일 추가 — 비워 둔 칸은 AI가 채웁니다");
+                    ui.strong(if self.todo_ui.without_review {
+                        "할 일 추가 — 엄격 모드가 아니라서 바로 추가됩니다(비워 둔 칸은 기본값)"
+                    } else {
+                        "할 일 추가 — 비워 둔 칸은 AI가 채웁니다"
+                    });
                 }
             }
             let form = &mut self.todo_ui.form;
@@ -995,10 +1094,10 @@ impl FocusApp {
             };
             let reason = form.reason.trim().to_string();
             let mut close = false;
-            let send_label = if editing.is_some() && self.todo_ui.without_review {
-                "바로 고치기"
-            } else {
-                "AI에게 보내기"
+            let send_label = match (&editing, self.todo_ui.without_review) {
+                (Some(_), true) => "바로 고치기",
+                (None, true) => "바로 추가하기",
+                _ => "AI에게 보내기",
             };
             ui.horizontal(|ui| {
                 if ui

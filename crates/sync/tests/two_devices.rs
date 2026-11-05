@@ -286,6 +286,8 @@ fn the_server_refuses_strangers_replays_old_requests_and_foreign_files() {
         pushes,
         known: Default::default(),
         app_version: sync::protocol::app_version().to_string(),
+        machine_id: None,
+        forget_devices: Vec::new(),
     };
 
     // A wrong key, or an unknown device.
@@ -453,6 +455,8 @@ fn a_device_with_an_older_version_stops_syncing_until_it_is_updated() {
         pushes: vec![],
         known: Default::default(),
         app_version: version.to_string(),
+        machine_id: None,
+        forget_devices: Vec::new(),
     };
     send_raw(
         &server,

@@ -52,6 +52,24 @@ pub struct SyncRequest {
     /// The program version of this device ([`app_version`]).
     #[serde(default)]
     pub app_version: String,
+    /// This computer's hashed id ([`crate::machine_identity`]), kept with the device entry.
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    /// Other devices to take off the list (old entries of a computer that was installed
+    /// again, or computers no longer used). The server refuses one that synced lately.
+    #[serde(default)]
+    pub forget_devices: Vec<String>,
+}
+
+/// Responsibility: Describe a paired device for the device list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub last_seen: Option<DateTime<Utc>>,
 }
 
 /// Responsibility: Carry one document the server holds, at a revision.
@@ -91,6 +109,12 @@ pub struct SyncResponse {
     /// administrator may turn a protection off.
     #[serde(default)]
     pub devices: Vec<(String, String)>,
+    /// Every paired device with its version and last sync, for the device list.
+    #[serde(default)]
+    pub device_details: Vec<DeviceSummary>,
+    /// Devices this request asked to take off the list that the server kept: (id, why).
+    #[serde(default)]
+    pub not_forgotten: Vec<(String, String)>,
 }
 
 /// Responsibility: Carry what a device needs to join: the server's address is given apart.

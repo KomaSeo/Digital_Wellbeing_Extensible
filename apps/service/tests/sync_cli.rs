@@ -18,11 +18,20 @@ impl Drop for Server {
     }
 }
 
+/// Each data folder plays one computer: its name is the computer's id.
+fn machine_of(data_folder: &Path) -> String {
+    data_folder
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
 fn run(server_folder: &Path, data_folder: &Path, arguments: &[&str]) -> Output {
     Command::new(PROGRAM)
         .args(arguments)
         .env("DW_SYNC_SERVER_DIR", server_folder)
         .env("DW_DATA_DIR", data_folder)
+        .env("DW_MACHINE_ID", machine_of(data_folder))
         .output()
         .expect("run the program")
 }
@@ -147,6 +156,7 @@ fn run_with_input(
         .args(arguments)
         .env("DW_SYNC_SERVER_DIR", server_folder)
         .env("DW_DATA_DIR", data_folder)
+        .env("DW_MACHINE_ID", machine_of(data_folder))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -269,6 +279,48 @@ fn devices_sign_up_and_log_in_and_come_back_after_the_server_is_set_up_again() {
     // The password is kept on the device only sealed.
     let config = fs::read_to_string(desktop.join("sync.json")).unwrap();
     assert!(!config.contains("long password"), "{config}");
+
+    // The desktop is installed again and its data deleted: logging in again on the same
+    // computer gives it its old device entry back, not a second one.
+    let device_of = |folder: &Path| -> String {
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(folder.join("sync.json")).unwrap()).unwrap();
+        config["device_id"].as_str().unwrap().to_string()
+    };
+    let desktop_device = device_of(&desktop);
+    for file in ["sync.json", "sync_state.json"] {
+        let _ = fs::remove_file(desktop.join(file));
+    }
+    let again = run_with_input(
+        &server_folder,
+        &desktop,
+        &["sync-login", &address, "me", "--device", "desktop"],
+        "long password\n",
+    );
+    assert!(again.status.success(), "{}", text(&again));
+    assert_eq!(device_of(&desktop), desktop_device);
+    let devices = text(&run(&server_folder, &desktop, &["sync-devices"]));
+    assert_eq!(
+        devices
+            .lines()
+            .filter(|line| line.contains("(desktop)"))
+            .count(),
+        1,
+        "{devices}"
+    );
+    let synced = run(&server_folder, &desktop, &["sync-now"]);
+    assert!(synced.status.success(), "{}", text(&synced));
+    // A device in use cannot be taken off the list from another PC.
+    fs::write(
+        laptop.join("sync_forget.json"),
+        serde_json::json!({ "devices": [desktop_device] }).to_string(),
+    )
+    .unwrap();
+    let synced = run(&server_folder, &laptop, &["sync-now"]);
+    assert!(synced.status.success(), "{}", text(&synced));
+    assert!(!laptop.join("sync_forget.json").exists());
+    let state = fs::read_to_string(laptop.join("sync_state.json")).unwrap();
+    assert!(state.contains("최근 10분 안에"), "{state}");
 
     // The Focus app's way: a request file, read and deleted, with the outcome next to it.
     let request = root.join("request.json");

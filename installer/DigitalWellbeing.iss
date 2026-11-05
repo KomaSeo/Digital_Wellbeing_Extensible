@@ -106,7 +106,7 @@ begin
     Note.Height := ScaleY(64);
     Note.WordWrap := True;
     Note.Caption := '사용자 정보는 할 일 목록, 생활 규칙, 지금 할 일, 설정, 차단과 접근 허용, 통계 기록, ' +
-      'Anthropic API 키, 설정 보호, 로그를 말합니다. 남겨 두면 다시 설치했을 때 그대로 이어서 씁니다.';
+      'Anthropic API 키, 엄격 모드, 로그를 말합니다. 남겨 두면 다시 설치했을 때 그대로 이어서 씁니다.';
 
     DeleteBox := TNewCheckBox.Create(Form);
     DeleteBox.Parent := Form;
@@ -181,7 +181,7 @@ begin
     DeleteDataOnInstall := MsgBox(
       '이 PC에 전에 설치했을 때의 사용자 정보가 있습니다. 지우고 처음부터 설치할까요?' + #13#10 + #13#10 +
       '사용자 정보는 할 일 목록, 생활 규칙, 지금 할 일, 설정, 차단과 접근 허용, 통계 기록, ' +
-      'Anthropic API 키, 설정 보호, 로그를 말합니다.' + #13#10 + #13#10 +
+      'Anthropic API 키, 엄격 모드, 로그를 말합니다.' + #13#10 + #13#10 +
       '예: 모두 지우고 처음부터 설치합니다. 되돌릴 수 없습니다.' + #13#10 +
       '아니요: 유지한 채로 설치합니다. 지금까지의 정보를 그대로 이어서 씁니다.',
       mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;

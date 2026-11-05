@@ -13,9 +13,9 @@
 | **Wayland** | X11을 대신하는 새 방식입니다. 보안상 한 프로그램이 다른 프로그램의 창을 볼 수 없습니다. |
 | **Xvfb** | 화면 없이 메모리 안에서만 도는 가상 X11 서버입니다. 테스트할 때 씁니다. |
 | **CI** | GitHub Actions가 push할 때마다 자동으로 빌드하고 테스트하는 일입니다(`.github/workflows/ci.yml`). |
-| **설정 보호와 예약된 업데이트** | 설치 직후(설정 단계)에는 agent가 저장 요청(`settings_put`)을 받으면 설정 파일을 바로 씁니다. 설정을 보호하는 요청(`settings_protect`)을 받은 뒤로는, agent가 저장한 파일을 설정 하나하나의 변경으로 나눕니다. 규칙을 더 엄격하게 만드는 변경은 바로 쓰고, 그 밖의 변경(생활 규칙 등)은 **예약된 업데이트**로 보관합니다. 예약된 업데이트는 "이 업데이트가 정말 맞나요?"라는 확인 질문에 사용자가 세 번 연속 "예"라고 답해야(`settings_answer`) 적용됩니다. 질문은 이틀 간격으로 옵니다([`multi_account.md`](multi_account.md) 6.4절). |
+| **엄격 모드와 예약된 업데이트** | 설치 직후, 곧 엄격 모드를 켜기 전(설정 단계)에는 agent가 저장 요청(`settings_put`)을 받으면 설정 파일을 바로 씁니다. 엄격 모드를 켜는 요청(`settings_protect`)을 받은 뒤로는, agent가 저장한 파일을 설정 하나하나의 변경으로 나눕니다. 규칙을 더 엄격하게 만드는 변경은 바로 쓰고, 그 밖의 변경(생활 규칙 등)은 **예약된 업데이트**로 보관합니다. 예약된 업데이트는 "이 업데이트가 정말 맞나요?"라는 확인 질문에 사용자가 세 번 연속 "예"라고 답해야(`settings_answer`) 적용됩니다. 질문은 이틀 간격으로 옵니다. 예전 버전에서는 엄격 모드를 **설정 보호**라고 불렀습니다([`multi_account.md`](multi_account.md) 6.4절). |
 | **데일리 웰빙(daily wellbeing)** | AI가 창을 지금 할 일에 비추어 검사하는 상태입니다. Focus 앱에서는 할 일 플래너가 할 일 목록에서 지금 할 일을 할당할 때 켜집니다. 사용자 API에서는 할 일 목록이 비어 있을 때 `start_session`이 적은 할 일로 켜고 `stop_session`이 끕니다(**AI 검사 멈추기**). 테스트는 이 두 요청을 씁니다. |
-| **할 일 변경** | 할 일 목록에 할 일을 추가하거나, 고치거나, 지우겠다고 agent의 AI에게 보내는 요청(`todo_change`)입니다. AI가 승인한 변경은 설정이 보호되어 있어도 바로 적용됩니다. AI가 거절한 변경은 사용자가 AI 없이 하기로 할 수 있고(`todo_change_schedule`), 그 변경은 두 시간 간격의 확인 질문을 세 번 거쳐 적용됩니다([`task_planner.md`](task_planner.md) 4.6절). |
+| **할 일 변경** | 할 일 목록에 할 일을 추가하거나, 고치거나, 지우겠다고 agent의 AI에게 보내는 요청(`todo_change`)입니다. AI가 승인한 변경은 엄격 모드여도 바로 적용됩니다. AI가 거절한 변경은 사용자가 AI 없이 하기로 할 수 있고(`todo_change_schedule`), 그 변경은 두 시간 간격의 확인 질문을 세 번 거쳐 적용됩니다([`task_planner.md`](task_planner.md) 4.6절). |
 | **가짜 Claude 서버** | 테스트가 띄우는 작은 HTTP 서버입니다. Claude Messages API와 같은 모양의 답을 돌려주므로, API 키와 비용 없이 판정 과정을 시험할 수 있습니다. |
 
 ---
@@ -24,7 +24,7 @@
 
 | 기능 | Windows | Linux |
 |---|---|---|
-| 차단 규칙(블랙리스트), AI 판정, 할 일 플래너, 접근 요청, 설정 보호와 예약된 업데이트, 토큰 사용량 | ✅ | ✅ (공통 코드) |
+| 차단 규칙(블랙리스트), AI 판정, 할 일 플래너, 접근 요청, 엄격 모드와 예약된 업데이트, 토큰 사용량 | ✅ | ✅ (공통 코드) |
 | agent와 그 사용자 API (`digital-wellbeing-service agent`) | ✅ 서비스가 사용자 세션마다 띄웁니다. | ✅ 사용자가 직접 실행합니다. |
 | 맨 앞 창, 열린 창 목록, 탭 닫기(Ctrl+W), 창 최소화, 화면 캡처 | ✅ Win32 (`platform/windows.rs`) | ✅ X11 (`platform/x11.rs`). Wayland 세션에서는 동작하지 않습니다. |
 | 서비스 등록, 설치기, 폴더 권한, 부팅 시 자동 시작 | ✅ (`install.rs`, `service.rs`, `spawn.rs`) | ❌ 없습니다. agent를 직접 실행하거나 systemd 사용자 서비스로 등록해야 합니다. |
@@ -69,9 +69,9 @@ xvfb-run -a cargo test --workspace
    - 뒤의 창도 제목으로 판정받는다.
    - 상태에 판정 기록, 차단, 오늘의 예상 비용이 나온다.
    - 설정 단계에서 설정 읽기와 쓰기, 할 일 추가(`propose_todo`)가 된다.
-   - 설정을 보호하면, 저장한 생활 규칙이 바로 적용되지 않고 예약된 업데이트가 된다(답의 `scheduled`에 업데이트 번호가 있다). 질문할 때가 될 때마다 "예"라고 답하면, 첫째와 둘째 답에는 `approved`가, 셋째 답에는 `applied`가 돌아오고, 그때 비로소 생활 규칙이 바뀐다.
+   - 엄격 모드를 켜면, 저장한 생활 규칙이 바로 적용되지 않고 예약된 업데이트가 된다(답의 `scheduled`에 업데이트 번호가 있다). 질문할 때가 될 때마다 "예"라고 답하면, 첫째와 둘째 답에는 `approved`가, 셋째 답에는 `applied`가 돌아오고, 그때 비로소 생활 규칙이 바뀐다.
    - 다른 업데이트를 예약하고 한 번 "예", 다음 질문에 "아니요"라고 답하면 `rejected`가 돌아오고, 생활 규칙은 앞에서 적용된 것 그대로이다.
-   - (가짜 Claude 서버로 할 때만) 설정이 보호된 뒤에도, AI가 승인한 할 일 추가("Water the plants")는 바로 `planner.json`의 목록에 들어가고, AI가 채운 메모를 가진다.
+   - (가짜 Claude 서버로 할 때만) 엄격 모드를 켠 뒤에도, AI가 승인한 할 일 추가("Water the plants")는 바로 `planner.json`의 목록에 들어가고, AI가 채운 메모를 가진다.
    - "please reject"를 이유로 보낸 할 일 추가("Watch a film")는 거절되어 목록에 들어가지 않는다. 테스트가 `todo_change_schedule`로 그 변경을 AI 없이 하기로 하면, 출처가 `todo_change`인 예약된 업데이트가 생긴다. 질문할 때가 될 때마다 세 번 "예"라고 답하면 그 할 일이 목록에 들어간다. 같은 변경을 다시 예약하려 하면 거부된다.
 
 **진짜 Claude API로 하는 끝에서 끝까지 테스트** (같은 파일의 `agent_end_to_end_on_x11_with_real_claude`): 위와 같은 일을 가짜 Claude 서버 대신 진짜 Claude API로 합니다.
@@ -131,9 +131,9 @@ GitHub의 Windows 빌드 서버에는 작업을 실행하는 사용자(runneradm
    - 할 일에 맞는 창은 최소화되지 않는다.
    - 두 창 모두 제목으로 판정받고, 상태에 딴짓 창의 차단과 오늘의 예상 비용이 나온다.
    - 할 일 추가(`propose_todo`)가 된다.
-   - 설정을 보호하면(`settings_protect`), 상태에 `settings_protected`가 켜지고, 저장한 생활 규칙의 변경은 예약된 업데이트가 되며 지금의 설정은 그대로이다. 질문할 때가 되기 전에 보낸 답은 거부된다. 예약된 업데이트는 거둘 수 있고(`settings_withdraw`), 거둔 뒤에도 설정은 그대로이다(`common::check_protected_edits_are_scheduled`).
+   - 엄격 모드를 켜면(`settings_protect`), 상태에 `settings_protected`가 켜지고, 저장한 생활 규칙의 변경은 예약된 업데이트가 되며 지금의 설정은 그대로이다. 질문할 때가 되기 전에 보낸 답은 거부된다. 예약된 업데이트는 거둘 수 있고(`settings_withdraw`), 거둔 뒤에도 설정은 그대로이다(`common::check_protected_edits_are_scheduled`).
 
 환경 변수 `DW_E2E_CLAUDE_ADDR`가 없으면 이 테스트는 건너뜁니다. 그래서 개발자 PC의 `cargo test`는 설치된 서비스를 건드리지 않습니다.
-같은 일을 개발자 PC에서 하려면, 관리자 PowerShell에서 서비스를 설치하고 CI의 "End to end through the installed agent's API" 단계를 그대로 실행하면 됩니다. 이 테스트는 마지막에 설정을 보호하고, 프로그램 안의 어떤 것도 보호를 끄지 못합니다. 그래서 쓰고 있는 PC에서는 실행하지 마십시오.
+같은 일을 개발자 PC에서 하려면, 관리자 PowerShell에서 서비스를 설치하고 CI의 "End to end through the installed agent's API" 단계를 그대로 실행하면 됩니다. 이 테스트는 마지막에 끄는 방법을 고르지 않고 엄격 모드를 켜므로 엄격 모드가 영구가 되고, 프로그램 안의 어떤 것도 그 엄격 모드를 끄지 못합니다. 그래서 쓰고 있는 PC에서는 실행하지 마십시오.
 
 실패하면 CI는 서비스와 agent의 로그를 출력합니다("Service and agent logs" 단계).

@@ -47,8 +47,9 @@ pub enum TaskLock {
     WaitingForTask,
     /// The task (named) is done away from the computer.
     AwayFromComputer { task: String },
-    /// The user stopped using the computer ("사용 중지"). Locks even during setup: the user
-    /// asked for it, and one button undoes it.
+    /// The user stopped using the computer ("사용 중지"). Locks only in strict mode (once the
+    /// settings are protected), like every other lock: the owner asked that it lock nothing
+    /// outside strict mode.
     Stopped,
     /// The PC syncs and has logins, and this Windows account has not logged in
     /// (`crate::login`).
@@ -76,10 +77,10 @@ pub fn lockdown(
     connection: &Connection,
     task_lock: Option<TaskLock>,
 ) -> Option<Lockdown> {
-    if task_lock == Some(TaskLock::Stopped) {
+    if protected && task_lock == Some(TaskLock::Stopped) {
         return Some(Lockdown {
             cause: LockdownCause::Stopped,
-            reason: "사용을 멈췄습니다. 다시 쓰려면 할 일 탭에서 \"다시 사용하기\"를 누르세요"
+            reason: "사용을 멈췄습니다. 다시 쓰려면 일하기 탭에서 \"다시 사용하기\"를 누르세요"
                 .to_string(),
             fix_now: Vec::new(),
             browsers_allowed: false,
@@ -127,7 +128,7 @@ pub fn lockdown(
         TaskLock::AwayFromComputer { task } => (
             LockdownCause::AwayFromComputer,
             format!(
-                "지금 할 일은 컴퓨터 없이 하는 일입니다({}). 끝나면 할 일 탭에서 보고하세요",
+                "지금 할 일은 컴퓨터 없이 하는 일입니다({}). 끝나면 일하기 탭에서 보고하세요",
                 task.chars().take(80).collect::<String>()
             ),
         ),
@@ -279,14 +280,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(away.cause, LockdownCause::AwayFromComputer);
-        // Stopping locks even during setup and before a broken connection.
         let login = lockdown(true, &Connection::Working, Some(TaskLock::LoginRequired)).unwrap();
         assert_eq!(login.cause, LockdownCause::LoginRequired);
         assert!(!login.browsers_allowed);
         assert!(lockdown(false, &Connection::Working, Some(TaskLock::LoginRequired)).is_none());
-        let stopped = lockdown(false, &broken, Some(TaskLock::Stopped)).unwrap();
+        // Stopping locks in strict mode, before a broken connection; outside it, nothing.
+        let stopped = lockdown(true, &broken, Some(TaskLock::Stopped)).unwrap();
         assert_eq!(stopped.cause, LockdownCause::Stopped);
         assert!(!stopped.browsers_allowed);
+        assert!(lockdown(false, &broken, Some(TaskLock::Stopped)).is_none());
         assert!(away.reason.contains("잠자기"));
         assert!(!away.browsers_allowed);
     }

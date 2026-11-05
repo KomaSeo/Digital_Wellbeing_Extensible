@@ -357,6 +357,9 @@ pub struct PickRequest<'a> {
     pub repick_reason: Option<&'a str>,
     /// Appointments that have not ended, soonest first.
     pub appointments: &'a [Appointment],
+    /// The user's situation in their own words ([`crate::PlannerState::situation`]); may be
+    /// empty.
+    pub situation: &'a str,
 }
 
 /// Responsibility: Carry what the AI sees when it gives the overview of this week.
@@ -1002,9 +1005,19 @@ pub(crate) fn pick_text(request: &PickRequest) -> String {
     format!(
         "Now: {now}\n\n{polish}Upcoming appointments (fixed):\n\
          {appointments}\n\nRecently finished:\n{done}\n\n\
-         Previous assignment: {prev}\n{repick}\nRecent foreground activity (oldest first):\n\
-         {history}",
+         Previous assignment: {prev}\n{repick}{situation}\nRecent foreground activity (oldest \
+         first):\n{history}",
         now = request.now_local,
+        situation = if request.situation.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "The user's situation right now, in their own words (where they are, what they \
+                 have with them, how they feel): \"{}\". Pick a to-do that can be done in this \
+                 situation, unless the life rules say otherwise.\n",
+                request.situation.trim()
+            )
+        },
         polish = polish_text(request.open),
         appointments = appointments_text(request.appointments),
         done = or_none(&done.join("\n")),

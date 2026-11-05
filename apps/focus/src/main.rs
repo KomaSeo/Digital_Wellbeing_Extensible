@@ -130,6 +130,9 @@ enum ChangeChoice {
 /// settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    /// "일하기": the task the AI picked and asking for a change.
+    Work,
+    /// "할 일": the to-do list and the appointments.
     Todo,
     Assistant,
     Blocking,
@@ -233,7 +236,7 @@ impl FocusApp {
             tray_context.request_repaint();
         });
         Self {
-            tab: Tab::Todo,
+            tab: Tab::Work,
             open_settings,
             settings: settings::SettingsTab::new(session),
             assistant: assistant::AssistantTab::new(session, context.clone()),
@@ -644,6 +647,7 @@ impl eframe::App for FocusApp {
         self.time_up_prompt_ui(context);
         egui::TopBottomPanel::top("tabs").show(context, |ui| {
             ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.tab, Tab::Work, "일하기");
                 ui.selectable_value(&mut self.tab, Tab::Todo, "할 일");
                 ui.selectable_value(&mut self.tab, Tab::Assistant, "AI 비서");
                 ui.selectable_value(&mut self.tab, Tab::Blocking, "차단");
@@ -678,7 +682,7 @@ impl eframe::App for FocusApp {
                     );
                     if connection {
                         ui.label(
-                            "설정이 보호된 상태에서 AI 연결이 끊기면, 연결될 때까지 Claude Desktop과 \
+                            "엄격 모드에서 AI 연결이 끊기면, 연결될 때까지 Claude Desktop과 \
                              Claude·Anthropic 웹사이트 말고는 모든 앱과 웹사이트를 막습니다. 설정 탭의 \
                              AI 연결에서 동작하는 키를 넣고 \"적용\"을 누르면 몇 초 안에 풀립니다. 잠긴 \
                              동안에는 키를 바꾸는 것이 예약되지 않고 바로 적용됩니다.",
@@ -700,6 +704,7 @@ impl eframe::App for FocusApp {
                     ui.colored_label(RED, &message);
                 }
                 match self.tab {
+                    Tab::Work => self.work_tab(ui, &status),
                     Tab::Todo => self.todo_tab(ui, &status),
                     Tab::Assistant => self.assistant.ui(ui),
                     Tab::Blocking => self.blocking_tab(ui, &status),

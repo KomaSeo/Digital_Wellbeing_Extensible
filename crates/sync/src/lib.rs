@@ -21,6 +21,7 @@ pub mod account;
 pub mod client;
 pub mod device_local;
 pub mod envelope;
+pub mod machine_identity;
 pub mod merge;
 pub mod protocol;
 pub mod secret;

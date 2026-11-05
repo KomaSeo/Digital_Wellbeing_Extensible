@@ -274,6 +274,15 @@ impl TaskPlanner {
         Ok(())
     }
 
+    /// Keep what the user wrote about their situation for the picks from now on (the owner's
+    /// request: "할일 받을 때 현재 상황을 설명할 수 있도록 칸을 만들어줘", "주관식으로").
+    pub fn set_situation(&self, situation: &str) -> Result<(), PlannerError> {
+        let situation: String = situation.trim().chars().take(MAX_NOTES_CHARS).collect();
+        self.state
+            .update(|planner_state| planner_state.situation = situation)?;
+        Ok(())
+    }
+
     /// "다시 사용하기": the stop ends; the next task comes when the user asks for it.
     pub fn resume_use(&self) -> Result<(), PlannerError> {
         self.state
@@ -427,6 +436,7 @@ impl TaskPlanner {
         PlannerStatus {
             extension_offer: self.extension_offer(now),
             stopped_at: state.stopped_at,
+            situation: state.situation.clone(),
             active: self.is_active_with(&open_todos),
             assignment: state.assignment.clone(),
             recent_requests: state.requests.iter().rev().take(10).cloned().collect(),
@@ -542,10 +552,11 @@ impl TaskPlanner {
         self.todo_change_with(now, change, reason, via, TodoChangeReview::ByTheAi)
     }
 
-    /// Edit or remove an open to-do without the AI's review, approved at once and logged like
-    /// a reviewed change; the caller puts it in force. For the setup stage (the settings are
-    /// not protected yet), when anyone may change anything anyway. An addition or an
-    /// appointment still goes to the AI ([`Self::review_todo_change`]).
+    /// Add, edit or remove a to-do without the AI's review, approved at once and logged like a
+    /// reviewed change; the caller puts it in force. Outside strict mode (the settings are not
+    /// protected yet), when anyone may change anything anyway. An addition keeps the user's
+    /// fields and the defaults (no AI fills it in). An appointment still goes to the AI
+    /// ([`Self::review_todo_change`]).
     pub fn todo_change_without_review(
         &self,
         now: DateTime<Utc>,
@@ -565,7 +576,10 @@ impl TaskPlanner {
         review_by: TodoChangeReview,
     ) -> Result<TodoChangeRecord, PlannerError> {
         if review_by == TodoChangeReview::None
-            && !matches!(change, TodoChange::Edit { .. } | TodoChange::Remove { .. })
+            && !matches!(
+                change,
+                TodoChange::Add { .. } | TodoChange::Edit { .. } | TodoChange::Remove { .. }
+            )
         {
             return self.todo_change_with(now, change, reason, via, TodoChangeReview::ByTheAi);
         }
@@ -643,6 +657,8 @@ impl TaskPlanner {
         }
         if review_by == TodoChangeReview::None {
             let after = match &change {
+                // The user's own fields, and the defaults for the empty ones (no AI fills them).
+                TodoChange::Add { todo } => Some(completed_todo(now, todo, None)),
                 TodoChange::Edit { todo, .. } => target.as_ref().map(|before| edited(before, todo)),
                 _ => None,
             };
@@ -653,7 +669,7 @@ impl TaskPlanner {
                 reason,
                 via: via.trim().chars().take(40).collect(),
                 approved: true,
-                reply: "설정이 아직 보호되지 않아 AI 심사 없이 바로 적용했습니다.".to_string(),
+                reply: "아직 엄격 모드가 아니어서 AI 심사 없이 바로 적용했습니다.".to_string(),
                 ai_failed: false,
                 before: target,
                 after,
@@ -1183,6 +1199,36 @@ impl TaskPlanner {
         )
     }
 
+    /// "끝냈다" without the AI's review, approved at once and logged like a reviewed report:
+    /// outside strict mode (the settings are not protected), where the owner wants no AI
+    /// judging. No reason is needed, and no improvement time follows (that needs the AI's
+    /// judgement of the work).
+    pub fn report_done_without_review(
+        &self,
+        now: DateTime<Utc>,
+        reason: &str,
+        evidence: Evidence,
+    ) -> Result<ChangeRecord, PlannerError> {
+        let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
+        if self.state.get().assignment.is_none() {
+            return Err(PlannerError::NothingAssigned);
+        }
+        let evidence_text: String = evidence.text.trim().chars().take(MAX_NOTES_CHARS).collect();
+        self.record_and_apply(
+            now,
+            ChangeKind::Done,
+            reason.trim(),
+            Review {
+                approved: true,
+                reply: "엄격 모드가 아니어서 AI 심사 없이 끝낸 것으로 기록했습니다.".into(),
+                outcome: "not_applicable".into(),
+                ..Default::default()
+            },
+            &self.open_todos(),
+            (evidence_text, false),
+        )
+    }
+
     /// Refuse a change request that cannot be sent to the AI: the planner is off, the reason
     /// is too short, or the request names no open to-do or an empty task. Callers may check
     /// before doing slow work for the request (such as waiting for a proof screenshot).
@@ -1651,6 +1697,7 @@ impl TaskPlanner {
             history: &history,
             repick_reason,
             appointments: &self.appointments(now),
+            situation: &state.situation,
         })?;
         let Some(picked) = open.iter().find(|todo| todo.id == pick.todo_id) else {
             return Err(PlannerError::BadPick(pick.todo_id));

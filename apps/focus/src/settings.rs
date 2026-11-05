@@ -67,6 +67,8 @@ enum Section {
     Checks,
     /// Program updates and the time zone: what the service does as administrator.
     System,
+    /// Turning the protection of the settings on (or off, the chosen way).
+    Protection,
 }
 
 /// Responsibility: Name one group of settings that is saved, applied, discarded and reset on
@@ -403,22 +405,7 @@ impl SettingsTab {
             .map(|lockdown| lockdown.fix_now.clone())
             .unwrap_or_default();
         self.refresh();
-        crate::style::section(ui, "설정 보호(잠금)");
-        if protected {
-            let numbers = self.numbers_in_force();
-            let every = interval_text(numbers.settings_interval_seconds());
-            ui.label(format!(
-                "설정이 보호되어 있습니다. 규칙을 더 엄격하게 만드는 변경은 바로 적용됩니다. 그 밖의 \
-                 변경은 예약되고, {every} 뒤부터 \"이 업데이트가 정말 맞나요?\"라는 질문이 옵니다. \
-                 {every} 간격으로 {}번 연속 \"예\"라고 답하면 적용되고, 한 번이라도 \"아니요\"라고 \
-                 답하면 거절됩니다. 이 횟수와 간격은 \"시스템\"의 \"확인 횟수와 간격\"에서 바꿉니다.",
-                numbers.settings_times()
-            ));
-            self.unlock_ui(ui, protection, sync);
-        } else {
-            self.protect_ui(ui, sync);
-        }
-        sync_ui(ui, sync);
+        sync_ui(ui, sync, self.session, &mut self.message);
         if self.reservations_ui(ui) {
             // Answered or withdrawn: the drafts are rebased on what is now true.
             self.fetched_at = None;
@@ -448,6 +435,7 @@ impl SettingsTab {
                 (Section::Blocking, "차단"),
                 (Section::Checks, "AI 검사"),
                 (Section::System, "시스템"),
+                (Section::Protection, "엄격 모드"),
             ] {
                 ui.selectable_value(&mut self.section, section, label);
             }
@@ -462,8 +450,39 @@ impl SettingsTab {
             Section::Blocking => self.blocking_ui(ui, &snapshot, protected),
             Section::Checks => self.checks_ui(ui, &snapshot, protected),
             Section::System => self.system_ui(ui, &snapshot, protected),
+            Section::Protection => self.protection_ui(ui, protected, protection, sync),
         }
         self.autosave(ui.ctx());
+    }
+
+    /// Show the protection's part of the tab next (from a link elsewhere in the app).
+    pub(crate) fn show_protection(&mut self) {
+        self.section = Section::Protection;
+    }
+
+    /// The protection of the settings: how it works now and how it ends, or turning it on.
+    fn protection_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        protected: bool,
+        protection: Option<&machine::user_api::ProtectionView>,
+        sync: Option<&machine::user_api::SyncStatus>,
+    ) {
+        crate::style::section(ui, "엄격 모드");
+        if protected {
+            let numbers = self.numbers_in_force();
+            let every = interval_text(numbers.settings_interval_seconds());
+            ui.label(format!(
+                "엄격 모드가 켜져 있습니다. 규칙을 더 엄격하게 만드는 변경은 바로 적용됩니다. 그 밖의 \
+                 변경은 예약되고, {every} 뒤부터 \"이 업데이트가 정말 맞나요?\"라는 질문이 옵니다. \
+                 {every} 간격으로 {}번 연속 \"예\"라고 답하면 적용되고, 한 번이라도 \"아니요\"라고 \
+                 답하면 거절됩니다. 이 횟수와 간격은 \"시스템\"의 \"확인 횟수와 간격\"에서 바꿉니다.",
+                numbers.settings_times()
+            ));
+            self.unlock_ui(ui, protection, sync);
+        } else {
+            self.protect_ui(ui, sync);
+        }
     }
 
     /// The confirmation numbers in force (the defaults until the settings are fetched).
@@ -517,22 +536,23 @@ impl SettingsTab {
         crate::style::notice(
             ui,
             crate::style::Tone::Warning,
-            "설정 단계: 변경이 바로 적용되고, 이 PC를 쓰는 누구나 설정을 바꿀 수 있습니다.",
+            "설정 단계(엄격 모드를 켜기 전): 변경이 바로 적용되고, 이 PC를 쓰는 누구나 설정을 바꿀 수 \
+             있습니다.",
         );
         let numbers = self.numbers_in_force();
         ui.label(format!(
-            "모두 정했으면 설정을 보호하세요. 그 뒤로는 규칙을 더 엄격하게 만드는 변경만 바로 \
+            "모두 정했으면 엄격 모드를 켜세요. 그 뒤로는 규칙을 더 엄격하게 만드는 변경만 바로 \
              적용되고, 그 밖의 변경은 {} 간격으로 {}번 확인해야 적용됩니다(횟수와 간격은 \
-             \"시스템\"의 \"확인 횟수와 간격\"에서 바꿉니다). 보호를 풀면 설정 단계로 돌아가고, \
+             \"시스템\"의 \"확인 횟수와 간격\"에서 바꿉니다). 엄격 모드를 끄면 설정 단계로 돌아가고, \
              걸린 차단도 모두 풀립니다.",
             interval_text(numbers.settings_interval_seconds()),
             numbers.settings_times()
         ));
-        ui.label("보호를 어떻게 풀 수 있게 할지 고르세요.");
+        ui.label("엄격 모드를 어떻게 끌 수 있게 할지 고르세요.");
         ui.radio_value(
             &mut self.protect_kind,
             ProtectKind::Until,
-            "기간: 정한 시간이 지나기 전에는 풀 수 없습니다",
+            "기간: 정한 시간이 지나기 전에는 끌 수 없습니다",
         );
         if self.protect_kind == ProtectKind::Until {
             ui.horizontal(|ui| {
@@ -546,7 +566,7 @@ impl SettingsTab {
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
                 ui.small(format!(
-                    "{}까지 풀 수 없습니다.",
+                    "{}까지 끌 수 없습니다.",
                     until.with_timezone(&Local).format("%Y-%m-%d %H:%M")
                 ));
             });
@@ -554,12 +574,12 @@ impl SettingsTab {
         ui.radio_value(
             &mut self.protect_kind,
             ProtectKind::Permanent,
-            "영구: 프로그램 안에서는 풀 수 없습니다",
+            "영구: 프로그램 안에서는 끌 수 없습니다",
         );
         ui.radio_value(
             &mut self.protect_kind,
             ProtectKind::Administrator,
-            "관리자 권한: Windows가 관리자 승인을 물을 때 승인할 수 있어야 풀 수 있습니다",
+            "관리자 권한: Windows가 관리자 승인을 물을 때 승인할 수 있어야 끌 수 있습니다",
         );
         // With sync: whose administrator. This computer by default, since the one choosing
         // is here; any computer's administrator is a choice too.
@@ -581,7 +601,7 @@ impl SettingsTab {
             };
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
-                ui.label("어느 컴퓨터의 관리자가 풀 수 있나");
+                ui.label("어느 컴퓨터의 관리자가 끌 수 있나");
                 egui::ComboBox::from_id_salt("protect_admin_device")
                     .selected_text(shown)
                     .show_ui(ui, |ui| {
@@ -608,15 +628,16 @@ impl SettingsTab {
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
                 ui.small(
-                    "고른 컴퓨터에서만, 그 컴퓨터의 관리자 승인으로 풀 수 있습니다. 풀면 모든 \
-                     컴퓨터에서 풀립니다. 그 컴퓨터를 동기화에서 빼면 이 보호는 풀 수 없게 됩니다.",
+                    "고른 컴퓨터에서만, 그 컴퓨터의 관리자 승인으로 끌 수 있습니다. 끄면 모든 \
+                     컴퓨터에서 꺼집니다. 그 컴퓨터를 동기화에서 빼면 엄격 모드를 끌 수 없게 \
+                     됩니다.",
                 );
             });
         }
         ui.radio_value(
             &mut self.protect_kind,
             ProtectKind::Password,
-            "비밀번호: 지금 정하는 비밀번호를 넣어야 풀 수 있습니다",
+            "비밀번호: 지금 정하는 비밀번호를 넣어야 끌 수 있습니다",
         );
         if self.protect_kind == ProtectKind::Password {
             egui::Grid::new("protect_password").show(ui, |ui| {
@@ -628,7 +649,7 @@ impl SettingsTab {
                 ui.end_row();
             });
             ui.small(
-                "다른 사람에게 비밀번호를 정하고 갖고 있게 하면, 스스로는 풀 수 없게 됩니다. \
+                "다른 사람에게 비밀번호를 정하고 갖고 있게 하면, 스스로는 끌 수 없게 됩니다. \
                  비밀번호는 되돌릴 수 없는 값(해시)으로만 저장됩니다.",
             );
         }
@@ -650,12 +671,12 @@ impl SettingsTab {
         }
         ui.checkbox(
             &mut self.confirm_protect,
-            "고른 방법이 아니면 보호를 풀 수 없다는 것을 이해했습니다.",
+            "고른 방법이 아니면 엄격 모드를 끌 수 없다는 것을 이해했습니다.",
         );
         if ui
             .add_enabled(
                 self.confirm_protect && mode.is_some(),
-                crate::style::primary("설정 보호하기", self.confirm_protect && mode.is_some()),
+                crate::style::primary("엄격 모드 켜기", self.confirm_protect && mode.is_some()),
             )
             .clicked()
         {
@@ -693,10 +714,10 @@ impl SettingsTab {
                 let until = protection.until.unwrap_or_else(Utc::now);
                 if Utc::now() < until {
                     ui.label(format!(
-                        "기간 보호입니다. {}까지는 풀 수 없습니다.",
+                        "기간을 정한 엄격 모드입니다. {}까지는 끌 수 없습니다.",
                         until.with_timezone(&Local).format("%Y-%m-%d %H:%M")
                     ));
-                } else if ui.button("기간이 끝났습니다: 보호 풀기").clicked() {
+                } else if ui.button("기간이 끝났습니다: 엄격 모드 끄기").clicked() {
                     unlock = Some(json!({}));
                 }
             }
@@ -716,25 +737,27 @@ impl SettingsTab {
                         })
                         .unwrap_or_else(|| required.to_string());
                     ui.label(format!(
-                        "관리자 권한 보호입니다. \"{name}\" 컴퓨터에서, 그 컴퓨터의 관리자 승인으로만 \
-                         풀 수 있습니다. 거기서 풀면 이 컴퓨터도 풀립니다."
+                        "관리자 권한으로 끄는 엄격 모드입니다. \"{name}\" 컴퓨터에서, 그 컴퓨터의 관리자 \
+                         승인으로만 끌 수 있습니다. 거기서 끄면 이 컴퓨터에서도 꺼집니다."
                     ));
                 } else if protection.device.is_some() {
                     ui.label(
-                        "관리자 권한 보호입니다. 이 컴퓨터에서 Windows의 관리자 승인 창에서 \
-                         승인해야 풀립니다. 풀면 모든 컴퓨터에서 풀립니다.",
+                        "관리자 권한으로 끄는 엄격 모드입니다. 이 컴퓨터에서 Windows의 관리자 승인 \
+                         창에서 승인해야 꺼집니다. 끄면 모든 컴퓨터에서 꺼집니다.",
                     );
                 } else {
                     ui.label(
-                        "관리자 권한 보호입니다. Windows의 관리자 승인 창에서 승인해야 풀립니다.",
+                        "관리자 권한으로 끄는 엄격 모드입니다. Windows의 관리자 승인 창에서 승인해야 \
+                         꺼집니다.",
                     );
                 }
-                if elsewhere.is_none() && ui.button("관리자 권한으로 보호 풀기").clicked()
+                if elsewhere.is_none() && ui.button("관리자 권한으로 엄격 모드 끄기").clicked()
                 {
                     match crate::elevate::run_settings_unlock() {
                         Ok(()) => {
                             self.message =
-                                "관리자 승인 창에서 승인하면 몇 초 안에 보호가 풀립니다.".into();
+                                "관리자 승인 창에서 승인하면 몇 초 안에 엄격 모드가 꺼집니다."
+                                    .into();
                             self.fetched_at = None;
                         }
                         Err(error) => self.error = error,
@@ -742,26 +765,26 @@ impl SettingsTab {
                 }
             }
             "password" => {
-                ui.label("비밀번호 보호입니다. 보호할 때 정한 비밀번호를 넣으면 풀립니다.");
+                ui.label("비밀번호로 끄는 엄격 모드입니다. 엄격 모드를 켤 때 정한 비밀번호를 넣으면 꺼집니다.");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.unlock_password).password(true));
-                    if ui.button("보호 풀기").clicked() {
+                    if ui.button("엄격 모드 끄기").clicked() {
                         unlock = Some(json!({ "password": self.unlock_password }));
                     }
                 });
             }
             _ => {
-                ui.label("영구 보호입니다. 프로그램 안에서는 풀 수 없습니다.");
+                ui.label("영구 엄격 모드입니다. 프로그램 안에서는 끌 수 없습니다.");
             }
         }
         if protection.kind != "permanent" {
-            ui.small("보호를 풀면 설정 단계로 돌아가고, 걸린 차단도 모두 풀립니다.");
+            ui.small("엄격 모드를 끄면 설정 단계로 돌아가고, 걸린 차단도 모두 풀립니다.");
         }
         if let Some(params) = unlock {
             match call_value(self.session, "settings_unprotect", params) {
                 Ok(_) => {
                     self.unlock_password.clear();
-                    self.message = "설정 보호를 풀었습니다. 걸린 차단도 모두 풀었습니다.".into();
+                    self.message = "엄격 모드를 껐습니다. 걸린 차단도 모두 풀었습니다.".into();
                     self.fetched_at = None;
                 }
                 Err(error) => self.error = error,
@@ -1371,7 +1394,7 @@ impl SettingsTab {
         ui.small(
             "새 버전은 GitHub의 릴리스 페이지에서 받습니다. 업데이트는 저절로 하지 않고, 아래 버튼으로만 \
              합니다. 설치하는 동안(보통 1분 안) 이 PC의 모든 앱과 브라우저가 닫히고 Focus 앱도 \
-             닫힙니다. 그래서 설정이 보호되어 있어도 업데이트로 규칙을 피할 수는 없습니다. 끝나면 \
+             닫힙니다. 그래서 엄격 모드여도 업데이트로 규칙을 피할 수는 없습니다. 끝나면 \
              시작 메뉴에서 Focus 앱을 다시 엽니다. 할 일, 설정, 로그인은 그대로 남습니다.",
         );
         let busy = status.pending.is_some() || state.busy.is_some();
@@ -1457,7 +1480,7 @@ impl SettingsTab {
     ) {
         crate::style::section(ui, "확인 횟수와 간격");
         ui.small(
-            "설정을 보호한 뒤에 규칙을 느슨하게 만드는 변경은 예약되고, 아래 간격마다 \"이 \
+            "엄격 모드를 켠 뒤에 규칙을 느슨하게 만드는 변경은 예약되고, 아래 간격마다 \"이 \
              업데이트가 정말 맞나요?\"라고 묻습니다. 아래 횟수만큼 연속으로 \"예\"라고 답해야 \
              적용됩니다. 횟수를 늘리거나 간격을 늘리는 변경은 바로 적용되고, 줄이는 변경은 지금의 \
              횟수와 간격으로 확인해야 적용됩니다. 이미 예약된 업데이트는 예약할 때의 횟수와 \
@@ -2542,7 +2565,12 @@ fn local(time: DateTime<Utc>) -> String {
 
 /// Whether this PC syncs with other devices, and how the last sync went (`docs/sync.md`).
 /// Logging in is at the top of this tab ([`crate::login`]).
-fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
+fn sync_ui(
+    ui: &mut egui::Ui,
+    sync: Option<&machine::user_api::SyncStatus>,
+    session: u32,
+    message: &mut String,
+) {
     crate::style::section(ui, "기기 동기화");
     let Some(sync) = sync else {
         ui.weak(
@@ -2590,4 +2618,78 @@ fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
             "https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases",
         );
     }
+    devices_ui(ui, sync, session, message);
+}
+
+/// The paired devices with their version and last sync, and a button that takes another
+/// device's entry off the server's list (an old entry of a computer installed again, or a
+/// computer no longer used).
+fn devices_ui(
+    ui: &mut egui::Ui,
+    sync: &machine::user_api::SyncStatus,
+    session: u32,
+    message: &mut String,
+) {
+    if sync.device_details.is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new(format!("서버에 붙은 기기({}대)", sync.device_details.len()))
+        .id_salt("sync_devices")
+        .show(ui, |ui| {
+            ui.small(
+                "같은 컴퓨터는 다시 설치해도 같은 기기로 붙습니다. 예전 버전에서 다시 설치해 생긴 \
+                 옛 기기나 더는 쓰지 않는 컴퓨터는 \"목록에서 지우기\"로 지웁니다. 최근 10분 안에 \
+                 동기화한 기기는 서버가 지우지 않습니다. 지운 컴퓨터를 다시 쓰면 그 컴퓨터는 저절로 \
+                 다시 붙습니다.",
+            );
+            egui::Grid::new("sync_device_list")
+                .striped(true)
+                .num_columns(5)
+                .show(ui, |ui| {
+                    for heading in ["기기", "이름", "버전", "마지막 동기화", ""] {
+                        ui.strong(heading);
+                    }
+                    ui.end_row();
+                    for device in &sync.device_details {
+                        let this_pc = device.id == sync.device_id;
+                        ui.label(if this_pc {
+                            format!("{} (이 PC)", device.id)
+                        } else {
+                            device.id.clone()
+                        });
+                        ui.label(&device.name);
+                        ui.label(if device.version.is_empty() {
+                            "?"
+                        } else {
+                            device.version.as_str()
+                        });
+                        ui.label(device.last_seen.map_or("없음".to_string(), |seen| {
+                            seen.with_timezone(&chrono::Local)
+                                .format("%m월 %d일 %H:%M")
+                                .to_string()
+                        }));
+                        if this_pc {
+                            ui.label("");
+                        } else if sync.forget_waiting.contains(&device.id) {
+                            ui.weak("다음 동기화 때 지웁니다");
+                        } else if ui.small_button("목록에서 지우기").clicked() {
+                            *message = match call_value(
+                                session,
+                                "sync_forget_device",
+                                json!({ "id": device.id }),
+                            ) {
+                                Ok(_) => format!(
+                                    "\"{}\"를 다음 동기화 때 서버의 목록에서 지웁니다.",
+                                    device.id
+                                ),
+                                Err(error) => format!("지우지 못했습니다: {error}"),
+                            };
+                        }
+                        ui.end_row();
+                    }
+                });
+            for (device, reason) in &sync.not_forgotten {
+                ui.colored_label(YELLOW, format!("\"{device}\"를 지우지 않았습니다: {reason}"));
+            }
+        });
 }

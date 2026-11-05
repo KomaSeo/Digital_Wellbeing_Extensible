@@ -358,11 +358,11 @@ impl LoginForm {
             }
         });
         if settings_protected {
-            ui.small("설정이 보호되어 있는 동안에는 로그아웃할 수 없습니다.");
+            ui.small("엄격 모드인 동안에는 로그아웃할 수 없습니다.");
         } else {
             ui.small(
-                "로그아웃하면 다시 로그인할 때까지 이 계정은 Windows 계정의 파일을 쓰고, 설정이 \
-                 보호되면 모든 앱이 잠깁니다.",
+                "로그아웃하면 다시 로그인할 때까지 이 계정은 Windows 계정의 파일을 쓰고, 엄격 \
+                 모드가 켜지면 모든 앱이 잠깁니다.",
             );
         }
         self.message_ui(ui);
