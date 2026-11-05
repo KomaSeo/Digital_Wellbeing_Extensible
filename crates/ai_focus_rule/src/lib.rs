@@ -13,6 +13,7 @@
 
 pub mod access_review;
 pub mod claude;
+pub mod comparison;
 mod config;
 pub mod connection;
 pub mod grants;

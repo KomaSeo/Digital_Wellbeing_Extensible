@@ -22,9 +22,11 @@ use tracing::warn;
 
 /// Days kept in the file (a little over two months, so "this month" and "last month" work).
 const DAYS_KEPT: usize = 62;
+/// Model comparisons kept in the file, newest last ([`crate::comparison`]).
+const COMPARISONS_KEPT: usize = 400;
 
 /// (input, output, cache read) in US dollars per million tokens. Cache writes cost 1.25×
-/// input. Prices as of October 2026; check the Claude pricing page when they change.
+/// input (kept five minutes) or 2× (kept an hour). Prices as of October 2026; check the Claude pricing page when they change.
 fn prices(model: &str) -> (f64, f64, f64) {
     match model {
         "claude-fable-5-1" => (10.0, 50.0, 0.25),
@@ -48,7 +50,10 @@ pub struct TokenUsage {
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
+    /// Every cache write, of either length.
     pub cache_write: u64,
+    /// The part of `cache_write` kept for an hour (billed at 2× instead of 1.25×).
+    pub cache_write_long: u64,
 }
 
 impl TokenUsage {
@@ -61,6 +66,9 @@ impl TokenUsage {
             output: token_count("output_tokens"),
             cache_read: token_count("cache_read_input_tokens"),
             cache_write: token_count("cache_creation_input_tokens"),
+            cache_write_long: usage["cache_creation"]["ephemeral_1h_input_tokens"]
+                .as_u64()
+                .unwrap_or(0),
         })
     }
 
@@ -69,7 +77,8 @@ impl TokenUsage {
         (self.input as f64 * input
             + self.output as f64 * output
             + self.cache_read as f64 * cache_read
-            + self.cache_write as f64 * input * 1.25)
+            + self.cache_write.saturating_sub(self.cache_write_long) as f64 * input * 1.25
+            + self.cache_write_long as f64 * input * 2.0)
             / 1_000_000.0
     }
 }
@@ -120,6 +129,9 @@ pub struct DayUsage {
 pub struct UsageLog {
     /// Local date (`YYYY-MM-DD`) -> usage; the oldest days are dropped.
     pub days: BTreeMap<NaiveDate, DayUsage>,
+    /// Sampled questions asked of every compared model, oldest first; the file goes to the
+    /// sync server with the usage, so every PC's samples add up.
+    pub comparisons: Vec<crate::comparison::ComparisonRecord>,
 }
 
 impl UsageLog {
@@ -175,6 +187,16 @@ impl UsageRecorder {
             .update(|log| log.add(today, purpose, usage, cost))
         {
             warn!("could not save token usage: {error}");
+        }
+    }
+
+    pub fn record_comparison(&self, record: crate::comparison::ComparisonRecord) {
+        if let Err(error) = self.store.update(|log| {
+            log.comparisons.push(record);
+            let extra = log.comparisons.len().saturating_sub(COMPARISONS_KEPT);
+            log.comparisons.drain(..extra);
+        }) {
+            warn!("could not save a model comparison: {error}");
         }
     }
 
@@ -242,10 +264,29 @@ pub fn record(purpose: &str, model: &str, response: &Value) {
     }
 }
 
+/// Keep a model comparison in the installed recorder's file (if any).
+pub fn record_comparison(record: crate::comparison::ComparisonRecord) {
+    if let Some(recorder) = RECORDER.read().ok().and_then(|slot| slot.clone()) {
+        recorder.record_comparison(record);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn hour_long_cache_writes_cost_twice_the_input_price() {
+        let usage = TokenUsage::from_response(&json!({ "usage": {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_creation_input_tokens": 1_500_000,
+            "cache_creation": { "ephemeral_1h_input_tokens": 1_000_000 },
+        } }))
+        .unwrap();
+        // Opus 5.5: $4 input; 0.5M five-minute writes at $5, 1M hour writes at $8.
+        assert!((usage.cost_usd("claude-opus-5-5") - 10.5).abs() < 1e-9);
+    }
 
     #[test]
     fn cost_follows_the_price_table() {

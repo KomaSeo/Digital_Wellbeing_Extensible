@@ -99,6 +99,9 @@ fn end_to_end(real_key: Option<String>) {
             "api_key": api_key,
             "send_screenshot": false,
             "browsers": [browser],
+            // No extra questions to the other model sizes: they would only add cost and
+            // calls (the comparison has its own tests).
+            "comparison_percent": 0,
         })
         .to_string(),
     )

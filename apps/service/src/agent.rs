@@ -294,6 +294,9 @@ fn reload_loop(
     );
     loop {
         thread::sleep(RELOAD_INTERVAL);
+        // The share of questions compared across model sizes (planner, assistant and window
+        // checks alike).
+        ai_focus_rule::comparison::set_percent(ai_store.get().comparison_percent);
         // The protection was turned off (here, in another session, or by an administrator):
         // without it a block means nothing, so every block of this session is lifted.
         let protected = machine::settings::is_protected(&data_directory);

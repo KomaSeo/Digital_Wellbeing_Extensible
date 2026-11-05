@@ -101,7 +101,7 @@ const MODEL: Block = Block {
 const BUDGET: Block = Block {
     id: "budget",
     file: "ai_focus",
-    paths: &[&["daily_budget_usd"]],
+    paths: &[&["daily_budget_usd"], &["comparison_percent"]],
     has_default: true,
 };
 const LIFE_RULES: Block = Block {
@@ -981,6 +981,20 @@ impl SettingsTab {
                         .range(0.0..=1000.0),
                 );
             });
+            ui.horizontal(|ui| {
+                ui.label("모델 비교: 다른 모델에게도 물어볼 질문의 비율(%, 0 = 끔)");
+                ui.add(
+                    egui::DragValue::new(&mut drafts.ai_focus.comparison_percent)
+                        .range(0..=100)
+                        .suffix("%"),
+                );
+            });
+            ui.small(
+                "모델 비교는 창 검사, 변경 요청 심사, 할 일 고르기, 할 일 변경 심사, AI 비서의 질문 중 \
+                 이 비율만큼을 Opus, Sonnet, Haiku에게 똑같이 물어 답을 비교합니다. 비교하는 답은 \
+                 아무것도 바꾸지 않고, 결과는 통계 탭의 \"모델 비교\"에 나옵니다. 그 비용도 AI 사용량에 \
+                 들어갑니다.",
+            );
         }
         self.block_bar(ui, &BUDGET, snapshot, protected);
         ui.small("지금까지 쓴 AI 사용량은 통계 탭에 있습니다.");
@@ -2261,12 +2275,135 @@ fn purpose_label(purpose: &str) -> (&str, &str) {
         "appointment review" => ("약속 심사", "약속 추가"),
         "week plan" => ("7일 계획", "통계 탭의 앞으로 7일 계획"),
         "assistant" => ("AI 비서", "AI 비서 탭의 대화(한 번에 여러 번 부를 수 있음)"),
+        "model comparison" => (
+            "모델 비교",
+            "질문 중 일부를 다른 크기의 모델에게도 똑같이 물어 답을 비교할 때(설정 탭의 비율)",
+        ),
         "connection check" => (
             "연결 확인",
             "크레딧이 없을 때 30초마다 보내는 가장 짧은 메시지",
         ),
         other => (other, ""),
     }
+}
+
+/// How often Sonnet and Haiku answered as Opus did, per feature, from every user's sampled
+/// questions (`ai_focus_rule::comparison`), with the latest questions they answered
+/// differently.
+pub(crate) fn comparison_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
+    use ai_focus_rule::comparison::{disagrees, summarize, ComparisonRecord};
+    let mut records: Vec<ComparisonRecord> = snapshot
+        .usage
+        .values()
+        .flat_map(|value| from_value::<UsageLog>(value).comparisons)
+        .collect();
+    records.sort_by_key(|record| record.at);
+    crate::style::section(ui, "모델 비교");
+    ui.small(
+        "질문 중 일부(설정 탭의 비율)를 Opus, Sonnet, Haiku에게 똑같이 물어, 싼 모델이 Opus와 같은 답을 \
+         하는지 셉니다. \"같음\"은 Opus와 같은 답의 비율입니다. \"위험\"은 싼 모델이 더 느슨하게 답한 \
+         비율입니다(Opus가 딴짓이라고 본 창을 할 일이라고 봄, Opus가 거절한 요청을 승인함). 할 일 \
+         고르기와 AI 비서는 답에 방향이 없어 \"위험\"을 세지 않습니다. 답이 달라도 둘 다 괜찮을 수 \
+         있으니, 아래의 예를 읽고 판단하세요.",
+    );
+    if records.is_empty() {
+        ui.label("아직 비교한 질문이 없습니다.");
+        return;
+    }
+    fn model_name(model: &str) -> &str {
+        match model {
+            "claude-opus-5-5" => "Opus",
+            "claude-sonnet-5-5" => "Sonnet",
+            "claude-haiku-5-5" => "Haiku",
+            other => other,
+        }
+    }
+    let percent = |part: usize, whole: usize| {
+        if whole == 0 {
+            "-".to_string()
+        } else {
+            format!(
+                "{:.0}% ({part}/{whole})",
+                part as f64 / whole as f64 * 100.0
+            )
+        }
+    };
+    egui::Grid::new("model_comparison")
+        .striped(true)
+        .num_columns(6)
+        .show(ui, |ui| {
+            for heading in [
+                "기능",
+                "질문 수",
+                "Sonnet 같음",
+                "Sonnet 위험",
+                "Haiku 같음",
+                "Haiku 위험",
+            ] {
+                ui.strong(heading);
+            }
+            ui.end_row();
+            for feature in summarize(&records) {
+                ui.label(purpose_label(&feature.purpose).0);
+                ui.label(feature.samples.to_string());
+                for model in ["claude-sonnet-5-5", "claude-haiku-5-5"] {
+                    let tally = feature.by_model.get(model).cloned().unwrap_or_default();
+                    let agreed = ui.label(percent(tally.agreed, tally.compared));
+                    if tally.errors > 0 {
+                        agreed.on_hover_text(format!(
+                            "실패한 질문 {}개는 세지 않았습니다",
+                            tally.errors
+                        ));
+                    }
+                    ui.label(if feature.has_direction {
+                        percent(tally.risky, tally.compared)
+                    } else {
+                        "-".to_string()
+                    });
+                }
+                ui.end_row();
+            }
+        });
+    let differing: Vec<&ComparisonRecord> = records
+        .iter()
+        .rev()
+        .filter(|record| disagrees(record))
+        .take(20)
+        .collect();
+    egui::CollapsingHeader::new(format!("답이 다른 질문(최근 {}개)", differing.len()))
+        .id_salt("comparison_differences")
+        .show(ui, |ui| {
+            for record in differing {
+                ui.group(|ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(purpose_label(&record.purpose).0);
+                        ui.weak(local(record.at));
+                    });
+                    if !record.asked.is_empty() {
+                        ui.small(&record.asked);
+                    }
+                    // Opus, Sonnet, Haiku, then any other model.
+                    let mut answers: Vec<(&String, &ai_focus_rule::comparison::ComparedAnswer)> =
+                        record.answers.iter().collect();
+                    answers.sort_by_key(|(model, _)| {
+                        ai_focus_rule::comparison::COMPARED_MODELS
+                            .iter()
+                            .position(|compared| compared == model)
+                            .unwrap_or(usize::MAX)
+                    });
+                    for (model, answer) in answers {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.strong(format!("{}:", model_name(model)));
+                            ui.label(&answer.key);
+                            if !answer.detail.is_empty() {
+                                ui.weak(&answer.detail);
+                            }
+                        });
+                    }
+                });
+            }
+        });
 }
 
 /// The AI usage of every user: in total, and per feature (today, the last seven days, this

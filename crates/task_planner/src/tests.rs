@@ -802,7 +802,7 @@ fn edits_and_removals_write_the_list_or_hide_an_older_proposed_todo() {
 #[test]
 fn the_todo_change_question_carries_the_rules_and_the_item() {
     let change = add("Watch a movie");
-    let text = crate::advisor::todo_change_text(&TodoChangeRequest {
+    let request = TodoChangeRequest {
         instructions: crate::advisor::PROPOSAL_PROMPT,
         now_local: "2026-10-30 Friday 14:05",
         life_rules: "No movies before 18:00.",
@@ -812,10 +812,51 @@ fn the_todo_change_question_carries_the_rules_and_the_item() {
         open: &[],
         recent_changes: &[],
         history: "",
-    });
+    };
+    let content = crate::advisor::question(
+        request.life_rules,
+        request.open,
+        crate::advisor::todo_change_text(&request),
+    );
+    let text: String = content
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .collect();
     assert!(text.contains("The owner's life rules (binding):\nNo movies before 18:00."));
     assert!(text.contains("\"title\": \"Watch a movie\""));
     assert!(text.contains("empty fields are for you to fill in"));
+}
+
+#[test]
+fn a_question_starts_with_the_cached_rules_and_list_and_ends_with_what_changes() {
+    let mut polish = todo("polish:a");
+    polish.title = "Improve: title a".into();
+    let open = vec![todo("a"), todo("b"), polish];
+    let first = crate::advisor::question("rules", &open, "Now: 14:05".into());
+    let second = crate::advisor::question("rules", &open, "Now: 14:40".into());
+    // The cached start is the same for both calls and marked for an hour.
+    assert_eq!(first[0], second[0]);
+    assert_eq!(first[0]["cache_control"]["ttl"], "1h");
+    let start = first[0]["text"].as_str().unwrap();
+    assert!(start.contains("rules") && start.contains("\"id\": \"a\""));
+    // The time and the "polish:" to-dos (their time left changes) come after it.
+    assert!(!start.contains("polish:a") && !start.contains("14:05"));
+    assert!(first[1].get("cache_control").is_none());
+    let pick = crate::advisor::pick_text(&PickRequest {
+        instructions: crate::advisor::PICK_PROMPT,
+        now_local: "14:05",
+        life_rules: "rules",
+        open: &open,
+        appointments: &[],
+        recently_done: &[],
+        previous: None,
+        history: "",
+        repick_reason: None,
+    });
+    assert!(
+        pick.contains("polish:a") && !pick.contains("\"id\": \"b\""),
+        "{pick}"
+    );
 }
 
 #[test]

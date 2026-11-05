@@ -386,6 +386,8 @@ pub fn direction(name: &str, edit: &Edit, in_force: &Value) -> Direction {
             }
         }
         ("ai_focus", ["always_allow"] | ["private_apps"]) => removing_is_stricter(),
+        // Only measures: the extra questions decide nothing.
+        ("ai_focus", ["comparison_percent"]) => Neutral,
         // Fewer programs the service may update as administrator.
         ("ai_focus", ["updatable_programs"]) => removing_is_stricter(),
         ("ai_focus", ["revoked_grants"] | ["always_blocked_sites"]) => adding_is_stricter(),

@@ -1521,6 +1521,8 @@ impl FocusMonitor {
         others: &[OtherWindow],
         previous: Option<&Previous>,
     ) -> Result<Judgement, JudgeError> {
+        // Every call of this agent (the planner's and the assistant's too) samples by it.
+        crate::comparison::set_percent(config.comparison_percent);
         if let Some((spent, limit)) = self
             .usage
             .as_ref()

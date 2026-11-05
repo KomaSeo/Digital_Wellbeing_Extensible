@@ -36,7 +36,10 @@ impl FocusApp {
             });
         }
         match self.settings.latest_snapshot() {
-            Some(snapshot) => crate::settings::usage_ui(ui, &snapshot),
+            Some(snapshot) => {
+                crate::settings::usage_ui(ui, &snapshot);
+                crate::settings::comparison_ui(ui, &snapshot);
+            }
             None => {
                 ui.label("agent에 연결하는 중…");
             }

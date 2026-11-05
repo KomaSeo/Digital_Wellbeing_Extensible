@@ -86,6 +86,9 @@ pub struct AiFocusConfig {
     /// (`0` = no limit). Planner and access-request calls are still allowed: refusing
     /// them could leave the user stuck on a task. See `usage.rs`.
     pub daily_budget_usd: f64,
+    /// Percent of the questions of the compared features also asked of the other model
+    /// sizes, to see whether a cheaper one decides the same (`crate::comparison`; 0 = off).
+    pub comparison_percent: u8,
     /// Grant ids revoked in the Settings tab. Kept here (the settings file) so the
     /// settings panels never write an agent's grants file; the monitor drops these.
     pub revoked_grants: BTreeSet<String>,
@@ -146,6 +149,7 @@ impl Default for AiFocusConfig {
             allow_permanent_grants: true,
             max_grant_minutes: 120,
             daily_budget_usd: 0.0,
+            comparison_percent: 10,
             revoked_grants: BTreeSet::new(),
             unblocked: BTreeSet::new(),
             always_blocked_sites: BTreeSet::new(),

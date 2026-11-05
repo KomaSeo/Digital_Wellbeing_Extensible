@@ -539,14 +539,14 @@ impl Advisor for ClaudeAdvisor {
         self.client.structured(
             "planner pick",
             request.instructions,
-            vec![text_block(pick_text(request))],
+            question(request.life_rules, request.open, pick_text(request)),
             pick_schema(),
             &self.effort,
         )
     }
 
     fn review(&self, request: &ReviewRequest) -> Result<Review, JudgeError> {
-        let mut content = vec![text_block(review_text(request))];
+        let mut content = question(request.life_rules, request.open, review_text(request));
         if let Some(jpeg) = request.screenshot {
             content.push(text_block(
                 "The screenshot the user attached as proof (taken by the app a few seconds \
@@ -577,7 +577,7 @@ impl Advisor for ClaudeAdvisor {
         self.client.structured(
             "to-do change review",
             request.instructions,
-            vec![text_block(todo_change_text(request))],
+            question(request.life_rules, request.open, todo_change_text(request)),
             todo_review_schema(),
             &self.effort,
         )
@@ -590,7 +590,7 @@ impl Advisor for ClaudeAdvisor {
         self.client.structured(
             "appointment review",
             request.instructions,
-            vec![text_block(appointment_text(request))],
+            question(request.life_rules, request.open, appointment_text(request)),
             appointment_review_schema(),
             &self.effort,
         )
@@ -674,13 +674,12 @@ pub(crate) fn appointment_text(request: &AppointmentRequest) -> String {
         )
     };
     format!(
-        "Now: {now}\n\n{rules}{life_rules}The user asks to add this appointment:\n\
+        "Now: {now}\n\n{rules}The user asks to add this appointment:\n\
          - title: {title}\n- notes: {notes}\n- from {start} to {end} ({minutes} min)\n\
          - away from the computer: {away}\nTheir reason: \"{reason}\"\n\n\
          Appointments already accepted:\n{appointments}\n\nCurrent assignment: {current}\n\n\
-         Open to-dos:\n{todos}\n\nEarlier to-do and appointment changes (newest first):\n{past}",
+         {polish}Earlier to-do and appointment changes (newest first):\n{past}",
         now = request.now_local,
-        life_rules = rules_text(request.life_rules),
         title = appointment.title,
         notes = or_none(&appointment.notes),
         start = local(appointment.start),
@@ -697,7 +696,7 @@ pub(crate) fn appointment_text(request: &AppointmentRequest) -> String {
             .current
             .map(|assignment| assignment_text(assignment, Utc::now()))
             .unwrap_or_else(|| "(none)".into()),
-        todos = todos_json(request.open),
+        polish = polish_text(request.open),
         past = or_none(&past.join("\n")),
     )
 }
@@ -923,6 +922,54 @@ fn todos_json(todos: &[TodoItem]) -> String {
     serde_json::to_string_pretty(todos).unwrap_or_default()
 }
 
+/// A planner question: first what stays the same from one call to the next while the list
+/// does not change (the owner's life rules and the open to-dos), then `text`, the part that
+/// changes every time (the time, the request, the activity).
+///
+/// The first block is marked for the prompt cache for an hour: the list is most of what a
+/// question costs, and the next question of the same kind within the hour reads it at a
+/// twentieth of the price (a write costs twice). Questions of one kind share their
+/// instructions (`system`) too, so the whole start of the prompt matches. The "polish:"
+/// to-dos change by the minute (their time left), so they go with `text` ([`polish_text`]).
+pub(crate) fn question(life_rules: &str, open: &[TodoItem], text: String) -> Vec<Value> {
+    let listed: Vec<TodoItem> = open
+        .iter()
+        .filter(|todo| !is_polish_item(todo))
+        .cloned()
+        .collect();
+    vec![
+        json!({
+            "type": "text",
+            "text": format!("{}Open to-dos:\n{}", rules_text(life_rules), todos_json(&listed)),
+            "cache_control": { "type": "ephemeral", "ttl": "1h" },
+        }),
+        text_block(text),
+    ]
+}
+
+fn is_polish_item(todo: &TodoItem) -> bool {
+    todo.id.starts_with("polish:")
+}
+
+/// The "polish:" to-dos, which are open to-dos too, for the changing part of a question;
+/// nothing when there are none.
+fn polish_text(open: &[TodoItem]) -> String {
+    let polish: Vec<TodoItem> = open
+        .iter()
+        .filter(|todo| is_polish_item(todo))
+        .cloned()
+        .collect();
+    if polish.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "More open to-dos (improving work finished early; listed here because their time \
+             left changes):\n{}\n\n",
+            todos_json(&polish)
+        )
+    }
+}
+
 /// The owner's life rules as a section of the question; nothing when empty.
 pub(crate) fn rules_text(rules: &str) -> String {
     if rules.trim().is_empty() {
@@ -940,7 +987,7 @@ fn or_none(text: &str) -> &str {
     }
 }
 
-fn pick_text(request: &PickRequest) -> String {
+pub(crate) fn pick_text(request: &PickRequest) -> String {
     let done: Vec<String> = request
         .recently_done
         .iter()
@@ -953,13 +1000,12 @@ fn pick_text(request: &PickRequest) -> String {
         })
         .collect();
     format!(
-        "Now: {now}\n\n{rules}Open to-dos:\n{todos}\n\nUpcoming appointments (fixed):\n\
+        "Now: {now}\n\n{polish}Upcoming appointments (fixed):\n\
          {appointments}\n\nRecently finished:\n{done}\n\n\
          Previous assignment: {prev}\n{repick}\nRecent foreground activity (oldest first):\n\
          {history}",
         now = request.now_local,
-        rules = rules_text(request.life_rules),
-        todos = todos_json(request.open),
+        polish = polish_text(request.open),
         appointments = appointments_text(request.appointments),
         done = or_none(&done.join("\n")),
         prev = request
@@ -1034,12 +1080,11 @@ pub(crate) fn review_text(request: &ReviewRequest) -> String {
         })
         .collect();
     format!(
-        "Now: {now}\n\n{rules}Current assignment: {current}\n{timing}{notes}{evidence}\n\
+        "Now: {now}\n\nCurrent assignment: {current}\n{timing}{notes}{evidence}\n\
          The user asks to: {ask}\nTheir reason: \"{reason}\"\n\n\
-         Open to-dos:\n{todos}\n\nEarlier change requests (newest first):\n{past}\n\n\
+         {polish}Earlier change requests (newest first):\n{past}\n\n\
          Recent foreground activity (oldest first):\n{history}",
         now = request.now_local,
-        rules = rules_text(request.life_rules),
         current = request
             .current
             .map(|assignment| assignment_text(assignment, Utc::now()))
@@ -1087,7 +1132,7 @@ pub(crate) fn review_text(request: &ReviewRequest) -> String {
             .unwrap_or_default(),
         ask = describe(request.request, request.target_title),
         reason = request.reason,
-        todos = todos_json(request.open),
+        polish = polish_text(request.open),
         past = or_none(&past.join("\n")),
         history = or_none(request.history),
     )
@@ -1137,13 +1182,12 @@ pub(crate) fn todo_change_text(request: &TodoChangeRequest) -> String {
         ),
     };
     format!(
-        "Now: {now}\n\n{rules}{asked}\nTheir reason: \"{reason}\"\n\nOpen to-dos:\n{todos}\n\n\
+        "Now: {now}\n\n{asked}\nTheir reason: \"{reason}\"\n\n{polish}\
          Earlier to-do changes (newest first):\n{past}\n\n\
          Recent foreground activity (oldest first):\n{history}",
         now = request.now_local,
-        rules = rules_text(request.life_rules),
         reason = request.reason,
-        todos = todos_json(request.open),
+        polish = polish_text(request.open),
         past = or_none(&past.join("\n")),
         history = or_none(request.history),
     )

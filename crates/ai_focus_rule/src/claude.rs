@@ -246,6 +246,7 @@ impl ClaudeClient {
         crate::connection::report_message_ok();
         // Before parsing: a refused or cut-off reply is billed too.
         crate::usage::record(purpose, &self.model, &response);
+        crate::comparison::after_call(purpose, &self.model, &self.api_key, body, &response);
         Ok(response)
     }
 }
