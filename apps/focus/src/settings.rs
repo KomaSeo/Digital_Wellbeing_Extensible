@@ -2668,8 +2668,16 @@ fn devices_ui(
                                 .format("%m월 %d일 %H:%M")
                                 .to_string()
                         }));
+                        // The server keeps a device that synced in the last 10 minutes.
+                        let in_use = device.last_seen.is_some_and(|seen| {
+                            (chrono::Utc::now() - seen).num_minutes() < 10
+                        });
                         if this_pc {
                             ui.label("");
+                        } else if in_use {
+                            ui.weak("사용 중").on_hover_text(
+                                "최근 10분 안에 동기화한 기기라서 목록에서 지울 수 없습니다",
+                            );
                         } else if sync.forget_waiting.contains(&device.id) {
                             ui.weak("다음 동기화 때 지웁니다");
                         } else if ui.small_button("목록에서 지우기").clicked() {

@@ -265,7 +265,7 @@ impl FocusApp {
         let locks = !self.todo_ui.without_review;
         if !self.todo_ui.confirm_stop {
             if ui
-                .add_enabled(idle, egui::Button::new("⏻ 사용 중지"))
+                .add_enabled(idle, egui::Button::new("사용 중지"))
                 .on_hover_text(if locks {
                     "컴퓨터를 그만 쓸 때 누릅니다. 모든 앱과 웹사이트가 잠기고, 차단 말고는 아무것도 \
                      하지 않습니다(AI도 부르지 않습니다)."
@@ -985,6 +985,13 @@ impl FocusApp {
             return;
         }
         let editing = self.todo_ui.editing.clone();
+        // What 0 means in the number fields: an edit leaves the field as it is; an addition
+        // lets the AI decide, or, outside strict mode (no AI), takes the default.
+        let (priority_zero, estimate_zero) = match (&editing, self.todo_ui.without_review) {
+            (Some(_), _) => ("1 낮음 … 5 급함, 0 = 그대로", "0 = 그대로"),
+            (None, true) => ("1 낮음 … 5 급함, 0 = 기본값(3)", "0 = 정하지 않음"),
+            (None, false) => ("1 낮음 … 5 급함, 0 = AI가 정함", "0 = AI가 정함"),
+        };
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             match &editing {
@@ -1037,13 +1044,13 @@ impl FocusApp {
                 ui.label("중요도");
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut form.priority).range(0..=5));
-                    ui.small("1 낮음 … 5 급함, 0 = AI가 정함");
+                    ui.small(priority_zero);
                 });
                 ui.end_row();
                 ui.label("예상 시간(분)");
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut form.estimate_minutes).range(0..=6000));
-                    ui.small("0 = AI가 정함");
+                    ui.small(estimate_zero);
                 });
                 ui.end_row();
                 ui.label("반복");

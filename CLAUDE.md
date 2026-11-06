@@ -36,3 +36,11 @@
   Then check that the release run succeeded. Several changes in one session may share one release.
 - The release notes hold only what changed in this version (the owner reads older changes on the older releases):
   for a new version, replace that section's content instead of keeping earlier versions' sections below it.
+
+## Checking screens
+
+- The owner uses the program every day on the PC it runs on, so they cannot try a new version there before it is
+  released. Before every release that changes what the Focus app shows, launch the agent and the Focus app on the
+  Linux virtual screen (`Xvfb`, a throwaway data folder with `DW_DATA_DIR` and `DW_PORT_BASE`, made-up to-dos and
+  states as needed), open every screen the change touches, take screenshots, look at them, fix what is wrong, and
+  send the screenshots to the owner with the release report. Do not report a screen as done without having seen it.
