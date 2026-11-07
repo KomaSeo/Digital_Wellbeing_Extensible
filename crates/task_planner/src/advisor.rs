@@ -36,9 +36,7 @@ urgent appeared; constant switching wastes the user's time. To-dos whose id \
 starts with \"polish:\" are work the user finished early that can still be \
 improved; their estimate is the time left for that. When nothing is overdue or \
 due today, prefer them over rest and leisure (unless the life rules call for a \
-break now). To-dos marked \
-\"proposed\": true were added by the user and approved by an AI review against the \
-life rules; weigh them like any other. To-dos marked \"repeat\": true are routines \
+break now). To-dos marked \"routine\" are routines \
 (sleep, getting ready, exercise, meals) that stay on the list after they are done: \
 use the recently finished list, the time of day and the life rules to judge whether \
 one is due now. Respect dates in the notes such as \"not before YYYY-MM-DD\": never \
@@ -167,7 +165,7 @@ leisure; anything that can wait belongs on the to-do list instead.
 
 Each assignment has a planned end. When it is up the user reports whether the \
 to-do is finished; only \"done\" reports come to you. A to-do marked as a routine \
-(\"repeat\") stays on the list when it is done, so judge only whether this \
+(\"routine\") stays on the list when it is done, so judge only whether this \
 round of it was done.
 
 Finishing a to-do, especially before its planned time is up: first decide what \
@@ -755,22 +753,20 @@ pub(crate) fn week_plan_text(request: &WeekPlanRequest) -> String {
         .iter()
         .map(|date| date.format("%Y-%m-%d %A").to_string())
         .collect();
-    let todos: Vec<Value> = request
+    // One line per to-do, as in the other questions, with the time spent and still needed.
+    let todos: Vec<String> = request
         .open
         .iter()
         .map(|(todo, spent)| {
-            json!({
-                "id": todo.id,
-                "title": todo.title,
-                "notes": todo.notes,
-                "deadline": todo.deadline,
-                "priority": todo.priority,
-                "estimate_minutes": todo.estimate_minutes,
-                "minutes_spent": spent,
-                "minutes_still_needed": todo
-                    .estimate_minutes
-                    .map(|estimate| (i64::from(estimate) - spent).max(0)),
-            })
+            let mut line = todos_text(std::slice::from_ref(todo));
+            line.push_str(&format!(" | spent {spent} min"));
+            if let Some(estimate) = todo.estimate_minutes {
+                line.push_str(&format!(
+                    " | still needed {} min",
+                    (i64::from(estimate) - spent).max(0)
+                ));
+            }
+            line
         })
         .collect();
     let worked: Vec<String> = request
@@ -796,7 +792,8 @@ pub(crate) fn week_plan_text(request: &WeekPlanRequest) -> String {
         })
         .collect();
     format!(
-        "Now: {now}\n\n{rules}Days to plan: {days}\n\nOpen to-dos:\n{todos}\n\n\
+        "Now: {now}\n\n{rules}Days to plan: {days}\n\nOpen to-dos. {TODOS_FORMAT} Each line \
+         ends with the minutes spent so far and still needed.\n{todos}\n\n\
          Appointments (fixed; not free time):\n{appointments}\n\n\
          Minutes spent on assignments on the last seven days:\n{worked}\n\nRecently \
          finished:\n{done}",
@@ -804,7 +801,7 @@ pub(crate) fn week_plan_text(request: &WeekPlanRequest) -> String {
         appointments = appointments_text(request.appointments),
         rules = rules_text(request.life_rules),
         days = days.join(", "),
-        todos = serde_json::to_string_pretty(&todos).unwrap_or_default(),
+        todos = or_none(&todos.join("\n")),
         worked = or_none(&worked.join("\n")),
         done = or_none(&done.join("\n")),
     )
@@ -923,9 +920,50 @@ fn assignment_text(assignment: &Assignment, now: DateTime<Utc>) -> String {
     )
 }
 
-fn todos_json(todos: &[TodoItem]) -> String {
-    serde_json::to_string_pretty(todos).unwrap_or_default()
+/// The to-dos one per line, the fields that say something only (the owner chose this over
+/// pretty-printed JSON to send fewer tokens, "탁월한 선택이네. 진행하도록"): `[id] title |
+/// due YYYY-MM-DD | priority N | estimate N min | routine | notes: …`.
+fn todos_text(todos: &[TodoItem]) -> String {
+    if todos.is_empty() {
+        return "(none)".to_string();
+    }
+    todos
+        .iter()
+        .map(|todo| {
+            let mut line = format!("[{}] {}", todo.id, one_line(&todo.title));
+            if let Some(deadline) = todo.deadline {
+                line.push_str(&format!(" | due {deadline}"));
+            }
+            line.push_str(&format!(" | priority {}", todo.priority));
+            if let Some(minutes) = todo.estimate_minutes {
+                line.push_str(&format!(" | estimate {minutes} min"));
+            }
+            if todo.repeat {
+                line.push_str(" | routine");
+            }
+            let notes = one_line(&todo.notes);
+            if !notes.is_empty() {
+                line.push_str(&format!(" | notes: {notes}"));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
+
+/// `text` on one line: line breaks become " / ", runs of spaces one space.
+fn one_line(text: &str) -> String {
+    text.lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+/// What the to-do lines say, before the first list of a question.
+const TODOS_FORMAT: &str = "One to-do per line: [id] title | due date | priority (1 low to 5 \
+urgent) | estimate | routine (stays on the list when done) | notes. Fields not shown are \
+not set.";
 
 /// A planner question: first what stays the same from one call to the next while the list
 /// does not change (the owner's life rules and the open to-dos), then `text`, the part that
@@ -945,7 +983,11 @@ pub(crate) fn question(life_rules: &str, open: &[TodoItem], text: String) -> Vec
     vec![
         json!({
             "type": "text",
-            "text": format!("{}Open to-dos:\n{}", rules_text(life_rules), todos_json(&listed)),
+            "text": format!(
+                "{}Open to-dos. {TODOS_FORMAT}\n{}",
+                rules_text(life_rules),
+                todos_text(&listed)
+            ),
             "cache_control": { "type": "ephemeral", "ttl": "1h" },
         }),
         text_block(text),
@@ -982,7 +1024,7 @@ fn polish_text(open: &[TodoItem]) -> String {
         format!(
             "More open to-dos (improving work finished early; listed here because their time \
              left changes):\n{}\n\n",
-            todos_json(&polish)
+            todos_text(&polish)
         )
     }
 }

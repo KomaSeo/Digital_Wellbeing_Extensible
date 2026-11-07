@@ -226,11 +226,11 @@ fn answer(request: &Value) -> Value {
             "warnings": [],
         })
     } else if system.contains("You assign the user's next piece of work") {
-        // The first open to-do, as the list shows it: `"id": "..."`.
+        // The first open to-do, as the list shows it: a line `[id] title | …`.
         let first_id = text
-            .split("\"id\": \"")
+            .split("\n[")
             .nth(1)
-            .and_then(|rest| rest.split('"').next())
+            .and_then(|rest| rest.split(']').next())
             .unwrap_or_default();
         json!({ "todo_id": first_id, "task": "work on it", "why": "first", "minutes": 30 })
     } else if system.contains("decide whether to accept this one") {

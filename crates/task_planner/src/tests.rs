@@ -897,7 +897,10 @@ fn a_question_starts_with_the_cached_rules_and_list_and_ends_with_what_changes()
     assert_eq!(first[0], second[0]);
     assert_eq!(first[0]["cache_control"]["ttl"], "1h");
     let start = first[0]["text"].as_str().unwrap();
-    assert!(start.contains("rules") && start.contains("\"id\": \"a\""));
+    assert!(
+        start.contains("rules") && start.contains("\n[a] "),
+        "{start}"
+    );
     // The time and the "polish:" to-dos (their time left changes) come after it.
     assert!(!start.contains("polish:a") && !start.contains("14:05"));
     assert!(first[1].get("cache_control").is_none());
@@ -921,9 +924,36 @@ fn a_question_starts_with_the_cached_rules_and_list_and_ends_with_what_changes()
     });
     assert!(pick.contains("카페, 노트북만 있음"), "{pick}");
     assert!(
-        pick.contains("polish:a") && !pick.contains("\"id\": \"b\""),
+        pick.contains("[polish:a] ") && !pick.contains("[b] "),
         "{pick}"
     );
+}
+
+#[test]
+fn a_to_do_is_one_line_with_only_the_fields_that_are_set() {
+    let mut full = todo("t1");
+    full.title = "논문 3장 초안 쓰기".into();
+    full.notes = "Google Docs\n관련 연구  절부터".into();
+    full.deadline = chrono::NaiveDate::from_ymd_opt(2026, 11, 20);
+    full.priority = 5;
+    full.estimate_minutes = Some(120);
+    full.repeat = true;
+    let mut bare = todo("t2");
+    bare.title = "장보기".into();
+    bare.notes = String::new();
+    bare.deadline = None;
+    bare.estimate_minutes = None;
+    bare.repeat = false;
+    let content = crate::advisor::question("", &[full, bare], "Now".into());
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains(
+            "[t1] 논문 3장 초안 쓰기 | due 2026-11-20 | priority 5 | estimate 120 min | routine | \
+             notes: Google Docs / 관련 연구 절부터\n[t2] 장보기 | priority 3"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("\"proposed\""), "{text}");
 }
 
 #[test]
@@ -1481,7 +1511,7 @@ fn the_week_plan_keeps_the_seven_days_and_listed_todos_only() {
         appointments: &[],
     });
     assert!(text.contains("2026-11-06 Friday"), "{text}");
-    assert!(text.contains("\"minutes_spent\": 30"), "{text}");
+    assert!(text.contains("| spent 30 min"), "{text}");
 }
 
 fn appointment_change(
