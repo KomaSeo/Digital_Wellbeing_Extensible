@@ -142,14 +142,6 @@ fn parse_clock(text: &str) -> Option<NaiveTime> {
 }
 
 /// "AI가 정함" / "예" / "아니요" for whether something is done away from the computer.
-fn away_choice_ui(ui: &mut egui::Ui, value: &mut Option<bool>) {
-    ui.horizontal(|ui| {
-        ui.radio_value(value, None, "AI가 정함");
-        ui.radio_value(value, Some(true), "예");
-        ui.radio_value(value, Some(false), "아니요");
-    });
-}
-
 /// Responsibility: Hold the fields of a to-do as the user types them; empty ones are filled
 /// in by the AI (adding) or stay as they are (editing).
 #[derive(Default, Clone)]
@@ -163,8 +155,6 @@ struct TodoForm {
     estimate_minutes: u32,
     /// A routine: it stays on the list when finished.
     repeat: bool,
-    /// Done away from the computer; `None` = let the AI decide (adding) / keep (editing).
-    away_from_computer: Option<bool>,
     reason: String,
 }
 
@@ -182,7 +172,6 @@ impl TodoForm {
             "priority": (self.priority > 0).then_some(self.priority),
             "estimate_minutes": (self.estimate_minutes > 0).then_some(self.estimate_minutes),
             "repeat": self.repeat,
-            "away_from_computer": self.away_from_computer,
         })
     }
 }
@@ -422,21 +411,10 @@ impl FocusApp {
                 local_time(assignment.at)
             ));
             if let Some(until) = assignment.until {
-                // While the user is away from a computer task, its time stands still.
-                let clock = assignment.paused_since.unwrap_or_else(Utc::now);
+                let clock = Utc::now();
                 let total = (until - assignment.at).num_seconds().max(1) as f32;
                 let elapsed = (clock - assignment.at).num_seconds().max(0) as f32;
                 let minutes_left = (until - clock).num_minutes();
-                if let Some(since) = assignment.paused_since {
-                    ui.colored_label(
-                        YELLOW,
-                        format!(
-                            "{}부터 키보드와 마우스를 쓰지 않아 시간이 멈춰 있습니다. 다시 쓰면 \
-                             멈춘 만큼 끝나는 시각이 늦춰집니다.",
-                            local_time(since)
-                        ),
-                    );
-                }
                 ui.add(egui::ProgressBar::new((elapsed / total).min(1.0)).text(
                     if minutes_left >= 0 {
                         format!(
@@ -466,13 +444,6 @@ impl FocusApp {
                     YELLOW,
                     "약속입니다. 정해진 시간에 저절로 시작했고, 끝나는 시각에 저절로 끝납니다. \
                      일찍 끝나면 \"끝냈다\"를 보내세요. 다른 일로 바꾸려면 급한 이유가 필요합니다.",
-                );
-            }
-            if assignment.away_from_computer {
-                ui.colored_label(
-                    RED,
-                    "컴퓨터 없이 하는 일입니다. 엄격 모드이면 이 앱 말고는 모든 앱과 웹사이트가 \
-                     잠깁니다. 다른 일로 바꾸거나 멈추려면 급한 이유가 필요합니다.",
                 );
             }
             if let Some(todo_id) = &assignment.todo_id {
@@ -596,7 +567,6 @@ impl FocusApp {
             priority: todo.priority,
             estimate_minutes: todo.estimate_minutes.unwrap_or(0),
             repeat: todo.repeat,
-            away_from_computer: todo.away_from_computer,
             reason: String::new(),
         };
         self.todo_ui.editing = Some(todo.id.clone());
@@ -895,9 +865,6 @@ impl FocusApp {
                 if todo.repeat {
                     ui.small("(반복)");
                 }
-                if todo.away_from_computer == Some(true) {
-                    ui.small("(컴퓨터 없이)");
-                }
                 if todo.proposed {
                     ui.small("(내가 추가)");
                 }
@@ -993,7 +960,6 @@ impl FocusApp {
             priority: draft.priority.unwrap_or(0),
             estimate_minutes: draft.estimate_minutes.unwrap_or(0),
             repeat: draft.repeat.unwrap_or(false),
-            away_from_computer: draft.away_from_computer,
             reason: record.reason.clone(),
         };
         match &record.change {
@@ -1132,12 +1098,6 @@ impl FocusApp {
                     &mut form.repeat,
                     "반복하는 할 일(잠자기, 출근 준비, 운동처럼 끝내도 목록에 남음)",
                 );
-                ui.end_row();
-                ui.label("컴퓨터 없이 하는 일");
-                ui.vertical(|ui| {
-                    away_choice_ui(ui, &mut form.away_from_computer);
-                    ui.small("잠자기, 운동처럼 컴퓨터 없이 하면, 그 일을 하는 동안 모든 앱과 웹사이트가 잠깁니다.");
-                });
                 ui.end_row();
                 ui.label("이유");
                 ui.add(

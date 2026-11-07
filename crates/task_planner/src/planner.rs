@@ -121,14 +121,7 @@ pub struct TaskPlanner {
     /// Held for a whole assign/review, so two clicks cannot race. The AI call
     /// happens under it, but no data lock is held during the call.
     busy: Mutex<()>,
-    /// Seconds since the user last touched the keyboard or mouse (`None`: unknown, the time
-    /// never stands still). The agent asks the desktop; tests set their own.
-    idle_source: Box<dyn Fn() -> Option<u64> + Send + Sync>,
 }
-
-/// Minutes without touching the computer after which a task done at the computer stops its
-/// time (from the last touch on).
-pub const IDLE_PAUSE_MINUTES: i64 = 5;
 
 impl TaskPlanner {
     pub fn new(
@@ -143,17 +136,7 @@ impl TaskPlanner {
             focus,
             advisor,
             busy: Mutex::new(()),
-            idle_source: Box::new(|| None),
         }
-    }
-
-    /// Where the planner learns how long the user has not touched the computer.
-    pub fn with_idle_source(
-        mut self,
-        source: impl Fn() -> Option<u64> + Send + Sync + 'static,
-    ) -> Self {
-        self.idle_source = Box::new(source);
-        self
     }
 
     pub fn config_store(&self) -> &JsonStore<PlannerConfig> {
@@ -291,15 +274,6 @@ impl TaskPlanner {
             .update(|planner_state| planner_state.stopped_at = None)?;
         info!("the user uses the computer again");
         Ok(())
-    }
-
-    /// The task when it is done away from the computer: the agent locks every app meanwhile.
-    pub fn away_from_computer_task(&self) -> Option<String> {
-        self.state
-            .get()
-            .assignment
-            .filter(|assignment| assignment.away_from_computer)
-            .map(|assignment| assignment.task)
     }
 
     /// An assignment that ends at `until`, cut off at the start of the next appointment.
@@ -1078,8 +1052,7 @@ impl TaskPlanner {
             return Ok(());
         }
         self.keep_appointments(now)?;
-        let idle_seconds = (self.idle_source)();
-        self.track_idle(now, idle_seconds)?;
+        self.end_old_pause(now)?;
         Ok(())
     }
 
@@ -1107,53 +1080,30 @@ impl TaskPlanner {
         Ok(())
     }
 
-    /// Stop the time of a task done at the computer while the user does not touch it, and
-    /// let it run on when they are back (`until` moves later by the time they were away).
-    /// Tasks done away from the computer and appointments (fixed times) never stop.
-    pub fn track_idle(
-        &self,
-        now: DateTime<Utc>,
-        idle_seconds: Option<u64>,
-    ) -> Result<(), PlannerError> {
-        let Some(idle_seconds) = idle_seconds else {
+    /// A task's time no longer stands still while the user is away (the owner chose "멈춤
+    /// 기능을 없앰"). A pause an older version started ends now: the time away is logged and
+    /// added to the end, as it was when the user came back.
+    fn end_old_pause(&self, now: DateTime<Utc>) -> Result<(), PlannerError> {
+        let Some(since) = self
+            .state
+            .get()
+            .assignment
+            .and_then(|assignment| assignment.paused_since)
+        else {
             return Ok(());
         };
-        let Some(current) = self.state.get().assignment else {
-            return Ok(());
-        };
-        if current.away_from_computer || current.appointment_id.is_some() {
-            return Ok(());
-        }
-        let idle_seconds = i64::try_from(idle_seconds).unwrap_or(i64::MAX / 2_000_000);
-        let away = idle_seconds >= IDLE_PAUSE_MINUTES * 60;
-        let last_touch = (now - Duration::seconds(idle_seconds)).max(current.at);
-        match current.paused_since {
-            // Gone: the time stands still from the last touch (unless it was up by then).
-            None if away && !current.time_is_up(last_touch) => {
-                self.state.update(|planner_state| {
-                    if let Some(assignment) = planner_state.assignment.as_mut() {
-                        assignment.paused_since = Some(last_touch);
-                    }
-                })?;
-                info!("no input since {last_touch}: the task's time stands still");
+        let back = now.max(since);
+        self.state.update(|planner_state| {
+            if let Some(assignment) = planner_state.assignment.as_mut() {
+                assignment.idle.push(IdleSpan {
+                    start: since,
+                    end: back,
+                });
+                assignment.paused_since = None;
+                assignment.until = assignment.until.map(|until| until + (back - since));
             }
-            // Back: the time away is logged and added to the end.
-            Some(since) if !away => {
-                let back = last_touch.max(since);
-                self.state.update(|planner_state| {
-                    if let Some(assignment) = planner_state.assignment.as_mut() {
-                        assignment.idle.push(IdleSpan {
-                            start: since,
-                            end: back,
-                        });
-                        assignment.paused_since = None;
-                        assignment.until = assignment.until.map(|until| until + (back - since));
-                    }
-                })?;
-                info!("back at {back}: the task's time runs again");
-            }
-            _ => {}
-        }
+        })?;
+        info!("the task's time, stopped by an older version since {since}, runs again");
         Ok(())
     }
 
@@ -1799,7 +1749,7 @@ impl TaskPlanner {
                     at: now,
                     until: Some(self.cut_at_next_appointment(now, end_after(now, minutes))),
                     when_time_is_up: WhenTimeIsUp::Reassign,
-                    away_from_computer: todo.away_from_computer.unwrap_or(false),
+                    away_from_computer: false,
                     appointment_id: None,
                     open: Vec::new(),
                     paused_since: None,
@@ -1871,11 +1821,13 @@ impl TaskPlanner {
             appointments: &self.appointments(now),
             situation: &state.situation,
         })?;
-        let Some(picked) = open.iter().find(|todo| todo.id == pick.todo_id) else {
+        if !open.iter().any(|todo| todo.id == pick.todo_id) {
             return Err(PlannerError::BadPick(pick.todo_id));
-        };
+        }
         let assignment = Assignment {
-            away_from_computer: picked.away_from_computer.unwrap_or(pick.away_from_computer),
+            // Nothing is done "away from the computer" any more (the owner: "그래 할 일에서도
+            // 없애자"): no lock; the window checks judge what has to do with the task.
+            away_from_computer: false,
             todo_id: Some(pick.todo_id),
             task: pick.task,
             why: pick.why,
@@ -2100,7 +2052,7 @@ fn polish_todo(todo_id: &str, polish: &PolishItem) -> TodoItem {
         estimate_minutes: u32::try_from(polish.minutes_left).ok(),
         proposed: polish.todo.proposed,
         repeat: false,
-        away_from_computer: polish.todo.away_from_computer,
+        away_from_computer: None,
     }
 }
 
@@ -2181,7 +2133,6 @@ fn completed_todo(
     draft: &ProposalInput,
     filled: Option<&ReviewedTodo>,
 ) -> TodoItem {
-    let judged_away = filled.map(|filled| filled.away_from_computer);
     let filled = filled.cloned().unwrap_or_default();
     let deadline = draft
         .deadline
@@ -2209,7 +2160,7 @@ fn completed_todo(
         estimate_minutes,
         proposed: true,
         repeat: draft.repeat.unwrap_or(false),
-        away_from_computer: draft.away_from_computer.or(judged_away),
+        away_from_computer: None,
     }
 }
 
@@ -2246,9 +2197,6 @@ fn edited_fields(draft: &ProposalInput) -> Map<String, Value> {
     }
     if let Some(repeat) = draft.repeat {
         changed_fields.insert("repeat".into(), json!(repeat));
-    }
-    if let Some(away) = draft.away_from_computer {
-        changed_fields.insert("away_from_computer".into(), json!(away));
     }
     changed_fields
 }

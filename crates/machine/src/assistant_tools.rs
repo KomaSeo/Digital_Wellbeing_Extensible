@@ -19,10 +19,9 @@ user never chooses what to work on next, not even through you: the app's AI does
 they want to stop the current task, send request_change with change \"repick\" and their \
 reason, not a task of your or their choosing. When the task's time is up, the app \
 accepts only a report (request_change done or not_finished); the next task comes when \
-the user asks for it (get_my_task). Tasks done away from the computer (sleep, exercise) \
-lock every app until they are reported, and appointments (add_appointment; the app's AI \
-accepts them by the owner's appointment rules) replace the task at their time; leaving \
-either early needs an urgent reason. A \
+the user asks for it (get_my_task). Appointments (add_appointment; the app's AI accepts \
+them by the owner's appointment rules) replace the task at their time; leaving one early \
+needs an urgent reason. A \
 scheduled settings update takes effect only after the user confirms it in the app as often \
 and as far apart as the settings say (planner's confirmations; by default three times, two \
 days apart); tell the user that, and never press them to confirm.";
@@ -54,7 +53,6 @@ pub fn tools() -> Value {
                     "priority": { "type": "integer", "minimum": 1, "maximum": 5, "description": "1 low .. 5 urgent (default 3)" },
                     "estimate_minutes": { "type": "integer", "minimum": 1 },
                     "repeat": { "type": "boolean", "description": "A routine (sleep, getting ready, exercise) that stays on the list when finished" },
-                    "away_from_computer": { "type": "boolean", "description": "Done away from the computer (sleep, exercise): every app is locked while it is the task. Leave out unless the user said; the app's AI judges it" },
                     "reason": { "type": "string", "description": "Why it belongs on the list (optional)" }
                 },
                 "required": ["title"]
@@ -74,7 +72,6 @@ pub fn tools() -> Value {
                     "priority": { "type": "integer", "minimum": 1, "maximum": 5 },
                     "estimate_minutes": { "type": "integer", "minimum": 1 },
                     "repeat": { "type": "boolean", "description": "Make it a routine (true) or a one-off (false)" },
-                    "away_from_computer": { "type": "boolean", "description": "Done away from the computer (true) or at it (false)" },
                     "reason": { "type": "string", "description": "The user's reason, in their words" }
                 },
                 "required": ["todo_id", "reason"]
@@ -242,7 +239,6 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                 "priority",
                 "estimate_minutes",
                 "repeat",
-                "away_from_computer",
             ] {
                 if let Some(value) = arguments.get(key).filter(|value| !value.is_null()) {
                     todo[key] = value.clone();
@@ -272,7 +268,6 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                     "priority",
                     "estimate_minutes",
                     "repeat",
-                    "away_from_computer",
                 ] {
                     if let Some(value) = arguments.get(key).filter(|value| !value.is_null()) {
                         todo[key] = value.clone();
@@ -552,7 +547,6 @@ pub fn summary(status: &Status) -> Value {
             "todo_id": assignment.todo_id,
             "since": assignment.at,
             "until": assignment.until,
-            "away_from_computer": assignment.away_from_computer,
             "appointment": assignment.appointment_id.is_some(),
         })),
         "appointments": planner.map(|planner| planner.appointments.iter().map(|appointment| json!({
@@ -574,7 +568,6 @@ pub fn summary(status: &Status) -> Value {
             "estimate_minutes": todo.estimate_minutes,
             "minutes_spent": planner.minutes_this_round.get(&todo.id),
             "routine": todo.repeat,
-            "away_from_computer": todo.away_from_computer,
             "proposed_by_user": todo.proposed,
         })).collect::<Vec<_>>()),
         "recent_todo_changes": planner.map(|planner| planner.recent_todo_changes.iter().map(|record| json!({

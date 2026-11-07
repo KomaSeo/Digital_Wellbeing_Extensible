@@ -1517,13 +1517,18 @@ fn add_appointment(
 }
 
 #[test]
-fn away_from_computer_tasks_are_marked_and_their_changes_say_so() {
+fn nothing_is_done_away_from_the_computer_any_more() {
+    // Whatever the AI or an older to-do says, a task never locks the computer.
     let fixture = harness(true, &["sleep"]);
-    // The to-do does not say: the AI's judgement at the pick counts.
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.todos[0].away_from_computer = Some(true))
+        .unwrap();
     fixture.advisor.judges_away.store(true, Ordering::SeqCst);
     let now = Utc::now();
-    fixture.planner.assign(now).unwrap();
-    assert!(fixture.planner.away_from_computer_task().is_some());
+    let assignment = fixture.planner.assign(now).unwrap();
+    assert!(!assignment.away_from_computer);
     fixture
         .planner
         .request_change(
@@ -1533,24 +1538,13 @@ fn away_from_computer_tasks_are_marked_and_their_changes_say_so() {
             Evidence::default(),
         )
         .unwrap();
-    assert!(fixture.advisor.saw_current_away.load(Ordering::SeqCst));
-    // The to-do's own flag wins over the AI.
-    let fixture = harness(true, &["mail"]);
-    fixture
-        .planner
-        .config_store()
-        .update(|config| config.todos[0].away_from_computer = Some(false))
-        .unwrap();
-    fixture.advisor.judges_away.store(true, Ordering::SeqCst);
-    fixture.planner.assign(now).unwrap();
-    assert!(fixture.planner.away_from_computer_task().is_none());
-    // A new to-do gets the AI's judgement unless the user said.
-    fixture.advisor.judges_away.store(true, Ordering::SeqCst);
+    assert!(!fixture.advisor.saw_current_away.load(Ordering::SeqCst));
+    // A new to-do is not marked either, whatever the AI or the user says.
     let record = fixture
         .planner
         .review_todo_change(now, add("go running"), "", "to-do tab")
         .unwrap();
-    assert_eq!(record.after.unwrap().away_from_computer, Some(true));
+    assert_eq!(record.after.unwrap().away_from_computer, None);
     let record = fixture
         .planner
         .review_todo_change(
@@ -1558,7 +1552,7 @@ fn away_from_computer_tasks_are_marked_and_their_changes_say_so() {
             TodoChange::Add {
                 todo: ProposalInput {
                     title: "online class".into(),
-                    away_from_computer: Some(false),
+                    away_from_computer: Some(true),
                     ..Default::default()
                 },
             },
@@ -1566,7 +1560,7 @@ fn away_from_computer_tasks_are_marked_and_their_changes_say_so() {
             "to-do tab",
         )
         .unwrap();
-    assert_eq!(record.after.unwrap().away_from_computer, Some(false));
+    assert_eq!(record.after.unwrap().away_from_computer, None);
 }
 
 #[test]
@@ -1680,7 +1674,6 @@ fn an_appointment_is_fixed_at_its_time_and_ends_by_itself() {
     assert!(current.appointment_id.is_some());
     // It locks nothing; the window checks judge what has to do with it.
     assert!(!current.away_from_computer);
-    assert!(fixture.planner.away_from_computer_task().is_none());
     let checked_task = fixture.focus.store().get().task;
     assert!(
         checked_task.starts_with("meeting") && checked_task.contains("약속과 관계된 일"),
@@ -2149,28 +2142,22 @@ fn an_approved_done_can_add_a_follow_up_and_set_steps() {
 }
 
 #[test]
-fn the_time_stands_still_while_the_user_is_away_from_a_computer_task() {
-    let fixture = harness(true, &["a"]);
+fn a_pause_an_older_version_started_ends_and_the_time_runs_on() {
+    let state = JsonStore::in_memory(PlannerState::default());
+    let fixture = harness_with_state(true, &["a"], state.clone());
     let start = Utc::now();
     let assignment = fixture.planner.assign(start).unwrap();
     let planned_end = assignment.until.unwrap();
-    assert_eq!((planned_end - start).num_minutes(), 45);
-
-    // Ten minutes in, nothing touched for six minutes: the time stands still from the last
-    // touch (four minutes in).
-    let ten = start + chrono::Duration::minutes(10);
-    fixture.planner.track_idle(ten, Some(6 * 60)).unwrap();
-    let paused = fixture.planner.status().assignment.unwrap();
-    assert_eq!(
-        paused.paused_since,
-        Some(start + chrono::Duration::minutes(4))
-    );
-    // Even past the planned end, the time is not up while it stands still.
-    assert!(!paused.time_is_up(planned_end + chrono::Duration::minutes(5)));
-
-    // Back at 64 minutes: 60 minutes away are added to the end.
-    let back = start + chrono::Duration::minutes(64);
-    fixture.planner.track_idle(back, Some(0)).unwrap();
+    // An older version stopped the time four minutes in.
+    let paused_at = start + chrono::Duration::minutes(4);
+    state
+        .update(|planner_state| {
+            planner_state.assignment.as_mut().unwrap().paused_since = Some(paused_at);
+        })
+        .unwrap();
+    // The agent's next round ends the pause: the time away is logged and added to the end.
+    let now = start + chrono::Duration::minutes(64);
+    fixture.planner.resume(now).unwrap();
     let running = fixture.planner.status().assignment.unwrap();
     assert_eq!(running.paused_since, None);
     assert_eq!(
@@ -2178,74 +2165,22 @@ fn the_time_stands_still_while_the_user_is_away_from_a_computer_task() {
         Some(planned_end + chrono::Duration::minutes(60))
     );
     assert_eq!(running.idle.len(), 1);
-
-    // Time spent counts only the time at the computer: 4 + 6 minutes so far at 74 minutes.
-    let later = start + chrono::Duration::minutes(74);
-    let timetable = fixture
+    let kinds: Vec<TimetableKind> = fixture
         .planner
-        .timetable(start - chrono::Duration::hours(1), later, later);
-    let kinds: Vec<(TimetableKind, i64)> = timetable
+        .timetable(start - chrono::Duration::hours(1), now, now)
         .iter()
-        .map(|entry| (entry.kind, (entry.end - entry.start).num_minutes()))
+        .map(|entry| entry.kind)
         .collect();
-    assert_eq!(
-        kinds,
-        vec![
-            (TimetableKind::Task, 4),
-            (TimetableKind::Unknown, 60),
-            (TimetableKind::Task, 10)
-        ]
-    );
-    assert_eq!(
-        fixture
-            .planner
-            .status()
-            .assignment
-            .unwrap()
-            .span_until(later)
-            .minutes(),
-        14
-    );
-}
-
-#[test]
-fn a_task_away_from_the_computer_never_stands_still() {
-    let fixture = harness(true, &["a"]);
-    fixture.advisor.judges_away.store(true, Ordering::SeqCst);
-    let start = Utc::now();
-    fixture.planner.assign(start).unwrap();
-    fixture
-        .planner
-        .track_idle(start + chrono::Duration::minutes(30), Some(30 * 60))
-        .unwrap();
-    let assignment = fixture.planner.status().assignment.unwrap();
-    assert!(assignment.away_from_computer);
-    assert_eq!(assignment.paused_since, None);
-    let timetable = fixture.planner.timetable(
-        start,
-        start + chrono::Duration::minutes(30),
-        start + chrono::Duration::minutes(30),
-    );
-    assert_eq!(timetable.len(), 1);
-    assert_eq!(timetable[0].kind, TimetableKind::AwayFromComputer);
-}
-
-#[test]
-fn an_ended_task_keeps_its_unknown_stretch_in_the_timetable() {
-    let fixture = harness(true, &["a", "b"]);
-    let start = Utc::now();
-    fixture.planner.assign(start).unwrap();
-    fixture
-        .planner
-        .track_idle(start + chrono::Duration::minutes(20), Some(10 * 60))
-        .unwrap();
-    // The task ends while the user is still away (e.g. "사용 중지" from another place).
-    let end = start + chrono::Duration::minutes(30);
-    fixture.planner.stop_use(end).unwrap();
-    let timetable = fixture.planner.timetable(start, end, end);
-    let kinds: Vec<TimetableKind> = timetable.iter().map(|entry| entry.kind).collect();
     assert_eq!(kinds, vec![TimetableKind::Task, TimetableKind::Unknown]);
-    assert_eq!((timetable[1].end - timetable[1].start).num_minutes(), 20);
+    // From now on the time runs, whether the user touches the computer or not.
+    fixture
+        .planner
+        .resume(now + chrono::Duration::minutes(30))
+        .unwrap();
+    assert_eq!(
+        fixture.planner.status().assignment.unwrap().paused_since,
+        None
+    );
 }
 
 #[test]

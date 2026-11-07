@@ -14,8 +14,8 @@
 //! The same lock holds while there are to-dos but none is assigned (after a report, or
 //! before the first task of the day): the user starts the next task by asking for it, so
 //! the time the AI gives it is not spent away from the computer. Then browsers close too.
-//! And while the task is done away from the computer (sleep, exercise, an appointment out of
-//! the house), everything locks the same way until the user reports or the appointment ends.
+//! Tasks done away from the computer no longer lock (the owner: "그래 할 일에서도 없애자"):
+//! the window checks judge what has to do with them.
 //! Walkthrough (Korean): `docs/ai_focus_rule.md` 5.13.
 
 use ai_focus_rule::connection::{Connection, KeyProblem};
@@ -32,8 +32,6 @@ pub enum LockdownCause {
     Connection { problem: KeyProblem },
     /// There are to-dos but none is assigned: the user asks for their task ("할 일 받기").
     NoTask,
-    /// The task is done away from the computer (sleep, exercise, an appointment).
-    AwayFromComputer,
     /// The user pressed "사용 중지".
     Stopped,
     /// This Windows account has not logged in to the owner's sync login yet.
@@ -45,8 +43,6 @@ pub enum LockdownCause {
 pub enum TaskLock {
     /// There are to-dos but none is assigned.
     WaitingForTask,
-    /// The task (named) is done away from the computer.
-    AwayFromComputer { task: String },
     /// The user stopped using the computer ("사용 중지"). Locks only in strict mode (once the
     /// settings are protected), like every other lock: the owner asked that it lock nothing
     /// outside strict mode.
@@ -125,13 +121,6 @@ pub fn lockdown(
             "이 PC는 여러 기기 동기화를 씁니다. 쓰려면 먼저 로그인하세요(Focus 앱 맨 위)"
                 .to_string(),
         ),
-        TaskLock::AwayFromComputer { task } => (
-            LockdownCause::AwayFromComputer,
-            format!(
-                "지금 할 일은 컴퓨터 없이 하는 일입니다({}). 끝나면 일하기 탭에서 보고하세요",
-                task.chars().take(80).collect::<String>()
-            ),
-        ),
     };
     Some(Lockdown {
         cause,
@@ -205,7 +194,7 @@ impl BlockRule for LockdownRule {
     fn description(&self) -> &str {
         "While the settings are protected and the AI key does not work, every app but the browsers \
          (Claude pages only) is closed, Claude Desktop included; in the other locks (no task, \
-         away from the computer, stopped, login) browsers are closed too."
+         stopped, login) browsers are closed too."
     }
 
     fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
@@ -281,15 +270,6 @@ mod tests {
         let waiting = lockdown(true, &Connection::Working, Some(TaskLock::WaitingForTask)).unwrap();
         assert_eq!(waiting.cause, LockdownCause::NoTask);
         assert!(!waiting.browsers_allowed);
-        let away = lockdown(
-            true,
-            &Connection::Working,
-            Some(TaskLock::AwayFromComputer {
-                task: "잠자기".into(),
-            }),
-        )
-        .unwrap();
-        assert_eq!(away.cause, LockdownCause::AwayFromComputer);
         let login = lockdown(true, &Connection::Working, Some(TaskLock::LoginRequired)).unwrap();
         assert_eq!(login.cause, LockdownCause::LoginRequired);
         assert!(!login.browsers_allowed);
@@ -299,8 +279,6 @@ mod tests {
         assert_eq!(stopped.cause, LockdownCause::Stopped);
         assert!(!stopped.browsers_allowed);
         assert!(lockdown(false, &broken, Some(TaskLock::Stopped)).is_none());
-        assert!(away.reason.contains("잠자기"));
-        assert!(!away.browsers_allowed);
     }
 
     #[test]

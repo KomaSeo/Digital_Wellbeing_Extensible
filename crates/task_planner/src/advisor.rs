@@ -60,11 +60,6 @@ finished, and you are asked again only when they ask for their next task; you ma
 pick the same to-do again. If the previous assignment was not finished, weigh \
 continuing it against what else is due.
 
-Set `away_from_computer`: true when this session is done away from the computer \
-(sleep, exercise, a walk, cooking, chores, getting ready, commuting, meals): the app \
-then locks every app and website until the user reports. When the to-do says \
-\"away_from_computer\", follow it; otherwise judge from the to-do.
-
 Set `open`: the websites this session clearly needs at its start, as full https \
 URLs (for \"check email\": the user's mail sites named in the to-do or its notes, \
 such as https://mail.google.com or https://mail.naver.com). The app opens them when \
@@ -139,10 +134,7 @@ the to-do being removed). For an addition, keep every field the user filled in \
 and complete the empty ones: `notes` says what done means and what the work needs \
 (apps, sites, material); `deadline` is a date YYYY-MM-DD only when the title or \
 notes imply one, otherwise an empty string; `priority` 1 (low) to 5 (urgent); \
-`estimate_minutes` a realistic estimate; `away_from_computer` true when the to-do is \
-done away from the computer (sleep, exercise, chores, errands outside; while it is \
-the task, the app locks every app and website), keeping the user's value when they \
-gave one. Write in the language of the to-do.
+`estimate_minutes` a realistic estimate. Write in the language of the to-do.
 
 The owner's life rules, when given, are binding; they were set in the app's \
 settings, which the user cannot change from here.
@@ -193,9 +185,8 @@ The app keeps the planned time that is left and later asks the user to spend it 
 improving the work, so a rushed finish gains nothing.
 - \"not_applicable\": any other request.
 
-When the current task is done away from the computer (sleep, exercise; the app \
-locks every app and website meanwhile) or is a fixed appointment, approve getting \
-something else or stopping only for something urgent that cannot wait: an \
+When the current task is a fixed appointment, approve getting something else or \
+stopping only for something urgent that cannot wait: an \
 emergency, an obligation that just came up, being ill or hurt. Wanting to use the \
 computer, boredom or a change of mood is never urgent. Finishing it (\"done\") is \
 judged as usual.
@@ -295,7 +286,8 @@ pub struct Pick {
     pub why: String,
     /// How long the session runs before the AI picks again.
     pub minutes: u32,
-    /// The session is done away from the computer (used when the to-do does not say).
+    /// No longer asked (nothing is done "away from the computer" any more); kept for older
+    /// answers.
     #[serde(default)]
     pub away_from_computer: bool,
     /// Websites (https URLs) the session clearly needs at its start.
@@ -471,6 +463,8 @@ pub struct ReviewedTodo {
     pub deadline: String,
     pub priority: u8,
     pub estimate_minutes: u32,
+    /// No longer asked; kept for older answers.
+    #[serde(default)]
     pub away_from_computer: bool,
 }
 
@@ -627,7 +621,7 @@ fn appointments_text(appointments: &[Appointment]) -> String {
         .iter()
         .map(|appointment| {
             format!(
-                "- {} to {}: {}{}{}",
+                "- {} to {}: {}{}",
                 appointment
                     .start
                     .with_timezone(&Local)
@@ -639,11 +633,6 @@ fn appointments_text(appointments: &[Appointment]) -> String {
                 } else {
                     format!(" ({})", appointment.notes.trim())
                 },
-                if appointment.away_from_computer {
-                    " [away from the computer]"
-                } else {
-                    ""
-                }
             )
         })
         .collect();
@@ -832,14 +821,13 @@ fn pick_schema() -> Value {
                 "type": "integer",
                 "description": "how long this session runs (10 to 720)"
             },
-            "away_from_computer": { "type": "boolean" },
             "open": {
                 "type": "array",
                 "items": { "type": "string" },
                 "description": "full https URLs of the websites this session clearly needs at its start; empty when unsure"
             }
         },
-        "required": ["todo_id", "task", "why", "minutes", "away_from_computer", "open"],
+        "required": ["todo_id", "task", "why", "minutes", "open"],
         "additionalProperties": false
     })
 }
@@ -858,9 +846,8 @@ fn todo_review_schema() -> Value {
                     "deadline": { "type": "string", "description": "YYYY-MM-DD or empty" },
                     "priority": { "type": "integer", "description": "1 (low) to 5 (urgent)" },
                     "estimate_minutes": { "type": "integer" },
-                    "away_from_computer": { "type": "boolean" }
                 },
-                "required": ["title", "notes", "deadline", "priority", "estimate_minutes", "away_from_computer"],
+                "required": ["title", "notes", "deadline", "priority", "estimate_minutes"],
                 "additionalProperties": false
             }
         },
@@ -923,11 +910,10 @@ fn assignment_text(assignment: &Assignment, now: DateTime<Utc>) -> String {
         WhenTimeIsUp::Reassign => "",
         WhenTimeIsUp::NotifyOnly => "; the user may keep on with it past the planned end",
     };
-    let kind = match (&assignment.appointment_id, assignment.away_from_computer) {
-        (Some(_), true) => "; a fixed appointment, away from the computer",
-        (Some(_), false) => "; a fixed appointment",
-        (None, true) => "; done away from the computer (every app is locked)",
-        (None, false) => "",
+    let kind = if assignment.appointment_id.is_some() {
+        "; a fixed appointment"
+    } else {
+        ""
     };
     format!(
         "{} (to-do id {:?}; since {}{end}{when_up}{kind})",

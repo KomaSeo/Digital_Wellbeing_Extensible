@@ -36,7 +36,7 @@ pub use model::{
     TaskNotes, TaskStep, TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem,
     TodoListWrite, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
-pub use planner::{PlannerError, TaskPlanner, IDLE_PAUSE_MINUTES};
+pub use planner::{PlannerError, TaskPlanner};
 
 #[cfg(test)]
 mod tests;
