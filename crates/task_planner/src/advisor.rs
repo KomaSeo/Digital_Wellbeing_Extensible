@@ -585,7 +585,11 @@ impl Advisor for ClaudeAdvisor {
         self.client.structured(
             "to-do change review",
             request.instructions,
-            question(request.life_rules, request.open, todo_change_text(request)),
+            uncached(question(
+                request.life_rules,
+                request.open,
+                todo_change_text(request),
+            )),
             todo_review_schema(),
             &self.effort,
         )
@@ -960,6 +964,18 @@ pub(crate) fn question(life_rules: &str, open: &[TodoItem], text: String) -> Vec
         }),
         text_block(text),
     ]
+}
+
+/// `content` without its prompt-cache mark. For the to-do change review (the owner: "일단 할
+/// 일 변경 심사는 캐시 쓰지 마봐"): an approved change alters the list, so the next review
+/// rarely finds the cache and mostly pays the cache write (twice the input price).
+pub(crate) fn uncached(mut content: Vec<Value>) -> Vec<Value> {
+    for block in &mut content {
+        if let Some(fields) = block.as_object_mut() {
+            fields.remove("cache_control");
+        }
+    }
+    content
 }
 
 fn is_polish_item(todo: &TodoItem) -> bool {

@@ -901,6 +901,12 @@ fn a_question_starts_with_the_cached_rules_and_list_and_ends_with_what_changes()
     // The time and the "polish:" to-dos (their time left changes) come after it.
     assert!(!start.contains("polish:a") && !start.contains("14:05"));
     assert!(first[1].get("cache_control").is_none());
+    // The to-do change review sends the same question without the cache mark.
+    let unmarked = crate::advisor::uncached(first.clone());
+    assert_eq!(unmarked[0]["text"], first[0]["text"]);
+    assert!(unmarked
+        .iter()
+        .all(|block| block.get("cache_control").is_none()));
     let pick = crate::advisor::pick_text(&PickRequest {
         instructions: crate::advisor::PICK_PROMPT,
         now_local: "14:05",
