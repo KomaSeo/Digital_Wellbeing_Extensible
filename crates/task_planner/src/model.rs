@@ -302,12 +302,12 @@ pub struct Assignment {
     /// starts.
     #[serde(default)]
     pub open: Vec<String>,
-    /// The user has not touched the computer since this time, during a task done at the
-    /// computer: the task's time stands still until they are back (then `until` moves later
-    /// by the time they were away).
+    /// The user paused the task ("일시 정지") at this time: its time stands still until they
+    /// go on (then `until` moves later by the pause). Older versions also set it when the
+    /// user did not touch the computer for a while.
     #[serde(default)]
     pub paused_since: Option<DateTime<Utc>>,
-    /// Earlier times during this task when the user did not touch the computer.
+    /// Earlier pauses during this task.
     #[serde(default)]
     pub idle: Vec<IdleSpan>,
 }

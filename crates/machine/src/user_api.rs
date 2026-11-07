@@ -680,6 +680,20 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let planner = api.planner.as_ref().ok_or("no task planner")?;
             planner.resume_use().map_err(|error| error.to_string())?;
         }
+        // The user pauses the current task and goes on with it (no AI: the window checks go
+        // on during a pause, so it frees nothing).
+        "pause_task" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            planner
+                .pause(Utc::now())
+                .map_err(|error| error.to_string())?;
+        }
+        "unpause_task" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            planner
+                .unpause(Utc::now())
+                .map_err(|error| error.to_string())?;
+        }
         "request_change" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
             let request: ChangeKind = serde_json::from_value(params["request"].clone())

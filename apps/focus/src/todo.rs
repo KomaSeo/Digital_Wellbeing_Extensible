@@ -411,7 +411,8 @@ impl FocusApp {
                 local_time(assignment.at)
             ));
             if let Some(until) = assignment.until {
-                let clock = Utc::now();
+                // A paused task's time stands still.
+                let clock = assignment.paused_since.unwrap_or_else(Utc::now);
                 let total = (until - assignment.at).num_seconds().max(1) as f32;
                 let elapsed = (clock - assignment.at).num_seconds().max(0) as f32;
                 let minutes_left = (until - clock).num_minutes();
@@ -437,6 +438,41 @@ impl FocusApp {
                         "시간이 다 되었습니다. 아래 \"완료 보고\"에서 끝냈는지 알려 주세요. 보고하기 \
                          전에는 다른 일로 넘어가지 않습니다.",
                     );
+                }
+            }
+            // The user may pause the task (not an appointment, nor a task whose time is up).
+            if assignment.appointment_id.is_none() {
+                let ready = !self.pending.load(Ordering::SeqCst);
+                match assignment.paused_since {
+                    Some(since) => {
+                        ui.colored_label(
+                            YELLOW,
+                            format!(
+                                "{}부터 일시 정지 중입니다. 다시 시작하면 멈춘 만큼 끝나는 시각이 \
+                                 늦춰집니다. 일시 정지 중에도 창 검사는 계속됩니다.",
+                                local_time(since)
+                            ),
+                        );
+                        if ui
+                            .add_enabled(ready, egui::Button::new("다시 시작"))
+                            .clicked()
+                        {
+                            self.send("unpause_task", json!({}));
+                        }
+                    }
+                    None if !assignment.time_is_up(Utc::now()) => {
+                        if ui
+                            .add_enabled(ready, egui::Button::new("일시 정지"))
+                            .on_hover_text(
+                                "할 일의 시간을 멈춥니다. 다시 시작하면 멈춘 만큼 끝나는 시각이 \
+                                 늦춰집니다. 일시 정지 중에도 창 검사는 계속됩니다.",
+                            )
+                            .clicked()
+                        {
+                            self.send("pause_task", json!({}));
+                        }
+                    }
+                    None => {}
                 }
             }
             if assignment.appointment_id.is_some() {

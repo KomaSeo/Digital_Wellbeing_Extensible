@@ -2142,45 +2142,88 @@ fn an_approved_done_can_add_a_follow_up_and_set_steps() {
 }
 
 #[test]
-fn a_pause_an_older_version_started_ends_and_the_time_runs_on() {
-    let state = JsonStore::in_memory(PlannerState::default());
-    let fixture = harness_with_state(true, &["a"], state.clone());
+fn the_user_pauses_a_task_and_its_time_stands_still_until_they_go_on() {
+    let fixture = harness(true, &["a"]);
     let start = Utc::now();
     let assignment = fixture.planner.assign(start).unwrap();
     let planned_end = assignment.until.unwrap();
-    // An older version stopped the time four minutes in.
-    let paused_at = start + chrono::Duration::minutes(4);
-    state
-        .update(|planner_state| {
-            planner_state.assignment.as_mut().unwrap().paused_since = Some(paused_at);
-        })
+    // Paused four minutes in: even past the planned end, the time is not up, and the agent's
+    // rounds do not end the pause.
+    let paused = fixture
+        .planner
+        .pause(start + chrono::Duration::minutes(4))
         .unwrap();
-    // The agent's next round ends the pause: the time away is logged and added to the end.
-    let now = start + chrono::Duration::minutes(64);
-    fixture.planner.resume(now).unwrap();
-    let running = fixture.planner.status().assignment.unwrap();
+    assert_eq!(
+        paused.paused_since,
+        Some(start + chrono::Duration::minutes(4))
+    );
+    fixture
+        .planner
+        .resume(planned_end + chrono::Duration::minutes(5))
+        .unwrap();
+    let still = fixture.planner.status().assignment.unwrap();
+    assert!(still.paused_since.is_some());
+    assert!(!still.time_is_up(planned_end + chrono::Duration::minutes(5)));
+    // Pausing again changes nothing.
+    fixture
+        .planner
+        .pause(start + chrono::Duration::minutes(30))
+        .unwrap();
+    assert_eq!(
+        fixture.planner.status().assignment.unwrap().paused_since,
+        Some(start + chrono::Duration::minutes(4))
+    );
+    // Going on at 64 minutes: the 60 minutes paused are logged and added to the end.
+    let back = start + chrono::Duration::minutes(64);
+    let running = fixture.planner.unpause(back).unwrap();
     assert_eq!(running.paused_since, None);
     assert_eq!(
         running.until,
         Some(planned_end + chrono::Duration::minutes(60))
     );
-    assert_eq!(running.idle.len(), 1);
-    let kinds: Vec<TimetableKind> = fixture
+    let later = back + chrono::Duration::minutes(10);
+    let kinds: Vec<(TimetableKind, i64)> = fixture
         .planner
-        .timetable(start - chrono::Duration::hours(1), now, now)
+        .timetable(start - chrono::Duration::hours(1), later, later)
         .iter()
-        .map(|entry| entry.kind)
+        .map(|entry| (entry.kind, (entry.end - entry.start).num_minutes()))
         .collect();
-    assert_eq!(kinds, vec![TimetableKind::Task, TimetableKind::Unknown]);
-    // From now on the time runs, whether the user touches the computer or not.
-    fixture
-        .planner
-        .resume(now + chrono::Duration::minutes(30))
-        .unwrap();
     assert_eq!(
-        fixture.planner.status().assignment.unwrap().paused_since,
-        None
+        kinds,
+        vec![
+            (TimetableKind::Task, 4),
+            (TimetableKind::Unknown, 60),
+            (TimetableKind::Task, 10)
+        ]
     );
+    // A task whose time is up is reported first.
+    let up = running.until.unwrap() + chrono::Duration::minutes(1);
+    assert!(matches!(
+        fixture.planner.pause(up),
+        Err(PlannerError::ReportFirst)
+    ));
+}
+
+#[test]
+fn an_appointment_cannot_be_paused() {
+    let fixture = harness(true, &["a"]);
+    let now = Utc::now();
+    add_appointment(
+        &fixture,
+        now,
+        appointment_change("meeting", now - chrono::Duration::minutes(1), 60, None),
+    )
+    .unwrap();
+    fixture.planner.resume(now).unwrap();
+    assert!(fixture
+        .planner
+        .status()
+        .assignment
+        .is_some_and(|assignment| assignment.appointment_id.is_some()));
+    assert!(matches!(
+        fixture.planner.pause(now),
+        Err(PlannerError::AppointmentCannotPause)
+    ));
 }
 
 #[test]

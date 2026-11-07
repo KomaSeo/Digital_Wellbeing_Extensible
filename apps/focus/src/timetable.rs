@@ -39,10 +39,10 @@ fn kind_color(kind: TimetableKind) -> egui::Color32 {
 
 fn kind_label(kind: TimetableKind) -> &'static str {
     match kind {
-        TimetableKind::Task => "컴퓨터로 하는 일",
-        TimetableKind::AwayFromComputer => "컴퓨터 없이 하는 일",
+        TimetableKind::Task => "할 일",
+        TimetableKind::AwayFromComputer => "컴퓨터 없이 하는 일(예전 기록)",
         TimetableKind::Appointment => "약속",
-        TimetableKind::Unknown => "알 수 없음",
+        TimetableKind::Unknown => "멈춤",
     }
 }
 
@@ -98,9 +98,10 @@ impl TimetableView {
     pub(crate) fn ui(&mut self, ui: &mut egui::Ui, session: u32) {
         crate::style::section(ui, "시간표");
         ui.label(
-            "고른 기간에 어떤 할 일을 언제 했는지 보여 줍니다. \"알 수 없음\"과 \"컴퓨터 없이 하는 \
-             일\"은 예전 버전의 기록에만 있습니다(자리를 비워 할 일의 시간이 멈췄던 때, 컴퓨터 없이 \
-             하는 일로 정했던 할 일). 이 기록은 이 기능이 생긴 뒤부터 쌓입니다.",
+            "고른 기간에 어떤 할 일을 언제 했는지 보여 줍니다. \"멈춤\"은 할 일을 일시 정지한 \
+             시간입니다(예전 버전에서 자리를 비워 할 일의 시간이 멈췄던 때도 들어갑니다). \
+             \"컴퓨터 없이 하는 일\"은 예전 버전의 기록에만 있습니다. 이 기록은 이 기능이 생긴 \
+             뒤부터 쌓입니다.",
         );
         let today = Local::now().date_naive();
         let mut fetch = self.entries.is_none();
@@ -193,7 +194,7 @@ impl TimetableView {
                     ui.colored_label(kind_color(entry.kind), "■");
                     ui.label(format!("{start}–{end} ({})", duration_text(minutes)));
                     if entry.kind == TimetableKind::Unknown {
-                        ui.label(format!("알 수 없음 (그때의 할 일: {})", entry.task));
+                        ui.label(format!("멈춤 (그때의 할 일: {})", entry.task));
                     } else {
                         ui.label(&entry.task);
                     }

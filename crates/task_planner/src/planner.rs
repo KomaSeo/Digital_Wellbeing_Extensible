@@ -91,6 +91,8 @@ pub enum PlannerError {
     NoLongerUsed,
     #[error("지금 할 일이 없습니다")]
     NothingAssigned,
+    #[error("약속은 시각이 정해져 있어서 일시 정지할 수 없습니다")]
+    AppointmentCannotPause,
     #[error("약속에 제목(2~{MAX_TITLE_CHARS}글자)과 시간을 적어 주세요. 끝은 시작보다 늦고 지금보다 뒤여야 하며, 약속은 24시간을 넘지 못합니다")]
     BadAppointment,
     #[error("\"{0}\" 약속과 시간이 겹칩니다")]
@@ -1052,7 +1054,6 @@ impl TaskPlanner {
             return Ok(());
         }
         self.keep_appointments(now)?;
-        self.end_old_pause(now)?;
         Ok(())
     }
 
@@ -1080,17 +1081,48 @@ impl TaskPlanner {
         Ok(())
     }
 
-    /// A task's time no longer stands still while the user is away (the owner chose "멈춤
-    /// 기능을 없앰"). A pause an older version started ends now: the time away is logged and
-    /// added to the end, as it was when the user came back.
-    fn end_old_pause(&self, now: DateTime<Utc>) -> Result<(), PlannerError> {
-        let Some(since) = self
+    /// The user pauses the current task ("일시 정지", the owner: "사용자가 직접 일시 정지는 할
+    /// 수 있도록 만들어 줄래?"): its time stands still until [`Self::unpause`]. The window
+    /// checks go on meanwhile, so a pause frees nothing. An appointment (fixed times) cannot
+    /// be paused, nor a task whose time is up (it is reported first).
+    pub fn pause(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
+        let _busy = self.busy.lock();
+        let current = self
             .state
             .get()
             .assignment
-            .and_then(|assignment| assignment.paused_since)
-        else {
-            return Ok(());
+            .ok_or(PlannerError::NothingAssigned)?;
+        if current.appointment_id.is_some() {
+            return Err(PlannerError::AppointmentCannotPause);
+        }
+        if current.paused_since.is_some() {
+            return Ok(current);
+        }
+        if current.time_is_up(now) {
+            return Err(PlannerError::ReportFirst);
+        }
+        self.state.update(|planner_state| {
+            if let Some(assignment) = planner_state.assignment.as_mut() {
+                assignment.paused_since = Some(now);
+            }
+        })?;
+        info!("the user paused \"{}\"", current.task);
+        self.state
+            .get()
+            .assignment
+            .ok_or(PlannerError::NothingAssigned)
+    }
+
+    /// The paused task goes on: the pause is logged and added to the end.
+    pub fn unpause(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
+        let _busy = self.busy.lock();
+        let current = self
+            .state
+            .get()
+            .assignment
+            .ok_or(PlannerError::NothingAssigned)?;
+        let Some(since) = current.paused_since else {
+            return Ok(current);
         };
         let back = now.max(since);
         self.state.update(|planner_state| {
@@ -1103,8 +1135,11 @@ impl TaskPlanner {
                 assignment.until = assignment.until.map(|until| until + (back - since));
             }
         })?;
-        info!("the task's time, stopped by an older version since {since}, runs again");
-        Ok(())
+        info!("the user went on with \"{}\"", current.task);
+        self.state
+            .get()
+            .assignment
+            .ok_or(PlannerError::NothingAssigned)
     }
 
     /// What the user did between `from` and `to`, in order: each assignment as one stretch,
