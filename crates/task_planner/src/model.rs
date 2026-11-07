@@ -389,6 +389,14 @@ pub enum ChangeKind {
         appointment_id: String,
         minutes: u32,
     },
+    /// The current to-do had already been done before this assignment, at another time or
+    /// place ("이미 처리했어요"): it is done, but this assignment's time is not counted as
+    /// spent on it, and no improvement time follows.
+    AlreadyDone,
+    /// The current to-do itself changed ("일이 변경되었어요": its deadline, scope or content,
+    /// or it is no longer needed), as the reason says. Approved, the AI's list changes edit
+    /// or remove it and the next task is picked from the updated list.
+    Changed,
     /// Change what happens when the current task's time is up. Asking for `NotifyOnly`
     /// (keep working past the planned end) needs the AI's approval; asking for `Reassign`
     /// is stricter and is approved without asking.

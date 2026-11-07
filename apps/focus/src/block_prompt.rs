@@ -460,6 +460,22 @@ impl FocusApp {
                             }
                             keep = false;
                         }
+                        if ui.button("이미 처리했어요").clicked() {
+                            self.tab = Tab::Work;
+                            self.choice = crate::ChangeChoice::AlreadyDone;
+                            if self.reason.trim().is_empty() {
+                                self.reason = "이미 한 때와 곳: ".into();
+                            }
+                            keep = false;
+                        }
+                        if ui.button("일이 변경되었어요").clicked() {
+                            self.tab = Tab::Work;
+                            self.choice = crate::ChangeChoice::Changed;
+                            if self.reason.trim().is_empty() {
+                                self.reason = "바뀐 것: ".into();
+                            }
+                            keep = false;
+                        }
                         if ui.button("시간이 더 필요해요(연장 요청)").clicked() {
                             prompt.answering = Some(true);
                         }

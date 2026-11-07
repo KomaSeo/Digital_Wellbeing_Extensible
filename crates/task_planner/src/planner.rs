@@ -79,6 +79,8 @@ pub enum PlannerError {
     MadeByTheApp(String),
     #[error("할 일 시간이 다 됐습니다. 먼저 끝냈는지 보고하세요(끝냈다 또는 다 못 했다)")]
     ReportFirst,
+    #[error("지금 할 일은 목록의 할 일이 아닙니다(약속이나 목록 밖의 일)")]
+    NotFromTheList,
     #[error(
         "\"다 못 했다\"는 할 일 시간이 다 된 뒤에 보고합니다. 그 전에는 \"다른 일 받기\"를 쓰세요"
     )]
@@ -336,9 +338,18 @@ impl TaskPlanner {
             return Ok(None);
         };
         let current = self.state.get().assignment;
-        if let Some(current) = current
+        if let Some(mut current) = current
             .filter(|assignment| assignment.appointment_id.as_deref() == Some(running.id.as_str()))
         {
+            // Started by an older version as away from the computer: no longer locks.
+            if current.away_from_computer {
+                current.away_from_computer = false;
+                self.state.update(|planner_state| {
+                    if let Some(assignment) = planner_state.assignment.as_mut() {
+                        assignment.away_from_computer = false;
+                    }
+                })?;
+            }
             return Ok(Some(current));
         }
         let task = if running.notes.trim().is_empty() {
@@ -354,7 +365,8 @@ impl TaskPlanner {
             at: now,
             until: Some(runs_until(&state, &running)),
             when_time_is_up: WhenTimeIsUp::Reassign,
-            away_from_computer: running.away_from_computer,
+            // Never locks: the window checks judge what has to do with the appointment.
+            away_from_computer: false,
             appointment_id: Some(running.id.clone()),
             open: Vec::new(),
             paused_since: None,
@@ -754,18 +766,12 @@ impl TaskPlanner {
                         recent_changes: recent,
                     })
                 });
-                let (approved, reply, ai_failed, judged_away) = match review {
-                    Ok(review) => (
-                        review.approved,
-                        review.reply,
-                        false,
-                        review.away_from_computer,
-                    ),
+                let (approved, reply, ai_failed) = match review {
+                    Ok(review) => (review.approved, review.reply, false),
                     Err(error) => (
                         false,
                         format!("The AI could not review this: {error}"),
                         true,
-                        false,
                     ),
                 };
                 let accepted = Appointment {
@@ -774,7 +780,11 @@ impl TaskPlanner {
                     notes: appointment.notes.clone(),
                     start: appointment.start,
                     end: appointment.end,
-                    away_from_computer: appointment.away_from_computer.unwrap_or(judged_away),
+                    // Appointments are not split into at and away from the computer (the
+                    // owner: even one away from it needs the computer, for messages or a
+                    // map); while it runs, the window checks ask whether the window has to
+                    // do with it.
+                    away_from_computer: false,
                 };
                 (approved, reply, ai_failed, Some(accepted))
             }
@@ -1209,18 +1219,41 @@ impl TaskPlanner {
         reason: &str,
         evidence: Evidence,
     ) -> Result<ChangeRecord, PlannerError> {
+        self.report_without_review(now, ChangeKind::Done, reason, evidence)
+    }
+
+    /// [`Self::report_done_without_review`] for "끝냈다" ([`ChangeKind::Done`]) or "이미
+    /// 처리했어요" ([`ChangeKind::AlreadyDone`]).
+    pub fn report_without_review(
+        &self,
+        now: DateTime<Utc>,
+        report: ChangeKind,
+        reason: &str,
+        evidence: Evidence,
+    ) -> Result<ChangeRecord, PlannerError> {
         let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
         if self.state.get().assignment.is_none() {
             return Err(PlannerError::NothingAssigned);
         }
+        let report = if report == ChangeKind::AlreadyDone {
+            ChangeKind::AlreadyDone
+        } else {
+            ChangeKind::Done
+        };
         let evidence_text: String = evidence.text.trim().chars().take(MAX_NOTES_CHARS).collect();
+        let already = report == ChangeKind::AlreadyDone;
         self.record_and_apply(
             now,
-            ChangeKind::Done,
+            report,
             reason.trim(),
             Review {
                 approved: true,
-                reply: "엄격 모드가 아니어서 AI 심사 없이 끝낸 것으로 기록했습니다.".into(),
+                reply: if already {
+                    "엄격 모드가 아니어서 AI 심사 없이 이미 처리한 것으로 기록했습니다."
+                } else {
+                    "엄격 모드가 아니어서 AI 심사 없이 끝낸 것으로 기록했습니다."
+                }
+                .into(),
                 outcome: "not_applicable".into(),
                 ..Default::default()
             },
@@ -1268,10 +1301,23 @@ impl TaskPlanner {
             .is_some_and(|assignment| assignment.time_is_up(now));
         match request {
             ChangeKind::SetWhenTimeIsUp { .. } => return Err(PlannerError::NoLongerUsed),
-            ChangeKind::Done | ChangeKind::NotFinished | ChangeKind::Repick | ChangeKind::End
+            ChangeKind::Done
+            | ChangeKind::AlreadyDone
+            | ChangeKind::Changed
+            | ChangeKind::NotFinished
+            | ChangeKind::Repick
+            | ChangeKind::End
                 if assignment.is_none() =>
             {
                 return Err(PlannerError::NothingAssigned)
+            }
+            // Only a to-do from the list can have changed (not an appointment or a free task).
+            ChangeKind::Changed
+                if assignment
+                    .as_ref()
+                    .is_some_and(|assignment| assignment.todo_id.is_none()) =>
+            {
+                return Err(PlannerError::NotFromTheList)
             }
             ChangeKind::NotFinished if !time_is_up => return Err(PlannerError::NotTimeYet),
             ChangeKind::Extend { .. } if assignment.is_none() => {
@@ -1286,8 +1332,13 @@ impl TaskPlanner {
             {
                 return Err(PlannerError::BadTaskExtension)
             }
-            // Nothing else before the report (more time is a way to report too).
-            ChangeKind::Done | ChangeKind::NotFinished | ChangeKind::Extend { .. } => {}
+            // Nothing else before the report (more time, or the to-do having changed or been
+            // done already, are ways to report too).
+            ChangeKind::Done
+            | ChangeKind::AlreadyDone
+            | ChangeKind::Changed
+            | ChangeKind::NotFinished
+            | ChangeKind::Extend { .. } => {}
             _ if time_is_up => return Err(PlannerError::ReportFirst),
             _ => {}
         }
@@ -1532,7 +1583,18 @@ impl TaskPlanner {
             })?;
         }
         match request {
-            ChangeKind::Done => {
+            ChangeKind::Done | ChangeKind::AlreadyDone => {
+                let already = *request == ChangeKind::AlreadyDone;
+                if already {
+                    // Done at another time: this assignment's time is not counted on it.
+                    self.state.update(|planner_state| {
+                        if let Some(assignment) = planner_state.assignment.as_mut() {
+                            assignment.at = now;
+                            assignment.paused_since = None;
+                            assignment.idle.clear();
+                        }
+                    })?;
+                }
                 let current = self.state.get().assignment;
                 if let Some(todo) = current
                     .as_ref()
@@ -1548,25 +1610,28 @@ impl TaskPlanner {
                     // to be spent improving it later.
                     // The to-do's estimate against all the time spent on it; without an
                     // estimate, this assignment's planned time against the time it ran.
-                    let polish_left =
-                        if review.outcome == "open_ended" && !is_polish(&todo.id) && !todo.repeat {
-                            match todo.estimate_minutes {
-                                Some(estimate) => {
-                                    i64::from(estimate) - self.minutes_spent_on(&todo.id, now)
-                                }
-                                None => current
-                                    .as_ref()
-                                    .and_then(|assignment| {
-                                        assignment.until.map(|until| {
-                                            (until - assignment.at).num_minutes()
-                                                - (now - assignment.at).num_minutes().max(0)
-                                        })
-                                    })
-                                    .unwrap_or(0),
+                    let polish_left = if !already
+                        && review.outcome == "open_ended"
+                        && !is_polish(&todo.id)
+                        && !todo.repeat
+                    {
+                        match todo.estimate_minutes {
+                            Some(estimate) => {
+                                i64::from(estimate) - self.minutes_spent_on(&todo.id, now)
                             }
-                        } else {
-                            0
-                        };
+                            None => current
+                                .as_ref()
+                                .and_then(|assignment| {
+                                    assignment.until.map(|until| {
+                                        (until - assignment.at).num_minutes()
+                                            - (now - assignment.at).num_minutes().max(0)
+                                    })
+                                })
+                                .unwrap_or(0),
+                        }
+                    } else {
+                        0
+                    };
                     let finished = todo.clone();
                     self.state.update(|planner_state| {
                         planner_state.done.push(record);
@@ -1588,6 +1653,9 @@ impl TaskPlanner {
                 self.end(now)?;
             }
             ChangeKind::NotFinished => self.end(now)?,
+            // The AI's list changes edit or remove the to-do (the agent writes them); the agent
+            // then picks the next task from the updated list.
+            ChangeKind::Changed => self.end(now)?,
             // Applied above.
             ChangeKind::ExtendAppointment { .. } => {}
             ChangeKind::Extend { minutes } => {
@@ -1742,7 +1810,18 @@ impl TaskPlanner {
     }
 
     fn start_focus(&self, assignment: &Assignment) -> Result<(), PlannerError> {
-        let task = assignment.task.clone();
+        // During an appointment the window checks ask whether a window has to do with it
+        // (messages, a map, a booking), not whether it is "the task".
+        let task = if assignment.appointment_id.is_some() {
+            format!(
+                "{} (약속 시간입니다. 약속과 관계된 일은 할 일로 봅니다: 약속 상대와의 연락과 메시지, \
+                 지도와 길 찾기, 교통편, 예약과 일정 확인, 약속에 필요한 자료. 약속과 관계없는 일은 \
+                 딴짓입니다.)",
+                assignment.task
+            )
+        } else {
+            assignment.task.clone()
+        };
         // Blocks belong to the to-do (see `SavedBlocks`).
         let scope = assignment
             .todo_id

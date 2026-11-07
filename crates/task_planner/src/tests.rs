@@ -1577,7 +1577,8 @@ fn appointments_are_reviewed_by_the_owners_rules_and_checked() {
     );
     let accepted = fixture.planner.appointments(now);
     assert_eq!(accepted.len(), 1);
-    assert!(accepted[0].away_from_computer);
+    // Never away from the computer, whatever the AI thinks: appointments do not lock.
+    assert!(!accepted[0].away_from_computer);
     // Overlapping, past, too long, untitled: refused without asking the AI.
     let reviews = fixture.advisor.reviews.load(Ordering::SeqCst);
     let later = now + chrono::Duration::seconds(1);
@@ -1657,9 +1658,14 @@ fn an_appointment_is_fixed_at_its_time_and_ends_by_itself() {
         .unwrap();
     let current = fixture.planner.status().assignment.unwrap();
     assert!(current.appointment_id.is_some());
-    assert!(current.away_from_computer);
-    assert!(fixture.planner.away_from_computer_task().is_some());
-    assert_eq!(fixture.focus.store().get().task, "meeting");
+    // It locks nothing; the window checks judge what has to do with it.
+    assert!(!current.away_from_computer);
+    assert!(fixture.planner.away_from_computer_task().is_none());
+    let checked_task = fixture.focus.store().get().task;
+    assert!(
+        checked_task.starts_with("meeting") && checked_task.contains("약속과 관계된 일"),
+        "{checked_task}"
+    );
     // "할 일 받기" during it gives the appointment, not a to-do.
     let picks = fixture.advisor.picks.load(Ordering::SeqCst);
     let again = fixture
@@ -2065,4 +2071,83 @@ fn an_ended_task_keeps_its_unknown_stretch_in_the_timetable() {
     let kinds: Vec<TimetableKind> = timetable.iter().map(|entry| entry.kind).collect();
     assert_eq!(kinds, vec![TimetableKind::Task, TimetableKind::Unknown]);
     assert_eq!((timetable[1].end - timetable[1].start).num_minutes(), 20);
+}
+
+#[test]
+fn a_to_do_done_before_counts_as_done_without_this_assignments_time() {
+    let fixture = harness(true, &["a", "b"]);
+    let start = Utc::now() - chrono::Duration::minutes(40);
+    fixture.planner.assign(start).unwrap();
+    let assigned = fixture
+        .planner
+        .status()
+        .assignment
+        .unwrap()
+        .todo_id
+        .unwrap();
+    let record = fixture
+        .planner
+        .report_without_review(
+            start + chrono::Duration::minutes(30),
+            ChangeKind::AlreadyDone,
+            "",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert!(record.approved);
+    let status = fixture.planner.status();
+    assert!(status.assignment.is_none());
+    assert!(status
+        .recent_done
+        .iter()
+        .any(|done_record| done_record.todo_id == assigned));
+    // The 30 minutes of this assignment are not counted on the to-do, and no improvement
+    // time is kept.
+    assert_eq!(status.minutes_total.get(&assigned).copied().unwrap_or(0), 0);
+    assert!(fixture
+        .planner
+        .state_store_for_tests()
+        .get()
+        .polish
+        .is_empty());
+}
+
+#[test]
+fn a_changed_to_do_is_edited_by_the_ai_and_the_task_ends() {
+    let fixture = harness(true, &["a", "b"]);
+    let now = Utc::now();
+    fixture.planner.assign(now).unwrap();
+    let assigned = fixture
+        .planner
+        .status()
+        .assignment
+        .unwrap()
+        .todo_id
+        .unwrap();
+    *fixture.advisor.list_changes.lock() = vec![ListChange {
+        action: "edit".into(),
+        todo_id: assigned.clone(),
+        deadline: "2030-01-10".into(),
+        ..Default::default()
+    }];
+    let record = fixture
+        .planner
+        .request_change(
+            now + chrono::Duration::minutes(5),
+            ChangeKind::Changed,
+            "the advisor moved the deadline to next week",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert!(record.approved);
+    assert_eq!(record.list_writes.len(), 1, "{:?}", record.list_writes);
+    assert!(fixture.planner.status().assignment.is_none());
+    // A reason is needed (strict mode), as for other requests.
+    fixture.planner.assign(now).unwrap();
+    assert!(matches!(
+        fixture
+            .planner
+            .request_change(now, ChangeKind::Changed, "no", Evidence::default()),
+        Err(PlannerError::ReasonTooShort)
+    ));
 }

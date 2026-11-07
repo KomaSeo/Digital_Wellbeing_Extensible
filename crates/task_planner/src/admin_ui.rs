@@ -401,6 +401,8 @@ impl Panel for PlannerAdminUi {
 pub(crate) fn request_label(request: &ChangeKind) -> String {
     match request {
         ChangeKind::Done => "done".into(),
+        ChangeKind::AlreadyDone => "already done before".into(),
+        ChangeKind::Changed => "the to-do changed".into(),
         ChangeKind::SwitchTodo { todo_id } => format!("switch to {todo_id}"),
         ChangeKind::SwitchFree { task } => format!("switch to \"{task}\""),
         ChangeKind::Repick => "something else (the AI picks)".into(),

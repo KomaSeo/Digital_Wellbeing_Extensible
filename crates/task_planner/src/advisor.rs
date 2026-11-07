@@ -250,11 +250,6 @@ The owner's appointment rules and life rules, when given, are binding and come \
 first; they were set in the app's settings, which the user cannot change from \
 here.
 
-Set `away_from_computer`: true when the appointment happens away from the computer \
-(meeting in person, a doctor, a class on site); the app then locks every app and \
-website while it runs. Keep the user's value when they gave one; an online call or \
-class is at the computer.
-
 `reply` is one or two sentences to the user, in the language of the request. \
 When rejecting, say what would make it acceptable (for example, adding it as a \
 to-do instead).
@@ -498,6 +493,8 @@ pub struct AppointmentRequest<'a> {
 pub struct AppointmentReview {
     pub approved: bool,
     pub reply: String,
+    /// No longer asked (appointments do not lock the computer); kept for older answers.
+    #[serde(default)]
     pub away_from_computer: bool,
 }
 
@@ -605,10 +602,9 @@ fn appointment_review_schema() -> Value {
         "type": "object",
         "properties": {
             "approved": { "type": "boolean" },
-            "reply": { "type": "string" },
-            "away_from_computer": { "type": "boolean" }
+            "reply": { "type": "string" }
         },
-        "required": ["approved", "reply", "away_from_computer"],
+        "required": ["approved", "reply"],
         "additionalProperties": false
     })
 }
@@ -1040,6 +1036,19 @@ pub(crate) fn pick_text(request: &PickRequest) -> String {
 fn describe(request: &ChangeKind, target_title: Option<&str>) -> String {
     match request {
         ChangeKind::Done => "mark the current to-do as finished".into(),
+        ChangeKind::AlreadyDone => "report that the current to-do had already been done before \
+                                    this assignment, at another time or place (judge it like \
+                                    \"done\": is it plausible, and is there proof where the \
+                                    result is decisive?); no improvement time follows"
+            .into(),
+        ChangeKind::Changed => "report that the current to-do itself changed (its deadline, \
+                                scope or content, or it is no longer needed), as their reason \
+                                says. When the reason is plausible and not a way around the \
+                                work, approve and put the change into list_changes: edit this \
+                                to-do (title, notes, deadline, estimate) or remove it when it is \
+                                no longer needed. After approval the app picks the next task \
+                                from the updated list"
+            .into(),
         ChangeKind::SwitchTodo { todo_id } => format!(
             "switch to the to-do \"{}\" (id {todo_id})",
             target_title.unwrap_or("?")

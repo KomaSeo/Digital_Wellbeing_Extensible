@@ -90,7 +90,6 @@ pub fn tools() -> Value {
                     "start": { "type": "string", "description": "Local time, YYYY-MM-DD HH:MM" },
                     "end": { "type": "string", "description": "Local time, YYYY-MM-DD HH:MM" },
                     "notes": { "type": "string", "description": "With whom, where" },
-                    "away_from_computer": { "type": "boolean", "description": "Leave out unless the user said; the app's AI judges it" },
                     "reason": { "type": "string", "description": "Optional" }
                 },
                 "required": ["title", "start", "end"]
@@ -112,11 +111,11 @@ pub fn tools() -> Value {
         },
         {
             "name": "request_change",
-            "description": "Ask to change the assigned task: it is done, get something else (repick: the app's AI picks what comes next; the user only gives the reason and never chooses the next task), or stop (end). Every task runs until a planned end (\"until\" in get_status); then (report_due in get_status) only a report (done, reviewed by the app's AI; not_finished, the to-do stays on the list, no review) or extend (more minutes, reviewed) is accepted. After a report or end, nothing is assigned until the user asks again (get_my_task). The app's AI approves or rejects the other requests.",
+            "description": "Ask to change the assigned task: it is done, get something else (repick: the app's AI picks what comes next; the user only gives the reason and never chooses the next task), or stop (end). Every task runs until a planned end (\"until\" in get_status); then (report_due in get_status) only a report (done, reviewed by the app's AI; not_finished, the to-do stays on the list, no review) or extend (more minutes, reviewed) is accepted; so are already_done (the to-do had been done before this assignment, elsewhere: done, but this time is not counted on it) and changed (the to-do itself changed or is no longer needed, as the reason says: the app's AI edits or removes it and picks the next task). After a report or end, nothing is assigned until the user asks again (get_my_task). The app's AI approves or rejects the other requests.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "change": { "type": "string", "enum": ["done", "not_finished", "extend", "repick", "end"] },
+                    "change": { "type": "string", "enum": ["done", "already_done", "changed", "not_finished", "extend", "repick", "end"] },
                     "minutes": { "type": "integer", "minimum": 5, "maximum": 240, "description": "For extend: how many more minutes the user asks for" },
                     "reason": { "type": "string", "description": "The user's reason, in their words" },
                     "evidence": { "type": "string", "description": "For done: proof of the result in the user's words (what was sent, to whom, an order number). The app's AI asks for proof when the result is a fact like a sent mail or an order; work that can always be improved (a report, practice) is accepted and the planned time left comes back later as an \"Improve: ...\" to-do." }
@@ -308,7 +307,6 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                             "notes": arguments["notes"].as_str().unwrap_or_default(),
                             "start": time("start")?,
                             "end": time("end")?,
-                            "away_from_computer": arguments["away_from_computer"].as_bool(),
                         },
                     },
                     "reason": arguments["reason"].as_str().unwrap_or_default(),
@@ -337,6 +335,8 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
         "request_change" => {
             let request = match arguments["change"].as_str().unwrap_or_default() {
                 "done" => json!({ "kind": "done" }),
+                "already_done" => json!({ "kind": "already_done" }),
+                "changed" => json!({ "kind": "changed" }),
                 "end" => json!({ "kind": "end" }),
                 "not_finished" => json!({ "kind": "not_finished" }),
                 "extend" => json!({
@@ -561,7 +561,6 @@ pub fn summary(status: &Status) -> Value {
             "notes": appointment.notes,
             "start_local": appointment.start.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string(),
             "end_local": appointment.end.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string(),
-            "away_from_computer": appointment.away_from_computer,
         })).collect::<Vec<_>>()),
         "report_due": planner.is_some_and(|planner| planner.report_due),
         "stopped_using": planner.is_some_and(|planner| planner.stopped_at.is_some()),

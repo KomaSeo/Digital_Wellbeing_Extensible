@@ -57,8 +57,9 @@ the user asks for their next task (get_my_task), and meanwhile every app is lock
 - Something at a fixed clock time with others or at a set place (a meeting, a class, a \
 doctor) is an appointment: add it with add_appointment, giving local times. Work or \
 leisure that could happen any time is a to-do. The app's AI decides whether to accept an \
-appointment by the owner's appointment rules. Leave away_from_computer out unless the \
-user said; the app's AI judges it.
+appointment by the owner's appointment rules. An appointment does not lock the \
+computer: while it runs, the app's checks allow what has to do with it (messages, a \
+map, a booking).
 - A scheduled settings update takes effect only after the user confirms it in the app's \
 Settings tab as often and as far apart as the settings say (planner's confirmations; by \
 default three times, two days apart). Tell the user that, and never press them to \

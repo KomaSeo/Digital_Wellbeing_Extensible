@@ -574,7 +574,9 @@ fn end_to_end(real_key: Option<String>) {
         assert!(assigned.lockdown.is_none(), "{:?}", assigned.lockdown);
 
         // 9. An appointment that runs now replaces the task by itself (the agent checks
-        // every 15 s); one away from the computer locks every app. Removing it ends it.
+        // every 15 s). It never locks the computer, even when the request still says it is
+        // away from it (older clients): the window checks judge what has to do with it.
+        // Removing it ends it.
         let now = chrono::Utc::now();
         let added = call(
             session,
@@ -601,10 +603,7 @@ fn end_to_end(real_key: Option<String>) {
                 .then_some(status)
         })
         .expect("the appointment starts by itself");
-        assert_eq!(
-            running.lockdown.map(|lockdown| lockdown.cause),
-            Some(LockdownCause::AwayFromComputer)
-        );
+        assert_eq!(running.lockdown.map(|lockdown| lockdown.cause), None);
         call(
             session,
             "todo_change",

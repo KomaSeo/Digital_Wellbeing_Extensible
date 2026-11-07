@@ -123,6 +123,10 @@ enum ChangeChoice {
     NotFinished,
     /// More time for the current task ("연장하기"), reviewed by the AI.
     Extend,
+    /// The to-do had already been done before ("이미 처리했어요").
+    AlreadyDone,
+    /// The to-do itself changed ("일이 변경되었어요"): outside strict mode the edit form opens.
+    Changed,
 }
 
 /// Responsibility: Name the Focus window's tabs: what to do (the planner's assignment, the

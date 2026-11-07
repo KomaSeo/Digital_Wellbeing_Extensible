@@ -70,8 +70,6 @@ struct AppointmentForm {
     /// "14:00", "오후 2시", "2시 30분".
     start: String,
     end: String,
-    /// `None` = let the AI decide.
-    away_from_computer: Option<bool>,
     reason: String,
 }
 
@@ -479,7 +477,11 @@ impl FocusApp {
         if report_due
             && !matches!(
                 self.choice,
-                ChangeChoice::Done | ChangeChoice::NotFinished | ChangeChoice::Extend
+                ChangeChoice::Done
+                    | ChangeChoice::NotFinished
+                    | ChangeChoice::Extend
+                    | ChangeChoice::AlreadyDone
+                    | ChangeChoice::Changed
             )
         {
             self.choice = ChangeChoice::Done;
@@ -487,7 +489,13 @@ impl FocusApp {
         if !report_due && self.choice == ChangeChoice::NotFinished {
             self.choice = ChangeChoice::Done;
         }
-        self.change_ui(ui, report_due);
+        // The to-do from the list the task is (none for an appointment or a free task).
+        let current_todo = assignment
+            .todo_id
+            .as_ref()
+            .and_then(|todo_id| planner.open_todos.iter().find(|todo| &todo.id == todo_id))
+            .cloned();
+        self.change_ui(ui, report_due, current_todo.as_ref());
     }
 
     /// The user's own notes and steps for the current to-do; the AI sees them when it
@@ -560,8 +568,28 @@ impl FocusApp {
         }
     }
 
-    /// Asking the AI to change what the planner assigned.
-    fn change_ui(&mut self, ui: &mut egui::Ui, report_due: bool) {
+    /// Open the to-do form to edit `todo` (in the To-do tab's list).
+    fn open_edit_form(&mut self, todo: &TodoItem) {
+        self.todo_ui.form = TodoForm {
+            title: todo.title.clone(),
+            notes: todo.notes.clone(),
+            deadline: todo
+                .deadline
+                .map(|deadline| deadline.to_string())
+                .unwrap_or_default(),
+            priority: todo.priority,
+            estimate_minutes: todo.estimate_minutes.unwrap_or(0),
+            repeat: todo.repeat,
+            away_from_computer: todo.away_from_computer,
+            reason: String::new(),
+        };
+        self.todo_ui.editing = Some(todo.id.clone());
+        self.todo_ui.form_open = true;
+    }
+
+    /// Asking the AI to change what the planner assigned. `current_todo`: the to-do from the
+    /// list the task is, if it is one.
+    fn change_ui(&mut self, ui: &mut egui::Ui, report_due: bool, current_todo: Option<&TodoItem>) {
         let idle = !self.pending.load(Ordering::SeqCst);
         // The answer to the request sent last has come (or the request failed): an answer
         // clears the reason, an approval also the proof. After an error both stay.
@@ -593,6 +621,8 @@ impl FocusApp {
                 let choice_before = self.choice;
                 ui.horizontal_wrapped(|ui| {
                     ui.radio_value(&mut self.choice, ChangeChoice::Done, "끝냈다");
+                    ui.radio_value(&mut self.choice, ChangeChoice::AlreadyDone, "이미 처리했어요");
+                    ui.radio_value(&mut self.choice, ChangeChoice::Changed, "일이 변경되었어요");
                     ui.radio_value(&mut self.choice, ChangeChoice::Extend, "연장하기");
                     if report_due {
                         ui.radio_value(&mut self.choice, ChangeChoice::NotFinished, "다 못 했다");
@@ -601,6 +631,26 @@ impl FocusApp {
                         ui.radio_value(&mut self.choice, ChangeChoice::End, "AI 검사 멈추기");
                     }
                 });
+                // Outside strict mode a changed to-do is simply edited in the form.
+                if self.choice == ChangeChoice::Changed && self.todo_ui.without_review {
+                    match current_todo {
+                        Some(todo) => {
+                            ui.small(
+                                "엄격 모드가 아니라서, 바뀐 내용은 할 일 고치기 양식에서 직접 고칩니다. \
+                                 고친 뒤 필요하면 \"다른 일 받기\"로 다음 일을 받으세요.",
+                            );
+                            if ui.button("이 할 일 고치기 양식 열기").clicked() {
+                                let todo = todo.clone();
+                                self.open_edit_form(&todo);
+                                self.tab = Tab::Todo;
+                            }
+                        }
+                        None => {
+                            ui.small("지금 할 일은 목록의 할 일이 아니라서(약속이나 목록 밖의 일) 고칠 수 없습니다.");
+                        }
+                    }
+                    return;
+                }
                 // A new choice starts the reason with what it asks for, unless the user
                 // already wrote their own.
                 if self.choice != choice_before
@@ -609,9 +659,10 @@ impl FocusApp {
                 {
                     self.reason = reason_start(self.choice).to_string();
                 }
-                // Outside strict mode "끝냈다" is taken at once, with no reason needed.
-                let done_at_once =
-                    self.todo_ui.without_review && self.choice == ChangeChoice::Done;
+                // Outside strict mode "끝냈다" and "이미 처리했어요" are taken at once, with no
+                // reason needed.
+                let done_at_once = self.todo_ui.without_review
+                    && matches!(self.choice, ChangeChoice::Done | ChangeChoice::AlreadyDone);
                 match self.choice {
                     ChangeChoice::NotFinished => {
                         ui.small(
@@ -635,6 +686,18 @@ impl FocusApp {
                              할 일 목록을 보고 정합니다. 이유만 적으세요.",
                         );
                     }
+                    ChangeChoice::AlreadyDone => {
+                        ui.small(
+                            "이 할 일이 이번 할당 전에 이미 끝나 있었다고 알립니다. 끝낸 것으로 기록하지만, \
+                             이번 할당의 시간은 이 일에 들인 시간으로 세지 않습니다.",
+                        );
+                    }
+                    ChangeChoice::Changed => {
+                        ui.small(
+                            "마감, 범위, 내용이 바뀌었거나 더는 필요 없으면, 무엇이 바뀌었는지 적으세요. \
+                             AI가 그에 맞게 할 일을 고치거나 지우고, 바뀐 목록에서 다음 일을 고릅니다.",
+                        );
+                    }
                     _ => {}
                 }
                 // The text the request is judged by comes first, named, so it is not mistaken
@@ -642,6 +705,9 @@ impl FocusApp {
                 ui.label(match (self.choice, done_at_once) {
                     (ChangeChoice::Done, true) => "끝낸 것(선택)",
                     (ChangeChoice::Done, false) => "끝낸 것(4글자 이상)",
+                    (ChangeChoice::AlreadyDone, true) => "언제, 어디서 했는지(선택)",
+                    (ChangeChoice::AlreadyDone, false) => "언제, 어디서 했는지(4글자 이상)",
+                    (ChangeChoice::Changed, _) => "무엇이 바뀌었는지(4글자 이상)",
                     (ChangeChoice::NotFinished, _) => "한 데까지(4글자 이상)",
                     _ => "이유(4글자 이상)",
                 });
@@ -655,7 +721,9 @@ impl FocusApp {
                             "충분한 이유인지 AI가 정합니다"
                         }),
                 );
-                if self.choice == ChangeChoice::Done && !done_at_once {
+                if matches!(self.choice, ChangeChoice::Done | ChangeChoice::AlreadyDone)
+                    && !done_at_once
+                {
                     ui.label("증거(선택)");
                     ui.add(
                         egui::TextEdit::multiline(&mut self.evidence)
@@ -673,6 +741,8 @@ impl FocusApp {
                 }
                 let request = match self.choice {
                     ChangeChoice::Done => Some(ChangeKind::Done),
+                    ChangeChoice::AlreadyDone => Some(ChangeKind::AlreadyDone),
+                    ChangeChoice::Changed => Some(ChangeKind::Changed),
                     ChangeChoice::End => Some(ChangeKind::End),
                     ChangeChoice::Repick => Some(ChangeKind::Repick),
                     ChangeChoice::NotFinished => Some(ChangeKind::NotFinished),
@@ -694,16 +764,17 @@ impl FocusApp {
                     if ui
                         .add_enabled(
                             ready,
-                            egui::Button::new(if done_at_once {
-                                "끝냈다고 기록하기"
-                            } else {
-                                "요청 보내기"
+                            egui::Button::new(match (done_at_once, self.choice) {
+                                (true, ChangeChoice::AlreadyDone) => "이미 처리했다고 기록하기",
+                                (true, _) => "끝냈다고 기록하기",
+                                (false, _) => "요청 보내기",
                             }),
                         )
                         .clicked()
                     {
                         if let Some(request) = request {
-                            let done = matches!(request, ChangeKind::Done);
+                            let done =
+                                matches!(request, ChangeKind::Done | ChangeKind::AlreadyDone);
                             let mut params = json!({ "request": request, "reason": self.reason });
                             if done {
                                 params["evidence"] = json!(self.evidence);
@@ -849,21 +920,7 @@ impl FocusApp {
                     ui.weak("일찍 끝낸 일의 다듬기 시간");
                 }
                 if !improvement && ui.button("고치기").clicked() {
-                    self.todo_ui.form = TodoForm {
-                        title: todo.title.clone(),
-                        notes: todo.notes.clone(),
-                        deadline: todo
-                            .deadline
-                            .map(|deadline| deadline.to_string())
-                            .unwrap_or_default(),
-                        priority: todo.priority,
-                        estimate_minutes: todo.estimate_minutes.unwrap_or(0),
-                        repeat: todo.repeat,
-                        away_from_computer: todo.away_from_computer,
-                        reason: String::new(),
-                    };
-                    self.todo_ui.editing = Some(todo.id.clone());
-                    self.todo_ui.form_open = true;
+                    self.open_edit_form(todo);
                 }
                 if !improvement && ui.button("지우기").clicked() {
                     self.todo_ui.removing = Some(todo.id.clone());
@@ -953,7 +1010,6 @@ impl FocusApp {
                     date: start.format("%Y-%m-%d").to_string(),
                     start: start.format("%H:%M").to_string(),
                     end: end.format("%H:%M").to_string(),
-                    away_from_computer: appointment.away_from_computer,
                     reason: record.reason.clone(),
                 };
                 self.todo_ui.appointment_form_open = true;
@@ -1207,9 +1263,6 @@ impl FocusApp {
                 }
                 ui.label(appointment_time_text(appointment.start, appointment.end));
                 ui.strong(&appointment.title);
-                if appointment.away_from_computer {
-                    ui.small("(컴퓨터 없이)");
-                }
                 if !appointment.notes.is_empty() {
                     ui.small(&appointment.notes);
                 }
@@ -1276,9 +1329,6 @@ impl FocusApp {
                             .hint_text("누구와, 어디서"),
                     );
                     ui.end_row();
-                    ui.label("컴퓨터 없이 하는 약속");
-                    away_choice_ui(ui, &mut form.away_from_computer);
-                    ui.end_row();
                     ui.label("이유");
                     ui.add(
                         egui::TextEdit::singleline(&mut form.reason)
@@ -1319,7 +1369,6 @@ impl FocusApp {
                                         "notes": form.notes.trim(),
                                         "start": start,
                                         "end": end,
-                                        "away_from_computer": form.away_from_computer,
                                     },
                                 },
                                 "reason": form.reason.trim(),
@@ -1493,6 +1542,8 @@ fn todo_change_line(record: &TodoChangeRecord) -> String {
 fn task_planner_label(request: &ChangeKind) -> String {
     match request {
         ChangeKind::Done => "끝냈다".into(),
+        ChangeKind::AlreadyDone => "이미 처리했어요".into(),
+        ChangeKind::Changed => "일이 변경되었어요".into(),
         ChangeKind::SwitchTodo { todo_id } => format!("{todo_id}(으)로 바꾸기"),
         ChangeKind::SwitchFree { task } => format!("\"{task}\"(으)로 바꾸기"),
         ChangeKind::Repick => "다른 일 받기(AI가 고름)".into(),
@@ -1584,6 +1635,8 @@ fn minutes_text(minutes: i64) -> String {
 fn reason_start(choice: ChangeChoice) -> &'static str {
     match choice {
         ChangeChoice::Done => "끝낸 것: ",
+        ChangeChoice::AlreadyDone => "이미 한 때와 곳: ",
+        ChangeChoice::Changed => "바뀐 것: ",
         ChangeChoice::Extend => "더 필요한 까닭: ",
         ChangeChoice::NotFinished => "한 데까지: ",
         ChangeChoice::Repick => "다른 일을 받으려는 까닭: ",

@@ -689,13 +689,15 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let reason = params["reason"].as_str().unwrap_or_default();
             // Outside strict mode a done report needs no AI (the owner's request), so no
             // reason and no proof either.
-            if request == ChangeKind::Done && !crate::settings::is_protected(&data_directory) {
+            if matches!(request, ChangeKind::Done | ChangeKind::AlreadyDone)
+                && !crate::settings::is_protected(&data_directory)
+            {
                 let evidence = Evidence {
                     text: params["evidence"].as_str().unwrap_or_default().to_string(),
                     screenshot_jpeg: None,
                 };
                 let record = planner
-                    .report_done_without_review(Utc::now(), reason, evidence)
+                    .report_without_review(Utc::now(), request, reason, evidence)
                     .map_err(|error| error.to_string())?;
                 last_decision = Some(record);
                 let mut status = status(api);
@@ -709,7 +711,9 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             // A proof screenshot (for "done" only) is taken a few seconds later, so the user
             // can switch to the window that shows the result.
             let screenshot_jpeg = match params["proof_screenshot_after_secs"].as_u64() {
-                Some(delay_seconds @ 1..=30) if request == ChangeKind::Done => {
+                Some(delay_seconds @ 1..=30)
+                    if matches!(request, ChangeKind::Done | ChangeKind::AlreadyDone) =>
+                {
                     thread::sleep(Duration::from_secs(delay_seconds));
                     Some(api.monitor.capture_proof()?)
                 }
@@ -734,6 +738,12 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                     .config_store()
                     .reload()
                     .map_err(|error| error.to_string())?;
+            }
+            // "일이 변경되었어요": the next task comes from the list as it is now.
+            if record.approved && record.request == ChangeKind::Changed {
+                if let Err(error) = planner.assign(Utc::now()) {
+                    tracing::warn!("no next task after a changed to-do: {error}");
+                }
             }
             last_decision = Some(record);
         }
