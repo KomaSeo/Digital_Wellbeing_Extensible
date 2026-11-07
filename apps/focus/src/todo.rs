@@ -18,8 +18,8 @@ use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::thread;
 use task_planner::{
-    ChangeKind, PlannerStatus, TaskNotes, TaskStep, TodoChange, TodoChangeRecord, TodoItem,
-    WhenTimeIsUp,
+    AppointmentInput, ChangeKind, PlannerStatus, TaskNotes, TaskStep, TodoChange, TodoChangeRecord,
+    TodoItem, WhenTimeIsUp,
 };
 
 /// Shown while there are to-dos but nothing is assigned.
@@ -56,6 +56,8 @@ pub struct TodoUiState {
     new_step: String,
     appointment_form: AppointmentForm,
     appointment_form_open: bool,
+    /// The appointment the form edits; `None` = adding.
+    appointment_editing: Option<String>,
     /// "사용 중지" was pressed once: ask to confirm.
     confirm_stop: bool,
 }
@@ -74,6 +76,20 @@ struct AppointmentForm {
 }
 
 impl AppointmentForm {
+    /// The form filled with `appointment`, for editing it or sending it again.
+    fn filled(appointment: &AppointmentInput, reason: &str) -> Self {
+        let start = appointment.start.with_timezone(&Local);
+        let end = appointment.end.with_timezone(&Local);
+        Self {
+            title: appointment.title.clone(),
+            notes: appointment.notes.clone(),
+            date: start.format("%Y-%m-%d").to_string(),
+            start: start.format("%H:%M").to_string(),
+            end: end.format("%H:%M").to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
     /// Start and end in UTC; an end earlier than the start is on the next day.
     fn times(&self) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
         let date = task_planner::parse_deadline(&self.date, Local::now().date_naive())?;
@@ -1002,16 +1018,18 @@ impl FocusApp {
                 self.todo_ui.form_open = true;
             }
             TodoChange::AddAppointment { appointment } => {
-                let start = appointment.start.with_timezone(&Local);
-                let end = appointment.end.with_timezone(&Local);
-                self.todo_ui.appointment_form = AppointmentForm {
-                    title: appointment.title.clone(),
-                    notes: appointment.notes.clone(),
-                    date: start.format("%Y-%m-%d").to_string(),
-                    start: start.format("%H:%M").to_string(),
-                    end: end.format("%H:%M").to_string(),
-                    reason: record.reason.clone(),
-                };
+                self.todo_ui.appointment_form =
+                    AppointmentForm::filled(appointment, &record.reason);
+                self.todo_ui.appointment_editing = None;
+                self.todo_ui.appointment_form_open = true;
+            }
+            TodoChange::EditAppointment {
+                appointment_id,
+                appointment,
+            } => {
+                self.todo_ui.appointment_form =
+                    AppointmentForm::filled(appointment, &record.reason);
+                self.todo_ui.appointment_editing = Some(appointment_id.clone());
                 self.todo_ui.appointment_form_open = true;
             }
             TodoChange::Remove { .. } | TodoChange::RemoveAppointment { .. } => {}
@@ -1207,7 +1225,10 @@ impl FocusApp {
         // A small mistake: open the form again with what was sent, to fix and resend.
         let can_edit = matches!(
             record.change,
-            TodoChange::Add { .. } | TodoChange::Edit { .. } | TodoChange::AddAppointment { .. }
+            TodoChange::Add { .. }
+                | TodoChange::Edit { .. }
+                | TodoChange::AddAppointment { .. }
+                | TodoChange::EditAppointment { .. }
         );
         if can_edit
             && ui
@@ -1220,7 +1241,10 @@ impl FocusApp {
             self.reopen_form(&record);
         }
         // An appointment the AI did not take cannot be scheduled without it.
-        if matches!(record.change, TodoChange::AddAppointment { .. }) {
+        if matches!(
+            record.change,
+            TodoChange::AddAppointment { .. } | TodoChange::EditAppointment { .. }
+        ) {
             return;
         }
         match &record.scheduled_update {
@@ -1242,7 +1266,8 @@ impl FocusApp {
     }
 
     /// The appointments: fixed at their time, they replace whatever runs. Adding one goes to
-    /// the AI (the owner's appointment rules); removing one needs no AI.
+    /// the AI (the owner's appointment rules); editing one does in strict mode; removing one
+    /// needs no AI.
     fn appointments_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
         let idle = !self.pending.load(Ordering::SeqCst);
         crate::style::section(ui, format!("약속 ({})", planner.appointments.len()));
@@ -1267,6 +1292,28 @@ impl FocusApp {
                     ui.small(&appointment.notes);
                 }
                 if ui
+                    .add_enabled(idle, egui::Button::new("고치기").small())
+                    .on_hover_text(if self.todo_ui.without_review {
+                        "약속 양식을 엽니다. 엄격 모드가 아니라서 고친 내용이 바로 적용됩니다."
+                    } else {
+                        "약속 양식을 엽니다. 고친 약속을 받을지는 AI가 약속 규칙에 따라 정합니다."
+                    })
+                    .clicked()
+                {
+                    self.todo_ui.appointment_form = AppointmentForm::filled(
+                        &AppointmentInput {
+                            title: appointment.title.clone(),
+                            notes: appointment.notes.clone(),
+                            start: appointment.start,
+                            end: appointment.end,
+                            away_from_computer: None,
+                        },
+                        "",
+                    );
+                    self.todo_ui.appointment_editing = Some(appointment.id.clone());
+                    self.todo_ui.appointment_form_open = true;
+                }
+                if ui
                     .add_enabled(idle, egui::Button::new("지우기").small())
                     .clicked()
                 {
@@ -1286,14 +1333,22 @@ impl FocusApp {
                     date: "오늘".into(),
                     ..Default::default()
                 };
+                self.todo_ui.appointment_editing = None;
                 self.todo_ui.appointment_form_open = true;
             }
             return;
         }
         let mut close = false;
+        // Editing outside strict mode needs no AI (the owner's request); adding always does.
+        let editing = self.todo_ui.appointment_editing.clone();
+        let at_once = editing.is_some() && self.todo_ui.without_review;
         ui.group(|ui| {
             ui.set_width(ui.available_width());
-            ui.strong("약속 추가 — AI가 약속 규칙에 따라 받을지 정합니다");
+            ui.strong(match (&editing, at_once) {
+                (None, _) => "약속 추가 — AI가 약속 규칙에 따라 받을지 정합니다",
+                (Some(_), true) => "약속 고치기 — 엄격 모드가 아니라서 고친 내용이 바로 적용됩니다",
+                (Some(_), false) => "약속 고치기 — 고친 약속을 받을지 AI가 약속 규칙에 따라 정합니다",
+            });
             let form = &mut self.todo_ui.appointment_form;
             egui::Grid::new("appointment_form")
                 .num_columns(2)
@@ -1353,24 +1408,38 @@ impl FocusApp {
             }
             let ready = idle && times.is_some() && form.title.trim().chars().count() >= 2;
             ui.horizontal(|ui| {
+                let send_label = if at_once {
+                    "바로 고치기"
+                } else {
+                    "AI에게 보내기"
+                };
                 if ui
-                    .add_enabled(ready, egui::Button::new("AI에게 보내기"))
+                    .add_enabled(ready, egui::Button::new(send_label))
                     .clicked()
                 {
                     if let Some((start, end)) = times {
                         let form = self.todo_ui.appointment_form.clone();
+                        let appointment = json!({
+                            "title": form.title.trim(),
+                            "notes": form.notes.trim(),
+                            "start": start,
+                            "end": end,
+                        });
+                        let change = match &editing {
+                            Some(appointment_id) => json!({
+                                "kind": "edit_appointment",
+                                "appointment_id": appointment_id,
+                                "appointment": appointment,
+                            }),
+                            None => json!({
+                                "kind": "add_appointment",
+                                "appointment": appointment,
+                            }),
+                        };
                         self.send(
                             "todo_change",
                             json!({
-                                "change": {
-                                    "kind": "add_appointment",
-                                    "appointment": {
-                                        "title": form.title.trim(),
-                                        "notes": form.notes.trim(),
-                                        "start": start,
-                                        "end": end,
-                                    },
-                                },
+                                "change": change,
                                 "reason": form.reason.trim(),
                                 "via": "to-do tab",
                             }),
@@ -1388,6 +1457,7 @@ impl FocusApp {
         });
         if close {
             self.todo_ui.appointment_form_open = false;
+            self.todo_ui.appointment_editing = None;
         }
         self.last_change_ui(ui);
     }
@@ -1588,6 +1658,25 @@ fn change_summary_korean(record: &TodoChangeRecord) -> String {
                 .with_timezone(&Local)
                 .format("%m-%d %H:%M")
         ),
+        TodoChange::EditAppointment {
+            appointment_id,
+            appointment,
+        } => {
+            let before = record
+                .appointment_before
+                .as_ref()
+                .map(|before| before.title.clone())
+                .unwrap_or_else(|| appointment_id.clone());
+            let renamed = if appointment.title == before {
+                String::new()
+            } else {
+                format!("\"{}\" ", appointment.title)
+            };
+            format!(
+                "약속 \"{before}\" 고치기 → {renamed}{}",
+                appointment_time_text(appointment.start, appointment.end)
+            )
+        }
         TodoChange::RemoveAppointment { appointment_id } => {
             format!("약속 \"{}\" 지우기", appointment_title(appointment_id))
         }

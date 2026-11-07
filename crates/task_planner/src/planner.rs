@@ -590,7 +590,10 @@ impl TaskPlanner {
         if review_by == TodoChangeReview::None
             && !matches!(
                 change,
-                TodoChange::Add { .. } | TodoChange::Edit { .. } | TodoChange::Remove { .. }
+                TodoChange::Add { .. }
+                    | TodoChange::Edit { .. }
+                    | TodoChange::Remove { .. }
+                    | TodoChange::EditAppointment { .. }
             )
         {
             return self.todo_change_with(now, change, reason, via, TodoChangeReview::ByTheAi);
@@ -622,6 +625,28 @@ impl TaskPlanner {
             TodoChange::AddAppointment { appointment } => {
                 if let Some(overlapping) = self.appointments(now).into_iter().find(|existing| {
                     existing.start < appointment.end && appointment.start < existing.end
+                }) {
+                    return Err(PlannerError::AppointmentOverlaps(overlapping.title));
+                }
+                None
+            }
+            TodoChange::EditAppointment {
+                appointment_id,
+                appointment,
+            } => {
+                if !self
+                    .config
+                    .get()
+                    .appointments
+                    .iter()
+                    .any(|existing| &existing.id == appointment_id)
+                {
+                    return Err(PlannerError::UnknownAppointment(appointment_id.clone()));
+                }
+                if let Some(overlapping) = self.appointments(now).into_iter().find(|existing| {
+                    &existing.id != appointment_id
+                        && existing.start < appointment.end
+                        && appointment.start < existing.end
                 }) {
                     return Err(PlannerError::AppointmentOverlaps(overlapping.title));
                 }
@@ -663,9 +688,12 @@ impl TaskPlanner {
         let config = self.config.get();
         if matches!(
             change,
-            TodoChange::AddAppointment { .. } | TodoChange::RemoveAppointment { .. }
+            TodoChange::AddAppointment { .. }
+                | TodoChange::EditAppointment { .. }
+                | TodoChange::RemoveAppointment { .. }
         ) {
-            return self.review_appointment_change(now, change, reason, via, &open, &recent);
+            return self
+                .review_appointment_change(now, change, reason, via, &open, &recent, review_by);
         }
         if review_by == TodoChangeReview::None {
             let after = match &change {
@@ -687,6 +715,7 @@ impl TaskPlanner {
                 after,
                 scheduled_update: None,
                 appointment: None,
+                appointment_before: None,
             };
             self.log_todo_change(&record)?;
             return Ok(record);
@@ -731,13 +760,16 @@ impl TaskPlanner {
             after,
             scheduled_update: None,
             appointment: None,
+            appointment_before: None,
         };
         self.log_todo_change(&record)?;
         Ok(record)
     }
 
     /// The appointment half of [`Self::review_todo_change`]: the AI decides on an addition
-    /// by the owner's appointment rules; a removal only frees time and needs no AI.
+    /// or an edit by the owner's appointment rules (outside strict mode an edit needs no AI);
+    /// a removal only frees time and needs no AI.
+    #[allow(clippy::too_many_arguments)]
     fn review_appointment_change(
         &self,
         now: DateTime<Utc>,
@@ -746,36 +778,74 @@ impl TaskPlanner {
         via: &str,
         open: &[TodoItem],
         recent: &[TodoChangeRecord],
+        review_by: TodoChangeReview,
     ) -> Result<TodoChangeRecord, PlannerError> {
         let config = self.config.get();
+        let listed = |appointment_id: &str| {
+            config
+                .appointments
+                .iter()
+                .find(|existing| existing.id == appointment_id)
+                .cloned()
+        };
+        let mut appointment_before = None;
         let (approved, reply, ai_failed, appointment) = match &change {
-            TodoChange::AddAppointment { appointment } => {
-                let now_local = local_now_text();
-                let state = self.state.get();
-                let review = (self.advisor)(&self.focus.store().get()).and_then(|advisor| {
-                    advisor.review_appointment(&AppointmentRequest {
-                        instructions: config.instructions.appointment_review_or_default(),
-                        now_local: &now_local,
-                        appointment_rules: &config.appointment_rules,
-                        life_rules: &config.life_rules,
-                        appointment,
-                        reason: &reason,
-                        appointments: &self.appointments(now),
-                        open,
-                        current: state.assignment.as_ref(),
-                        recent_changes: recent,
-                    })
-                });
-                let (approved, reply, ai_failed) = match review {
-                    Ok(review) => (review.approved, review.reply, false),
-                    Err(error) => (
-                        false,
-                        format!("The AI could not review this: {error}"),
+            TodoChange::AddAppointment { appointment }
+            | TodoChange::EditAppointment { appointment, .. } => {
+                let replaces = match &change {
+                    TodoChange::EditAppointment { appointment_id, .. } => listed(appointment_id),
+                    _ => None,
+                };
+                let (approved, reply, ai_failed) = if review_by == TodoChangeReview::None {
+                    (
                         true,
-                    ),
+                        "아직 엄격 모드가 아니어서 AI 심사 없이 약속을 바로 고쳤습니다."
+                            .to_string(),
+                        false,
+                    )
+                } else {
+                    let now_local = local_now_text();
+                    let state = self.state.get();
+                    // The AI weighs the edited appointment against the others, not itself.
+                    let others: Vec<Appointment> = self
+                        .appointments(now)
+                        .into_iter()
+                        .filter(|existing| {
+                            replaces
+                                .as_ref()
+                                .is_none_or(|replaced| replaced.id != existing.id)
+                        })
+                        .collect();
+                    let review = (self.advisor)(&self.focus.store().get()).and_then(|advisor| {
+                        advisor.review_appointment(&AppointmentRequest {
+                            instructions: config.instructions.appointment_review_or_default(),
+                            now_local: &now_local,
+                            appointment_rules: &config.appointment_rules,
+                            life_rules: &config.life_rules,
+                            appointment,
+                            replaces: replaces.as_ref(),
+                            reason: &reason,
+                            appointments: &others,
+                            open,
+                            current: state.assignment.as_ref(),
+                            recent_changes: recent,
+                        })
+                    });
+                    match review {
+                        Ok(review) => (review.approved, review.reply, false),
+                        Err(error) => (
+                            false,
+                            format!("The AI could not review this: {error}"),
+                            true,
+                        ),
+                    }
                 };
                 let accepted = Appointment {
-                    id: format!("a{}", now.timestamp_millis()),
+                    // An edit keeps the id, so the write replaces the appointment.
+                    id: replaces
+                        .as_ref()
+                        .map(|replaced| replaced.id.clone())
+                        .unwrap_or_else(|| format!("a{}", now.timestamp_millis())),
                     title: appointment.title.clone(),
                     notes: appointment.notes.clone(),
                     start: appointment.start,
@@ -786,6 +856,7 @@ impl TaskPlanner {
                     // do with it.
                     away_from_computer: false,
                 };
+                appointment_before = replaces;
                 (approved, reply, ai_failed, Some(accepted))
             }
             TodoChange::RemoveAppointment { appointment_id } => (
@@ -813,6 +884,7 @@ impl TaskPlanner {
             after: None,
             scheduled_update: None,
             appointment,
+            appointment_before,
         };
         self.log_todo_change(&record)?;
         Ok(record)
@@ -904,10 +976,42 @@ impl TaskPlanner {
                         .map(TodoListWrite::PutAppointment),
                 )
                 .collect(),
+            TodoChange::EditAppointment { .. } => record
+                .appointment
+                .clone()
+                .map(TodoListWrite::PutAppointment)
+                .into_iter()
+                .collect(),
             TodoChange::RemoveAppointment { appointment_id } => {
                 vec![TodoListWrite::RemoveAppointment(appointment_id.clone())]
             }
         }
+    }
+
+    /// After an edited appointment is written to the list: it runs on its new times, so an
+    /// extension or an early end approved for its old times no longer counts, and when it
+    /// is the current task it starts again (or ends, when its new start is later).
+    pub fn appointment_edited(
+        &self,
+        now: DateTime<Utc>,
+        appointment_id: &str,
+    ) -> Result<(), PlannerError> {
+        let _busy = self.busy.lock();
+        self.state.update(|planner_state| {
+            planner_state.appointment_extensions.remove(appointment_id);
+            planner_state.ended_appointments.remove(appointment_id);
+        })?;
+        let running_it =
+            self.state.get().assignment.is_some_and(|assignment| {
+                assignment.appointment_id.as_deref() == Some(appointment_id)
+            });
+        if running_it {
+            self.end(now)?;
+        }
+        if let Some(appointment) = self.keep_appointments(now)? {
+            self.start_focus(&appointment)?;
+        }
+        Ok(())
     }
 
     /// Note that the user scheduled a change the AI did not approve.
@@ -2049,6 +2153,16 @@ fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, Pl
             }
             TodoChange::AddAppointment { appointment }
         }
+        TodoChange::EditAppointment {
+            appointment_id,
+            appointment,
+        } => match clean_change(TodoChange::AddAppointment { appointment }, now)? {
+            TodoChange::AddAppointment { appointment } => TodoChange::EditAppointment {
+                appointment_id,
+                appointment,
+            },
+            _ => unreachable!("an addition stays an addition"),
+        },
         other @ (TodoChange::Remove { .. } | TodoChange::RemoveAppointment { .. }) => other,
     };
     match &change {

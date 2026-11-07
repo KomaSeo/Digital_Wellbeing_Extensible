@@ -468,6 +468,12 @@ pub enum TodoChange {
     Remove { todo_id: String },
     /// Add an appointment; the AI decides whether to accept it (owner's appointment rules).
     AddAppointment { appointment: AppointmentInput },
+    /// Change an appointment on the list (keeps its id). In strict mode the AI decides by the
+    /// owner's appointment rules, seeing the appointment it replaces.
+    EditAppointment {
+        appointment_id: String,
+        appointment: AppointmentInput,
+    },
     /// Take an appointment off the list. Needs no AI review: it only frees time for to-dos.
     RemoveAppointment { appointment_id: String },
 }
@@ -498,9 +504,12 @@ pub struct TodoChangeRecord {
     /// that applies it after three confirmations, two hours apart.
     #[serde(default)]
     pub scheduled_update: Option<String>,
-    /// The appointment added or removed.
+    /// The appointment added, removed, or as it is after an edit.
     #[serde(default)]
     pub appointment: Option<Appointment>,
+    /// The appointment as it was before an edit.
+    #[serde(default)]
+    pub appointment_before: Option<Appointment>,
 }
 
 /// Responsibility: Name one write to the to-do list that applies a [`TodoChangeRecord`].

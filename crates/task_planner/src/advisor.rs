@@ -246,6 +246,11 @@ dressed up as an appointment, times or lengths that look inflated (a two-hour co
 that blocks a whole afternoon), appointments overlapping one already accepted, and \
 anything the owner's rules forbid.
 
+The user may also ask to change an accepted appointment. Judge the changed one as \
+you would a new one, and weigh what changed: moving or fixing it for a real reason \
+(the other side moved it, it was entered wrong) is fine; stretching it over leisure \
+or over work the user wants to dodge is not.
+
 The owner's appointment rules and life rules, when given, are binding and come \
 first; they were set in the app's settings, which the user cannot change from \
 here.
@@ -478,8 +483,11 @@ pub struct AppointmentRequest<'a> {
     pub appointment_rules: &'a str,
     pub life_rules: &'a str,
     pub appointment: &'a AppointmentInput,
+    /// For an edit: the accepted appointment this one replaces.
+    pub replaces: Option<&'a Appointment>,
     pub reason: &'a str,
-    /// Appointments already accepted that have not ended.
+    /// Appointments already accepted that have not ended (for an edit, without the one it
+    /// replaces).
     pub appointments: &'a [Appointment],
     pub open: &'a [TodoItem],
     pub current: Option<&'a Assignment>,
@@ -672,10 +680,23 @@ pub(crate) fn appointment_text(request: &AppointmentRequest) -> String {
             request.appointment_rules.trim()
         )
     };
+    let asked = match request.replaces {
+        Some(replaced) => format!(
+            "The user asks to change this accepted appointment:\n\
+             - title: {title}\n- notes: {notes}\n- from {start} to {end} ({minutes} min)\n\
+             into this one:",
+            title = replaced.title,
+            notes = or_none(&replaced.notes),
+            start = local(replaced.start),
+            end = local(replaced.end),
+            minutes = (replaced.end - replaced.start).num_minutes(),
+        ),
+        None => "The user asks to add this appointment:".to_string(),
+    };
     format!(
-        "Now: {now}\n\n{rules}The user asks to add this appointment:\n\
+        "Now: {now}\n\n{rules}{asked}\n\
          - title: {title}\n- notes: {notes}\n- from {start} to {end} ({minutes} min)\n\
-         - away from the computer: {away}\nTheir reason: \"{reason}\"\n\n\
+         Their reason: \"{reason}\"\n\n\
          Appointments already accepted:\n{appointments}\n\nCurrent assignment: {current}\n\n\
          {polish}Earlier to-do and appointment changes (newest first):\n{past}",
         now = request.now_local,
@@ -684,11 +705,6 @@ pub(crate) fn appointment_text(request: &AppointmentRequest) -> String {
         start = local(appointment.start),
         end = local(appointment.end),
         minutes = (appointment.end - appointment.start).num_minutes(),
-        away = match appointment.away_from_computer {
-            Some(true) => "yes (the user said so)",
-            Some(false) => "no (the user said so)",
-            None => "not given; judge it",
-        },
         reason = or_none(request.reason),
         appointments = appointments_text(request.appointments),
         current = request
@@ -1194,7 +1210,9 @@ pub(crate) fn todo_change_text(request: &TodoChangeRequest) -> String {
                 .unwrap_or_default(),
             draft(todo)
         ),
-        TodoChange::AddAppointment { .. } | TodoChange::RemoveAppointment { .. } => String::new(),
+        TodoChange::AddAppointment { .. }
+        | TodoChange::EditAppointment { .. }
+        | TodoChange::RemoveAppointment { .. } => String::new(),
         TodoChange::Remove { .. } => format!(
             "Remove this to-do:\n{}",
             request
@@ -1228,6 +1246,17 @@ pub fn change_summary(change: &TodoChange, before: Option<&TodoItem>) -> String 
         TodoChange::Remove { todo_id } => format!("remove \"{}\"", title(todo_id)),
         TodoChange::AddAppointment { appointment } => format!(
             "add the appointment \"{}\" ({})",
+            appointment.title,
+            appointment
+                .start
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M")
+        ),
+        TodoChange::EditAppointment {
+            appointment_id,
+            appointment,
+        } => format!(
+            "change the appointment {appointment_id} into \"{}\" ({})",
             appointment.title,
             appointment
                 .start

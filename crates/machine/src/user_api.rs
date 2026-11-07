@@ -791,6 +791,12 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                     .config_store()
                     .reload()
                     .map_err(|error| error.to_string())?;
+                // An edited appointment that runs now starts again on its new times.
+                if let TodoChange::EditAppointment { appointment_id, .. } = &record.change {
+                    planner
+                        .appointment_edited(Utc::now(), appointment_id)
+                        .map_err(|error| error.to_string())?;
+                }
             }
             last_proposal = Some(ProposalRecord {
                 at: record.at,
@@ -834,7 +840,10 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 return Err("AI가 이미 승인해서 적용된 변경입니다".into());
             }
             // Whether to take an appointment is the AI's call (the owner's request).
-            if matches!(record.change, TodoChange::AddAppointment { .. }) {
+            if matches!(
+                record.change,
+                TodoChange::AddAppointment { .. } | TodoChange::EditAppointment { .. }
+            ) {
                 return Err("약속은 AI가 받을지 정합니다. AI 없이 예약할 수 없습니다".into());
             }
             if record.scheduled_update.is_some() {

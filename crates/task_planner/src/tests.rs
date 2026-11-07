@@ -33,6 +33,10 @@ struct FakeAdvisor {
     /// The appointment rules and the upcoming appointments the last question carried.
     saw_appointment_rules: parking_lot::Mutex<String>,
     saw_appointments: parking_lot::Mutex<Vec<String>>,
+    /// The appointment the last appointment review was asked to replace (an edit), and the
+    /// other appointments it saw.
+    saw_replaced: parking_lot::Mutex<Option<String>>,
+    saw_other_appointments: parking_lot::Mutex<Vec<String>>,
     /// The current assignment as the last change review saw it.
     saw_current_away: AtomicBool,
     /// The list changes the next change review makes.
@@ -75,6 +79,14 @@ impl Advisor for FakeAdvisor {
     ) -> Result<AppointmentReview, JudgeError> {
         self.reviews.fetch_add(1, Ordering::SeqCst);
         *self.saw_appointment_rules.lock() = request.appointment_rules.to_string();
+        *self.saw_replaced.lock() = request
+            .replaces
+            .map(|appointment| appointment.title.clone());
+        *self.saw_other_appointments.lock() = request
+            .appointments
+            .iter()
+            .map(|appointment| appointment.title.clone())
+            .collect();
         *self.saw_instructions.lock() = request.instructions.to_string();
         if self.fail.load(Ordering::SeqCst) {
             return Err(JudgeError::NoApiKey);
@@ -212,6 +224,8 @@ fn harness_with_state(enabled: bool, ids: &[&str], state: JsonStore<PlannerState
         judges_away: AtomicBool::new(false),
         saw_appointment_rules: parking_lot::Mutex::new(String::new()),
         saw_appointments: parking_lot::Mutex::new(Vec::new()),
+        saw_replaced: parking_lot::Mutex::new(None),
+        saw_other_appointments: parking_lot::Mutex::new(Vec::new()),
         saw_current_away: AtomicBool::new(false),
         list_changes: parking_lot::Mutex::new(Vec::new()),
     });
@@ -1691,6 +1705,161 @@ fn an_appointment_is_fixed_at_its_time_and_ends_by_itself() {
     assert!(fixture.planner.waiting_for_task());
     let offer = fixture.planner.extension_offer(after_grace).unwrap();
     assert_eq!(offer.appointment.title, "meeting");
+}
+
+fn edit_appointment(
+    appointment_id: &str,
+    title: &str,
+    start: chrono::DateTime<Utc>,
+    minutes: i64,
+) -> TodoChange {
+    match appointment_change(title, start, minutes, None) {
+        TodoChange::AddAppointment { appointment } => TodoChange::EditAppointment {
+            appointment_id: appointment_id.into(),
+            appointment,
+        },
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn an_appointment_is_edited_by_the_ai_in_strict_mode_and_at_once_outside_it() {
+    let fixture = harness(true, &["a"]);
+    let now = Utc::now();
+    let start = now + chrono::Duration::minutes(20);
+    add_appointment(
+        &fixture,
+        now,
+        appointment_change("meeting", start, 60, None),
+    )
+    .unwrap();
+    add_appointment(
+        &fixture,
+        now + chrono::Duration::seconds(1),
+        appointment_change("class", start + chrono::Duration::hours(3), 60, None),
+    )
+    .unwrap();
+    let meeting_id = fixture.planner.appointments(now)[0].id.clone();
+    // Strict mode: the AI decides, seeing the appointment the edit replaces and the others
+    // (not the replaced one). Moving it over its own old time is no overlap.
+    let reviews = fixture.advisor.reviews.load(Ordering::SeqCst);
+    let moved = start + chrono::Duration::minutes(30);
+    let record = add_appointment(
+        &fixture,
+        now + chrono::Duration::seconds(2),
+        edit_appointment(&meeting_id, "meeting moved", moved, 60),
+    )
+    .unwrap();
+    assert!(record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), reviews + 1);
+    assert_eq!(
+        fixture.advisor.saw_replaced.lock().as_deref(),
+        Some("meeting")
+    );
+    assert_eq!(*fixture.advisor.saw_other_appointments.lock(), ["class"]);
+    assert_eq!(record.appointment_before.as_ref().unwrap().title, "meeting");
+    let appointments = fixture.planner.appointments(now);
+    assert_eq!(appointments.len(), 2);
+    assert_eq!(appointments[0].id, meeting_id);
+    assert_eq!(appointments[0].title, "meeting moved");
+    assert_eq!(appointments[0].start, moved);
+    // Rejected: it stays as it was.
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let record = add_appointment(
+        &fixture,
+        now + chrono::Duration::seconds(3),
+        edit_appointment(&meeting_id, "gaming", moved, 90),
+    )
+    .unwrap();
+    assert!(!record.approved);
+    assert_eq!(fixture.planner.appointments(now)[0].title, "meeting moved");
+    // Another appointment's time is never taken, and an unknown one cannot be edited.
+    assert!(matches!(
+        add_appointment(
+            &fixture,
+            now + chrono::Duration::seconds(4),
+            edit_appointment(&meeting_id, "meeting", start + chrono::Duration::hours(3), 30),
+        ),
+        Err(PlannerError::AppointmentOverlaps(title)) if title == "class"
+    ));
+    assert!(matches!(
+        add_appointment(
+            &fixture,
+            now + chrono::Duration::seconds(5),
+            edit_appointment("nope", "meeting", start, 30),
+        ),
+        Err(PlannerError::UnknownAppointment(_))
+    ));
+    // Outside strict mode: applied at once, without the AI.
+    let reviews = fixture.advisor.reviews.load(Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .todo_change_without_review(
+            now + chrono::Duration::seconds(6),
+            edit_appointment(&meeting_id, "meeting", start, 60),
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), reviews);
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    assert_eq!(fixture.planner.appointments(now)[0].start, start);
+    // An appointment that runs now runs on its new times once edited.
+    let during = start + chrono::Duration::minutes(10);
+    fixture.planner.resume(during).unwrap();
+    assert!(fixture
+        .planner
+        .status()
+        .assignment
+        .is_some_and(
+            |assignment| assignment.appointment_id.as_deref() == Some(meeting_id.as_str())
+        ));
+    let record = fixture
+        .planner
+        .todo_change_without_review(
+            during,
+            edit_appointment(&meeting_id, "meeting", start, 120),
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    fixture
+        .planner
+        .appointment_edited(during, &meeting_id)
+        .unwrap();
+    let running = fixture.planner.status().assignment.unwrap();
+    assert_eq!(running.appointment_id.as_deref(), Some(meeting_id.as_str()));
+    assert_eq!(
+        running.until,
+        Some(start + chrono::Duration::minutes(120 + APPOINTMENT_GRACE_MINUTES))
+    );
+    // Moved to later: it ends now and starts at its new time.
+    let record = fixture
+        .planner
+        .todo_change_without_review(
+            during,
+            edit_appointment(
+                &meeting_id,
+                "meeting",
+                start + chrono::Duration::minutes(60),
+                60,
+            ),
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    fixture
+        .planner
+        .appointment_edited(during, &meeting_id)
+        .unwrap();
+    assert!(fixture
+        .planner
+        .status()
+        .assignment
+        .is_none_or(|assignment| assignment.appointment_id.is_none()));
 }
 
 #[test]

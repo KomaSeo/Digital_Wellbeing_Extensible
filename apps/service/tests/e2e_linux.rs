@@ -604,6 +604,42 @@ fn end_to_end(real_key: Option<String>) {
         })
         .expect("the appointment starts by itself");
         assert_eq!(running.lockdown.map(|lockdown| lockdown.cause), None);
+        // Editing it outside strict mode applies at once, keeps its id, and the running
+        // appointment goes on to its new end (plus the grace time).
+        let new_end = now + chrono::Duration::minutes(50);
+        let edited = call(
+            session,
+            "todo_change",
+            json!({
+                "change": { "kind": "edit_appointment", "appointment_id": appointment_id,
+                    "appointment": {
+                        "title": "dentist", "notes": "room 3",
+                        "start": now - chrono::Duration::minutes(1),
+                        "end": new_end,
+                    } },
+                "reason": "",
+                "via": "e2e",
+            }),
+        )
+        .unwrap();
+        let record = edited.last_todo_change.clone().unwrap();
+        assert!(record.approved, "{}", record.reply);
+        let planner = edited.planner.clone().unwrap();
+        assert_eq!(planner.appointments.len(), 1);
+        assert_eq!(planner.appointments[0].id, appointment_id);
+        assert_eq!(planner.appointments[0].notes, "room 3");
+        let assignment = planner.assignment.unwrap();
+        assert_eq!(
+            assignment.appointment_id.as_deref(),
+            Some(appointment_id.as_str())
+        );
+        assert_eq!(
+            assignment.until.map(|until| until.timestamp()),
+            Some(
+                (new_end + chrono::Duration::minutes(task_planner::APPOINTMENT_GRACE_MINUTES))
+                    .timestamp()
+            )
+        );
         call(
             session,
             "todo_change",
