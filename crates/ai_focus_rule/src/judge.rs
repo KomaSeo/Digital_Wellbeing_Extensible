@@ -104,8 +104,9 @@ pub struct JudgeRequest<'a> {
     pub grant_purpose: Option<&'a str>,
     /// The other open windows to judge as well (title only).
     pub others: &'a [OtherWindow],
-    /// A recheck by the cheaper model (counted apart in the usage, "focus recheck").
-    pub recheck: bool,
+    /// Asked of a larger model after a smaller one did not find every window on task
+    /// (counted apart in the usage, "focus escalation").
+    pub escalated: bool,
 }
 
 /// Responsibility: Report why a Claude call failed (shared by every Claude-backed module).
@@ -165,8 +166,8 @@ impl Judge for ClaudeJudge {
         // Effort `low`: a single classification needs little reasoning, and
         // this runs every check interval.
         self.client.structured(
-            if request.recheck {
-                "focus recheck"
+            if request.escalated {
+                "focus escalation"
             } else {
                 "focus check"
             },
@@ -324,7 +325,7 @@ mod tests {
     fn body_includes_image_and_fallback() {
         let client = ClaudeClient::new("k".into(), "claude-opus-5-5".into());
         let request = JudgeRequest {
-            recheck: false,
+            escalated: false,
             task: "write thesis",
             history: "",
             process_name: "chrome.exe",
@@ -369,7 +370,7 @@ mod tests {
     #[test]
     fn grant_purpose_is_part_of_the_question() {
         let request = JudgeRequest {
-            recheck: false,
+            escalated: false,
             task: "write thesis",
             history: "",
             process_name: "chrome.exe",
@@ -383,7 +384,7 @@ mod tests {
         assert!(user_text(&request)
             .contains("granted this app/site for this purpose: \"Rust 비동기 강의 시청\""));
         let plain = JudgeRequest {
-            recheck: false,
+            escalated: false,
             grant_purpose: None,
             ..request
         };
