@@ -180,7 +180,8 @@ fn task_flow_guide(ui: &mut egui::Ui) {
         "2. 할 일이 없을 때의 잠금: 엄격 모드이고 맡은 할 일이 없으면, 이 프로그램은 모든 앱과 \
          웹사이트를 잠그고 사용자가 \"할 일 받기\"를 누르기를 기다립니다. 할 일을 받는 순간부터 시간이 \
          흐르므로, 자리를 비운 동안 시간이 지나가 버리지 않습니다. 이 잠금에서는 이 앱만 열 수 있고, \
-         Claude Desktop도 꺼집니다. Claude Desktop으로도 웹을 볼 수 있기 때문입니다.",
+         Claude Desktop도 꺼집니다. Claude Desktop으로도 웹을 볼 수 있기 때문입니다. 모든 앱이 잠기는 \
+         다른 경우에도 Claude Desktop은 꺼집니다.",
     );
     paragraph(
         ui,
@@ -292,7 +293,7 @@ fn lockdown_guide(ui: &mut egui::Ui) {
          길을 막기 위해서입니다. 인터넷이 끊긴 것만으로는 잠기지 않습니다.",
     );
     for line in [
-        "열어 둘 수 있는 것: Claude Desktop, 브라우저의 Claude·Anthropic 페이지와 빈 새 탭과 Google \
+        "열어 둘 수 있는 것: 브라우저의 Claude·Anthropic 페이지와 빈 새 탭과 Google \
          로그인 페이지, Windows 설정, 이 앱. 다른 탭은 닫히고 다른 앱은 꺼집니다.",
         "푸는 방법: 아래 링크로 Claude Console에 들어가 새 키를 만들거나 크레딧을 채웁니다. 링크는 \
          브라우저에서 열리고, 잠긴 동안에도 Claude Console 페이지는 닫히지 않습니다. 새 키는 설정 탭 → AI 연결에 붙여 넣고 \"적용\"을 누릅니다. 잠긴 동안에는 \

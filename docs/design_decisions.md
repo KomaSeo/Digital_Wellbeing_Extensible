@@ -989,12 +989,11 @@
   - 약속 심사 질문에 남아 있던 "away from the computer" 줄을 지웠습니다(8.85에서 약속을 컴퓨터를 쓰는 약속과 안 쓰는 약속으로 나누지 않기로 했기 때문입니다). 문서의 `add_appointment` 형식에서도 그 칸을 지웠습니다.
   - Claude Desktop과 AI 비서에는 약속 고치기 도구를 더하지 않았습니다(요청에 없음). agent는 `edit_appointment` 변경을 어디서 오든 받습니다.
 
-### 8.88 할 일이 없을 때의 잠금 등에서는 Claude Desktop도 끈다
-- **소유자 요청:** "아아니 내 말은 claude desktop도 브라우저 기능이 있어서, 이를 악용해서 모든 앱을 잠궈놓고 할 일이 지정되지 않으면 claude desktop으로 브라우징을 할 수도 있기 떄문에 막아야 한다는 의미였어."
-- **소유자가 말한 이유:** Claude Desktop에도 브라우저 기능이 있어서, 모든 앱이 잠긴 동안 Claude Desktop으로 웹을 볼 수 있다.
+### 8.88 모든 앱 잠금에서 Claude Desktop도 끈다
+- **소유자 요청:** "아아니 내 말은 claude desktop도 브라우저 기능이 있어서, 이를 악용해서 모든 앱을 잠궈놓고 할 일이 지정되지 않으면 claude desktop으로 브라우징을 할 수도 있기 떄문에 막아야 한다는 의미였어." 이어서, AI가 AI 연결이 끊긴 잠금에서는 8.16의 요청("claude 웹사이트와 claude desktop앱은 예외 처리 하도록 해")에 따라 Claude Desktop을 남긴다고 하자 "엥? 그건 claude desktop이 아니라 claude dashboard말하는 거 아니었어?", "아 그렇구나. 그래 사실 desktop 앱은 필요가 없지"
+- **소유자가 말한 이유:** Claude Desktop에도 브라우저 기능이 있어서, 모든 앱이 잠긴 동안 Claude Desktop으로 웹을 볼 수 있다. 8.16의 예외는 Claude 대시보드(Claude Console)를 뜻했고, Claude Desktop 앱은 필요 없다.
 - **AI가 정한 세부:**
-  - 할 일을 기다리는 잠금, 컴퓨터 없이 하는 일의 잠금, 사용 중지의 잠금, 로그인이 필요한 잠금에서 Claude Desktop(`claude.exe`)을 끕니다.
-  - AI 연결이 끊긴 잠금에서는 Claude Desktop을 지금처럼 남깁니다. 소유자가 예전에 "Claude Desktop은 API를 다시 연결할 때 필요하기 때문에 예외"라고 했기 때문입니다(8.16).
+  - 모든 앱 잠금(AI 연결 끊김, 할 일 받기 기다림, 컴퓨터 없이 하는 일, 사용 중지, 로그인 필요)에서 Claude Desktop(`claude.exe`)을 끕니다. 브라우저의 Claude·Anthropic 페이지(Claude Console 포함)는 AI 연결이 끊긴 잠금에서 지금처럼 남습니다.
   - 설정의 "검사하지 않는 앱"에 Claude Desktop을 넣었으면 어느 잠금에서도 남습니다. 이 목록은 소유자가 정하는 것이기 때문입니다.
-  - 프로그램을 업데이트하는 동안 앱을 닫는 규칙(업데이트 보호)은 바꾸지 않았습니다. 그 동안에도 Claude Desktop은 남습니다.
-  - 이 프로그램과 Claude Desktop을 잇는 연결 프로그램(`digital-wellbeing-mcp.exe`)은 이 앱의 일부라서 끄지 않습니다. Claude Desktop이 꺼지면 함께 쓸 일이 없습니다.
+  - 프로그램을 업데이트하는 동안 앱을 닫는 규칙(업데이트 보호)은 바꾸지 않았습니다. 그 동안에는 Claude Desktop이 남습니다.
+  - 이 프로그램과 Claude Desktop을 잇는 연결 프로그램(`digital-wellbeing-mcp.exe`)은 이 앱의 일부라서 끄지 않습니다. Claude Desktop이 꺼지면 쓰이지 않습니다.

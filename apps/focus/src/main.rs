@@ -686,7 +686,7 @@ impl eframe::App for FocusApp {
                     );
                     if connection {
                         ui.label(
-                            "엄격 모드에서 AI 연결이 끊기면, 연결될 때까지 Claude Desktop과 \
+                            "엄격 모드에서 AI 연결이 끊기면, 연결될 때까지 브라우저의 \
                              Claude·Anthropic 웹사이트 말고는 모든 앱과 웹사이트를 막습니다. 설정 탭의 \
                              AI 연결에서 동작하는 키를 넣고 \"적용\"을 누르면 몇 초 안에 풀립니다. 잠긴 \
                              동안에는 키를 바꾸는 것이 예약되지 않고 바로 적용됩니다.",
