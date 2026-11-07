@@ -7,8 +7,11 @@
 //!
 //! - After a real call of a [compared feature](COMPARED_PURPOSES) answers, [`after_call`]
 //!   draws a number; with the settings' share (`comparison_percent`, default 10%) it sends
-//!   the very same request to each of [`COMPARED_MODELS`] the real call did not use, on a
-//!   thread of its own, so the real answer is not delayed. The question is asked at that
+//!   the very same request to each of [`COMPARED_MODELS`], once each, on a thread of its
+//!   own, so the real answer is not delayed. The real answer itself is not used: whichever
+//!   model the settings choose, every sample holds one answer of each model, and
+//!   [`summarize`] compares every pair (the owner: "Opus, Sonnet, Haiku를 각각 한번 씩
+//!   호출하고 이를 바탕으로 서로 얼마나 일치하는지 matrix 만들라는 거지"). The question is asked at that
 //!   moment, so nothing (no screenshot, no prompt) has to be stored to ask it later, and the
 //!   API key never leaves the PC.
 //! - Those answers change nothing: they are only recorded ([`ComparisonRecord`]) in the
@@ -26,7 +29,7 @@ use std::collections::BTreeMap;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// The three sizes compared, the first being the reference ("성능 좋은 모델").
+/// The three sizes compared, largest first (the order of the rows and columns).
 pub const COMPARED_MODELS: [&str; 3] = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 
 /// The features whose questions are sampled (usage purposes; see `usage.rs`).
@@ -97,33 +100,25 @@ fn sampled() -> bool {
     hasher.finish() % 100 < u64::from(percent)
 }
 
-/// Called by [`ClaudeClient::send`] after a real call of `purpose` with `model` answered
-/// `response`: maybe ask the other compared models the same `body`, in the background.
-pub fn after_call(purpose: &str, model: &str, api_key: &str, body: &Value, response: &Value) {
+/// Called by [`ClaudeClient::send`] after a real call of `purpose` answered: maybe ask each
+/// compared model the same `body` once, in the background.
+pub fn after_call(purpose: &str, api_key: &str, body: &Value) {
     if !COMPARED_PURPOSES.contains(&purpose) || !sampled() {
         return;
     }
     let purpose = purpose.to_string();
-    let model = response["model"].as_str().unwrap_or(model).to_string();
     let api_key = api_key.to_string();
     let body = body.clone();
-    let response = response.clone();
     std::thread::spawn(move || {
         let mut answers = BTreeMap::new();
-        if COMPARED_MODELS.contains(&model.as_str()) {
-            answers.insert(model.clone(), answer_of(&purpose, Ok(&response)));
-        }
-        for other in COMPARED_MODELS {
-            if answers.contains_key(other) {
-                continue;
-            }
-            let client = ClaudeClient::new(api_key.clone(), other.to_string());
-            let reply = client.send(COMPARISON_PURPOSE, &copy_for(&body, other));
+        for model in COMPARED_MODELS {
+            let client = ClaudeClient::new(api_key.clone(), model.to_string());
+            let reply = client.send(COMPARISON_PURPOSE, &copy_for(&body, model));
             let answer = match &reply {
                 Ok(reply) => answer_of(&purpose, Ok(reply)),
                 Err(error) => answer_of(&purpose, Err(error.to_string())),
             };
-            answers.insert(other.to_string(), answer);
+            answers.insert(model.to_string(), answer);
         }
         crate::usage::record_comparison(ComparisonRecord {
             at: Utc::now(),
@@ -290,33 +285,34 @@ fn asked_of(purpose: &str, body: &Value) -> String {
     }
 }
 
-/// Responsibility: Hold how often one cheaper model agreed with the reference on one feature.
+/// Responsibility: Hold how often one model (the column) answered as another (the row) did
+/// on one feature.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelAgreement {
-    /// Samples where both the reference and this model answered.
+    /// Samples where both models answered.
     pub compared: usize,
     pub agreed: usize,
-    /// Disagreements where this model let through more than the reference (missed a
-    /// distraction, approved what the reference rejected).
+    /// Disagreements where the column model let through more than the row model (missed a
+    /// distraction, approved what the row model rejected).
     pub risky: usize,
-    /// Calls of this model that failed.
-    pub errors: usize,
 }
 
-/// Responsibility: Hold the comparison of one feature.
+/// Responsibility: Hold the comparison of one feature: every pair of compared models.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FeatureComparison {
     pub purpose: String,
     pub samples: usize,
     /// Its answers have a direction (lenience), so a difference can be the risky kind.
     pub has_direction: bool,
-    /// The other compared models (by id) against the reference, [`COMPARED_MODELS`][0].
-    pub by_model: BTreeMap<String, ModelAgreement>,
+    /// (row model, column model) -> how often the column model answered as the row model
+    /// did. Agreement is the same both ways; `risky` is not.
+    pub pairs: BTreeMap<(String, String), ModelAgreement>,
+    /// Model -> its calls that failed (left out of `pairs`).
+    pub errors: BTreeMap<String, usize>,
 }
 
-/// Count, per feature, how often each cheaper model agreed with the reference.
+/// Count, per feature, how often each compared model answered as each other one did.
 pub fn summarize(records: &[ComparisonRecord]) -> Vec<FeatureComparison> {
-    let reference = COMPARED_MODELS[0];
     let mut features: BTreeMap<String, FeatureComparison> = BTreeMap::new();
     for record in records {
         let feature = features
@@ -330,30 +326,43 @@ pub fn summarize(records: &[ComparisonRecord]) -> Vec<FeatureComparison> {
             .answers
             .values()
             .any(|answer| answer.lenience.is_some());
-        let reference_answer = record
-            .answers
-            .get(reference)
-            .filter(|answer| answer.key != "error");
-        for model in &COMPARED_MODELS[1..] {
-            let tally = feature.by_model.entry(model.to_string()).or_default();
-            let Some(answer) = record.answers.get(*model) else {
-                continue;
-            };
-            if answer.key == "error" {
-                tally.errors += 1;
-                continue;
-            }
-            let Some(reference_answer) = reference_answer else {
-                continue;
-            };
-            tally.compared += 1;
-            if answer.key == reference_answer.key {
-                tally.agreed += 1;
-            } else if let (Some(lenience), Some(reference_lenience)) =
-                (answer.lenience, reference_answer.lenience)
+        let answered = |model: &str| {
+            record
+                .answers
+                .get(model)
+                .filter(|answer| answer.key != "error")
+        };
+        for model in COMPARED_MODELS {
+            if record
+                .answers
+                .get(model)
+                .is_some_and(|answer| answer.key == "error")
             {
-                if lenience > reference_lenience {
-                    tally.risky += 1;
+                *feature.errors.entry(model.to_string()).or_default() += 1;
+            }
+        }
+        for row in COMPARED_MODELS {
+            for column in COMPARED_MODELS {
+                if row == column {
+                    continue;
+                }
+                let (Some(row_answer), Some(column_answer)) = (answered(row), answered(column))
+                else {
+                    continue;
+                };
+                let tally = feature
+                    .pairs
+                    .entry((row.to_string(), column.to_string()))
+                    .or_default();
+                tally.compared += 1;
+                if column_answer.key == row_answer.key {
+                    tally.agreed += 1;
+                } else if let (Some(column_lenience), Some(row_lenience)) =
+                    (column_answer.lenience, row_answer.lenience)
+                {
+                    if column_lenience > row_lenience {
+                        tally.risky += 1;
+                    }
                 }
             }
         }
@@ -442,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn agreement_and_risky_differences_are_counted_against_the_reference() {
+    fn every_pair_of_models_is_compared_both_ways() {
         let answer = |key: &str, lenience: Option<u8>| ComparedAnswer {
             key: key.into(),
             detail: String::new(),
@@ -468,13 +477,13 @@ mod tests {
                 answer("rejected", Some(0)),
                 answer("rejected", Some(0)),
             ),
-            // Haiku approves what Opus rejected (risky); Sonnet agrees.
+            // Haiku approves what Opus and Sonnet rejected.
             record(
                 answer("rejected", Some(0)),
                 answer("rejected", Some(0)),
                 answer("approved", Some(1)),
             ),
-            // Sonnet is stricter than Opus (a difference, not a risky one); Haiku failed.
+            // Sonnet is stricter than Opus; Haiku failed.
             record(
                 answer("approved", Some(1)),
                 answer("rejected", Some(0)),
@@ -484,13 +493,19 @@ mod tests {
         let summary = summarize(&records);
         assert_eq!(summary.len(), 1);
         assert_eq!(summary[0].samples, 3);
-        let sonnet = &summary[0].by_model["claude-sonnet-5-5"];
-        assert_eq!((sonnet.compared, sonnet.agreed, sonnet.risky), (3, 2, 0));
-        let haiku = &summary[0].by_model["claude-haiku-5-5"];
-        assert_eq!(
-            (haiku.compared, haiku.agreed, haiku.risky, haiku.errors),
-            (2, 1, 1, 1)
-        );
+        let pair = |row: &str, column: &str| {
+            let tally = &summary[0].pairs[&(row.to_string(), column.to_string())];
+            (tally.compared, tally.agreed, tally.risky)
+        };
+        let (opus, sonnet, haiku) = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5");
+        // Agreement is the same both ways; which one is looser is not.
+        assert_eq!(pair(opus, sonnet), (3, 2, 0));
+        assert_eq!(pair(sonnet, opus), (3, 2, 1));
+        assert_eq!(pair(opus, haiku), (2, 1, 1));
+        assert_eq!(pair(haiku, opus), (2, 1, 0));
+        assert_eq!(pair(sonnet, haiku), (2, 1, 1));
+        assert_eq!(summary[0].errors[haiku], 1);
+        assert!(!summary[0].errors.contains_key(opus));
         assert!(!disagrees(&records[0]) && disagrees(&records[1]));
     }
 

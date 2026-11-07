@@ -1005,7 +1005,7 @@ impl SettingsTab {
                 );
             });
             ui.horizontal(|ui| {
-                ui.label("모델 비교: 다른 모델에게도 물어볼 질문의 비율(%, 0 = 끔)");
+                ui.label("모델 비교: 세 모델에게 따로 물어볼 질문의 비율(%, 0 = 끔)");
                 ui.add(
                     egui::DragValue::new(&mut drafts.ai_focus.comparison_percent)
                         .range(0..=100)
@@ -1014,7 +1014,7 @@ impl SettingsTab {
             });
             ui.small(
                 "모델 비교는 창 검사, 변경 요청 심사, 할 일 고르기, 할 일 변경 심사, AI 비서의 질문 중 \
-                 이 비율만큼을 Opus, Sonnet, Haiku에게 똑같이 물어 답을 비교합니다. 비교하는 답은 \
+                 이 비율만큼을 Opus, Sonnet, Haiku에게 한 번씩 똑같이 물어 답을 비교합니다. 비교하는 답은 \
                  아무것도 바꾸지 않고, 결과는 통계 탭의 \"모델 비교\"에 나옵니다. 그 비용도 AI 사용량에 \
                  들어갑니다.",
             );
@@ -2310,11 +2310,11 @@ fn purpose_label(purpose: &str) -> (&str, &str) {
     }
 }
 
-/// How often Sonnet and Haiku answered as Opus did, per feature, from every user's sampled
-/// questions (`ai_focus_rule::comparison`), with the latest questions they answered
-/// differently.
+/// How often Opus, Sonnet and Haiku answered as each other did, per feature, from every
+/// user's sampled questions (`ai_focus_rule::comparison`), with the latest questions they
+/// answered differently.
 pub(crate) fn comparison_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
-    use ai_focus_rule::comparison::{disagrees, summarize, ComparisonRecord};
+    use ai_focus_rule::comparison::{disagrees, summarize, ComparisonRecord, COMPARED_MODELS};
     let mut records: Vec<ComparisonRecord> = snapshot
         .usage
         .values()
@@ -2323,11 +2323,12 @@ pub(crate) fn comparison_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
     records.sort_by_key(|record| record.at);
     crate::style::section(ui, "모델 비교");
     ui.small(
-        "질문 중 일부(설정 탭의 비율)를 Opus, Sonnet, Haiku에게 똑같이 물어, 싼 모델이 Opus와 같은 답을 \
-         하는지 셉니다. \"같음\"은 Opus와 같은 답의 비율입니다. \"위험\"은 싼 모델이 더 느슨하게 답한 \
-         비율입니다(Opus가 딴짓이라고 본 창을 할 일이라고 봄, Opus가 거절한 요청을 승인함). 할 일 \
-         고르기와 AI 비서는 답에 방향이 없어 \"위험\"을 세지 않습니다. 답이 달라도 둘 다 괜찮을 수 \
-         있으니, 아래의 예를 읽고 판단하세요.",
+        "질문 중 일부(설정 탭의 비율)를 Opus, Sonnet, Haiku에게 한 번씩 똑같이 묻고, 세 모델이 서로 \
+         같은 답을 했는지 셉니다. 설정에서 고른 모델과 상관없이 세 모델에게 모두 묻습니다. 표의 칸은 \
+         왼쪽 모델과 위쪽 모델이 같은 답을 한 비율입니다. \"느슨\"은 위쪽 모델이 왼쪽 모델보다 \
+         느슨하게 답한 비율입니다(왼쪽 모델이 딴짓이라고 본 창을 할 일이라고 봄, 왼쪽 모델이 거절한 \
+         요청을 승인함). 할 일 고르기와 AI 비서는 답에 방향이 없어 \"느슨\"을 세지 않습니다. 답이 \
+         달라도 둘 다 괜찮을 수 있으니, 아래의 예를 읽고 판단하세요.",
     );
     if records.is_empty() {
         ui.label("아직 비교한 질문이 없습니다.");
@@ -2351,42 +2352,59 @@ pub(crate) fn comparison_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
             )
         }
     };
-    egui::Grid::new("model_comparison")
-        .striped(true)
-        .num_columns(6)
-        .show(ui, |ui| {
-            for heading in [
-                "기능",
-                "질문 수",
-                "Sonnet 같음",
-                "Sonnet 위험",
-                "Haiku 같음",
-                "Haiku 위험",
-            ] {
-                ui.strong(heading);
-            }
-            ui.end_row();
-            for feature in summarize(&records) {
-                ui.label(purpose_label(&feature.purpose).0);
-                ui.label(feature.samples.to_string());
-                for model in ["claude-sonnet-5-5", "claude-haiku-5-5"] {
-                    let tally = feature.by_model.get(model).cloned().unwrap_or_default();
-                    let agreed = ui.label(percent(tally.agreed, tally.compared));
-                    if tally.errors > 0 {
-                        agreed.on_hover_text(format!(
-                            "실패한 질문 {}개는 세지 않았습니다",
-                            tally.errors
-                        ));
-                    }
-                    ui.label(if feature.has_direction {
-                        percent(tally.risky, tally.compared)
-                    } else {
-                        "-".to_string()
-                    });
+    for feature in summarize(&records) {
+        ui.add_space(6.0);
+        ui.strong(format!(
+            "{} — 질문 {}개",
+            purpose_label(&feature.purpose).0,
+            feature.samples
+        ));
+        egui::Grid::new(("model_comparison", feature.purpose.as_str()))
+            .striped(true)
+            .num_columns(COMPARED_MODELS.len() + 1)
+            .show(ui, |ui| {
+                ui.label("");
+                for column in COMPARED_MODELS {
+                    ui.strong(model_name(column));
                 }
                 ui.end_row();
-            }
-        });
+                for row in COMPARED_MODELS {
+                    ui.strong(model_name(row));
+                    for column in COMPARED_MODELS {
+                        if row == column {
+                            ui.weak("-");
+                            continue;
+                        }
+                        let tally = feature
+                            .pairs
+                            .get(&(row.to_string(), column.to_string()))
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut cell = percent(tally.agreed, tally.compared);
+                        if feature.has_direction && tally.compared > 0 {
+                            cell.push_str(&format!(
+                                " · 느슨 {:.0}%",
+                                tally.risky as f64 / tally.compared as f64 * 100.0
+                            ));
+                        }
+                        ui.label(cell);
+                    }
+                    ui.end_row();
+                }
+            });
+        let failed: Vec<String> = COMPARED_MODELS
+            .iter()
+            .filter_map(|model| {
+                feature
+                    .errors
+                    .get(*model)
+                    .map(|count| format!("{} {count}번", model_name(model)))
+            })
+            .collect();
+        if !failed.is_empty() {
+            ui.small(format!("실패한 질문(세지 않음): {}", failed.join(", ")));
+        }
+    }
     let differing: Vec<&ComparisonRecord> = records
         .iter()
         .rev()
