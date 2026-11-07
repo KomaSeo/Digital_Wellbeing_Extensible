@@ -71,14 +71,19 @@ impl BlockRule for GuardRule {
         processes
             .iter()
             .filter(|process| {
-                !machine::lockdown::spared(process, |name| self.settings.is_always_allowed(name))
+                !machine::lockdown::spared(process, |name| {
+                    self.settings.is_always_allowed(name)
+                        || machine::lockdown::is_claude_desktop(name)
+                })
             })
             .map(|process| BlockEvent::new(process, "업데이트하는 동안 모든 앱을 닫는 중"))
             .collect()
     }
 
     fn keeps(&self, process: &ProcessSnapshot) -> bool {
-        machine::lockdown::spared(process, |name| self.settings.is_always_allowed(name))
+        machine::lockdown::spared(process, |name| {
+            self.settings.is_always_allowed(name) || machine::lockdown::is_claude_desktop(name)
+        })
     }
 }
 

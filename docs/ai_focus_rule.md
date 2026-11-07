@@ -542,11 +542,12 @@ Other open windows (title only; judge each in `others`):
 - Enforcer의 규칙 `LockdownRule`이 사용자 세션의 프로그램을 모두 끕니다. 다음 프로그램만 남깁니다.
   - Windows가 돌아가는 데 꼭 필요한 프로그램과 이 앱(Enforcer의 `never_terminate`).
   - Windows 폴더(`C:\Windows`) 아래의 프로그램.
-  - Claude Desktop(`claude.exe`), Windows 설정(`systemsettings.exe`, 네트워크를 고칠 때), 웹 보기(`msedgewebview2.exe`), 보안 도우미, 작업 관리자(`LOCKDOWN_KEEPS`).
+  - Windows 설정(`systemsettings.exe`, 네트워크를 고칠 때), 웹 보기(`msedgewebview2.exe`), 보안 도우미, 작업 관리자(`LOCKDOWN_KEEPS`).
+  - AI 연결이 끊겨서 잠긴 경우에만: Claude Desktop(`claude.exe`, `Lockdown.claude_desktop_allowed`).
   - 설정의 "검사하지 않는 앱"(`always_allow`)과 브라우저 목록(`browsers`)의 프로그램.
 - AI 연결이 끊겨서 잠긴 경우, 브라우저는 끄지 않는 대신, 모니터가 Claude와 Anthropic 페이지가 아닌 탭을 모두 닫습니다(`close_always_blocked_sites`, `lockdown_allows_page`). 남기는 탭은 제목에 "Claude"나 "Anthropic"이 든 탭, 빈 새 탭(주소를 적기 위해), Google 로그인 페이지(Claude에 로그인하기 위해)입니다. 뒤쪽 창의 다른 탭은 최소화합니다.
 - 소유자가 Claude 웹사이트와 Claude Desktop을 예외로 하라고 했습니다. 키를 다시 연결하려면 Claude Console에서 새 키를 만들어야 하기 때문입니다.
-- 할 일을 기다리는 잠금, 컴퓨터 없이 하는 일의 잠금, 사용 중지의 잠금에서는 브라우저도 끕니다(`Lockdown.browsers_allowed`가 `false`). 이 잠금들은 Focus 앱의 버튼이나 보고로 풀리므로 웹사이트가 필요 없기 때문입니다. Claude Desktop, Windows가 돌아가는 데 필요한 프로그램, 이 앱, "검사하지 않는 앱"은 이 잠금에서도 남습니다.
+- 할 일을 기다리는 잠금, 컴퓨터 없이 하는 일의 잠금, 사용 중지의 잠금, 로그인이 필요한 잠금에서는 브라우저와 Claude Desktop도 끕니다(`Lockdown.browsers_allowed`와 `Lockdown.claude_desktop_allowed`가 `false`). 이 잠금들은 Focus 앱의 버튼이나 보고로 풀리므로 웹사이트가 필요 없기 때문입니다. Claude Desktop을 끄는 까닭은 Claude Desktop에도 웹을 보는 기능이 있어서, 잠금을 걸어 두고 Claude Desktop으로 웹을 볼 수 있기 때문입니다(소유자의 요청). Windows가 돌아가는 데 필요한 프로그램, 이 앱, "검사하지 않는 앱"은 이 잠금에서도 남습니다. Claude Desktop을 "검사하지 않는 앱"에 넣었으면 남습니다.
 - Linux에서는 agent의 "세션"이 사용자의 모든 프로세스(개발 도구 포함)이므로 프로그램을 끄지 않고, 상태와 탭 닫기만 동작합니다.
 
 **잠금에서 벗어나는 법.** 잠긴 동안에는 API 키의 변경이 예약되지 않고 바로 적용됩니다(`settings::put`의 `fix_now`). 모델이 문제(`UnknownModel`)이면 기본 모델과 다시 검사 모델의 변경도 바로 적용됩니다. 정기 확인은 두 모델이 모두 있는지 봅니다. 사용자는 Focus 앱의 설정 탭 → AI 연결에서 동작하는 키를 넣고 **적용**을 누릅니다. agent는 3초 안에 새 키를 확인하고, 키가 동작하면 잠금을 풉니다. 크레딧 문제는 Anthropic 웹사이트에서 크레딧을 채우면 30초 안에 풀립니다.

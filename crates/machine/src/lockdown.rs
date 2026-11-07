@@ -68,6 +68,11 @@ pub struct Lockdown {
     /// Browsers stay open with Claude and Anthropic pages only (to fix the key); otherwise
     /// they are closed like every other app.
     pub browsers_allowed: bool,
+    /// Claude Desktop stays open (to get help fixing the key). Only for a broken connection:
+    /// Claude Desktop can browse the web, so in the other locks it would be a way around
+    /// them (the owner's request).
+    #[serde(default)]
+    pub claude_desktop_allowed: bool,
 }
 
 /// The lockdown in force, if any. Only once the settings are protected: during setup
@@ -84,6 +89,7 @@ pub fn lockdown(
                 .to_string(),
             fix_now: Vec::new(),
             browsers_allowed: false,
+            claude_desktop_allowed: false,
         });
     }
     if !protected {
@@ -112,6 +118,7 @@ pub fn lockdown(
             },
             fix_now,
             browsers_allowed: true,
+            claude_desktop_allowed: true,
         });
     }
     let (cause, reason) = match task_lock? {
@@ -138,16 +145,16 @@ pub fn lockdown(
         reason,
         fix_now: Vec::new(),
         browsers_allowed: false,
+        claude_desktop_allowed: false,
     })
 }
 
-/// Programs a lockdown leaves running besides the enforcer's own never-terminate list: Claude
-/// Desktop, the Windows settings (network), the web view the Start menu and widgets use, and
-/// security helpers. Browsers stay too, but the monitor closes every tab except Claude and
-/// Anthropic pages (`ai_focus_rule::lockdown_allows_page`).
-pub const LOCKDOWN_KEEPS: [&str; 8] = [
-    // Claude Desktop, to get help fixing the connection (the owner's exception)
-    "claude.exe",
+/// Programs every lockdown leaves running besides the enforcer's own never-terminate list:
+/// the Windows settings (network), the web view the Start menu and widgets use, and security
+/// helpers. A broken connection also leaves Claude Desktop ([`CLAUDE_DESKTOP`]) and browsers,
+/// whose tabs the monitor closes except Claude and Anthropic pages
+/// (`ai_focus_rule::lockdown_allows_page`).
+pub const LOCKDOWN_KEEPS: [&str; 7] = [
     "systemsettings.exe",
     "shellhost.exe",
     "msedgewebview2.exe",
@@ -156,6 +163,14 @@ pub const LOCKDOWN_KEEPS: [&str; 8] = [
     "taskmgr.exe",
     "useroobebroker.exe",
 ];
+
+/// Claude Desktop's program (its helper processes have the same name).
+pub const CLAUDE_DESKTOP: &str = "claude.exe";
+
+/// Whether `process_name` is Claude Desktop.
+pub fn is_claude_desktop(process_name: &str) -> bool {
+    normalize_process_name(process_name) == CLAUDE_DESKTOP
+}
 
 /// Whether a lockdown leaves `process` running: the programs of [`LOCKDOWN_KEEPS`], the
 /// programs `kept` names (always allowed programs and browsers), and Windows' own programs
@@ -195,7 +210,8 @@ impl BlockRule for LockdownRule {
 
     fn description(&self) -> &str {
         "While the settings are protected and the AI key does not work, every app but the browsers \
-         (Claude pages only) and Claude Desktop is closed."
+         (Claude pages only) and Claude Desktop is closed; in the other locks (no task, away from \
+         the computer, stopped, login) browsers and Claude Desktop are closed too."
     }
 
     fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
@@ -212,6 +228,7 @@ impl BlockRule for LockdownRule {
                 !spared(process, |name| {
                     config.is_always_allowed(name)
                         || (lockdown.browsers_allowed && config.is_browser(name))
+                        || (lockdown.claude_desktop_allowed && is_claude_desktop(name))
                 })
             })
             .map(|process| {
@@ -220,12 +237,17 @@ impl BlockRule for LockdownRule {
             .collect()
     }
 
-    /// What a lockdown leaves running (Claude Desktop, Windows' own programs, always-allowed
-    /// programs, browsers) is never closed as another program's helper.
+    /// What a lockdown leaves running (Windows' own programs, always-allowed programs,
+    /// browsers, and Claude Desktop unless the lockdown in force closes it) is never closed as
+    /// another program's helper.
     fn keeps(&self, process: &ProcessSnapshot) -> bool {
         let config = self.settings.get();
+        let claude_desktop_kept =
+            (self.active)().is_none_or(|lockdown| lockdown.claude_desktop_allowed);
         spared(process, |name| {
-            config.is_always_allowed(name) || config.is_browser(name)
+            config.is_always_allowed(name)
+                || config.is_browser(name)
+                || (claude_desktop_kept && is_claude_desktop(name))
         })
     }
 }
@@ -343,7 +365,7 @@ mod tests {
         // Browsers stay; the monitor closes their tabs except Claude pages.
         assert_eq!(closed, ["steam.exe", "KakaoTalk.exe"]);
 
-        // Waiting for a task: browsers close too.
+        // Waiting for a task: browsers close too, and Claude Desktop (it can browse the web).
         let waiting = lockdown(true, &Connection::Working, Some(TaskLock::WaitingForTask));
         let rule = LockdownRule {
             active: Arc::new(move || waiting.clone()),
@@ -357,8 +379,28 @@ mod tests {
             .collect();
         assert_eq!(
             closed,
-            ["steam.exe", "chrome.exe", "KakaoTalk.exe", "KeePass.exe"]
+            [
+                "steam.exe",
+                "chrome.exe",
+                "Claude.exe",
+                "KakaoTalk.exe",
+                "KeePass.exe"
+            ]
         );
+        assert!(
+            !rule.keeps(&processes[2]),
+            "not kept as another program's helper either"
+        );
+        for task_lock in [
+            TaskLock::Stopped,
+            TaskLock::LoginRequired,
+            TaskLock::AwayFromComputer {
+                task: "잠자기".into(),
+            },
+        ] {
+            let locked = lockdown(true, &Connection::Working, Some(task_lock)).unwrap();
+            assert!(!locked.claude_desktop_allowed, "{:?}", locked.cause);
+        }
 
         let off = LockdownRule {
             active: Arc::new(|| None),
