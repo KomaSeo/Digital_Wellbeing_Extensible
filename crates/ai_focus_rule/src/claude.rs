@@ -55,7 +55,7 @@ impl ClaudeClient {
         let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
             .iter()
             .any(|prefix| base_url.starts_with(prefix));
-        let agent = ureq::AgentBuilder::new()
+        let agent = web_client::agent_builder()
             .timeout(Duration::from_secs(300))
             .try_proxy_from_env(!local)
             .build();

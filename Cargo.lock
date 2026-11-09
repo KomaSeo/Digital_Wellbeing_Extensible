@@ -166,6 +166,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tracing",
  "ureq",
+ "web_client",
  "windows-sys 0.59.0",
  "x11rb",
  "xcap",
@@ -2508,6 +2509,7 @@ dependencies = [
  "task_planner",
  "tracing",
  "ureq",
+ "web_client",
  "windows-sys 0.59.0",
 ]
 
@@ -4333,6 +4335,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tracing",
  "ureq",
+ "web_client",
  "windows-sys 0.59.0",
 ]
 
@@ -5058,6 +5061,17 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "web_client"
+version = "0.1.0"
+dependencies = [
+ "rustls",
+ "rustls-native-certs",
+ "tracing",
+ "ureq",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]

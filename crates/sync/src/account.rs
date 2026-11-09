@@ -287,7 +287,7 @@ pub fn http_transport(
     server_url: &str,
 ) -> impl FnMut(&AccountRequest) -> Result<AccountAnswer, String> {
     let url = format!("{}/account", server_url.trim_end_matches('/'));
-    let agent = ureq::AgentBuilder::new()
+    let agent = web_client::agent_builder()
         .timeout(std::time::Duration::from_secs(60))
         .build();
     move |request: &AccountRequest| match agent.post(&url).send_json(request) {

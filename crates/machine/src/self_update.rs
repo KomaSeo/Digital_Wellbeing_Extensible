@@ -238,7 +238,11 @@ pub fn newest_release(releases: &Value, current: &str) -> Option<Release> {
 /// `DW_GITHUB_TOKEN` (CI only) lifts GitHub's limit for requests without a login, which
 /// shared CI machines reach; a PC asks a few times a day at most and needs none.
 pub fn fetch_releases() -> Result<Value, String> {
-    let mut request = ureq::get(RELEASES_API)
+    let agent = web_client::agent_builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build();
+    let mut request = agent
+        .get(RELEASES_API)
         .set("User-Agent", "digital-wellbeing-updater")
         .set("Accept", "application/vnd.github+json");
     if let Some(token) = std::env::var("DW_GITHUB_TOKEN")
@@ -247,7 +251,7 @@ pub fn fetch_releases() -> Result<Value, String> {
     {
         request = request.set("Authorization", &format!("Bearer {token}"));
     }
-    match request.timeout(std::time::Duration::from_secs(60)).call() {
+    match request.call() {
         Ok(response) => response
             .into_json()
             .map_err(|error| format!("GitHub의 답을 읽지 못했습니다: {error}")),
@@ -276,9 +280,11 @@ pub fn download_setup(data_directory: &Path, release: &Release) -> Result<PathBu
     }
     let mut bytes = Vec::new();
     use std::io::Read;
-    ureq::get(&release.setup_url)
-        .set("User-Agent", "digital-wellbeing-updater")
+    web_client::agent_builder()
         .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .get(&release.setup_url)
+        .set("User-Agent", "digital-wellbeing-updater")
         .call()
         .map_err(|error| format!("설치 파일을 받지 못했습니다: {error}"))?
         .into_reader()

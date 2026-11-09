@@ -522,7 +522,7 @@ impl SyncClient {
 /// Send one envelope to `server_url` (`POST /sync`) and return the answer.
 pub fn http_transport(server_url: &str) -> impl FnMut(&Envelope) -> Result<Envelope, String> {
     let url = format!("{}/sync", server_url.trim_end_matches('/'));
-    let agent = ureq::AgentBuilder::new()
+    let agent = web_client::agent_builder()
         .timeout(std::time::Duration::from_secs(60))
         .build();
     move |sealed: &Envelope| match agent.post(&url).send_json(sealed) {

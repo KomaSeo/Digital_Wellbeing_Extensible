@@ -16,6 +16,7 @@ enforcer = { workspace = true }
 rule_ui = { workspace = true }
 egui = { workspace = true }
 ureq = { version = "2", features = ["json", "native-certs"] }
+web_client = { workspace = true }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 

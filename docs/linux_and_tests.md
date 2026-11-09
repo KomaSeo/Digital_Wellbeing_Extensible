@@ -92,8 +92,9 @@ xvfb-run -a cargo test --workspace
   - 평범한 할 일 추가를 받아들이는지는 진짜 AI로 확인하지 않습니다. 할 일 목록에 쉬기와 놀기가 들어가므로, 추가를 받아들이는지는 시험할 가치가 적기 때문입니다. 할 일 변경이 동작하는지(승인된 추가, 거절된 추가의 예약)는 가짜 Claude 서버로 하는 테스트가 확인합니다.
 - 테스트는 AI가 각 창에 내린 판정과 이유, AI가 고른 할 일과 그 이유, 예상 비용을 출력합니다(`--nocapture`).
 
-**운영체제의 인증서 저장소:** 프로그램은 Claude API에 HTTPS로 연결할 때 운영체제가 믿는 인증서(Windows는 Windows 인증서 저장소, Linux는 `/etc/ssl/certs`)를 믿습니다(`ureq`의 `native-certs` 기능).
-회사 네트워크나 이 개발 서버처럼 HTTPS를 중간에서 검사하는 네트워크는 자기 인증서를 운영체제에 등록해 둡니다. 프로그램이 자기 안에 든 인증서 목록만 믿으면, 이런 네트워크에서는 연결이 "invalid peer certificate: UnknownIssuer"로 실패합니다.
+**HTTPS 인증서 목록:** 프로그램은 HTTPS로 연결할 때(Claude API, GitHub의 업데이트, 동기화 서버) 상대 서버의 인증서가 믿을 만한 기관(루트 인증서)에서 왔는지 확인합니다. 프로그램은 두 루트 인증서 목록을 함께 믿습니다(`crates/web_client`).
+- **운영체제의 목록:** Windows는 Windows 인증서 저장소, Linux는 `/etc/ssl/certs`입니다. 회사 네트워크나 이 개발 서버처럼 HTTPS를 중간에서 검사하는 네트워크는 자기 인증서를 운영체제에 등록해 둡니다. 운영체제의 목록이 없으면 이런 네트워크에서는 연결이 "invalid peer certificate: UnknownIssuer"로 실패합니다.
+- **프로그램 안의 목록:** Mozilla가 관리하는 루트 인증서 목록입니다(`webpki-roots`). 새로 설치한 Windows는 루트 인증서를 조금만 갖고 있다가, Windows 자체의 HTTPS 기능(예: Edge)이 처음 필요로 할 때 나머지를 내려받습니다. 이 프로그램은 HTTPS를 Windows에 맡기지 않으므로 그 내려받기가 일어나지 않습니다. 그래서 운영체제의 목록만 믿던 rc.59까지는 새 PC에서 GitHub에 연결할 때 "UnknownIssuer"로 실패했습니다.
 
 **`DW_CLAUDE_API_URL`:** 이 환경 변수가 있으면 프로그램은 `https://api.anthropic.com` 대신 그 주소로 Claude를 부릅니다. 주소가 `127.0.0.1`이나 `localhost`이면 환경 변수의 프록시를 거치지 않습니다.
 Windows에서 agent의 환경 변수는 SYSTEM 서비스의 환경 변수이고, 이것은 관리자만 바꿀 수 있습니다. 그래서 일반 사용자가 이 값으로 판정을 바꿀 수는 없습니다.

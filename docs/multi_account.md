@@ -174,6 +174,7 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
 | `crates/machine/` | 여러 프로그램이 함께 쓰는 코드입니다. 파일 경로, 관리 대상 계정 설정(`MachineConfig`), 세션 번호, agent와 Focus 앱 사이의 통신(`user_api.rs`), 엄격 모드와 예약된 업데이트(`settings.rs`), 설정 파일을 설정 하나하나의 변경으로 나누고 변경의 방향을 정하는 코드(`setting_edits.rs`)가 있습니다. |
 | `crates/enforcer` | 개발자가 `set_process_filter`를 추가했습니다. agent는 이 함수로 자기 세션의 프로그램만 차단하게 만듭니다. `pattern.rs`는 항상 막을 프로그램과 항상 막을 웹사이트의 이름을 글자 그대로 또는 정규식으로 맞춰 봅니다(6.2절). |
 | `crates/ai_focus_rule` | 개발자가 읽기 전용 설정 저장소와 설정 편집 전용 화면 모드를 추가했습니다. |
+| `crates/web_client` | 모든 HTTPS 연결이 함께 쓰는 연결 설정입니다. Windows의 루트 인증서 목록과 프로그램 안의 목록을 함께 믿습니다([`linux_and_tests.md`](linux_and_tests.md)). |
 
 ---
 

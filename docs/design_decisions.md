@@ -1089,3 +1089,12 @@
   - 창 검사 지시문에 not_related의 뜻과 예(잠금 화면, 로그인·비밀번호 창, Windows 설정·업데이트 창, 설치 프로그램, 바탕 화면, 작업 표시줄, 알림, 파일 고르기 창, 음악 재생기·동기화 도구 같은 백그라운드 도구)를 적고, unsure는 "도움도 방해도 될 수 있는 창"에만 쓰게 했습니다. 예전에 on_task로 보라고 했던 음악 재생기와 동기화 도구도 not_related로 옮겼습니다.
   - not_related는 on_task와 똑같이 다룹니다: 차단하지 않고, 경고를 지우고, 윗단계 모델로 넘기지 않고, 15분 뒤에 다시 봅니다. 모델 비교에서도 on_task와 같은 답으로 셉니다.
   - 시험(실제 API): Haiku가 Windows 업데이트 설정 창과 OneDrive 창을 not_related로 판정해 Sonnet으로 넘기지 않았습니다.
+
+### 8.99 HTTPS 연결이 프로그램 안의 인증서 목록도 믿는다
+- **소유자 요청:** "https://api.github.com/repos/KomaSeo/Digital_Wellbeing_Extensible/releases?per_page=30: Connection Failed: tls connection init failed: invalid peer certificate: UnknownIssuer", "새 컴퓨터에서 업데이트 하려고 하니까 이렇게 뜨던데"
+- **소유자가 말한 이유:** 새 컴퓨터에서 업데이트가 되지 않았기 때문입니다.
+- **AI가 정한 세부:**
+  - 원인: 프로그램은 운영체제의 루트 인증서 목록만 믿었습니다. 새로 설치한 Windows는 루트 인증서를 Windows 자체의 HTTPS 기능이 처음 필요로 할 때 내려받는데, 이 프로그램은 HTTPS를 Windows에 맡기지 않아 GitHub의 루트 인증서(Sectigo의 USERTrust)가 목록에 없었습니다.
+  - 고친 것: 모든 HTTPS 연결(Claude API, GitHub의 업데이트, 동기화 서버)이 프로그램 안의 Mozilla 목록과 운영체제의 목록을 함께 믿습니다. 운영체제의 목록은 HTTPS를 중간에서 검사하는 네트워크 때문에 남겼습니다. 이 일을 새 묶음 `crates/web_client`가 맡습니다.
+  - 이미 설치된 새 PC는 rc.59의 업데이트 기능으로 이 버전을 받을 수 없을 수 있습니다. 그 PC에서는 Edge로 https://github.com 을 한 번 열어 Windows가 루트 인증서를 내려받게 하거나, 설치 파일을 릴리스 페이지에서 직접 받아 설치합니다.
+  - 시험: 프로그램 안의 목록에 USERTrust 루트 인증서 두 개가 있는지 확인하는 테스트를 더했습니다. 이 개발 환경은 HTTPS를 중간에서 검사하므로, 운영체제의 목록 없이 GitHub에 실제로 연결하는 시험은 할 수 없었습니다. 운영체제의 목록으로 Claude API에 연결되는 것은 확인했습니다.
