@@ -1,6 +1,7 @@
-//! Responsibility: Show what already happened (the Statistics tab): the timetable of a chosen
-//! period (`timetable.rs`), AI usage and cost, today's summary, finished to-dos, change
-//! requests with the AI's answers, and recent AI verdicts.
+//! Responsibility: Show what already happened (the Statistics tab), in two parts: the
+//! records (the next seven days, the timetable of a chosen period (`timetable.rs`), today's
+//! summary, finished to-dos, change requests with the AI's answers, recent AI verdicts) and
+//! the AI's cost (usage per feature, window-check steps, model comparison).
 
 use crate::{FocusApp, GREEN, RED};
 use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
@@ -11,19 +12,28 @@ use std::sync::atomic::Ordering;
 use task_planner::{PlannerStatus, WeekPlan};
 
 impl FocusApp {
-    /// The Statistics tab.
+    /// The Statistics tab, in two parts (the owner: "1. 시간표 + 앞으로 7일 + 할 일 통계 2.
+    /// API 값 관련 통계"): the records, and what the AI costs.
     pub(crate) fn statistics_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
         crate::style::section(ui, "통계");
-        ui.label(
-            "이 탭은 앞으로 7일 동안 일이 얼마나 남았는지와 지난 기록을 보여 줍니다. 설정이나 할 \
-             일은 여기서 바꾸지 않습니다.",
-        );
-        if let Some(planner) = status.planner.clone() {
-            self.week_ui(ui, &planner);
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.statistics_view,
+                StatisticsView::Records,
+                "시간표와 할 일",
+            );
+            ui.selectable_value(&mut self.statistics_view, StatisticsView::AiCost, "AI 비용");
+        });
+        match self.statistics_view {
+            StatisticsView::Records => self.records_ui(ui, status),
+            StatisticsView::AiCost => self.ai_cost_ui(ui, status),
         }
+    }
 
-        self.timetable.ui(ui, self.session);
-
+    /// What the AI costs: the usage per feature, how often a window check went to a larger
+    /// model, and how the models compare.
+    fn ai_cost_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
+        ui.label("AI를 부를 때 든 비용(추정)과, 창 검사가 윗단계 모델로 넘어간 횟수, 모델 비교를 보여 줍니다.");
         crate::style::section(ui, "AI 사용량");
         if let Some(cost) = status.ai_cost_today_usd {
             ui.label(if status.daily_budget_usd > 0.0 {
@@ -38,12 +48,26 @@ impl FocusApp {
         match self.settings.latest_snapshot() {
             Some(snapshot) => {
                 crate::settings::usage_ui(ui, &snapshot);
+                crate::settings::escalation_ui(ui, &snapshot);
                 crate::settings::comparison_ui(ui, &snapshot);
             }
             None => {
                 ui.label("agent에 연결하는 중…");
             }
         }
+    }
+
+    /// The records: the next seven days, the timetable, the to-dos, the recent verdicts.
+    fn records_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
+        ui.label(
+            "앞으로 7일 동안 일이 얼마나 남았는지와 지난 기록을 보여 줍니다. 설정이나 할 일은 여기서 \
+             바꾸지 않습니다.",
+        );
+        if let Some(planner) = status.planner.clone() {
+            self.week_ui(ui, &planner);
+        }
+
+        self.timetable.ui(ui, self.session);
 
         if let Some(planner) = status.planner.clone() {
             crate::style::section(ui, "할 일");
@@ -61,6 +85,7 @@ impl FocusApp {
                 Verdict::OnTask => (GREEN, "할 일에 맞음"),
                 Verdict::OffTask => (RED, "딴짓"),
                 Verdict::Unsure => (egui::Color32::GRAY, "애매함"),
+                Verdict::NotRelated => (egui::Color32::from_rgb(120, 150, 120), "관계없음(통과)"),
             };
             ui.horizontal_wrapped(|ui| {
                 ui.label(
@@ -81,6 +106,14 @@ impl FocusApp {
             });
         }
     }
+}
+
+/// Responsibility: Name the part of the Statistics tab shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum StatisticsView {
+    #[default]
+    Records,
+    AiCost,
 }
 
 impl FocusApp {

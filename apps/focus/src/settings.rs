@@ -2259,9 +2259,17 @@ fn purpose_label(purpose: &str) -> (&str, &str) {
             "창 검사(AI 검사)",
             "창을 검사할 때 먼저 묻는 모델(Haiku)이 화면 캡처와 창 제목을 봅니다",
         ),
+        "focus escalation sonnet" => (
+            "창 검사(Sonnet으로 넘김)",
+            "Haiku가 할 일과 관계있다고 보지 않은 창을 Sonnet이 다시 볼 때",
+        ),
+        "focus escalation opus" => (
+            "창 검사(Opus로 넘김)",
+            "Sonnet도 할 일과 관계있다고 보지 않은 창을 Opus가 다시 볼 때",
+        ),
         "focus escalation" => (
-            "창 검사(윗단계 모델)",
-            "아래 단계 모델이 할 일과 관계있다고 보지 않은 창을 Sonnet, 그다음 Opus가 다시 볼 때",
+            "창 검사(윗단계 모델, 예전 기록)",
+            "rc.54~rc.57: Sonnet과 Opus가 다시 본 창 검사를 나누지 않고 셈",
         ),
         "focus recheck" => (
             "창 다시 검사(싼 모델)",
@@ -2423,97 +2431,269 @@ pub(crate) fn comparison_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
         });
 }
 
-/// The AI usage of every user: in total, and per feature (today, the last seven days, this
-/// month), so the user can see which feature costs what.
-pub(crate) fn usage_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
-    let today = Local::now().date_naive();
-    let week_start = today - chrono::Duration::days(6);
-    let (mut today_calls, mut today_cost, mut month_calls, mut month_cost) = (0u64, 0.0, 0u64, 0.0);
-    // Per purpose: today, last seven days, this month.
-    let mut by_purpose: BTreeMap<String, [Totals; 3]> = BTreeMap::new();
-    for value in snapshot.usage.values() {
-        let log: UsageLog = from_value(value);
-        for (date, day) in &log.days {
-            let this_month = date.year() == today.year() && date.month() == today.month();
-            if *date == today {
-                today_calls += day.total.calls;
-                today_cost += day.total.cost_usd;
-            }
-            if this_month {
-                month_calls += day.total.calls;
-                month_cost += day.total.cost_usd;
-            }
-            for (purpose, totals) in &day.by_purpose {
-                let entry = by_purpose.entry(purpose.clone()).or_default();
-                if *date == today {
-                    entry[0].merge(totals);
-                }
-                if *date >= week_start {
-                    entry[1].merge(totals);
-                }
-                if this_month {
-                    entry[2].merge(totals);
-                }
-            }
+/// How often a window check was passed on from Haiku to Sonnet and from Sonnet to Opus, of
+/// every user (the owner: "창 검사에서 fallback이 얼마나 되었는지 알려주는 창도 띄워주도록").
+pub(crate) fn escalation_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
+    const FIRST: &str = "focus check";
+    const TO_SONNET: &str = "focus escalation sonnet";
+    const TO_OPUS: &str = "focus escalation opus";
+    const UNSPLIT: &str = "focus escalation";
+    let columns = UsageColumns::gather(snapshot);
+    crate::style::section(ui, "창 검사 단계");
+    ui.small(
+        "창 검사는 Haiku에게 먼저 묻습니다. Haiku가 할 일과 관계있다고 보지 않은 창(딴짓, 애매함, \
+         답에서 빠진 창)만 Sonnet에게 넘기고, Sonnet도 그렇게 보지 않은 창만 Opus에게 넘깁니다. 넘긴 \
+         비율이 높을수록 비용이 많이 듭니다. 비율은 Haiku 검사 수에 대한 비율입니다.",
+    );
+    let calls = |rows: &BTreeMap<String, Vec<Totals>>, purpose: &str| -> Vec<Totals> {
+        UsageColumns::column_totals(rows, Some(purpose))
+    };
+    let share = |part: u64, whole: u64| {
+        if whole == 0 {
+            format!("{part}번")
+        } else {
+            format!("{part}번 ({:.0}%)", part as f64 / whole as f64 * 100.0)
         }
-    }
-    ui.label(format!(
-        "오늘: {today_calls}번 호출, 약 ${today_cost:.2} · 이번 달: {month_calls}번 호출, 약 \
-         ${month_cost:.2}"
-    ));
-    if by_purpose.is_empty() {
-        return;
-    }
-    ui.strong("기능별 AI 비용(추정)");
-    let mut rows: Vec<(String, [Totals; 3])> = by_purpose.into_iter().collect();
-    rows.sort_by(|left, right| right.1[2].cost_usd.total_cmp(&left.1[2].cost_usd));
-    egui::Grid::new("usage_by_purpose")
+    };
+    // One row per day, newest first, and a row for the last 24 hours on top.
+    let mut table: Vec<(String, [Totals; 4])> = Vec::new();
+    let mut add_rows = |rows: &BTreeMap<String, Vec<Totals>>,
+                        labels: Vec<String>,
+                        sum_all: bool| {
+        let parts = [FIRST, TO_SONNET, TO_OPUS, UNSPLIT].map(|purpose| calls(rows, purpose));
+        let width = labels.len();
+        let mut lines: Vec<(String, [Totals; 4])> = (0..width)
+            .map(|column| {
+                (
+                    labels[column].clone(),
+                    [0, 1, 2, 3].map(|part| parts[part].get(column).cloned().unwrap_or_default()),
+                )
+            })
+            .collect();
+        if sum_all {
+            let mut summed: [Totals; 4] = Default::default();
+            for (_, line) in &lines {
+                for (sum, part) in summed.iter_mut().zip(line) {
+                    sum.merge(part);
+                }
+            }
+            lines = vec![("최근 24시간".to_string(), summed)];
+        }
+        table.extend(lines);
+    };
+    add_rows(
+        &columns.by_hour,
+        vec![String::new(); columns.hours.len()],
+        true,
+    );
+    add_rows(
+        &columns.by_day,
+        columns
+            .days
+            .iter()
+            .map(|date| date.format("%m-%d").to_string())
+            .collect(),
+        false,
+    );
+    egui::Grid::new("check_escalation")
         .striped(true)
-        .num_columns(7)
+        .num_columns(5)
         .show(ui, |ui| {
             for heading in [
-                "기능",
-                "오늘",
-                "최근 7일",
-                "이번 달",
-                "한 번에 평균",
-                "이번 달 비중",
-                "토큰(이번 달, 입력/출력)",
+                "기간",
+                "Haiku 검사",
+                "Sonnet으로 넘김",
+                "Opus로 넘김",
+                "창 검사 비용",
             ] {
                 ui.strong(heading);
             }
             ui.end_row();
-            for (purpose, [today_totals, week_totals, month_totals]) in &rows {
-                let (name, what) = purpose_label(purpose);
-                ui.label(name).on_hover_text(what);
-                let cell =
-                    |totals: &Totals| format!("${:.2} ({}번)", totals.cost_usd, totals.calls);
-                ui.label(cell(today_totals));
-                ui.label(cell(week_totals));
-                ui.label(cell(month_totals));
-                ui.label(if month_totals.calls > 0 {
-                    format!("${:.4}", month_totals.cost_usd / month_totals.calls as f64)
-                } else {
-                    "-".into()
-                });
-                ui.label(if month_cost > 0.0 {
-                    format!("{:.0}%", month_totals.cost_usd / month_cost * 100.0)
-                } else {
-                    "-".into()
-                });
+            for (label, [first, to_sonnet, to_opus, unsplit]) in &table {
+                ui.label(label);
+                ui.label(format!("{}번", first.calls));
+                ui.label(share(to_sonnet.calls, first.calls));
+                ui.label(share(to_opus.calls, first.calls));
                 ui.label(format!(
-                    "{} / {}",
-                    month_totals.input_tokens
-                        + month_totals.cache_read_tokens
-                        + month_totals.cache_write_tokens,
-                    month_totals.output_tokens
+                    "${:.2}",
+                    first.cost_usd + to_sonnet.cost_usd + to_opus.cost_usd + unsplit.cost_usd
                 ));
                 ui.end_row();
             }
         });
+    let unsplit: u64 = table.iter().skip(1).map(|(_, line)| line[3].calls).sum();
+    if unsplit > 0 {
+        ui.small(format!(
+            "rc.57까지는 Sonnet과 Opus가 다시 본 검사를 나누지 않고 셌습니다. 최근 7일의 그 기록 \
+             {unsplit}번은 넘김 칸에 넣지 않았습니다(비용에는 들어 있습니다)."
+        ));
+    }
+}
+
+/// Every user's usage in the last seven days (one column per local day) and in
+/// the last 24 hours (one column per hour), per feature; the newest first, so today shows
+/// without scrolling. The owner: "최근 7일을 하루하루
+/// 보여줘. 그래야 내가 하루 보고 하루 고치고 하루 보고 하루 고치고 하지" and "최근 24시간
+/// AI 사용량도 같은 포멧으로 보여줘".
+struct UsageColumns {
+    days: Vec<chrono::NaiveDate>,
+    hours: Vec<DateTime<Utc>>,
+    /// Feature -> totals per day, and per hour.
+    by_day: BTreeMap<String, Vec<Totals>>,
+    by_hour: BTreeMap<String, Vec<Totals>>,
+}
+
+impl UsageColumns {
+    fn gather(snapshot: &SettingsSnapshot) -> Self {
+        let today = Local::now().date_naive();
+        let days: Vec<chrono::NaiveDate> = (0..7)
+            .map(|back| today - chrono::Duration::days(back))
+            .collect();
+        let this_hour = ai_focus_rule::usage::start_of_hour(Utc::now());
+        let hours: Vec<DateTime<Utc>> = (0..24)
+            .map(|back| this_hour - chrono::Duration::hours(back))
+            .collect();
+        let mut by_day: BTreeMap<String, Vec<Totals>> = BTreeMap::new();
+        let mut by_hour: BTreeMap<String, Vec<Totals>> = BTreeMap::new();
+        for value in snapshot.usage.values() {
+            let log: UsageLog = from_value(value);
+            for (column, date) in days.iter().enumerate() {
+                for (purpose, totals) in log.day(*date).by_purpose {
+                    by_day
+                        .entry(purpose)
+                        .or_insert_with(|| vec![Totals::default(); days.len()])[column]
+                        .merge(&totals);
+                }
+            }
+            for (column, hour) in hours.iter().enumerate() {
+                let Some(bucket) = log.hours.get(hour) else {
+                    continue;
+                };
+                for (purpose, totals) in &bucket.by_purpose {
+                    by_hour
+                        .entry(purpose.clone())
+                        .or_insert_with(|| vec![Totals::default(); hours.len()])[column]
+                        .merge(totals);
+                }
+            }
+        }
+        Self {
+            days,
+            hours,
+            by_day,
+            by_hour,
+        }
+    }
+
+    /// What one feature (or all, `None`) cost in each column.
+    fn column_totals(rows: &BTreeMap<String, Vec<Totals>>, purpose: Option<&str>) -> Vec<Totals> {
+        let width = rows.values().next().map_or(0, Vec::len);
+        let mut sums = vec![Totals::default(); width];
+        for (row_purpose, totals) in rows {
+            if purpose.is_none_or(|wanted| wanted == row_purpose) {
+                for (sum, totals) in sums.iter_mut().zip(totals) {
+                    sum.merge(totals);
+                }
+            }
+        }
+        sums
+    }
+}
+
+/// One table of [`UsageColumns`]: a row per feature (most expensive first), a column per day or
+/// hour, and a total row and column. A cell shows the cost and the calls; its tooltip, the
+/// tokens and the average per call.
+fn usage_table(
+    ui: &mut egui::Ui,
+    id: &str,
+    headings: &[String],
+    rows: &BTreeMap<String, Vec<Totals>>,
+) {
+    if rows.is_empty() {
+        ui.label("AI를 부르지 않았습니다.");
+        return;
+    }
+    let sum = |totals: &[Totals]| {
+        let mut sum = Totals::default();
+        for column in totals {
+            sum.merge(column);
+        }
+        sum
+    };
+    let mut ordered: Vec<(&String, &Vec<Totals>)> = rows.iter().collect();
+    ordered.sort_by(|left, right| sum(right.1).cost_usd.total_cmp(&sum(left.1).cost_usd));
+    let cell = |ui: &mut egui::Ui, totals: &Totals| {
+        if totals.calls == 0 {
+            ui.weak("-");
+            return;
+        }
+        ui.label(format!("${:.2}\n{}번", totals.cost_usd, totals.calls))
+            .on_hover_text(format!(
+                "입력 {} 토큰(캐시 읽기 {}, 캐시 쓰기 {}) · 출력 {} 토큰 · 한 번에 평균 ${:.4}",
+                totals.input_tokens + totals.cache_read_tokens + totals.cache_write_tokens,
+                totals.cache_read_tokens,
+                totals.cache_write_tokens,
+                totals.output_tokens,
+                totals.cost_usd / totals.calls as f64
+            ));
+    };
+    egui::ScrollArea::horizontal().id_salt(id).show(ui, |ui| {
+        egui::Grid::new(id)
+            .striped(true)
+            .num_columns(headings.len() + 2)
+            .show(ui, |ui| {
+                ui.strong("기능");
+                for heading in headings {
+                    ui.strong(heading);
+                }
+                ui.strong("합계");
+                ui.end_row();
+                for (purpose, totals) in &ordered {
+                    let (name, what) = purpose_label(purpose);
+                    ui.label(name).on_hover_text(what);
+                    for column in totals.iter() {
+                        cell(ui, column);
+                    }
+                    cell(ui, &sum(totals));
+                    ui.end_row();
+                }
+                let all = UsageColumns::column_totals(rows, None);
+                ui.strong("합계");
+                for column in &all {
+                    cell(ui, column);
+                }
+                cell(ui, &sum(&all));
+                ui.end_row();
+            });
+    });
+}
+
+/// The AI usage of every user, per feature: the last seven days one day at a time, and the
+/// last 24 hours one hour at a time.
+pub(crate) fn usage_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
+    let columns = UsageColumns::gather(snapshot);
+    ui.strong("최근 7일 AI 사용량(하루씩, 추정)");
+    let weekday = |date: &chrono::NaiveDate| {
+        ["월", "화", "수", "목", "금", "토", "일"][date.weekday().num_days_from_monday() as usize]
+    };
+    let day_headings: Vec<String> = columns
+        .days
+        .iter()
+        .map(|date| format!("{} ({})", date.format("%m-%d"), weekday(date)))
+        .collect();
+    usage_table(ui, "usage_by_day", &day_headings, &columns.by_day);
+    ui.add_space(8.0);
+    ui.strong("최근 24시간 AI 사용량(한 시간씩, 추정)");
+    let hour_headings: Vec<String> = columns
+        .hours
+        .iter()
+        .map(|hour| hour.with_timezone(&Local).format("%d일 %H시").to_string())
+        .collect();
+    usage_table(ui, "usage_by_hour", &hour_headings, &columns.by_hour);
     ui.small(
         "비용은 토큰 수와 가격표로 계산한 추정입니다. 실제 청구액은 Claude Console에서 확인하세요. 기능 \
-         이름 위에 마우스를 올리면 그 기능이 언제 AI를 부르는지 나옵니다.",
+         이름 위에 마우스를 올리면 그 기능이 언제 AI를 부르는지, 칸 위에 올리면 토큰과 한 번에 \
+         평균 비용이 나옵니다. 표가 넓으면 옆으로 밉니다. 시간별 기록은 이 버전부터 쌓입니다.",
     );
 }
 

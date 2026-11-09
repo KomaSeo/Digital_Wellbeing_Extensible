@@ -285,7 +285,8 @@ impl FocusApp {
         ui.colored_label(
             RED,
             if locks {
-                "지금 할 일은 목록에 남고, 모든 앱과 웹사이트가 잠깁니다."
+                "지금 할 일은 목록에 남고, 다시 사용하기 전까지 이 앱이 화면을 덮습니다. 다른 앱은 \
+                 닫지 않습니다."
             } else {
                 "지금 할 일은 목록에 남습니다. 엄격 모드가 아니므로 앱과 웹사이트는 잠그지 않습니다."
             },
@@ -309,7 +310,7 @@ impl FocusApp {
             if self.todo_ui.without_review {
                 "엄격 모드가 아니므로 앱과 웹사이트는 잠그지 않습니다."
             } else {
-                "이 앱과 Windows 말고는 모든 앱과 웹사이트가 잠겨 있고, 차단 말고는 아무것도 하지 \
+                "이 앱이 화면을 덮고 있고(다른 앱은 닫지 않습니다), 차단 말고는 아무것도 하지 \
                  않습니다."
             }
         ));
@@ -368,7 +369,7 @@ impl FocusApp {
             if status.settings_protected {
                 ui.colored_label(
                     RED,
-                    "할 일을 받기 전까지는 이 앱과 Windows 말고는 모든 앱과 웹사이트가 잠깁니다.",
+                    "할 일을 받기 전까지는 이 앱이 화면을 덮습니다. 다른 앱은 닫지 않고 그대로 둡니다.",
                 );
             }
             // The user's situation in their own words, for the AI that picks (kept until
@@ -461,14 +462,13 @@ impl FocusApp {
                         }
                     }
                     None if !assignment.time_is_up(Utc::now()) => {
-                        if ui
+                        let pause = ui
                             .add_enabled(ready, egui::Button::new("일시 정지"))
                             .on_hover_text(
                                 "할 일의 시간을 멈춥니다. 다시 시작하면 멈춘 만큼 끝나는 시각이 \
                                  늦춰집니다. 일시 정지 중에도 창 검사는 계속됩니다.",
-                            )
-                            .clicked()
-                        {
+                            );
+                        if pause.clicked() {
                             self.send("pause_task", json!({}));
                         }
                     }

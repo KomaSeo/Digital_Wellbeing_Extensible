@@ -374,7 +374,7 @@ impl MonitorState {
                     action = format!("strike {strikes}/{needed}");
                 }
             }
-        } else if verdict.verdict == Verdict::OnTask && !is_browser {
+        } else if verdict.verdict.passes() && !is_browser {
             self.strikes.remove(&target);
         }
         if self.verdicts.len() >= VERDICT_LOG_CAPACITY {
@@ -630,7 +630,7 @@ impl MonitorState {
                 None => target.clone(),
             };
             match judgement.verdict {
-                Verdict::OnTask => {
+                Verdict::OnTask | Verdict::NotRelated => {
                     self.strikes.remove(&key);
                 }
                 Verdict::Unsure => {}
@@ -762,7 +762,7 @@ pub fn strip_browser_noise(title: &str) -> &str {
 
 /// How long a verdict stands before the window is judged again.
 fn recheck_after(config: &AiFocusConfig, verdict: Verdict) -> ChronoDuration {
-    if verdict == Verdict::OnTask && config.recheck_minutes > 0 {
+    if verdict.passes() && config.recheck_minutes > 0 {
         ChronoDuration::minutes(clamp_recheck_minutes(config.recheck_minutes))
     } else {
         ChronoDuration::seconds(clamp_interval(config.check_interval_secs))
@@ -914,6 +914,11 @@ impl FocusMonitor {
     }
 
     /// Seconds since the user last used the keyboard or mouse (`None`: unknown).
+    /// The window in front now (for the lock that covers the screen, `machine::lockdown`).
+    pub fn foreground_window(&self) -> Option<Foreground> {
+        self.desktop.foreground()
+    }
+
     pub fn idle_seconds(&self) -> Option<u64> {
         self.desktop.idle_seconds()
     }
@@ -1556,12 +1561,12 @@ impl FocusMonitor {
                 None => judgement,
             };
             // A listed window the answer left out is not settled either.
-            let settled = (!judge_front || merged.verdict == Verdict::OnTask)
+            let settled = (!judge_front || merged.verdict.passes())
                 && others.iter().all(|listed| {
                     merged
                         .others
                         .iter()
-                        .any(|other| other.id == listed.id && other.verdict == Verdict::OnTask)
+                        .any(|other| other.id == listed.id && other.verdict.passes())
                 });
             if !settled && tier + 1 < CHECK_TIERS.len() {
                 info!(
@@ -1590,12 +1595,12 @@ fn settle(mut earlier: Judgement, later: Judgement) -> Judgement {
     let mut others = later.others;
     for earlier_other in std::mem::take(&mut earlier.others) {
         match others.iter_mut().find(|other| other.id == earlier_other.id) {
-            Some(other) if earlier_other.verdict == Verdict::OnTask => *other = earlier_other,
+            Some(other) if earlier_other.verdict.passes() => *other = earlier_other,
             Some(_) => {}
             None => others.push(earlier_other),
         }
     }
-    let front = if earlier.verdict == Verdict::OnTask {
+    let front = if earlier.verdict.passes() {
         earlier
     } else {
         Judgement {
@@ -2820,8 +2825,20 @@ mod tests {
         assert!(monitor.state().process_blocks().is_empty());
         // All three find it off task: blocked, on Opus's word.
         set(&opus, Verdict::OffTask);
-        monitor.step(third + ChronoDuration::minutes(16));
+        let fourth = third + ChronoDuration::minutes(16);
+        monitor.step(fourth);
         assert_eq!(calls().len(), 3);
+        assert_eq!(monitor.state().process_blocks().len(), 1);
+        // A window Haiku finds not related (a sync tool) passes like one on task: no larger
+        // model is asked, nothing is blocked, and it is due again only after the on-task
+        // recheck time.
+        set(&haiku, Verdict::NotRelated);
+        *current.lock() = Some(foreground("OneDrive.exe", "OneDrive - 동기화 완료"));
+        let fifth = fourth + ChronoDuration::minutes(1);
+        monitor.step(fifth);
+        assert_eq!(calls(), [(haiku.clone(), false)]);
+        monitor.step(fifth + ChronoDuration::minutes(5));
+        assert!(calls().is_empty());
         assert_eq!(monitor.state().process_blocks().len(), 1);
     }
 

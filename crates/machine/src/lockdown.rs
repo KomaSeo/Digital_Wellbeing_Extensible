@@ -16,13 +16,18 @@
 //! the time the AI gives it is not spent away from the computer. Then browsers close too.
 //! Tasks done away from the computer no longer lock (the owner: "그래 할 일에서도 없애자"):
 //! the window checks judge what has to do with them.
+//! In every lock but a broken connection, nothing is closed: the Focus app covers every
+//! screen, always in front ([`Lockdown::covers_screen`]); only a program kept in front of it
+//! is closed, and every program when the Focus app does not run.
 //! Walkthrough (Korean): `docs/ai_focus_rule.md` 5.13.
 
 use ai_focus_rule::connection::{Connection, KeyProblem};
 use ai_focus_rule::AiFocusStore;
 use enforcer::{normalize_process_name, BlockEvent, BlockRule, ProcessSnapshot};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Responsibility: Name why every app is locked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +69,12 @@ pub struct Lockdown {
     /// Browsers stay open with Claude and Anthropic pages only (to fix the key); otherwise
     /// they are closed like every other app.
     pub browsers_allowed: bool,
+    /// The Focus app covers every screen, always in front, and no program is closed (the
+    /// owner: "앱이나 웹사이트를 도륙내는 대신에, digital wellbeing focus앱이 전체화면으로
+    /// 전환되게 만들고 항상 맨 앞으로 나오게"). Every lock but a broken connection, which
+    /// needs the browser to fix the key.
+    #[serde(default)]
+    pub covers_screen: bool,
 }
 
 /// The lockdown in force, if any. Only once the settings are protected: during setup
@@ -80,6 +91,7 @@ pub fn lockdown(
                 .to_string(),
             fix_now: Vec::new(),
             browsers_allowed: false,
+            covers_screen: true,
         });
     }
     if !protected {
@@ -108,6 +120,7 @@ pub fn lockdown(
             },
             fix_now,
             browsers_allowed: true,
+            covers_screen: false,
         });
     }
     let (cause, reason) = match task_lock? {
@@ -127,6 +140,7 @@ pub fn lockdown(
         reason,
         fix_now: Vec::new(),
         browsers_allowed: false,
+        covers_screen: true,
     })
 }
 
@@ -172,14 +186,86 @@ pub fn spared(process: &ProcessSnapshot, kept: impl Fn(&str) -> bool) -> bool {
     })
 }
 
-/// Responsibility: Ask the enforcer to close every program a lockdown does not spare.
+/// The Focus app's program: while it runs, a lock that covers the screen closes nothing but
+/// a program held in front of it.
+pub const FOCUS_APP: &str = "digital-wellbeing-focus.exe";
+
+/// How long a program may stay in front of the covering Focus app before it is closed.
+pub const COVER_GRACE: Duration = Duration::from_secs(5);
+
+/// The program in front: process id and name.
+pub type ForegroundSource = Arc<dyn Fn() -> Option<(u32, String)> + Send + Sync>;
+
+/// Responsibility: Ask the enforcer to close what a lockdown does not allow: while the Focus
+/// app covers the screen, only a program kept in front of it for [`COVER_GRACE`]; otherwise
+/// (a broken connection, or the Focus app is not running) every program the lockdown does
+/// not spare.
 pub struct LockdownRule {
     /// The lockdown in force now.
-    pub active: Arc<dyn Fn() -> Option<Lockdown> + Send + Sync>,
-    pub settings: AiFocusStore,
+    active: Arc<dyn Fn() -> Option<Lockdown> + Send + Sync>,
+    settings: AiFocusStore,
     /// Close programs. Off on Linux, where the agent's "session" is every process of the
     /// user, the developer's tools included.
-    pub closes_programs: bool,
+    closes_programs: bool,
+    foreground: ForegroundSource,
+    /// A program in front of the covering Focus app, and since when.
+    in_front_since: Mutex<Option<(u32, Instant)>>,
+}
+
+impl LockdownRule {
+    pub fn new(
+        active: Arc<dyn Fn() -> Option<Lockdown> + Send + Sync>,
+        settings: AiFocusStore,
+        closes_programs: bool,
+        foreground: ForegroundSource,
+    ) -> Self {
+        Self {
+            active,
+            settings,
+            closes_programs,
+            foreground,
+            in_front_since: Mutex::new(None),
+        }
+    }
+
+    /// The last resort while the Focus app covers the screen: a program the lockdown does not
+    /// spare that has stayed in front (Alt+Tab, a window kept on top) for [`COVER_GRACE`].
+    fn held_in_front(
+        &self,
+        processes: &[ProcessSnapshot],
+        config: &ai_focus_rule::AiFocusConfig,
+        lockdown: &Lockdown,
+    ) -> Vec<BlockEvent> {
+        let mut in_front_since = self.in_front_since.lock();
+        let Some((process_id, _)) = (self.foreground)() else {
+            *in_front_since = None;
+            return Vec::new();
+        };
+        let Some(process) = processes
+            .iter()
+            .find(|process| process.pid == process_id)
+            .filter(|process| !spared(process, |name| config.is_always_allowed(name)))
+        else {
+            *in_front_since = None;
+            return Vec::new();
+        };
+        match *in_front_since {
+            Some((front, since)) if front == process_id => {
+                if since.elapsed() >= COVER_GRACE {
+                    *in_front_since = None;
+                    return vec![BlockEvent::new(
+                        process,
+                        format!(
+                            "모든 앱이 잠긴 동안 Focus 앱을 가리고 앞에 있어서 닫음: {}",
+                            lockdown.reason
+                        ),
+                    )];
+                }
+            }
+            _ => *in_front_since = Some((process_id, Instant::now())),
+        }
+        Vec::new()
+    }
 }
 
 impl BlockRule for LockdownRule {
@@ -193,8 +279,9 @@ impl BlockRule for LockdownRule {
 
     fn description(&self) -> &str {
         "While the settings are protected and the AI key does not work, every app but the browsers \
-         (Claude pages only) is closed, Claude Desktop included; in the other locks (no task, \
-         stopped, login) browsers are closed too."
+         (Claude pages only) is closed, Claude Desktop included. In the other locks (no task, \
+         stopped, login) the Focus app covers the screen and only a program kept in front of it \
+         is closed (every program, when the Focus app is not running)."
     }
 
     fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
@@ -202,9 +289,16 @@ impl BlockRule for LockdownRule {
             return Vec::new();
         }
         let Some(lockdown) = (self.active)() else {
+            *self.in_front_since.lock() = None;
             return Vec::new();
         };
         let config = self.settings.get();
+        let focus_app_runs = processes
+            .iter()
+            .any(|process| normalize_process_name(&process.name) == FOCUS_APP);
+        if lockdown.covers_screen && focus_app_runs {
+            return self.held_in_front(processes, &config, &lockdown);
+        }
         processes
             .iter()
             .filter(|process| {
@@ -293,11 +387,12 @@ mod tests {
             },
             None,
         );
-        let rule = LockdownRule {
-            active: Arc::new(move || locked.clone()),
-            settings: AiFocusStore::in_memory(config),
-            closes_programs: true,
-        };
+        let rule = LockdownRule::new(
+            Arc::new(move || locked.clone()),
+            AiFocusStore::in_memory(config),
+            true,
+            Arc::new(|| None),
+        );
         let processes = [
             process("steam.exe", r"C:\Program Files (x86)\Steam\steam.exe"),
             process(
@@ -336,13 +431,15 @@ mod tests {
             "not kept as another program's helper either"
         );
 
-        // Waiting for a task: browsers close too.
+        // Waiting for a task while the Focus app does not run (nothing covers the screen):
+        // everything closes as before, browsers too.
         let waiting = lockdown(true, &Connection::Working, Some(TaskLock::WaitingForTask));
-        let rule = LockdownRule {
-            active: Arc::new(move || waiting.clone()),
-            settings: AiFocusStore::in_memory(AiFocusConfig::default()),
-            closes_programs: true,
-        };
+        let rule = LockdownRule::new(
+            Arc::new(move || waiting.clone()),
+            AiFocusStore::in_memory(AiFocusConfig::default()),
+            true,
+            Arc::new(|| None),
+        );
         let closed: Vec<String> = rule
             .evaluate(&processes)
             .into_iter()
@@ -359,11 +456,83 @@ mod tests {
             ]
         );
 
-        let off = LockdownRule {
-            active: Arc::new(|| None),
-            settings: AiFocusStore::in_memory(AiFocusConfig::default()),
-            closes_programs: true,
-        };
+        let off = LockdownRule::new(
+            Arc::new(|| None),
+            AiFocusStore::in_memory(AiFocusConfig::default()),
+            true,
+            Arc::new(|| None),
+        );
         assert!(off.evaluate(&processes).is_empty());
+    }
+
+    #[test]
+    fn while_the_focus_app_covers_the_screen_only_a_program_held_in_front_is_closed() {
+        let waiting = lockdown(true, &Connection::Working, Some(TaskLock::WaitingForTask));
+        assert!(waiting.as_ref().is_some_and(|locked| locked.covers_screen));
+        let broken = lockdown(
+            true,
+            &Connection::Broken {
+                problem: KeyProblem::NoKey,
+                detail: String::new(),
+            },
+            None,
+        );
+        assert!(broken.is_some_and(|locked| !locked.covers_screen));
+        let front: Arc<Mutex<Option<(u32, String)>>> = Arc::new(Mutex::new(None));
+        let shown = Arc::clone(&front);
+        let rule = LockdownRule::new(
+            Arc::new(move || waiting.clone()),
+            AiFocusStore::in_memory(AiFocusConfig::default()),
+            true,
+            Arc::new(move || shown.lock().clone()),
+        );
+        let with_id = |pid: u32, name: &str, exe: &str| ProcessSnapshot {
+            pid,
+            name: name.into(),
+            exe: Some(exe.into()),
+        };
+        let processes = [
+            with_id(
+                10,
+                "digital-wellbeing-focus.exe",
+                r"C:\Program Files\DigitalWellbeing\digital-wellbeing-focus.exe",
+            ),
+            with_id(11, "steam.exe", r"C:\Program Files (x86)\Steam\steam.exe"),
+            with_id(
+                12,
+                "WINWORD.EXE",
+                r"C:\Program Files\Microsoft Office\WINWORD.EXE",
+            ),
+            with_id(13, "explorer.exe", r"C:\Windows\explorer.exe"),
+        ];
+        let in_front = |process_id: u32, name: &str| {
+            *front.lock() = Some((process_id, name.to_string()));
+        };
+        let closed = |rule: &LockdownRule| -> Vec<String> {
+            rule.evaluate(&processes)
+                .into_iter()
+                .map(|event| event.process_name)
+                .collect()
+        };
+        // The Focus app in front: nothing is closed, Word and Steam stay open behind it.
+        in_front(10, "digital-wellbeing-focus.exe");
+        assert!(closed(&rule).is_empty());
+        // Steam comes in front: not closed at once ...
+        in_front(11, "steam.exe");
+        assert!(closed(&rule).is_empty());
+        // ... but once it has stayed in front for the grace time, it alone is closed.
+        *rule.in_front_since.lock() = Some((11, Instant::now() - COVER_GRACE));
+        assert_eq!(closed(&rule), ["steam.exe"]);
+        // Another program in front starts its own grace time.
+        in_front(12, "WINWORD.EXE");
+        assert!(closed(&rule).is_empty());
+        // Windows' own programs (the taskbar) are never closed.
+        in_front(13, "explorer.exe");
+        *rule.in_front_since.lock() = Some((13, Instant::now() - COVER_GRACE));
+        assert!(closed(&rule).is_empty());
+        // Without the Focus app nothing covers the screen: everything closes as before.
+        let without_focus_app = &processes[1..];
+        let events = rule.evaluate(without_focus_app);
+        assert_eq!(events.len(), 2, "Steam and Word");
     }
 }

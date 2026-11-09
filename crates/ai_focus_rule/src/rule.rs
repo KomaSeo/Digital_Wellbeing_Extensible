@@ -567,6 +567,9 @@ impl AiFocusRule {
                         Verdict::OnTask => (egui::Color32::from_rgb(80, 170, 90), "on task"),
                         Verdict::OffTask => (egui::Color32::from_rgb(200, 80, 80), "off task"),
                         Verdict::Unsure => (egui::Color32::GRAY, "unsure"),
+                        Verdict::NotRelated => {
+                            (egui::Color32::from_rgb(120, 150, 120), "not related")
+                        }
                     };
                     ui.horizontal_wrapped(|ui| {
                         ui.label(

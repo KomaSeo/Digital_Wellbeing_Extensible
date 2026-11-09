@@ -18,7 +18,7 @@ pub enum TrayCommand {
 }
 
 #[cfg(windows)]
-pub use imp::{activate_existing, show_window, start};
+pub use imp::{activate_existing, own_window, show_window, start};
 
 /// Whether this build has a tray icon (closing the window then hides it).
 pub const AVAILABLE: bool = cfg!(windows);
@@ -241,6 +241,12 @@ mod imp {
                 bring_to_front(window_handle);
             }
         }
+    }
+
+    /// This process's window titled `title`.
+    pub fn own_window(title: &str) -> Option<HWND> {
+        // SAFETY: a Win32 window lookup.
+        unsafe { find(title, std::process::id(), false) }
     }
 
     /// If another Focus app already runs (perhaps hidden in the tray), show its window and

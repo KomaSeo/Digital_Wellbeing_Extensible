@@ -12,7 +12,7 @@
 
 use crate::config::AiFocusConfig;
 use crate::store::JsonStore;
-use chrono::{Local, NaiveDate};
+use chrono::{DateTime, DurationRound, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -22,6 +22,14 @@ use tracing::warn;
 
 /// Days kept in the file (a little over two months, so "this month" and "last month" work).
 const DAYS_KEPT: usize = 62;
+/// Hours kept in the file: two days, so the last 24 hours are always there.
+const HOURS_KEPT: usize = 48;
+
+/// `time` with its minutes and seconds dropped: the hour it falls in.
+pub fn start_of_hour(time: DateTime<Utc>) -> DateTime<Utc> {
+    time.duration_trunc(chrono::Duration::hours(1))
+        .unwrap_or(time)
+}
 /// Model comparisons kept in the file, newest last ([`crate::comparison`]).
 const COMPARISONS_KEPT: usize = 400;
 
@@ -129,21 +137,39 @@ pub struct DayUsage {
 pub struct UsageLog {
     /// Local date (`YYYY-MM-DD`) -> usage; the oldest days are dropped.
     pub days: BTreeMap<NaiveDate, DayUsage>,
+    /// The start of each hour (UTC) -> usage in that hour, for the last [`HOURS_KEPT`] hours
+    /// (the statistics' last 24 hours, the owner: "최근 24시간 AI 사용량도 같은 포멧으로").
+    pub hours: BTreeMap<DateTime<Utc>, DayUsage>,
     /// Sampled questions asked of every compared model, oldest first; the file goes to the
     /// sync server with the usage, so every PC's samples add up.
     pub comparisons: Vec<crate::comparison::ComparisonRecord>,
 }
 
 impl UsageLog {
-    fn add(&mut self, date: NaiveDate, purpose: &str, usage: &TokenUsage, cost: f64) {
-        let day = self.days.entry(date).or_default();
-        day.total.add(usage, cost);
-        day.by_purpose
-            .entry(purpose.to_string())
-            .or_default()
-            .add(usage, cost);
+    fn add(
+        &mut self,
+        date: NaiveDate,
+        hour: DateTime<Utc>,
+        purpose: &str,
+        usage: &TokenUsage,
+        cost: f64,
+    ) {
+        for bucket in [
+            self.days.entry(date).or_default(),
+            self.hours.entry(hour).or_default(),
+        ] {
+            bucket.total.add(usage, cost);
+            bucket
+                .by_purpose
+                .entry(purpose.to_string())
+                .or_default()
+                .add(usage, cost);
+        }
         while self.days.len() > DAYS_KEPT {
             self.days.pop_first();
+        }
+        while self.hours.len() > HOURS_KEPT {
+            self.hours.pop_first();
         }
     }
 
@@ -181,10 +207,12 @@ impl UsageRecorder {
 
     pub fn record(&self, purpose: &str, model: &str, usage: &TokenUsage) {
         let cost = usage.cost_usd(model);
-        let today = Local::now().date_naive();
+        let now = Utc::now();
+        let today = now.with_timezone(&Local).date_naive();
+        let hour = start_of_hour(now);
         if let Err(error) = self
             .store
-            .update(|log| log.add(today, purpose, usage, cost))
+            .update(|log| log.add(today, hour, purpose, usage, cost))
         {
             warn!("could not save token usage: {error}");
         }
@@ -342,18 +370,28 @@ mod tests {
     }
 
     #[test]
-    fn old_days_are_dropped() {
+    fn old_days_and_hours_are_dropped() {
         let mut log = UsageLog::default();
         let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        for day_offset in 0..70 {
+        let first_hour = start_of_hour(Utc::now());
+        for offset in 0..70 {
             log.add(
-                start + chrono::Duration::days(day_offset),
+                start + chrono::Duration::days(offset),
+                first_hour + chrono::Duration::hours(offset),
                 "focus check",
                 &TokenUsage::default(),
-                0.0,
+                0.1,
             );
         }
         assert_eq!(log.days.len(), DAYS_KEPT);
         assert!(!log.days.contains_key(&start));
+        assert_eq!(log.hours.len(), HOURS_KEPT);
+        let newest = first_hour + chrono::Duration::hours(69);
+        assert_eq!(log.hours[&newest].by_purpose["focus check"].calls, 1);
+        assert!(!log.hours.contains_key(&first_hour));
+        // The hour key survives the file (a JSON object key).
+        let written = serde_json::to_string(&log).unwrap();
+        let read: UsageLog = serde_json::from_str(&written).unwrap();
+        assert_eq!(read.hours.len(), HOURS_KEPT);
     }
 }

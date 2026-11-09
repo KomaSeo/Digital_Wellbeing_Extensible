@@ -78,8 +78,8 @@ pub struct ComparedAnswer {
     #[serde(default)]
     pub detail: String,
     /// How much the answer lets through, where that has a direction: a window check's
-    /// on_task 2, unsure 1, off_task 0; a review's approval 1, rejection 0. An answer that lets
-    /// through more than the reference's is the risky kind of difference.
+    /// on_task and not_related 2, unsure 1, off_task 0; a review's approval 1, rejection 0. An
+    /// answer that lets through more than the reference's is the risky kind of difference.
     #[serde(default)]
     pub lenience: Option<u8>,
 }
@@ -184,7 +184,7 @@ pub fn answer_of(purpose: &str, reply: Result<&Value, String>) -> ComparedAnswer
             let verdict = text("verdict");
             ComparedAnswer {
                 lenience: match verdict.as_str() {
-                    "on_task" => Some(2),
+                    "on_task" | "not_related" => Some(2),
                     "unsure" => Some(1),
                     "off_task" => Some(0),
                     _ => None,
@@ -355,7 +355,7 @@ pub fn summarize(records: &[ComparisonRecord]) -> Vec<FeatureComparison> {
                     .entry((row.to_string(), column.to_string()))
                     .or_default();
                 tally.compared += 1;
-                if column_answer.key == row_answer.key {
+                if same_decision(column_answer, row_answer) {
                     tally.agreed += 1;
                 } else if let (Some(column_lenience), Some(row_lenience)) =
                     (column_answer.lenience, row_answer.lenience)
@@ -370,11 +370,19 @@ pub fn summarize(records: &[ComparisonRecord]) -> Vec<FeatureComparison> {
     features.into_values().collect()
 }
 
+/// The two answers decide the same: the same answer, or answers that let through as much
+/// (a window on task and one not related both pass).
+fn same_decision(first: &ComparedAnswer, second: &ComparedAnswer) -> bool {
+    first.key == second.key || (first.lenience.is_some() && first.lenience == second.lenience)
+}
+
 /// Whether the models in `record` did not all give the same answer.
 pub fn disagrees(record: &ComparisonRecord) -> bool {
-    let mut keys = record.answers.values().map(|answer| &answer.key);
-    let first = keys.next();
-    keys.any(|key| Some(key) != first)
+    let mut answers = record.answers.values();
+    let Some(first) = answers.next() else {
+        return false;
+    };
+    answers.any(|answer| !same_decision(answer, first))
 }
 
 #[cfg(test)]
@@ -507,6 +515,38 @@ mod tests {
         assert_eq!(summary[0].errors[haiku], 1);
         assert!(!summary[0].errors.contains_key(opus));
         assert!(!disagrees(&records[0]) && disagrees(&records[1]));
+    }
+
+    #[test]
+    fn a_window_on_task_and_one_not_related_are_the_same_decision() {
+        let window = |verdict: &str| {
+            answer_of(
+                "focus check",
+                Ok(&reply(json!({
+                    "verdict": verdict, "reason": "r", "channel": "", "search_pattern": "",
+                    "others": []
+                }))),
+            )
+        };
+        let record = ComparisonRecord {
+            at: Utc::now(),
+            purpose: "focus check".into(),
+            asked: String::new(),
+            answers: [
+                ("claude-opus-5-5".to_string(), window("on_task")),
+                ("claude-sonnet-5-5".to_string(), window("not_related")),
+                ("claude-haiku-5-5".to_string(), window("unsure")),
+            ]
+            .into(),
+        };
+        let summary = summarize(std::slice::from_ref(&record));
+        let pair = |row: &str, column: &str| {
+            let tally = &summary[0].pairs[&(row.to_string(), column.to_string())];
+            (tally.compared, tally.agreed)
+        };
+        assert_eq!(pair("claude-opus-5-5", "claude-sonnet-5-5"), (1, 1));
+        assert_eq!(pair("claude-opus-5-5", "claude-haiku-5-5"), (1, 0));
+        assert!(disagrees(&record), "Haiku is unsure");
     }
 
     #[test]

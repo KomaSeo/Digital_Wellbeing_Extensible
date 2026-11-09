@@ -122,12 +122,19 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     enforcer.register_rule(list_rule.rule());
     enforcer.register_rule(ai_rule.rule());
     // Protected settings and a broken AI connection: every app but the browsers (Claude pages
-    // only, see the monitor) and Claude Desktop is closed until the key works again.
-    enforcer.register_rule(Arc::new(LockdownRule {
-        active: Arc::clone(&lockdown_now),
-        settings: ai_store.clone(),
-        closes_programs: cfg!(windows),
-    }));
+    // only, see the monitor) is closed until the key works again. The other locks close
+    // nothing while the Focus app covers the screen, but a program kept in front of it.
+    let front_monitor = Arc::clone(&monitor);
+    enforcer.register_rule(Arc::new(LockdownRule::new(
+        Arc::clone(&lockdown_now),
+        ai_store.clone(),
+        cfg!(windows),
+        Arc::new(move || {
+            front_monitor
+                .foreground_window()
+                .map(|front| (front.pid, front.process_name))
+        }),
+    )));
     let probe_store = ai_store.clone();
     let probe_planner = Arc::clone(&planner_cell);
     thread::spawn(move || {

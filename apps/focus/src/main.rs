@@ -22,6 +22,7 @@
 
 mod assistant;
 mod block_prompt;
+mod cover;
 mod elevate;
 mod help;
 mod login;
@@ -190,6 +191,10 @@ struct FocusApp {
     /// brings the window up with [`block_prompt::ExtensionPrompt`].
     seen_offer: Option<Option<String>>,
     extension_prompt: Option<block_prompt::ExtensionPrompt>,
+    /// Covers every screen while everything is locked.
+    cover: cover::Cover,
+    /// The part of the Statistics tab shown.
+    statistics_view: statistics::StatisticsView,
 }
 
 impl FocusApp {
@@ -266,6 +271,8 @@ impl FocusApp {
             block_prompt: None,
             seen_offer: None,
             extension_prompt: None,
+            cover: cover::Cover::default(),
+            statistics_view: statistics::StatisticsView::default(),
         }
     }
 
@@ -538,10 +545,27 @@ impl eframe::App for FocusApp {
             let shared_state = self.shared.lock();
             (shared_state.status.clone(), shared_state.message.clone())
         };
-        if tray::AVAILABLE && context.input(|input| input.viewport().close_requested()) {
-            // Keep running in the tray; "Quit" in the tray menu ends the app.
-            context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        // While everything is locked, the window covers every screen (in place of closing
+        // every program), with the Work tab and the lock's reason in front.
+        let covers = matches!(
+            &status,
+            Some(Ok(current_status)) if current_status
+                .lockdown
+                .as_ref()
+                .is_some_and(|lockdown| lockdown.covers_screen)
+        );
+        if self.cover.follow(context, TITLE, covers) {
+            self.tab = Tab::Work;
+        }
+        if context.input(|input| input.viewport().close_requested()) {
+            if self.cover.covering() {
+                // It cannot be closed or hidden while it covers the screen.
+                context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            } else if tray::AVAILABLE {
+                // Keep running in the tray; "Quit" in the tray menu ends the app.
+                context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
         }
         if self.open_settings.swap(false, Ordering::SeqCst) {
             self.tab = Tab::Settings;
@@ -678,7 +702,15 @@ impl eframe::App for FocusApp {
                     style::notice(
                         ui,
                         style::Tone::Error,
-                        format!("모든 앱과 웹사이트가 잠겨 있습니다. {}", lockdown.reason),
+                        if lockdown.covers_screen {
+                            format!(
+                                "모든 앱과 웹사이트가 잠겨 있습니다(이 앱이 화면을 덮고, 다른 앱은 \
+                                 닫지 않고 그대로 둡니다). {}",
+                                lockdown.reason
+                            )
+                        } else {
+                            format!("모든 앱과 웹사이트가 잠겨 있습니다. {}", lockdown.reason)
+                        },
                     );
                     let connection = matches!(
                         lockdown.cause,
