@@ -401,9 +401,9 @@ YouTube는 강의를 볼 때도 쓰고 딴짓을 할 때도 씁니다. 그래서
 **창 검사는 싼 모델부터 차례로 묻습니다** (`run_judge`, `CHECK_TIERS`, `settle`). 소유자가 "HAIKU --> SONNET --> OPUS 방식(하위 단계에서 허락 안해주면 다음 단계에서 허락 확인. 하위 단계에서 허락 하면 다음 단계 넘어가지 않고 유지)"을 묻고, 창 검사에만 쓰기로 정했습니다("창 검사 2번으로 해보고 너가 몇 번 시험 해보고 그 이후에 괜찮으면 넣어줘", "심사는 건들지 말자 일단").
 1. 모든 창 검사(처음 보는 창이든, 다시 검사할 시각이 된 창이든)는 Claude Haiku 5.5에게 먼저 묻습니다.
 2. Haiku가 할 일과 관계있음(`on_task`)이라고 본 창은 그 판정으로 확정합니다. 다음 모델에게 묻지 않습니다.
-3. Haiku가 딴짓(`off_task`)으로 본 창이 하나라도 있으면(할 일과 관계없음(`not_related`)은 `on_task`처럼 확정입니다), 같은 화면 캡처와 같은 내용으로 Claude Sonnet 5.5에게 묻습니다. 함께 묻는 뒤쪽 창의 판정이 빠져 있어도 Sonnet에게 묻습니다. Sonnet이 딴짓이나 애매함(`unsure`)으로 본 창은 Claude Opus 5.5가 판정하고, 그 판정을 따릅니다.
-   - Haiku가 애매함으로 본 창은 넘기지 않고 Haiku의 판정으로 둡니다. 애매함은 차단하지 않고, 검사 간격(기본 60초) 뒤에 다시 Haiku부터 검사합니다. 소유자가 "unsure이면 haiku에서 멈추자. 그리고 60초 뒤에 다시 검사하자. 결국 unsure라는 건 off_task인지 on_task인지 확실하지 않다는 거잖아."라고 해서 rc.65부터 이렇게 바뀌었습니다.
-   - Sonnet의 애매함은 지금처럼 Opus에게 넘깁니다. Sonnet이 애매하다고 본 창은 Opus가 대개 할 일과 관계있다고 보아 15분 동안 다시 묻지 않으므로, Sonnet의 애매함을 그대로 두고 1분마다 Haiku와 Sonnet에게 다시 묻는 것보다 쌉니다.
+3. Haiku가 딴짓(`off_task`)으로 본 창이 하나라도 있으면, 같은 화면 캡처와 같은 내용으로 Claude Sonnet 5.5에게 묻습니다. 함께 묻는 뒤쪽 창의 판정이 빠져 있어도 Sonnet에게 묻습니다. Sonnet이 딴짓으로 본 창은 Claude Opus 5.5가 판정하고, 그 판정을 따릅니다.
+   - **딴짓일 때만 다음 모델에게 넘깁니다.** 할 일과 관계있음(`on_task`), 할 일과 관계없음(`not_related`), 애매함(`unsure`)은 그 모델의 판정으로 확정합니다(`goes_up`). 소유자가 "unsure이면 haiku에서 멈추자. 그리고 60초 뒤에 다시 검사하자. 결국 unsure라는 건 off_task인지 on_task인지 확실하지 않다는 거잖아."라고 한 뒤 "방해일 떄만 다음 단계로로 하자"고 정해서 rc.65부터 이렇게 바뀌었습니다. 예전에는 애매함도 다음 모델에게 넘겼습니다.
+   - 애매함은 차단하지 않고 경고도 쌓지 않습니다. 검사 간격(`check_interval_secs`, 기본 60초) 뒤에 다시 Haiku부터 검사합니다.
 4. 창마다 따로 확정합니다. 앞 모델이 할 일과 관계있다고 본 창은 뒤 모델이 다르게 답해도 앞 모델의 판정을 씁니다(`settle`).
 5. 그래서 딴짓 판정과 차단은 언제나 세 모델이 모두 관계있다고 보지 않은 창에만 걸립니다. 반대로 셋 중 하나라도 관계있다고 보면 허락됩니다. 이 방식은 Opus 혼자 판정할 때보다 느슨할 수 있습니다. 모델 비교(5.19절)의 "느슨" 비율이 그 정도를 보여 줍니다.
 6. 어느 모델의 호출이 실패하면 다음 모델이 묻습니다. 다만 키가 거부되거나 API가 모델을 모르는 실패는 AI 연결이 끊긴 것으로 기록합니다(5.13절).
@@ -863,8 +863,8 @@ let rule_uis = vec![list_rule.ui(), ai_rule.ui()];
 | `verdict_is_discarded_when_access_is_granted_during_the_check` | 판정하는 동안 허용이 승인되면, 모니터가 그 판정을 버린다(다시 차단하지 않는다). |
 | `grant_lifts_a_long_title_block_and_its_tab_stays_open` | 긴 제목의 탭도 허용이 차단을 풀고, 허용된 탭은 닫히지 않는다. |
 | `a_window_without_a_verdict_is_judged_at_once` | 판정 기록이 없는 창은 처음 보인 확인에서 바로 판정된다. 판정이 유효한 창으로 돌아가면 Claude를 부르지 않는다. |
-| `a_window_goes_to_a_larger_model_only_while_none_finds_it_on_task` | 창 검사는 Haiku에게 먼저 묻고, Haiku가 할 일과 관계있다고 보거나 애매하다고 보면 끝낸다(애매함은 검사 간격 뒤에 다시 Haiku부터). Haiku가 딴짓이면 Sonnet, Sonnet이 딴짓이나 애매함이면 Opus에게 묻고, 하나라도 관계있다고 보면 차단하지 않는다. 셋 다 `off_task`면 차단한다. 설정의 기본 모델과 다시 검사 모델은 쓰지 않는다. |
-| `a_later_model_decides_only_the_windows_the_earlier_did_not_find_on_task` | 앞 모델이 할 일과 관계있다고 본 창은 그 판정을 그대로 쓰고, 나머지 창만 뒤 모델의 판정을 쓴다. |
+| `a_window_goes_to_a_larger_model_only_while_each_finds_it_off_task` | 창 검사는 Haiku에게 먼저 묻고, 딴짓일 때만 Sonnet, 그다음 Opus에게 넘긴다. 애매함은 그 모델에서 멈추고 차단하지 않으며, 검사 간격 뒤에 다시 Haiku부터 검사한다. 셋 다 `off_task`면 차단한다. 설정의 기본 모델과 다시 검사 모델은 쓰지 않는다. |
+| `a_later_model_decides_only_the_windows_the_earlier_found_off_task` | 앞 모델이 할 일과 관계있다고 본 창은 그 판정을 그대로 쓰고, 나머지 창만 뒤 모델의 판정을 쓴다. |
 | `verdicts_come_due_again` | `on_task` 판정은 `recheck_minutes` 뒤에, `unsure` 판정은 `check_interval_secs` 뒤에 다시 판정할 때가 된다. 할 일이 바뀌면 모든 판정 기록이 지워진다. |
 | `no_screenshot_while_a_private_app_is_visible_behind` | 비공개 앱이 뒤에 보이기만 해도 화면 캡처를 보내지 않는다. |
 | `saved_blocks_are_resumed_after_a_restart` | 저장된 차단을 새 agent가 이어서 적용한다. |

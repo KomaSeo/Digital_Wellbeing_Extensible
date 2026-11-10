@@ -1484,14 +1484,12 @@ impl FocusMonitor {
     }
 
     /// Ask the judge about the front window (when `judge_front`) and `others`, the models of
-    /// [`CHECK_TIERS`] in turn, cheapest first, with the same screenshot. A window a model
-    /// finds on task is settled; the windows it finds off task or unsure go to the next
-    /// model, whose verdict counts for them (the owner: Haiku, then Sonnet, then Opus, "하위
-    /// 단계에서 허락 안해주면 다음 단계에서 허락 확인. 하위 단계에서 허락 하면 다음 단계
-    /// 넘어가지 않고 유지"). A window the first model (Haiku) finds unsure is settled too: it
-    /// is judged again after the check interval (the owner: "unsure이면 haiku에서 멈추자.
-    /// 그리고 60초 뒤에 다시 검사하자"). A failed call, other than a broken key or an unknown
-    /// model, passes the question on too.
+    /// [`CHECK_TIERS`] in turn, cheapest first, with the same screenshot. Only the windows a
+    /// model finds off task go to the next model, whose verdict counts for them (the owner:
+    /// Haiku, then Sonnet, then Opus, "하위 단계에서 허락 안해주면 다음 단계에서 허락 확인";
+    /// then "방해일 떄만 다음 단계로로 하자"). Every other verdict stands; an unsure window is
+    /// judged again after the check interval. A failed call, other than a broken key or an
+    /// unknown model, passes the question on too.
     fn run_judge(
         &self,
         config: &AiFocusConfig,
@@ -1562,19 +1560,13 @@ impl FocusMonitor {
                 Some(earlier) => settle(earlier, judgement),
                 None => judgement,
             };
-            // The first model's "unsure" stands until the next check: asking Haiku again in a
-            // minute costs little. A larger model's "unsure" still goes up, because Opus often
-            // settles such a window for the recheck time, cheaper than asking Haiku and
-            // Sonnet every minute.
-            let stands =
-                |verdict: Verdict| verdict.passes() || (tier == 0 && verdict == Verdict::Unsure);
             // A listed window the answer left out is not settled either.
-            let settled = (!judge_front || stands(merged.verdict))
+            let settled = (!judge_front || !goes_up(merged.verdict))
                 && others.iter().all(|listed| {
                     merged
                         .others
                         .iter()
-                        .any(|other| other.id == listed.id && stands(other.verdict))
+                        .any(|other| other.id == listed.id && !goes_up(other.verdict))
                 });
             if !settled && tier + 1 < CHECK_TIERS.len() {
                 info!(
@@ -1595,6 +1587,12 @@ impl FocusMonitor {
     }
 }
 
+/// A verdict the next model of [`CHECK_TIERS`] is asked about: only "off task" (the owner:
+/// "방해일 떄만 다음 단계로로 하자"). On task, not related and unsure stand.
+fn goes_up(verdict: Verdict) -> bool {
+    verdict == Verdict::OffTask
+}
+
 /// The models a window check asks in turn, cheapest first ([`FocusMonitor::run_judge`]).
 pub const CHECK_TIERS: [&str; 3] = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
 
@@ -1603,12 +1601,12 @@ fn settle(mut earlier: Judgement, later: Judgement) -> Judgement {
     let mut others = later.others;
     for earlier_other in std::mem::take(&mut earlier.others) {
         match others.iter_mut().find(|other| other.id == earlier_other.id) {
-            Some(other) if earlier_other.verdict.passes() => *other = earlier_other,
+            Some(other) if !goes_up(earlier_other.verdict) => *other = earlier_other,
             Some(_) => {}
             None => others.push(earlier_other),
         }
     }
-    let front = if earlier.verdict.passes() {
+    let front = if !goes_up(earlier.verdict) {
         earlier
     } else {
         Judgement {
@@ -2769,7 +2767,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_goes_to_a_larger_model_only_while_none_finds_it_on_task() {
+    fn a_window_goes_to_a_larger_model_only_while_each_finds_it_off_task() {
         let [haiku, sonnet, opus] = CHECK_TIERS.map(str::to_string);
         let shared = Arc::new(ModelJudges {
             verdicts: Mutex::new(HashMap::from([
@@ -2829,11 +2827,17 @@ mod tests {
         assert!(calls().is_empty(), "judged again before the check interval");
         monitor.step(unsure + ChronoDuration::seconds(61));
         assert_eq!(calls(), [(haiku.clone(), false)]);
-        // Haiku off task, Sonnet unsure, Opus on task: Sonnet's "unsure" goes on to Opus,
-        // who decides; no block.
+        // Haiku off task, Sonnet unsure: Sonnet's "unsure" stands too; Opus is not asked,
+        // nothing is blocked.
         set(&haiku, Verdict::OffTask);
         set(&sonnet, Verdict::Unsure);
-        let third = unsure + ChronoDuration::minutes(16);
+        let sonnet_unsure = unsure + ChronoDuration::minutes(16);
+        monitor.step(sonnet_unsure);
+        assert_eq!(calls(), [(haiku.clone(), false), (sonnet.clone(), true)]);
+        assert!(monitor.state().process_blocks().is_empty());
+        // Haiku and Sonnet off task, Opus on task: Opus decides; no block.
+        set(&sonnet, Verdict::OffTask);
+        let third = sonnet_unsure + ChronoDuration::minutes(16);
         monitor.step(third);
         assert_eq!(
             calls(),
@@ -2845,7 +2849,6 @@ mod tests {
         );
         assert!(monitor.state().process_blocks().is_empty());
         // All three find it off task: blocked, on Opus's word.
-        set(&sonnet, Verdict::OffTask);
         set(&opus, Verdict::OffTask);
         let fourth = third + ChronoDuration::minutes(16);
         monitor.step(fourth);
@@ -2865,7 +2868,7 @@ mod tests {
     }
 
     #[test]
-    fn a_later_model_decides_only_the_windows_the_earlier_did_not_find_on_task() {
+    fn a_later_model_decides_only_the_windows_the_earlier_found_off_task() {
         let other = |id: usize, verdict: Verdict| OtherVerdict {
             id,
             verdict,
@@ -2876,7 +2879,11 @@ mod tests {
             reason: "earlier front".into(),
             channel: String::new(),
             search_pattern: String::new(),
-            others: vec![other(0, Verdict::OnTask), other(1, Verdict::OffTask)],
+            others: vec![
+                other(0, Verdict::OnTask),
+                other(1, Verdict::OffTask),
+                other(2, Verdict::Unsure),
+            ],
         };
         let later = Judgement {
             verdict: Verdict::OffTask,
@@ -2894,6 +2901,11 @@ mod tests {
                     verdict: Verdict::OnTask,
                     reason: "later 1".into(),
                 },
+                OtherVerdict {
+                    id: 2,
+                    verdict: Verdict::OffTask,
+                    reason: "later 2".into(),
+                },
             ],
         };
         let settled = settle(earlier, later);
@@ -2909,6 +2921,8 @@ mod tests {
         };
         assert_eq!(by_id(0), (Verdict::OnTask, "earlier 0".to_string()));
         assert_eq!(by_id(1), (Verdict::OnTask, "later 1".to_string()));
+        // An earlier "unsure" stands like "on task": only "off task" goes up.
+        assert_eq!(by_id(2), (Verdict::Unsure, "earlier 2".to_string()));
     }
 
     #[test]
