@@ -467,13 +467,14 @@ pub fn winget_upgrade(program: &str) -> (UpdateOutcome, String) {
             "winget 이름의 모양이 아닙니다".into(),
         );
     }
-    let Some(winget) = winget_path() else {
-        return (
-            UpdateOutcome::Failed,
-            "winget을 찾지 못했습니다. Microsoft Store의 '앱 설치 관리자'(App Installer)가 \
-             필요합니다"
-                .into(),
-        );
+    let winget = match winget_path() {
+        Ok(winget) => winget,
+        Err(diagnosis) => {
+            return (
+                UpdateOutcome::Failed,
+                format!("서비스가 winget을 찾지 못했습니다 ({diagnosis})"),
+            )
+        }
     };
     let child = Command::new(&winget)
         .args([
@@ -567,35 +568,151 @@ pub fn outcome_of(code: Option<i32>, output: String) -> (UpdateOutcome, String) 
     }
 }
 
-/// The newest winget of the App Installer package (the service has no user profile, so
-/// winget is not on its PATH).
+/// The App Installer package's publisher id, the end of its folder names.
+const APP_INSTALLER_PUBLISHER: &str = "8wekyb3d8bbwe";
+
+/// The winget of the newest App Installer package. The service has no user profile, so winget
+/// is not on its PATH: the packages come from the WindowsApps folder and from Windows' own list
+/// (`Get-AppxPackage -AllUsers`, which also knows packages installed on another drive). On
+/// failure, says what was looked at.
 #[cfg(windows)]
-fn winget_path() -> Option<PathBuf> {
+fn winget_path() -> Result<PathBuf, String> {
     let program_files = std::env::var_os("ProgramW6432")
         .or_else(|| std::env::var_os("ProgramFiles"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
-    let version_of = |name: &str| -> Vec<u32> {
-        name.split('_')
-            .nth(1)
-            .unwrap_or_default()
-            .split('.')
-            .map(|part| part.parse().unwrap_or(0))
-            .collect()
-    };
-    fs::read_dir(program_files.join("WindowsApps"))
-        .ok()?
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let wanted = name.starts_with("Microsoft.DesktopAppInstaller_")
-                && name.ends_with("__8wekyb3d8bbwe")
-                && (name.contains("_x64_") || name.contains("_arm64_"));
-            let winget = entry.path().join("winget.exe");
-            (wanted && winget.exists()).then(|| (version_of(&name), winget))
+    let apps_folder = program_files.join("WindowsApps");
+    let mut notes = Vec::new();
+    let mut packages: Vec<PathBuf> = Vec::new();
+    match fs::read_dir(&apps_folder) {
+        Ok(entries) => packages.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| is_app_installer_folder(path)),
+        ),
+        Err(error) => notes.push(format!("{}을 읽지 못함: {error}", apps_folder.display())),
+    }
+    match installed_app_installers() {
+        Ok(locations) => packages.extend(locations),
+        Err(error) => notes.push(format!("Windows의 앱 목록을 읽지 못함: {error}")),
+    }
+    newest_winget(packages).map_err(|searched| {
+        notes.insert(0, searched);
+        notes.join("; ")
+    })
+}
+
+/// The install folders of App Installer for every account, as Windows lists them.
+#[cfg(windows)]
+fn installed_app_installers() -> Result<Vec<PathBuf>, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let output = std::process::Command::new(
+        system_root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
+    )
+    .args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller | \
+         ForEach-Object { $_.InstallLocation }",
+    ])
+    .stdin(std::process::Stdio::null())
+    .creation_flags(CREATE_NO_WINDOW)
+    .output()
+    .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(short_output(&output.stdout, &output.stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
+/// An App Installer package's own folder (`Microsoft.DesktopAppInstaller_<version>_<cpu>__<publisher>`),
+/// not its bundle or language folders.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_app_installer_folder(path: &Path) -> bool {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .is_some_and(|name| {
+            name.starts_with("Microsoft.DesktopAppInstaller_")
+                && name.ends_with(&format!("__{APP_INSTALLER_PUBLISHER}"))
         })
-        .max_by(|first, second| first.0.cmp(&second.0))
-        .map(|(_, winget)| winget)
+}
+
+/// The version in a package folder's name, for ordering (`1.29.380.0` -> [1, 29, 380, 0]).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn package_version(path: &Path) -> Vec<u32> {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
+        .split('_')
+        .nth(1)
+        .unwrap_or_default()
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0))
+        .collect()
+}
+
+/// The winget of the newest of `packages` that has one; otherwise, which folders were searched.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn newest_winget(mut packages: Vec<PathBuf>) -> Result<PathBuf, String> {
+    packages.sort();
+    packages.dedup();
+    packages.sort_by_key(|package| std::cmp::Reverse(package_version(package)));
+    if let Some(winget) = packages.iter().find_map(|package| winget_in(package)) {
+        return Ok(winget);
+    }
+    let names: Vec<String> = packages
+        .iter()
+        .map(|package| package.display().to_string())
+        .collect();
+    Err(if names.is_empty() {
+        "앱 설치 관리자 폴더를 찾지 못함".into()
+    } else {
+        format!("앱 설치 관리자 폴더 [{}]에 winget이 없음", names.join(", "))
+    })
+}
+
+/// The winget program inside one App Installer package folder: the program its manifest names
+/// for the `winget.exe` command, else a `winget.exe` in the folder or one level below.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn winget_in(package: &Path) -> Option<PathBuf> {
+    let from_manifest = fs::read_to_string(package.join("AppxManifest.xml"))
+        .ok()
+        .and_then(|manifest| winget_executable_in_manifest(&manifest))
+        .map(|executable| package.join(executable));
+    let below = fs::read_dir(package)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path().join("winget.exe"));
+    from_manifest
+        .into_iter()
+        .chain(std::iter::once(package.join("winget.exe")))
+        .chain(below)
+        .find(|candidate| candidate.is_file())
+}
+
+/// The `Executable` of the manifest entry that gives the `winget.exe` command (the attribute
+/// nearest before `Alias="winget.exe"`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn winget_executable_in_manifest(manifest: &str) -> Option<String> {
+    let alias = manifest.find("Alias=\"winget.exe\"")?;
+    let attribute = "Executable=\"";
+    let start = manifest[..alias].rfind(attribute)? + attribute.len();
+    let length = manifest[start..].find('"')?;
+    let executable = manifest[start..start + length].trim();
+    (!executable.is_empty() && !executable.contains("..")).then(|| executable.to_string())
 }
 
 /// The last few meaningful lines of a program's output (winget draws progress bars).
@@ -686,6 +803,53 @@ mod tests {
         assert!(!is_program_id("Kakao.KakaoTalk --uninstall"));
         assert!(!is_program_id("\"x\""));
         assert!(!is_program_id(""));
+    }
+
+    #[test]
+    fn winget_is_found_through_the_manifest_or_the_folder() {
+        let root = folder("winget_lookup");
+        let old = root.join("Microsoft.DesktopAppInstaller_1.9.100.0_x64__8wekyb3d8bbwe");
+        let new = root.join("Microsoft.DesktopAppInstaller_1.29.380.0_x64__8wekyb3d8bbwe");
+        let language = root.join(
+            "Microsoft.DesktopAppInstaller_1.29.380.0_neutral_split.language-ko_8wekyb3d8bbwe",
+        );
+        for package in [&old, &new, &language] {
+            fs::create_dir_all(package).unwrap();
+        }
+        assert!(is_app_installer_folder(&old) && is_app_installer_folder(&new));
+        assert!(!is_app_installer_folder(&language));
+        // The old package has winget.exe at its top; the new one only through its manifest.
+        fs::write(old.join("winget.exe"), b"").unwrap();
+        fs::create_dir_all(new.join("cli")).unwrap();
+        fs::write(new.join(r"cli").join("wg.exe"), b"").unwrap();
+        fs::write(
+            new.join("AppxManifest.xml"),
+            r#"<Application Id="winget" Executable="cli\wg.exe"><uap3:Extension Category="windows.appExecutionAlias" Executable="cli/wg.exe"><desktop:ExecutionAlias Alias="winget.exe"/></uap3:Extension></Application>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            newest_winget(vec![old.clone(), new.clone(), old.clone()]).unwrap(),
+            new.join("cli/wg.exe")
+        );
+        // Without the manifest, a winget.exe one level below is found.
+        fs::remove_file(new.join("AppxManifest.xml")).unwrap();
+        fs::write(new.join("cli").join("winget.exe"), b"").unwrap();
+        assert_eq!(
+            newest_winget(vec![old.clone(), new.clone()]).unwrap(),
+            new.join("cli").join("winget.exe")
+        );
+        // Nothing found: the error names the folders searched.
+        fs::remove_file(new.join("cli").join("winget.exe")).unwrap();
+        let error = newest_winget(vec![new.clone()]).unwrap_err();
+        assert!(error.contains("1.29.380.0"), "{error}");
+        assert_eq!(
+            newest_winget(Vec::new()).unwrap_err(),
+            "앱 설치 관리자 폴더를 찾지 못함"
+        );
+        assert_eq!(
+            winget_executable_in_manifest(r#"Executable="..\x.exe" Alias="winget.exe""#),
+            None
+        );
     }
 
     #[test]
