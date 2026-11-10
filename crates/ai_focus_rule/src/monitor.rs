@@ -1488,8 +1488,10 @@ impl FocusMonitor {
     /// finds on task is settled; the windows it finds off task or unsure go to the next
     /// model, whose verdict counts for them (the owner: Haiku, then Sonnet, then Opus, "하위
     /// 단계에서 허락 안해주면 다음 단계에서 허락 확인. 하위 단계에서 허락 하면 다음 단계
-    /// 넘어가지 않고 유지"). A failed call, other than a broken key or an unknown model,
-    /// passes the question on too.
+    /// 넘어가지 않고 유지"). A window the first model (Haiku) finds unsure is settled too: it
+    /// is judged again after the check interval (the owner: "unsure이면 haiku에서 멈추자.
+    /// 그리고 60초 뒤에 다시 검사하자"). A failed call, other than a broken key or an unknown
+    /// model, passes the question on too.
     fn run_judge(
         &self,
         config: &AiFocusConfig,
@@ -1560,13 +1562,19 @@ impl FocusMonitor {
                 Some(earlier) => settle(earlier, judgement),
                 None => judgement,
             };
+            // The first model's "unsure" stands until the next check: asking Haiku again in a
+            // minute costs little. A larger model's "unsure" still goes up, because Opus often
+            // settles such a window for the recheck time, cheaper than asking Haiku and
+            // Sonnet every minute.
+            let stands =
+                |verdict: Verdict| verdict.passes() || (tier == 0 && verdict == Verdict::Unsure);
             // A listed window the answer left out is not settled either.
-            let settled = (!judge_front || merged.verdict.passes())
+            let settled = (!judge_front || stands(merged.verdict))
                 && others.iter().all(|listed| {
                     merged
                         .others
                         .iter()
-                        .any(|other| other.id == listed.id && other.verdict.passes())
+                        .any(|other| other.id == listed.id && stands(other.verdict))
                 });
             if !settled && tier + 1 < CHECK_TIERS.len() {
                 info!(
@@ -2809,10 +2817,23 @@ mod tests {
         monitor.step(second);
         assert_eq!(calls(), [(haiku.clone(), false), (sonnet.clone(), true)]);
         assert!(monitor.state().process_blocks().is_empty());
-        // Haiku unsure, Sonnet off task, Opus on task: Opus decides, no block.
+        // Haiku unsure: no larger model is asked, nothing is blocked, and the window is
+        // judged again (by Haiku first) after the check interval.
         set(&haiku, Verdict::Unsure);
         set(&sonnet, Verdict::OffTask);
-        let third = second + ChronoDuration::minutes(16);
+        let unsure = second + ChronoDuration::minutes(16);
+        monitor.step(unsure);
+        assert_eq!(calls(), [(haiku.clone(), false)]);
+        assert!(monitor.state().process_blocks().is_empty());
+        monitor.step(unsure + ChronoDuration::seconds(30));
+        assert!(calls().is_empty(), "judged again before the check interval");
+        monitor.step(unsure + ChronoDuration::seconds(61));
+        assert_eq!(calls(), [(haiku.clone(), false)]);
+        // Haiku off task, Sonnet unsure, Opus on task: Sonnet's "unsure" goes on to Opus,
+        // who decides; no block.
+        set(&haiku, Verdict::OffTask);
+        set(&sonnet, Verdict::Unsure);
+        let third = unsure + ChronoDuration::minutes(16);
         monitor.step(third);
         assert_eq!(
             calls(),
@@ -2824,6 +2845,7 @@ mod tests {
         );
         assert!(monitor.state().process_blocks().is_empty());
         // All three find it off task: blocked, on Opus's word.
+        set(&sonnet, Verdict::OffTask);
         set(&opus, Verdict::OffTask);
         let fourth = third + ChronoDuration::minutes(16);
         monitor.step(fourth);
