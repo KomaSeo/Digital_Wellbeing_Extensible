@@ -150,6 +150,7 @@ impl Advisor for FakeAdvisor {
             todo: ReviewedTodo {
                 title: "ignored".into(),
                 notes: "filled by the AI".into(),
+                constraints: "AI: needs a computer".into(),
                 deadline: "2030-01-01".into(),
                 priority: 2,
                 estimate_minutes: 30,
@@ -577,6 +578,7 @@ fn an_approved_addition_is_completed_by_the_ai_and_joins_the_list() {
     assert_eq!(after.title, "Buy groceries");
     assert_eq!(after.priority, 5, "the user's priority, clamped to 1..=5");
     assert_eq!(after.notes, "filled by the AI");
+    assert_eq!(after.constraints, "AI: needs a computer");
     assert_eq!(after.deadline.unwrap().to_string(), "2030-01-01");
     assert_eq!(after.estimate_minutes, Some(30));
     assert!(after.proposed);
@@ -934,6 +936,7 @@ fn a_to_do_is_one_line_with_only_the_fields_that_are_set() {
     let mut full = todo("t1");
     full.title = "논문 3장 초안 쓰기".into();
     full.notes = "Google Docs\n관련 연구  절부터".into();
+    full.constraints = "컴퓨터 필요\n12월 1일 이후".into();
     full.deadline = chrono::NaiveDate::from_ymd_opt(2026, 11, 20);
     full.priority = 5;
     full.estimate_minutes = Some(120);
@@ -949,10 +952,12 @@ fn a_to_do_is_one_line_with_only_the_fields_that_are_set() {
     assert!(
         text.contains(
             "[t1] 논문 3장 초안 쓰기 | due 2026-11-20 | priority 5 | estimate 120 min | routine | \
-             notes: Google Docs / 관련 연구 절부터\n[t2] 장보기 | priority 3"
+             constraints: 컴퓨터 필요 / 12월 1일 이후\n[t2] 장보기 | priority 3"
         ),
         "{text}"
     );
+    // The notes (how to do the work) are not in the list.
+    assert!(!text.contains("Google Docs"), "{text}");
     assert!(!text.contains("\"proposed\""), "{text}");
 }
 
@@ -2113,7 +2118,7 @@ fn an_approved_done_can_add_a_follow_up_and_set_steps() {
         ListChange {
             action: "add".into(),
             title: "Reply to the mail".into(),
-            notes: "Not before 2030-01-03".into(),
+            constraints: "Not before 2030-01-03".into(),
             ..Default::default()
         },
         ListChange {
@@ -2155,7 +2160,7 @@ fn an_approved_done_can_add_a_follow_up_and_set_steps() {
         .planner
         .open_todos()
         .iter()
-        .any(|todo| todo.title == "Reply to the mail" && todo.notes.contains("2030-01-03")));
+        .any(|todo| todo.title == "Reply to the mail" && todo.constraints.contains("2030-01-03")));
     assert_eq!(
         fixture.planner.status().task_notes["b"].steps.len(),
         2,
@@ -2333,4 +2338,153 @@ fn a_changed_to_do_is_edited_by_the_ai_and_the_task_ends() {
             .request_change(now, ChangeKind::Changed, "no", Evidence::default()),
         Err(PlannerError::ReasonTooShort)
     ));
+}
+
+#[test]
+fn constraints_are_the_users_or_the_reviews_and_follow_new_notes() {
+    let fixture = harness(true, &["a"]);
+    // The user's own constraints win over the review's.
+    let mine = TodoChange::Add {
+        todo: ProposalInput {
+            title: "Repaint the fence".into(),
+            constraints: "at home, dry weather".into(),
+            ..Default::default()
+        },
+    };
+    let record = fixture
+        .planner
+        .review_todo_change(Utc::now(), mine, "", "to-do tab")
+        .unwrap();
+    assert_eq!(record.after.unwrap().constraints, "at home, dry weather");
+
+    // An edit of the notes takes the review's constraints for the edited to-do.
+    let new_notes = TodoChange::Edit {
+        todo_id: "a".into(),
+        todo: ProposalInput {
+            notes: "now needs the office printer".into(),
+            ..Default::default()
+        },
+    };
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            new_notes,
+            "the plan changed at work",
+            "to-do tab",
+        )
+        .unwrap();
+    assert_eq!(
+        record.after.as_ref().unwrap().constraints,
+        "AI: needs a computer"
+    );
+    let writes = fixture.planner.writes_for(&record);
+    let TodoListWrite::Merge { changed_fields, .. } = &writes[0] else {
+        panic!("{writes:?}");
+    };
+    assert_eq!(changed_fields["constraints"], "AI: needs a computer");
+    assert_eq!(changed_fields["notes"], "now needs the office printer");
+
+    // An edit of the priority only leaves the constraints alone.
+    let priority = TodoChange::Edit {
+        todo_id: "a".into(),
+        todo: ProposalInput {
+            priority: Some(4),
+            ..Default::default()
+        },
+    };
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            priority,
+            "the deadline moved closer",
+            "to-do tab",
+        )
+        .unwrap();
+    let writes = fixture.planner.writes_for(&record);
+    let TodoListWrite::Merge { changed_fields, .. } = &writes[0] else {
+        panic!("{writes:?}");
+    };
+    assert!(
+        !changed_fields.contains_key("constraints"),
+        "{changed_fields:?}"
+    );
+}
+
+#[test]
+fn a_question_about_one_to_do_shows_its_notes_the_list_does_not() {
+    let mut current = todo("a");
+    current.notes = "write the design memo, then commit".into();
+    current.constraints = "computer".into();
+    let mut target = todo("b");
+    target.notes = "call the clinic before 6".into();
+    let other = {
+        let mut other = todo("c");
+        other.notes = "secret details of c".into();
+        other
+    };
+    let open = [current, target, other];
+    let assignment = Assignment {
+        todo_id: Some("a".into()),
+        task: "title a".into(),
+        why: String::new(),
+        source: AssignmentSource::Planner,
+        at: Utc::now(),
+        until: None,
+        when_time_is_up: WhenTimeIsUp::Reassign,
+        away_from_computer: false,
+        appointment_id: None,
+        open: Vec::new(),
+        paused_since: None,
+        idle: Vec::new(),
+    };
+    let request = ChangeKind::SwitchTodo {
+        todo_id: "b".into(),
+    };
+    let text = crate::advisor::review_text(&ReviewRequest {
+        instructions: "",
+        now_local: "now",
+        life_rules: "",
+        current: Some(&assignment),
+        request: &request,
+        target_title: Some("title b"),
+        reason: "the clinic called",
+        open: &open,
+        recent_requests: &[],
+        history: "",
+        notes: None,
+        evidence: "",
+        screenshot: None,
+        planned_minutes: None,
+        elapsed_minutes: 0,
+        spent_on_todo_minutes: 0,
+        estimate_minutes: None,
+    });
+    assert!(
+        text.contains("The current to-do's notes: write the design memo, then commit"),
+        "{text}"
+    );
+    assert!(
+        text.contains("The current to-do's constraints: computer"),
+        "{text}"
+    );
+    assert!(
+        text.contains("The to-do they want to switch to's notes: call the clinic before 6"),
+        "{text}"
+    );
+    assert!(!text.contains("secret details of c"), "{text}");
+}
+
+#[test]
+fn an_older_follow_up_shows_its_date_from_the_notes() {
+    let mut older = todo("f");
+    older.notes = "reply politely. not before 2030-01-03, after the call".into();
+    let content = crate::advisor::question("", &[older], "Now".into());
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("| constraints: Not before 2030-01-03"),
+        "{text}"
+    );
+    assert!(!text.contains("reply politely"), "{text}");
 }

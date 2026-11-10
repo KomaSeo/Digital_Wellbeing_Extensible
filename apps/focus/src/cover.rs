@@ -94,10 +94,14 @@ impl Cover {
 /// Put this process's window titled `title` over the whole desktop (every monitor), on top
 /// of every other window, and make it the window in front. Windows only lets the program in
 /// front hand over the front, so the window joins that program's input for the moment it
-/// takes it. Returns false when the window was not found.
+/// takes it; when that is not enough, one press of Alt (the last input then is this
+/// program's) lets it take the front. A program left in front would be closed by the agent
+/// after a few seconds, and the next one after it. Returns false when the window was not
+/// found.
 #[cfg(windows)]
 fn hold_in_front(title: &str) -> bool {
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP, VK_MENU};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId,
         IsIconic, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST, SM_CXVIRTUALSCREEN,
@@ -136,6 +140,11 @@ fn hold_in_front(title: &str) -> bool {
             SetForegroundWindow(own);
             if joined {
                 AttachThreadInput(own_thread, front_thread, 0);
+            }
+            if GetForegroundWindow() != own {
+                keybd_event(VK_MENU as u8, 0, 0, 0);
+                keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
+                SetForegroundWindow(own);
             }
         }
     }

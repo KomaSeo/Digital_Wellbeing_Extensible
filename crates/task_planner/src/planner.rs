@@ -39,6 +39,8 @@ use tracing::info;
 const REQUEST_LOG_CAPACITY: usize = 50;
 const MAX_TITLE_CHARS: usize = 120;
 const MAX_NOTES_CHARS: usize = 1000;
+/// [`TodoItem::constraints`] are a line or two, not a second set of notes.
+const MAX_CONSTRAINTS_CHARS: usize = 200;
 const MIN_REASON_CHARS: usize = 4;
 /// Bounds on the time the AI gives one assignment, and the time an approved switch gets
 /// when the AI names none.
@@ -71,7 +73,7 @@ pub enum PlannerError {
     EmptyTask,
     #[error("AI가 목록에 없는 할 일을 골랐습니다('{0}')")]
     BadPick(String),
-    #[error("할 일에 제목을 적어 주세요(제목은 {MAX_TITLE_CHARS}글자, 메모는 {MAX_NOTES_CHARS}글자까지)")]
+    #[error("할 일에 제목을 적어 주세요(제목은 {MAX_TITLE_CHARS}글자, 메모는 {MAX_NOTES_CHARS}글자, 제약은 {MAX_CONSTRAINTS_CHARS}글자까지)")]
     BadProposal,
     #[error("\"{0}\"은(는) 이미 목록에 있습니다")]
     Duplicate(String),
@@ -720,7 +722,18 @@ impl TaskPlanner {
         };
         let after = match &change {
             TodoChange::Add { todo } => Some(completed_todo(now, todo, filled.as_ref())),
-            TodoChange::Edit { todo, .. } => target.as_ref().map(|before| edited(before, todo)),
+            TodoChange::Edit { todo, .. } => target.as_ref().map(|before| {
+                let mut after = edited(before, todo);
+                // A new title or notes may change what matters for picking it: the AI's
+                // constraints replace the old ones, unless the user wrote their own.
+                if todo.constraints.is_empty() && (!todo.title.is_empty() || !todo.notes.is_empty())
+                {
+                    if let Some(filled) = &filled {
+                        after.constraints = clip(&filled.constraints, MAX_CONSTRAINTS_CHARS);
+                    }
+                }
+                after
+            }),
             _ => None,
         };
         let record = TodoChangeRecord {
@@ -922,9 +935,17 @@ impl TaskPlanner {
                 if outside_the_file {
                     writes.push(TodoListWrite::Dismiss(todo_id.clone()));
                 }
+                let mut changed_fields = edited_fields(todo);
+                // The constraints the review wrote for a new title or notes.
+                if let (Some(before), Some(after)) = (&record.before, &record.after) {
+                    if todo.constraints.is_empty() && before.constraints != after.constraints {
+                        changed_fields
+                            .insert("constraints".into(), json!(after.constraints.clone()));
+                    }
+                }
                 writes.push(TodoListWrite::Merge {
                     todo_id: todo_id.clone(),
-                    changed_fields: edited_fields(todo),
+                    changed_fields,
                     base: record.before.clone().filter(|_| outside_the_file),
                 });
                 writes
@@ -1527,7 +1548,6 @@ impl TaskPlanner {
             .map(|todo| todo.id.clone())
             .collect();
         let (mut writes, mut summary, mut notes_updates) = (Vec::new(), Vec::new(), Vec::new());
-        let clip = |text: &str, max: usize| text.trim().chars().take(max).collect::<String>();
         for (index, change) in changes.iter().take(MAX_LIST_CHANGES).enumerate() {
             let target = open
                 .iter()
@@ -1545,6 +1565,7 @@ impl TaskPlanner {
                     let todo = TodoItem {
                         id: format!("p{}{index}", now.timestamp_millis()),
                         notes: clip(&change.notes, MAX_NOTES_CHARS),
+                        constraints: clip(&change.constraints, MAX_CONSTRAINTS_CHARS),
                         deadline,
                         priority: if change.priority == 0 {
                             3
@@ -1563,6 +1584,7 @@ impl TaskPlanner {
                     let draft = ProposalInput {
                         title: clip(&change.title, MAX_TITLE_CHARS),
                         notes: clip(&change.notes, MAX_NOTES_CHARS),
+                        constraints: clip(&change.constraints, MAX_CONSTRAINTS_CHARS),
                         deadline,
                         priority: (change.priority > 0).then_some(change.priority),
                         estimate_minutes: (change.estimate_minutes > 0)
@@ -1911,7 +1933,22 @@ impl TaskPlanner {
                 assignment.task
             )
         } else {
-            assignment.task.clone()
+            // The pick saw no notes (only constraints): the window checks get the to-do's
+            // notes, which often name the apps and sites the work needs.
+            let notes = assignment
+                .todo_id
+                .as_deref()
+                .and_then(|todo_id| {
+                    self.open_todos()
+                        .into_iter()
+                        .find(|todo| todo.id == todo_id)
+                })
+                .map(|todo| todo.notes.trim().to_string())
+                .filter(|notes| !notes.is_empty() && !assignment.task.contains(notes.as_str()));
+            match notes {
+                Some(notes) => format!("{}\n(이 할 일의 메모: {notes})", assignment.task),
+                None => assignment.task.clone(),
+            }
         };
         // Blocks belong to the to-do (see `SavedBlocks`).
         let scope = assignment
@@ -2082,6 +2119,7 @@ fn polish_todo(todo_id: &str, polish: &PolishItem) -> TodoItem {
         )
         .trim()
         .to_string(),
+        constraints: polish.todo.constraints.clone(),
         deadline: None,
         priority: polish.todo.priority,
         estimate_minutes: u32::try_from(polish.minutes_left).ok(),
@@ -2089,6 +2127,11 @@ fn polish_todo(todo_id: &str, polish: &PolishItem) -> TodoItem {
         repeat: false,
         away_from_computer: None,
     }
+}
+
+/// `text` trimmed and cut to `max` characters.
+fn clip(text: &str, max: usize) -> String {
+    text.trim().chars().take(max).collect()
 }
 
 /// `now` plus `minutes`, kept within the bounds an assignment may run.
@@ -2109,11 +2152,13 @@ fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, Pl
     let clean = |mut todo: ProposalInput| {
         todo.title = todo.title.split_whitespace().collect::<Vec<_>>().join(" ");
         todo.notes = todo.notes.trim().to_string();
+        todo.constraints = todo.constraints.trim().to_string();
         todo
     };
     let fits = |todo: &ProposalInput| {
         todo.title.chars().count() <= MAX_TITLE_CHARS
             && todo.notes.chars().count() <= MAX_NOTES_CHARS
+            && todo.constraints.chars().count() <= MAX_CONSTRAINTS_CHARS
     };
     let change = match change {
         TodoChange::Add { todo } => TodoChange::Add { todo: clean(todo) },
@@ -2177,6 +2222,11 @@ fn completed_todo(
     } else {
         draft.notes.clone()
     };
+    let constraints = if draft.constraints.is_empty() {
+        clip(&filled.constraints, MAX_CONSTRAINTS_CHARS)
+    } else {
+        draft.constraints.clone()
+    };
     let priority = draft
         .priority
         .or((filled.priority > 0).then_some(filled.priority))
@@ -2190,6 +2240,7 @@ fn completed_todo(
         id: format!("p{}", now.timestamp_millis()),
         title: draft.title.clone(),
         notes,
+        constraints,
         deadline,
         priority,
         estimate_minutes,
@@ -2217,6 +2268,9 @@ fn edited_fields(draft: &ProposalInput) -> Map<String, Value> {
     }
     if !draft.notes.is_empty() {
         changed_fields.insert("notes".into(), json!(draft.notes));
+    }
+    if !draft.constraints.is_empty() {
+        changed_fields.insert("constraints".into(), json!(draft.constraints));
     }
     if let Some(deadline) = draft.deadline {
         changed_fields.insert("deadline".into(), json!(deadline));

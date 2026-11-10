@@ -206,7 +206,21 @@ impl FocusApp {
         let poll_context = context.clone();
         thread::spawn(move || loop {
             let result = call(session, "status", json!({}));
+            let covers = matches!(
+                &result,
+                Ok(current_status) if current_status
+                    .lockdown
+                    .as_ref()
+                    .is_some_and(|lockdown| lockdown.covers_screen)
+            );
             poll.lock().status = Some(result);
+            if covers {
+                // A window hidden in the tray draws no frames, so it would never start covering
+                // the screen, while the agent, seeing the Focus app run, closes whatever stays
+                // in front instead, one program after another (the owner: "아직도 전체화면 전환될
+                // 때 다른 프로그램 다 꺼지던데"). Show it from here.
+                tray::show_window(TITLE);
+            }
             poll_context.request_repaint();
             thread::sleep(POLL);
         });

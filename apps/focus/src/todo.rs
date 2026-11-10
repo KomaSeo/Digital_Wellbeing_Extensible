@@ -148,6 +148,8 @@ fn parse_clock(text: &str) -> Option<NaiveTime> {
 struct TodoForm {
     title: String,
     notes: String,
+    /// What matters for picking it (when, where, with what); empty: the AI writes it.
+    constraints: String,
     deadline: String,
     /// 0 = let the AI decide (adding) / keep (editing).
     priority: u8,
@@ -168,6 +170,7 @@ impl TodoForm {
         json!({
             "title": self.title.trim(),
             "notes": self.notes.trim(),
+            "constraints": self.constraints.trim(),
             "deadline": self.deadline_date(),
             "priority": (self.priority > 0).then_some(self.priority),
             "estimate_minutes": (self.estimate_minutes > 0).then_some(self.estimate_minutes),
@@ -596,6 +599,7 @@ impl FocusApp {
         self.todo_ui.form = TodoForm {
             title: todo.title.clone(),
             notes: todo.notes.clone(),
+            constraints: todo.constraints.clone(),
             deadline: todo
                 .deadline
                 .map(|deadline| deadline.to_string())
@@ -919,6 +923,9 @@ impl FocusApp {
     fn todo_details_ui(&mut self, ui: &mut egui::Ui, todo: &TodoItem, planner: &PlannerStatus) {
         let idle = !self.pending.load(Ordering::SeqCst);
         ui.indent(("details", &todo.id), |ui| {
+            if !todo.constraints.is_empty() {
+                ui.label(format!("제약: {}", todo.constraints));
+            }
             if !todo.notes.is_empty() {
                 ui.label(&todo.notes);
             }
@@ -989,6 +996,7 @@ impl FocusApp {
         let from_draft = |draft: &task_planner::ProposalInput| TodoForm {
             title: draft.title.clone(),
             notes: draft.notes.clone(),
+            constraints: draft.constraints.clone(),
             deadline: draft
                 .deadline
                 .map(|deadline| deadline.to_string())
@@ -1013,6 +1021,9 @@ impl FocusApp {
                     }
                     if form.notes.is_empty() {
                         form.notes = before.notes.clone();
+                    }
+                    if form.constraints.is_empty() {
+                        form.constraints = before.constraints.clone();
                     }
                 }
                 self.todo_ui.form = form;
@@ -1102,6 +1113,18 @@ impl FocusApp {
                         .desired_rows(2)
                         .desired_width(320.0)
                         .hint_text("무엇을 하면 끝인지, 무엇이 필요한지"),
+                );
+                ui.end_row();
+                ui.label("제약");
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.constraints)
+                        .desired_width(320.0)
+                        .hint_text("언제, 어디서, 무엇이 있어야 할 수 있는지 (비우면 AI가 적음)"),
+                )
+                .on_hover_text(
+                    "AI가 할 일을 고를 때는 메모 대신 이 칸을 봅니다. 12월 1일 이후, 집에서만, \
+                     컴퓨터 필요, 취미처럼 언제 할지 정하는 데 필요한 것만 적습니다. 생활 규칙에 \
+                     있는 시간과 요일은 적지 않습니다.",
                 );
                 ui.end_row();
                 ui.label("마감");

@@ -11,9 +11,19 @@ pub struct TodoItem {
     /// Stable id; generated when the admin adds the item.
     pub id: String,
     pub title: String,
-    /// Free-form details: what "done" means, which tools/sites are needed.
+    /// Free-form details: what "done" means, which tools/sites are needed. The AI sees them
+    /// only for the to-do a question is about (the current one, the one asked about); the
+    /// list it picks from shows [`Self::constraints`] instead.
     #[serde(default)]
     pub notes: String,
+    /// What matters for choosing when to do this to-do, without the details of the work
+    /// (the owner: "일의 detail (뭐를 해야한다. 어떻게 해야한다)은 제외하고 할 일 고르기에
+    /// 필요한 일시, 장소 정보 같은 거"): the earliest or a fixed date, where it can be done,
+    /// what it needs, its kind. Never times or limits copied from the life rules, which may
+    /// change. Written by the user or filled in by the to-do change review. Empty: the AI's
+    /// list shows the title only ("요약이 없으면 일단 제목만 보내게 해").
+    #[serde(default)]
+    pub constraints: String,
     #[serde(default)]
     pub deadline: Option<NaiveDate>,
     /// 1 (low) ..= 5 (urgent).
@@ -46,6 +56,7 @@ impl TodoItem {
             id: format!("t{}", Utc::now().timestamp_millis()),
             title: title.into(),
             notes: String::new(),
+            constraints: String::new(),
             deadline: None,
             priority: default_priority(),
             estimate_minutes: None,
@@ -541,6 +552,9 @@ pub enum TodoListWrite {
 pub struct ProposalInput {
     pub title: String,
     pub notes: String,
+    /// [`TodoItem::constraints`]; empty: the AI writes them (adding, or editing the title or
+    /// notes) or they stay as they are.
+    pub constraints: String,
     pub deadline: Option<NaiveDate>,
     /// 1 (low) ..= 5 (urgent); 3 when missing.
     pub priority: Option<u8>,

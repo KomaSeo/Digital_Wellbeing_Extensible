@@ -39,8 +39,8 @@ due today, prefer them over rest and leisure (unless the life rules call for a \
 break now). To-dos marked \"routine\" are routines \
 (sleep, getting ready, exercise, meals) that stay on the list after they are done: \
 use the recently finished list, the time of day and the life rules to judge whether \
-one is due now. Respect dates in the notes such as \"not before YYYY-MM-DD\": never \
-pick a to-do before its date.
+one is due now. Respect each to-do's constraints, and dates in them such as \"not \
+before YYYY-MM-DD\": never pick a to-do before its date.
 
 You also get the user's upcoming appointments. They are fixed: at an appointment's \
 start the app replaces whatever task is running with it, and the session you assign \
@@ -132,7 +132,10 @@ the to-do being removed). For an addition, keep every field the user filled in \
 and complete the empty ones: `notes` says what done means and what the work needs \
 (apps, sites, material); `deadline` is a date YYYY-MM-DD only when the title or \
 notes imply one, otherwise an empty string; `priority` 1 (low) to 5 (urgent); \
-`estimate_minutes` a realistic estimate. Write in the language of the to-do.
+`estimate_minutes` a realistic estimate; `constraints` only facts about the to-do \
+itself that matter for choosing when to do it (see its description): never the details \
+of the work, and never a time, day or limit that comes from the life rules (the app \
+applies those itself). Write in the language of the to-do.
 
 The owner's life rules, when given, are binding; they were set in the app's \
 settings, which the user cannot change from here.
@@ -197,8 +200,8 @@ the other people still needing the user, or a delay outside the user's control \
 
 When you approve and the user's reason or proof says the to-do list should change, \
 put those changes in `list_changes`: a follow-up to-do (\"I read the mail, reply in \
-two days\" adds \"Reply to the mail\" with notes \"Not before YYYY-MM-DD\", the date \
-worked out from now), a corrected title or notes, steps done or new steps for a \
+two days\" adds \"Reply to the mail\" with constraints \"Not before YYYY-MM-DD\", the \
+date worked out from now), a corrected title, notes or constraints, steps done or new steps for a \
 to-do (set_notes, with the whole list of steps), or a to-do that turned out to be \
 unnecessary. Only what the user said or plainly implies; never touch other \
 to-dos. Write in the language of the to-dos. The finished to-do itself leaves the \
@@ -303,6 +306,8 @@ pub struct ListChange {
     pub todo_id: String,
     pub title: String,
     pub notes: String,
+    /// [`crate::TodoItem::constraints`] ("Not before YYYY-MM-DD" for a follow-up).
+    pub constraints: String,
     /// `YYYY-MM-DD` or empty.
     pub deadline: String,
     /// 1..=5; 0 = leave it.
@@ -458,6 +463,9 @@ pub struct TodoReview {
 pub struct ReviewedTodo {
     pub title: String,
     pub notes: String,
+    /// What matters for picking it ([`crate::TodoItem::constraints`]); older answers lack it.
+    #[serde(default)]
+    pub constraints: String,
     pub deadline: String,
     pub priority: u8,
     pub estimate_minutes: u32,
@@ -829,6 +837,18 @@ fn pick_schema() -> Value {
     })
 }
 
+/// How the to-do change review writes [`crate::TodoItem::constraints`]; in the answer
+/// format, so it holds with the owner's own instruction too.
+const CONSTRAINTS_GUIDE: &str = "Only facts about this to-do itself that matter for choosing \
+when to do it, taken from its title and notes alone, in the language of the to-do, at most \
+two short sentences: the earliest date or a fixed date, where it can be done (only at home, \
+outside), what it needs (a computer, a car, another person), its kind (hobby, chore, study, \
+exercise). Leave out the work itself (what to do, how, when it is finished). Write it as if \
+you had not seen the life rules: no time of day, weekday, part of the day or allowed hours \
+unless the notes themselves fix one; the app applies the life rules on its own, and they may \
+change. Wrong: \"취미이므로 평일 오후에 할 것. 컴퓨터 필요.\" Right: \"취미. 컴퓨터 필요.\" Empty \
+when nothing like this is known. For an edit, the constraints after the change.";
+
 fn todo_review_schema() -> Value {
     json!({
         "type": "object",
@@ -840,11 +860,12 @@ fn todo_review_schema() -> Value {
                 "properties": {
                     "title": { "type": "string" },
                     "notes": { "type": "string" },
+                    "constraints": { "type": "string", "description": CONSTRAINTS_GUIDE },
                     "deadline": { "type": "string", "description": "YYYY-MM-DD or empty" },
                     "priority": { "type": "integer", "description": "1 (low) to 5 (urgent)" },
                     "estimate_minutes": { "type": "integer" },
                 },
-                "required": ["title", "notes", "deadline", "priority", "estimate_minutes"],
+                "required": ["title", "notes", "constraints", "deadline", "priority", "estimate_minutes"],
                 "additionalProperties": false
             }
         },
@@ -877,14 +898,15 @@ fn change_review_schema() -> Value {
                         "action": { "type": "string", "enum": ["add", "edit", "remove", "set_notes"] },
                         "todo_id": { "type": "string", "description": "the to-do's id; empty for add" },
                         "title": { "type": "string", "description": "add: required; edit: empty keeps it" },
-                        "notes": { "type": "string", "description": "add/edit: what done means, and dates such as 'not before YYYY-MM-DD'; empty keeps it" },
+                        "notes": { "type": "string", "description": "add/edit: what done means and what the work needs; empty keeps it" },
+                        "constraints": { "type": "string", "description": "add/edit: only what matters for choosing when to do it, such as 'Not before YYYY-MM-DD', where, what it needs, its kind; never times or days from the life rules; empty keeps it" },
                         "deadline": { "type": "string", "description": "YYYY-MM-DD or empty" },
                         "priority": { "type": "integer", "description": "1 (low) to 5 (urgent); 0 keeps it" },
                         "estimate_minutes": { "type": "integer", "description": "0 keeps it" },
                         "working_notes": { "type": "string", "description": "set_notes: the to-do's working notes" },
                         "steps": { "type": "array", "items": { "type": "string" }, "description": "set_notes: the to-do's steps, in order" }
                     },
-                    "required": ["action", "todo_id", "title", "notes", "deadline", "priority", "estimate_minutes", "working_notes", "steps"],
+                    "required": ["action", "todo_id", "title", "notes", "constraints", "deadline", "priority", "estimate_minutes", "working_notes", "steps"],
                     "additionalProperties": false
                 }
             }
@@ -922,7 +944,9 @@ fn assignment_text(assignment: &Assignment, now: DateTime<Utc>) -> String {
 
 /// The to-dos one per line, the fields that say something only (the owner chose this over
 /// pretty-printed JSON to send fewer tokens, "탁월한 선택이네. 진행하도록"): `[id] title |
-/// due YYYY-MM-DD | priority N | estimate N min | routine | notes: …`.
+/// due YYYY-MM-DD | priority N | estimate N min | routine | constraints: …`. Not the notes:
+/// they are most of a long list and say how to do the work, which picking does not need
+/// (the owner: "AI에게는 제약 … 만 보여주게"); a question about one to-do shows its notes.
 fn todos_text(todos: &[TodoItem]) -> String {
     if todos.is_empty() {
         return "(none)".to_string();
@@ -941,14 +965,28 @@ fn todos_text(todos: &[TodoItem]) -> String {
             if todo.repeat {
                 line.push_str(" | routine");
             }
-            let notes = one_line(&todo.notes);
-            if !notes.is_empty() {
-                line.push_str(&format!(" | notes: {notes}"));
+            let mut constraints = one_line(&todo.constraints);
+            if constraints.is_empty() {
+                // Follow-ups made before constraints existed kept their date in the notes.
+                constraints = not_before_in(&todo.notes).unwrap_or_default();
+            }
+            if !constraints.is_empty() {
+                line.push_str(&format!(" | constraints: {constraints}"));
             }
             line
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// "Not before YYYY-MM-DD" when `notes` say so (any case), for the to-do list.
+fn not_before_in(notes: &str) -> Option<String> {
+    let lower = notes.to_lowercase();
+    let start = lower.find("not before ")? + "not before ".len();
+    let date = notes.get(start..start + 10)?;
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()
+        .map(|_| format!("Not before {date}"))
 }
 
 /// `text` on one line: line breaks become " / ", runs of spaces one space.
@@ -962,8 +1000,9 @@ fn one_line(text: &str) -> String {
 
 /// What the to-do lines say, before the first list of a question.
 const TODOS_FORMAT: &str = "One to-do per line: [id] title | due date | priority (1 low to 5 \
-urgent) | estimate | routine (stays on the list when done) | notes. Fields not shown are \
-not set.";
+urgent) | estimate | routine (stays on the list when done) | constraints (when, where and \
+with what it can be done). Fields not shown are not set. The to-dos' notes (how to do the \
+work) are not listed.";
 
 /// A planner question: first what stays the same from one call to the next while the list
 /// does not change (the owner's life rules and the open to-dos), then `text`, the part that
@@ -1161,9 +1200,22 @@ pub(crate) fn review_text(request: &ReviewRequest) -> String {
             )
         })
         .collect();
+    // The list shows no notes: the to-dos this request is about show theirs here.
+    let current_todo = request
+        .current
+        .and_then(|assignment| assignment.todo_id.as_deref())
+        .and_then(|todo_id| todo_details(request.open, todo_id, "The current to-do"))
+        .unwrap_or_default();
+    let target_todo = match request.request {
+        ChangeKind::SwitchTodo { todo_id } => {
+            todo_details(request.open, todo_id, "The to-do they want to switch to")
+                .unwrap_or_default()
+        }
+        _ => String::new(),
+    };
     format!(
-        "Now: {now}\n\nCurrent assignment: {current}\n{timing}{notes}{evidence}\n\
-         The user asks to: {ask}\nTheir reason: \"{reason}\"\n\n\
+        "Now: {now}\n\nCurrent assignment: {current}\n{current_todo}{timing}{notes}{evidence}\n\
+         The user asks to: {ask}\nTheir reason: \"{reason}\"\n{target_todo}\n\
          {polish}Earlier change requests (newest first):\n{past}\n\n\
          Recent foreground activity (oldest first):\n{history}",
         now = request.now_local,
@@ -1218,6 +1270,23 @@ pub(crate) fn review_text(request: &ReviewRequest) -> String {
         past = or_none(&past.join("\n")),
         history = or_none(request.history),
     )
+}
+
+/// `label`, the to-do's constraints and its notes, for a question about that one to-do;
+/// `None` when it is not open or has neither.
+fn todo_details(open: &[TodoItem], todo_id: &str, label: &str) -> Option<String> {
+    let todo = open.iter().find(|todo| todo.id == todo_id)?;
+    let mut text = String::new();
+    if !todo.constraints.trim().is_empty() {
+        text.push_str(&format!(
+            "{label}'s constraints: {}\n",
+            todo.constraints.trim()
+        ));
+    }
+    if !todo.notes.trim().is_empty() {
+        text.push_str(&format!("{label}'s notes: {}\n", todo.notes.trim()));
+    }
+    (!text.is_empty()).then_some(text)
 }
 
 pub(crate) fn todo_change_text(request: &TodoChangeRequest) -> String {
