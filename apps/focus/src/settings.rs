@@ -322,6 +322,8 @@ pub struct SettingsTab {
     care_fetched_at: Option<Instant>,
     /// What the last "지금 업데이트" did.
     care_message: String,
+    /// The text that narrows the list of installed programs.
+    installed_filter: String,
     /// The last `self_update_status` answer (this program's own update).
     self_update: Option<Result<machine::self_update::UpdateStatus, String>>,
     /// What the last "업데이트 확인" / "지금 업데이트" request did.
@@ -387,6 +389,7 @@ impl SettingsTab {
             care: None,
             care_fetched_at: None,
             care_message: String::new(),
+            installed_filter: String::new(),
             self_update: None,
             self_update_message: String::new(),
             confirming_install: false,
@@ -1504,7 +1507,120 @@ impl SettingsTab {
         self.block_bar(ui, &CONFIRMATIONS, snapshot, protected);
     }
 
+    /// "설치된 프로그램에서 고르기": the programs the service sees through winget, each with a
+    /// button that puts its winget id on the update list (saved with the section's 적용).
+    fn installed_picker_ui(&mut self, ui: &mut egui::Ui, care: &CareStatus) {
+        egui::CollapsingHeader::new("설치된 프로그램에서 고르기")
+            .id_salt("installed_programs")
+            .show(ui, |ui| {
+                ui.small(
+                    "서비스가 winget으로 이 PC에 설치된 프로그램 중 winget이 업데이트할 수 있는 것을 \
+                     읽어 옵니다. \"넣기\"를 누르면 위 목록에 들어가고, 아래의 \"적용\"을 눌러야 \
+                     저장됩니다. 한 사용자 계정에만 설치된 프로그램과 Microsoft Store에서 받은 앱은 \
+                     서비스에게 보이지 않아 여기에 나오지 않습니다. Store 앱은 Store가 저절로 \
+                     업데이트합니다.",
+                );
+                let listed = care.installed.as_ref();
+                ui.horizontal(|ui| {
+                    let label = if listed.is_some() {
+                        "다시 읽기"
+                    } else {
+                        "목록 읽기"
+                    };
+                    if ui
+                        .add_enabled(!care.installed_waiting, egui::Button::new(label))
+                        .clicked()
+                    {
+                        if let Err(error) =
+                            call_value(self.session, "installed_programs_refresh", json!({}))
+                        {
+                            self.care_message = error;
+                        }
+                        self.care_fetched_at = None;
+                    }
+                    if care.installed_waiting {
+                        ui.spinner();
+                        ui.small("서비스가 목록을 읽는 중입니다. 1분쯤 걸릴 수 있습니다.");
+                    } else if let Some(listed_at) = listed.and_then(|list| list.listed_at) {
+                        ui.small(format!("읽은 때: {}", local(listed_at)));
+                    }
+                });
+                let Some(list) = listed else {
+                    return;
+                };
+                if !list.error.is_empty() {
+                    ui.colored_label(RED, format!("목록을 읽지 못했습니다: {}", list.error));
+                }
+                if list.programs.is_empty() {
+                    if list.error.is_empty() {
+                        ui.small("winget이 업데이트할 수 있는 프로그램이 없습니다.");
+                    }
+                    return;
+                }
+                ui.horizontal(|ui| {
+                    ui.label("찾기:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.installed_filter)
+                            .hint_text("이름이나 ID의 일부")
+                            .desired_width(200.0),
+                    );
+                });
+                let filter = self.installed_filter.trim().to_lowercase();
+                let Some(drafts) = &mut self.drafts else {
+                    return;
+                };
+                let chosen = &mut drafts.ai_focus.updatable_programs;
+                egui::ScrollArea::vertical()
+                    .id_salt("installed_programs_scroll")
+                    // Inside the tab's own scroll area the list would shrink to a few rows.
+                    .min_scrolled_height(280.0)
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("installed_programs_grid")
+                            .striped(true)
+                            .num_columns(4)
+                            .show(ui, |ui| {
+                                ui.strong("이름");
+                                ui.strong("ID");
+                                ui.strong("버전");
+                                ui.label("");
+                                ui.end_row();
+                                for program in list.programs.iter().filter(|program| {
+                                    filter.is_empty()
+                                        || program.name.to_lowercase().contains(&filter)
+                                        || program.id.to_lowercase().contains(&filter)
+                                }) {
+                                    ui.label(&program.name);
+                                    ui.monospace(&program.id);
+                                    if program.available.is_empty() {
+                                        ui.label(&program.version);
+                                    } else {
+                                        ui.colored_label(
+                                            YELLOW,
+                                            format!("{} → {}", program.version, program.available),
+                                        )
+                                        .on_hover_text("winget에 새 버전이 있습니다");
+                                    }
+                                    let already = chosen
+                                        .iter()
+                                        .any(|listed| listed.eq_ignore_ascii_case(&program.id));
+                                    if already {
+                                        ui.add_enabled(false, egui::Button::new("목록에 있음"));
+                                    } else if ui.button("넣기").clicked() {
+                                        chosen.insert(program.id.clone());
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+    }
+
     fn system_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
+        // While the service lists the installed programs, keep looking without input.
+        if matches!(&self.care, Some(Ok(care)) if care.installed_waiting) {
+            ui.ctx().request_repaint_after(REFRESH);
+        }
         if self
             .care_fetched_at
             .is_none_or(|fetched_at| fetched_at.elapsed() >= REFRESH)
@@ -1537,9 +1653,10 @@ impl SettingsTab {
         ui.small(
             "카카오톡처럼 업데이트에 관리자 권한이 필요한 프로그램을 여기에 넣습니다. 사용자에게 \
              관리자 권한을 주지 않고, 이 PC의 서비스(SYSTEM)가 화면 없이 winget으로 그 프로그램만 \
-             업데이트합니다. 지우기나 다른 명령은 하지 않습니다. 이름은 winget의 이름(id)으로 \
-             적습니다. 명령 프롬프트에서 winget search 카카오톡 처럼 찾으면 \"ID\" 칸에 나옵니다. \
-             예: Kakao.KakaoTalk. 넣기는 예약되고, 빼기는 바로 적용됩니다.",
+             업데이트합니다. 설치되어 있지 않으면 모든 사용자에게 설치합니다. 지우기나 다른 명령은 \
+             하지 않습니다. 이름은 winget의 이름(id)으로 적습니다. 아래 \"설치된 프로그램에서 \
+             고르기\"에서 고르거나, 명령 프롬프트에서 winget search 카카오톡 처럼 찾으면 \"ID\" 칸에 \
+             나옵니다. 예: Kakao.KakaoTalk. 넣기는 예약되고, 빼기는 바로 적용됩니다.",
         );
         if let Some(drafts) = &mut self.drafts {
             names_ui(
@@ -1557,6 +1674,9 @@ impl SettingsTab {
                     machine::system_care::AUTO_UPDATE_FROM_HOUR
                 ),
             );
+        }
+        if let Some(care) = &care {
+            self.installed_picker_ui(ui, care);
         }
         self.block_bar(ui, &PROGRAM_UPDATES, snapshot, protected);
         if let Some(care) = &care {
@@ -1600,6 +1720,7 @@ impl SettingsTab {
             for run in care.state.runs.iter().rev().take(8) {
                 let (color, outcome) = match run.outcome {
                     UpdateOutcome::Updated => (GREEN, "업데이트함"),
+                    UpdateOutcome::Installed => (GREEN, "새로 설치함"),
                     UpdateOutcome::AlreadyUpToDate => (GREEN, "이미 최신"),
                     UpdateOutcome::NotInstalled => (YELLOW, "설치되어 있지 않음"),
                     UpdateOutcome::Failed => (RED, "실패"),

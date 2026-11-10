@@ -26,6 +26,13 @@ use std::path::{Path, PathBuf};
 
 pub const REQUESTS_FOLDER: &str = "update_requests";
 pub const STATE_FILE: &str = "system_care.json";
+/// The service's list of installed programs (written by the service only).
+pub const INSTALLED_FILE: &str = "installed_programs.json";
+/// Present while an agent waits for a new list of installed programs.
+pub const INSTALLED_REQUEST_FILE: &str = "installed_programs_request";
+/// Where winget writes the ids of the installed programs (`winget export`).
+#[cfg_attr(not(windows), allow(dead_code))]
+const EXPORT_FILE: &str = "installed_programs_export.json";
 /// The daily automatic update runs once a day, from this local hour on.
 pub const AUTO_UPDATE_FROM_HOUR: u32 = 4;
 const KEEP_RUNS: usize = 30;
@@ -36,6 +43,8 @@ const KEEP_RESETS: usize = 20;
 #[serde(rename_all = "snake_case")]
 pub enum UpdateOutcome {
     Updated,
+    /// It was not installed, so the service installed it (for every account).
+    Installed,
     AlreadyUpToDate,
     NotInstalled,
     Failed,
@@ -99,6 +108,33 @@ pub struct CareStatus {
     /// The time zone of the settings, and the PC's time zone now.
     pub time_zone: String,
     pub time_zone_now: String,
+    /// The programs winget knows on this PC, as the service last listed them.
+    pub installed: Option<InstalledList>,
+    /// A new list was asked for and the service has not written it yet.
+    pub installed_waiting: bool,
+}
+
+/// Responsibility: Describe one program installed on this PC that winget can update.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InstalledProgram {
+    /// The winget id (what `updatable_programs` holds).
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    /// The newer version winget offers, if any.
+    pub available: String,
+}
+
+/// Responsibility: Hold the service's last list of installed programs
+/// (the contents of `installed_programs.json`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InstalledList {
+    pub listed_at: Option<DateTime<Utc>>,
+    pub programs: Vec<InstalledProgram>,
+    /// Why the list could not be read, if it could not.
+    pub error: String,
 }
 
 /// A winget id: letters, digits and `.`, `-`, `_`, `+` only.
@@ -215,7 +251,154 @@ pub fn status(data_directory: &Path, config: &AiFocusConfig) -> CareStatus {
         state: read_state(data_directory),
         time_zone: config.time_zone.clone(),
         time_zone_now: current_time_zone().unwrap_or_default(),
+        installed: read_installed_list(data_directory),
+        installed_waiting: data_directory.join(INSTALLED_REQUEST_FILE).exists(),
     }
+}
+
+/// Ask the service for a new list of installed programs (agent side).
+pub fn request_installed_list(data_directory: &Path) -> Result<(), String> {
+    fs::write(
+        data_directory.join(INSTALLED_REQUEST_FILE),
+        Utc::now().to_rfc3339(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn read_installed_list(data_directory: &Path) -> Option<InstalledList> {
+    serde_json::from_str(&fs::read_to_string(data_directory.join(INSTALLED_FILE)).ok()?).ok()
+}
+
+/// One pass of the service: when an agent asked for it, list the installed programs with
+/// `list` (winget in production) and write the list.
+pub fn list_installed_if_asked(
+    data_directory: &Path,
+    list: &dyn Fn(&Path) -> Result<Vec<InstalledProgram>, String>,
+) {
+    let request = data_directory.join(INSTALLED_REQUEST_FILE);
+    if !request.exists() {
+        return;
+    }
+    tracing::info!("listing the installed programs");
+    let (programs, error) = match list(data_directory) {
+        Ok(programs) => (programs, String::new()),
+        Err(error) => (Vec::new(), error),
+    };
+    let installed = InstalledList {
+        listed_at: Some(Utc::now()),
+        programs,
+        error,
+    };
+    let path = data_directory.join(INSTALLED_FILE);
+    let temporary = path.with_extension("json.tmp");
+    let written = serde_json::to_vec_pretty(&installed)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| fs::write(&temporary, bytes))
+        .and_then(|_| fs::rename(&temporary, &path));
+    if let Err(error) = written {
+        tracing::warn!("could not save {INSTALLED_FILE}: {error}");
+    }
+    // Removed last, so the Focus app shows "waiting" until the list is there.
+    let _ = fs::remove_file(request);
+}
+
+/// The installed programs: each id of `winget export` (the exact ids winget can update), with
+/// the name, version and newer version from the table `winget list` printed. The table's
+/// headers are in the PC's language and long cells end in "…", so rows are found by the id.
+pub fn installed_from(
+    export_json: &str,
+    list_table: &str,
+) -> Result<Vec<InstalledProgram>, String> {
+    let export: serde_json::Value =
+        serde_json::from_str(export_json).map_err(|error| format!("winget export: {error}"))?;
+    let mut ids: Vec<String> = export["Sources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|source| source["Packages"].as_array().cloned().unwrap_or_default())
+        .filter_map(|package| package["PackageIdentifier"].as_str().map(str::to_string))
+        .filter(|id| is_program_id(id))
+        .collect();
+    ids.sort_by_key(|id| id.to_lowercase());
+    ids.dedup_by(|first, second| first.eq_ignore_ascii_case(second));
+    let rows: Vec<&str> = list_table
+        .lines()
+        .skip_while(|line| !is_rule_line(line))
+        .skip(1)
+        .collect();
+    Ok(ids
+        .into_iter()
+        .map(|id| {
+            rows.iter()
+                .find_map(|row| program_in_row(row, &id))
+                .unwrap_or_else(|| InstalledProgram {
+                    name: id.clone(),
+                    id,
+                    ..InstalledProgram::default()
+                })
+        })
+        .collect())
+}
+
+/// The line of dashes under a winget table's headers.
+fn is_rule_line(line: &str) -> bool {
+    let line = line.trim();
+    line.len() >= 10 && line.chars().all(|character| character == '-')
+}
+
+/// `id`'s program in one row of `winget list` (name, id, version, newer version, source), if
+/// the row is that program's.
+fn program_in_row(row: &str, id: &str) -> Option<InstalledProgram> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (position, character) in row.char_indices() {
+        match (character.is_whitespace(), start) {
+            (true, Some(token_start)) => {
+                tokens.push((token_start, &row[token_start..position]));
+                start = None;
+            }
+            (false, None) => start = Some(position),
+            _ => {}
+        }
+    }
+    if let Some(token_start) = start {
+        tokens.push((token_start, &row[token_start..]));
+    }
+    let matches_id = |token: &str| {
+        token.eq_ignore_ascii_case(id)
+            || token.strip_suffix('…').is_some_and(|shortened| {
+                !shortened.is_empty() && id.to_lowercase().starts_with(&shortened.to_lowercase())
+            })
+    };
+    // The id is not the first cell: that is the name.
+    let index = (1..tokens.len()).find(|&index| matches_id(tokens[index].1))?;
+    let name = row[..tokens[index].0].trim().to_string();
+    let mut cells: Vec<String> = Vec::new();
+    let mut after = tokens[index + 1..]
+        .iter()
+        .map(|(_, token)| *token)
+        .peekable();
+    while let Some(token) = after.next() {
+        // winget writes an unknown version as "< 1.2" or "> 1.2".
+        if (token == "<" || token == ">") && after.peek().is_some() {
+            cells.push(format!("{token} {}", after.next().unwrap_or_default()));
+        } else {
+            cells.push(token.to_string());
+        }
+    }
+    if cells.last().is_some_and(|last| last == "winget") {
+        cells.pop();
+    }
+    Some(InstalledProgram {
+        id: id.to_string(),
+        name: if name.is_empty() {
+            id.to_string()
+        } else {
+            name
+        },
+        version: cells.first().cloned().unwrap_or_default(),
+        available: cells.get(1).cloned().unwrap_or_default(),
+    })
 }
 
 /// The daily update is due: not yet run on this local day, and it is past
@@ -450,17 +633,19 @@ pub fn set_time_zone(_name: &str) -> Result<(), String> {
 const WINGET_NO_UPDATE: u32 = 0x8A15_002B;
 /// winget's error "no installed package found".
 const WINGET_NOT_INSTALLED: u32 = 0x8A15_0014;
+/// winget's error "no applicable installer found" (here: none that installs for every account).
+const WINGET_NO_APPLICABLE_INSTALLER: u32 = 0x8A15_0010;
+/// winget's error "package is already installed".
+const WINGET_ALREADY_INSTALLED: u32 = 0x8A15_0061;
 /// An update that runs longer is stopped.
 #[cfg(windows)]
 const UPDATE_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-/// Update `program` with winget, silently and without a window (service side).
+/// Update `program` with winget, silently and without a window (service side). When winget
+/// finds it not installed, install it for every account (`--scope machine`): a program the
+/// service installs for itself alone would not reach the user.
 #[cfg(windows)]
 pub fn winget_upgrade(program: &str) -> (UpdateOutcome, String) {
-    use std::io::Read;
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     if !is_program_id(program) {
         return (
             UpdateOutcome::Failed,
@@ -476,33 +661,107 @@ pub fn winget_upgrade(program: &str) -> (UpdateOutcome, String) {
             )
         }
     };
-    let child = Command::new(&winget)
-        .args([
-            "upgrade",
-            "--id",
-            program,
-            "--exact",
+    let common = [
+        "--id",
+        program,
+        "--exact",
+        "--source",
+        "winget",
+        "--silent",
+        "--disable-interactivity",
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+    ];
+    let upgrade = match run_winget(&winget, &[&["upgrade"][..], &common].concat()) {
+        Ok((code, stdout, stderr)) => outcome_of(code, short_output(&stdout, &stderr)),
+        Err(message) => return (UpdateOutcome::Failed, message),
+    };
+    if upgrade.0 != UpdateOutcome::NotInstalled {
+        return upgrade;
+    }
+    tracing::info!("{program} is not installed; installing it");
+    match run_winget(
+        &winget,
+        &[&["install", "--scope", "machine"][..], &common].concat(),
+    ) {
+        Ok((code, stdout, stderr)) => install_outcome_of(code, short_output(&stdout, &stderr)),
+        Err(message) => (UpdateOutcome::Failed, message),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn winget_upgrade(_program: &str) -> (UpdateOutcome, String) {
+    (
+        UpdateOutcome::Failed,
+        "프로그램 업데이트는 Windows에서만 됩니다".into(),
+    )
+}
+
+/// The installed programs winget can update, as the service sees them (`winget export` for
+/// the ids, `winget list` for the names). `work_folder` holds the export file meanwhile.
+#[cfg(windows)]
+pub fn winget_installed(work_folder: &Path) -> Result<Vec<InstalledProgram>, String> {
+    let winget = winget_path()
+        .map_err(|diagnosis| format!("서비스가 winget을 찾지 못했습니다 ({diagnosis})"))?;
+    let export_path = work_folder.join(EXPORT_FILE);
+    let _ = fs::remove_file(&export_path);
+    let export_argument = export_path.to_string_lossy().to_string();
+    let (code, stdout, stderr) = run_winget(
+        &winget,
+        &[
+            "export",
+            "--output",
+            &export_argument,
             "--source",
             "winget",
-            "--silent",
-            "--disable-interactivity",
             "--accept-source-agreements",
-            "--accept-package-agreements",
-        ])
+            "--disable-interactivity",
+        ],
+    )?;
+    let export_json = fs::read_to_string(&export_path).map_err(|error| {
+        format!(
+            "winget export가 목록을 쓰지 못했습니다 (코드 {code:?}, {error}). {}",
+            short_output(&stdout, &stderr)
+        )
+    })?;
+    let _ = fs::remove_file(&export_path);
+    let (_, list_stdout, _) = run_winget(
+        &winget,
+        &[
+            "list",
+            "--source",
+            "winget",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ],
+    )?;
+    installed_from(&export_json, &String::from_utf8_lossy(&list_stdout))
+}
+
+#[cfg(not(windows))]
+pub fn winget_installed(_work_folder: &Path) -> Result<Vec<InstalledProgram>, String> {
+    Err("설치된 프로그램 목록은 Windows에서만 읽을 수 있습니다".into())
+}
+
+/// Run winget with `arguments`, without a window, for at most [`UPDATE_TIME_LIMIT`]: its exit
+/// code and output.
+#[cfg(windows)]
+fn run_winget(
+    winget: &Path,
+    arguments: &[&str],
+) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut child = Command::new(winget)
+        .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
-    let mut child = match child {
-        Ok(child) => child,
-        Err(error) => {
-            return (
-                UpdateOutcome::Failed,
-                format!("winget을 실행하지 못했습니다: {error}"),
-            )
-        }
-    };
+        .spawn()
+        .map_err(|error| format!("winget을 실행하지 못했습니다: {error}"))?;
     // Read the output on threads, or a full pipe would stop winget.
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -533,25 +792,15 @@ pub fn winget_upgrade(program: &str) -> (UpdateOutcome, String) {
             Err(_) => break None,
         }
     };
-    let output = short_output(
-        &stdout_reader.join().unwrap_or_default(),
-        &stderr_reader.join().unwrap_or_default(),
-    );
-    let Some(status) = status else {
-        return (
-            UpdateOutcome::Failed,
-            format!("30분 안에 끝나지 않아 멈췄습니다. {output}"),
-        );
-    };
-    outcome_of(status.code(), output)
-}
-
-#[cfg(not(windows))]
-pub fn winget_upgrade(_program: &str) -> (UpdateOutcome, String) {
-    (
-        UpdateOutcome::Failed,
-        "프로그램 업데이트는 Windows에서만 됩니다".into(),
-    )
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    match status {
+        Some(status) => Ok((status.code(), stdout, stderr)),
+        None => Err(format!(
+            "30분 안에 끝나지 않아 멈췄습니다. {}",
+            short_output(&stdout, &stderr)
+        )),
+    }
 }
 
 /// The outcome of winget's exit code.
@@ -563,6 +812,38 @@ pub fn outcome_of(code: Option<i32>, output: String) -> (UpdateOutcome, String) 
         Some(code) => (
             UpdateOutcome::Failed,
             format!("winget 오류 {code:#X}. {output}"),
+        ),
+        None => (UpdateOutcome::Failed, output),
+    }
+}
+
+/// The outcome of `winget install`'s exit code (run when the update found nothing installed).
+pub fn install_outcome_of(code: Option<i32>, output: String) -> (UpdateOutcome, String) {
+    match code.map(|code| code as u32) {
+        Some(0) => (UpdateOutcome::Installed, output),
+        Some(WINGET_NO_APPLICABLE_INSTALLER) => (
+            UpdateOutcome::Failed,
+            format!(
+                "설치되어 있지 않아 설치하려 했지만, 이 프로그램에는 모든 사용자에게 설치하는 설치 \
+                 파일이 없어 서비스가 설치할 수 없습니다. {output}"
+            ),
+        ),
+        Some(WINGET_NOT_INSTALLED) => (
+            UpdateOutcome::Failed,
+            format!("winget 목록에 이 이름의 프로그램이 없습니다. {output}"),
+        ),
+        Some(WINGET_ALREADY_INSTALLED) => (
+            UpdateOutcome::Failed,
+            format!(
+                "업데이트할 때는 설치되어 있지 않다고 했는데, 설치할 때는 이미 설치되어 있다고 \
+                 합니다. {output}"
+            ),
+        ),
+        Some(code) => (
+            UpdateOutcome::Failed,
+            format!(
+                "설치되어 있지 않아 설치하려 했지만 실패했습니다: winget 오류 {code:#X}. {output}"
+            ),
         ),
         None => (UpdateOutcome::Failed, output),
     }
@@ -853,6 +1134,91 @@ mod tests {
     }
 
     #[test]
+    fn installed_programs_come_from_the_export_with_the_tables_names() {
+        let export = r#"{"Sources":[{"Packages":[
+            {"PackageIdentifier":"Kakao.KakaoTalk"},
+            {"PackageIdentifier":"Microsoft.VisualStudioCode"},
+            {"PackageIdentifier":"Anthropic.Claude"},
+            {"PackageIdentifier":"Git.Git"},
+            {"PackageIdentifier":"bad id; rm"}],
+            "SourceDetails":{"Name":"winget"}}]}"#;
+        // A Korean table: headers in Korean, a long id cut short with "…", an unknown version.
+        let table = "   - \\ |\r\n\
+이름                          ID                           버전          사용 가능     원본\n\
+--------------------------------------------------------------------------------------------\n\
+카카오톡                      Kakao.KakaoTalk              4.2.1.3683    4.2.3.3720    winget\n\
+Microsoft Visual Studio Code  Microsoft.VisualStudioCo…    1.95.0                      winget\n\
+Git                           Git.Git                      < 2.40.0                    winget\n";
+        let programs = installed_from(export, table).unwrap();
+        let ids: Vec<&str> = programs.iter().map(|program| program.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "Anthropic.Claude",
+                "Git.Git",
+                "Kakao.KakaoTalk",
+                "Microsoft.VisualStudioCode"
+            ]
+        );
+        let kakao = &programs[2];
+        assert_eq!(
+            (
+                kakao.name.as_str(),
+                kakao.version.as_str(),
+                kakao.available.as_str()
+            ),
+            ("카카오톡", "4.2.1.3683", "4.2.3.3720")
+        );
+        let code = &programs[3];
+        assert_eq!(
+            (
+                code.name.as_str(),
+                code.version.as_str(),
+                code.available.as_str()
+            ),
+            ("Microsoft Visual Studio Code", "1.95.0", "")
+        );
+        assert_eq!(programs[1].version, "< 2.40.0");
+        // Not in the table: shown by its id alone.
+        assert_eq!(programs[0].name, "Anthropic.Claude");
+        assert!(installed_from("not json", table).is_err());
+    }
+
+    #[test]
+    fn the_installed_list_is_written_only_when_asked() {
+        let data_directory = folder("installed_list");
+        let calls = RefCell::new(0);
+        let list = |_: &Path| {
+            *calls.borrow_mut() += 1;
+            Ok(vec![InstalledProgram {
+                id: "Kakao.KakaoTalk".into(),
+                name: "카카오톡".into(),
+                ..InstalledProgram::default()
+            }])
+        };
+        list_installed_if_asked(&data_directory, &list);
+        assert_eq!(*calls.borrow(), 0);
+        assert!(read_installed_list(&data_directory).is_none());
+        request_installed_list(&data_directory).unwrap();
+        let config = AiFocusConfig::default();
+        assert!(status(&data_directory, &config).installed_waiting);
+        list_installed_if_asked(&data_directory, &list);
+        list_installed_if_asked(&data_directory, &list);
+        assert_eq!(*calls.borrow(), 1);
+        let shown = status(&data_directory, &config);
+        assert!(!shown.installed_waiting);
+        let installed = shown.installed.unwrap();
+        assert_eq!(installed.programs[0].name, "카카오톡");
+        assert!(installed.listed_at.is_some() && installed.error.is_empty());
+        // A failed listing is written with its reason.
+        request_installed_list(&data_directory).unwrap();
+        list_installed_if_asked(&data_directory, &|_: &Path| Err("winget 없음".to_string()));
+        let installed = read_installed_list(&data_directory).unwrap();
+        assert!(installed.programs.is_empty());
+        assert_eq!(installed.error, "winget 없음");
+    }
+
+    #[test]
     fn winget_exit_codes() {
         assert_eq!(outcome_of(Some(0), String::new()).0, UpdateOutcome::Updated);
         assert_eq!(
@@ -864,6 +1230,17 @@ mod tests {
             UpdateOutcome::NotInstalled
         );
         assert_eq!(outcome_of(Some(1), String::new()).0, UpdateOutcome::Failed);
+        assert_eq!(
+            install_outcome_of(Some(0), String::new()).0,
+            UpdateOutcome::Installed
+        );
+        let (outcome, message) = install_outcome_of(Some(0x8A15_0010u32 as i32), String::new());
+        assert_eq!(outcome, UpdateOutcome::Failed);
+        assert!(message.contains("모든 사용자에게 설치하는"), "{message}");
+        assert_eq!(
+            install_outcome_of(Some(1), String::new()).0,
+            UpdateOutcome::Failed
+        );
         assert_eq!(
             short_output(
                 "Found KakaoTalk\r  ██████▒▒ 50%\r\nSuccessfully installed\n".as_bytes(),

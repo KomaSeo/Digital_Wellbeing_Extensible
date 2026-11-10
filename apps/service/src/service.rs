@@ -172,12 +172,18 @@ fn care_loop(job: CareJob) {
                     &system_care::set_time_zone,
                 );
             }
-            CareJob::Updates => system_care::run_updates(
-                &data_directory,
-                &config,
-                chrono::Local::now(),
-                &system_care::winget_upgrade,
-            ),
+            CareJob::Updates => {
+                system_care::list_installed_if_asked(
+                    &data_directory,
+                    &system_care::winget_installed,
+                );
+                system_care::run_updates(
+                    &data_directory,
+                    &config,
+                    chrono::Local::now(),
+                    &system_care::winget_upgrade,
+                )
+            }
             CareJob::SelfUpdate => machine::self_update::handle_request(
                 &data_directory,
                 &machine::self_update::fetch_releases,

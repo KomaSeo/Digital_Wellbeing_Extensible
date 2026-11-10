@@ -141,7 +141,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "program_update",
-            "description": "Ask the app's service to update a program that needs administrator rights (KakaoTalk, for example). Only programs on the settings' list (updatable_programs, winget ids such as Kakao.KakaoTalk; see get_settings) can be updated; the service runs winget silently, and the user never gets administrator rights. The update starts within seconds and may take minutes; its result shows in the app's Settings tab (시스템). Without an argument, it lists the programs and the recent results.",
+            "description": "Ask the app's service to update a program that needs administrator rights (KakaoTalk, for example). Only programs on the settings' list (updatable_programs, winget ids such as Kakao.KakaoTalk; see get_settings) can be updated; the service runs winget silently (and installs the program for every account when it is not installed), and the user never gets administrator rights. The update starts within seconds and may take minutes; its result shows in the app's Settings tab (시스템). Without an argument, it lists the programs and the recent results.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -33,6 +33,7 @@
 //! | `settings_unprotect` | `{ password? }` (time over, or the password) | `{ protected: false }`; every block lifted |
 //! | `program_update` | `{ "program": "Kakao.KakaoTalk" }` (listed in `updatable_programs`) | [`crate::system_care::CareStatus`] |
 //! | `system_care_status` | `{}`                                 | [`crate::system_care::CareStatus`] |
+//! | `installed_programs_refresh` | `{}` (the service lists the programs winget can update) | [`crate::system_care::CareStatus`] |
 //! | `self_update` | `{ "action": "check"\|"install" }` (the service does it; see `crate::self_update`) | [`crate::self_update::UpdateStatus`] |
 //! | `self_update_status` | `{}`                                 | [`crate::self_update::UpdateStatus`] |
 //! | `assistant_send` | `{ "text": "…" }` (starts a turn and returns at once) | [`crate::assistant::AssistantView`] |
@@ -525,6 +526,12 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
         }
         "self_update_status" => {
             return serde_json::to_value(crate::self_update::status(&data_directory))
+                .map_err(|error| error.to_string());
+        }
+        "installed_programs_refresh" => {
+            crate::system_care::request_installed_list(&data_directory)?;
+            let config = api.monitor.store().get();
+            return serde_json::to_value(crate::system_care::status(&data_directory, &config))
                 .map_err(|error| error.to_string());
         }
         "system_care_status" => {
