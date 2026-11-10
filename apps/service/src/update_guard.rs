@@ -9,7 +9,12 @@
 //! 2. runs the setup program silently (it keeps the owner's data), with this program's own
 //!    windows closed too: the Focus app (where the update was asked for) and the MCP server
 //!    Claude Desktop runs. The enforcer never closes them, and a program file in use makes
-//!    the silent setup give up (exit code 5). The setup's log goes to `logs\setup.log`;
+//!    the silent setup give up (exit code 5). The setup itself stops the service and its
+//!    agents. It is told not to close other programs that hold our files open
+//!    (`/NOCLOSEAPPLICATIONS`): an antivirus that is scanning them (McAfee on the owner's PC)
+//!    cannot be closed, and the silent setup gave up on that alone, although a scan does not
+//!    keep a file from being replaced. A failed setup is tried again twice, half a minute
+//!    apart. The setup's log goes to `logs\setup.log` (the last try's);
 //! 3. starts the service if the setup left it stopped, waits until the new agents run, and
 //!    only then stops closing apps and records the outcome (`self_update.json`).
 //!
@@ -162,7 +167,33 @@ fn close_own_programs() {
     let _ = command.creation_flags(CREATE_NO_WINDOW).output();
 }
 
+/// How many times the setup program is run before the update counts as failed.
+const SETUP_TRIES: u32 = 3;
+/// The pause before the setup program is run again.
+const SETUP_RETRY_PAUSE: Duration = Duration::from_secs(30);
+
 fn run_setup(setup: &Path) -> anyhow::Result<()> {
+    let mut try_number = 1;
+    loop {
+        match run_setup_once(setup) {
+            Ok(()) => return Ok(()),
+            Err(error) if try_number < SETUP_TRIES => {
+                warn!("setup try {try_number} of {SETUP_TRIES} failed: {error:#}; trying again");
+                // The service may be left stopped: start it again for the pause.
+                let _ = start_service();
+                std::thread::sleep(SETUP_RETRY_PAUSE);
+                try_number += 1;
+            }
+            Err(error) => {
+                // The service may be left stopped: start it again, the old version or the new.
+                let _ = start_service();
+                return Err(error.context(format!("{SETUP_TRIES}번 시도했습니다")));
+            }
+        }
+    }
+}
+
+fn run_setup_once(setup: &Path) -> anyhow::Result<()> {
     close_own_programs();
     let log = machine::log_dir().join("setup.log");
     let mut child = Command::new(setup)
@@ -171,8 +202,7 @@ fn run_setup(setup: &Path) -> anyhow::Result<()> {
             "/SUPPRESSMSGBOXES",
             "/NORESTART",
             "/SP-",
-            "/CLOSEAPPLICATIONS",
-            "/FORCECLOSEAPPLICATIONS",
+            "/NOCLOSEAPPLICATIONS",
         ])
         .arg(format!("/LOG={}", log.display()))
         .creation_flags(CREATE_NO_WINDOW)
@@ -190,8 +220,6 @@ fn run_setup(setup: &Path) -> anyhow::Result<()> {
             if status.success() {
                 return Ok(());
             }
-            // The service may be left stopped: start it again, the old version or the new.
-            let _ = start_service();
             anyhow::bail!(
                 "the setup program ended with {status} (its log: {})",
                 log.display()
@@ -199,7 +227,6 @@ fn run_setup(setup: &Path) -> anyhow::Result<()> {
         }
         if started.elapsed() > SETUP_TIME_LIMIT {
             let _ = child.kill();
-            let _ = start_service();
             anyhow::bail!("the setup program took more than 15 minutes");
         }
         std::thread::sleep(Duration::from_secs(1));

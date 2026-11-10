@@ -1107,3 +1107,13 @@
   - 그래서 찾는 길을 늘렸습니다. 서비스는 패키지 폴더를 WindowsApps 폴더와 Windows의 앱 목록(`Get-AppxPackage -AllUsers`) 두 곳에서 찾습니다. 패키지 안에서는 패키지 설명 파일이 `winget.exe` 명령에 연결한 프로그램을 쓰고, 없으면 맨 위나 한 단계 아래의 `winget.exe`를 씁니다.
   - 그래도 찾지 못하면 결과에 찾아본 폴더와 읽지 못한 곳의 오류를 적습니다. 다음에 또 실패하면 이 문구로 원인을 알 수 있습니다.
 
+### 8.101 이 프로그램의 업데이트가 백신 프로그램 때문에 멈추지 않게 한다
+- **소유자 요청:** "마지막 업데이트(2026-11-10 11:06): 업데이트하지 못했습니다: the setup program ended with exit code: 5 (its log: C:\ProgramData\DigitalWellbeing\logs\setup.log)"와 설치 기록. 기록에는 "RestartManager found an application using one of our files: McAfee Framework Host", "Some applications could not be shut down.", "Defaulting to Abort for suppressed message box"가 있었습니다.
+- **소유자가 말한 이유:** 이 프로그램의 업데이트가 실패했기 때문입니다.
+- **AI가 정한 세부:**
+  - 원인: 설치 프로그램은 바꿀 파일을 열어 둔 프로그램을 Windows의 재시작 관리자(Restart Manager)로 닫으려 했습니다. McAfee는 자기를 보호하므로 닫히지 않았고, 화면 없는 설치는 이때 묻는 창에 "중단"을 골라 종료 코드 5로 끝났습니다.
+  - 고친 것: 업데이트 지킴이는 설치 프로그램에 `/CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS` 대신 `/NOCLOSEAPPLICATIONS`를 줍니다. 이 프로그램 자신의 프로세스는 따로 닫힙니다. Focus 앱과 MCP 서버는 지킴이가 닫고, 서비스와 agent는 설치 프로그램이 멈춥니다. 백신이 검사하느라 파일을 열어 두어도 보통 파일은 바꿀 수 있다고 보았습니다.
+  - 그래도 파일이 잠깐 쓰이고 있어 실패할 수 있으므로, 실패하면 30초 뒤에 다시 시도하고 모두 세 번까지 시도합니다. 시도 사이에는 서비스를 다시 켜 둡니다.
+  - 사람이 직접 실행하는 설치는 바꾸지 않았습니다. 그 설치는 파일을 쓰는 프로그램을 보여 주고, 사람이 "닫지 않고 계속"을 고를 수 있습니다.
+  - 이 고침은 rc.62부터 동작합니다. 업데이트를 실행하는 것은 이미 설치된 버전의 지킴이이므로, McAfee가 있는 PC에서 rc.61 이하로부터 업데이트할 때는 여전히 실패할 수 있습니다. 그런 PC는 관리자 계정에서 설치 파일을 직접 실행해 한 번 업데이트합니다.
+
