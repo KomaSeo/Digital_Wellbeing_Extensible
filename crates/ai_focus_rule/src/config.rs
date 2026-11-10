@@ -149,7 +149,7 @@ impl Default for AiFocusConfig {
             allow_permanent_grants: true,
             max_grant_minutes: 120,
             daily_budget_usd: 0.0,
-            comparison_percent: 10,
+            comparison_percent: 1,
             revoked_grants: BTreeSet::new(),
             unblocked: BTreeSet::new(),
             always_blocked_sites: BTreeSet::new(),

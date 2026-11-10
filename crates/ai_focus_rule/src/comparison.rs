@@ -6,7 +6,7 @@
 //! 세 개 모델 (OPUS, SONNET, HAIKU) 모두 돌려서 비교" at 10%.
 //!
 //! - After a real call of a [compared feature](COMPARED_PURPOSES) answers, [`after_call`]
-//!   draws a number; with the settings' share (`comparison_percent`, default 10%) it sends
+//!   draws a number; with the settings' share (`comparison_percent`, default 1%; the owner first chose 10%) it sends
 //!   the very same request to each of [`COMPARED_MODELS`], once each, on a thread of its
 //!   own, so the real answer is not delayed. The real answer itself is not used: whichever
 //!   model the settings choose, every sample holds one answer of each model, and

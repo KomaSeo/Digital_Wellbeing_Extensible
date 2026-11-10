@@ -661,7 +661,7 @@ Other open windows (title only; judge each in `others`):
 
 **동작:**
 1. `ClaudeClient::send()`는 실제 질문의 답을 받으면 `comparison::after_call()`을 부릅니다.
-2. 그 질문이 비교하는 기능(`focus check`, `planner review`, `planner pick`, `to-do change review`, `assistant`)이면, 설정의 비율(`comparison_percent`, 기본값 10%)로 제비를 뽑습니다. 창 다시 검사(`focus recheck`)와 그 밖의 질문은 비교하지 않습니다.
+2. 그 질문이 비교하는 기능(`focus check`, `planner review`, `planner pick`, `to-do change review`, `assistant`)이면, 설정의 비율(`comparison_percent`, 기본값 1%. 처음에는 10%였습니다)로 제비를 뽑습니다. 창 다시 검사(`focus recheck`)와 그 밖의 질문은 비교하지 않습니다.
 3. 뽑히면, 별도의 스레드가 같은 요청을 세 모델에게 **한 번씩** 보냅니다. 그래서 실제 답은 늦어지지 않습니다. 설정에서 고른 모델이 무엇이든 세 모델에게 모두 묻고, 실제 질문의 답은 비교에 쓰지 않습니다. 그래서 고른 모델에 따라 비교 방식이 달라지지 않습니다. 소유자가 "유저가 어떤 모델을 선택했는지 여러 가지 경우의 수가 있을 수 있잖아. 그러니까 그런 일 없게, Opus, Sonnet, Haiku를 각각 한번 씩 호출하고 이를 바탕으로 서로 얼마나 일치하는지 matrix 만들라는 거지"라고 해서 이렇게 바뀌었습니다. 예전에는 실제 질문이 쓰지 않은 모델에게만 물었고, 실제 답을 그 모델의 답으로 썼습니다(예전 기록도 그대로 셉니다).
    - 복사한 요청에서는 캐시 표시를 뺍니다. 다시 읽히지 않을 캐시를 쓰면 쓰는 값만 들기 때문입니다.
    - 서버의 다른 모델 대신 답하기(`fallbacks`)도 뺍니다. 그 모델 자신의 답이어야 하기 때문입니다.
