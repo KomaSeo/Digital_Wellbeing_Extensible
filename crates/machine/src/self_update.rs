@@ -10,7 +10,12 @@
 //!   program runs silently (keeping the owner's data), and until the new service has started
 //!   its agents again. So an update is never a way around the rules, whether the settings are
 //!   protected or not.
-//! - There is no automatic update: the owner chose to update by hand.
+//! - The service also updates on its own (the owner: "켤때 + 하루 한 번"): a minute and a half
+//!   after it starts (the PC was turned on, so little is open yet) and once a day from 4 o'clock,
+//!   it checks and installs a newer release like the "지금 업데이트" button
+//!   ([`automatic_due`], [`RequestKind::Automatic`]). Not again within an hour of the last
+//!   automatic try, or a failing install (which starts the service again) would close every
+//!   app every few minutes.
 //! - Builds made on the old sync branch (`sync-windows-latest`) show a build after their
 //!   version; they update to the numbered releases like any other.
 //!
@@ -79,6 +84,8 @@ pub fn version_order(version: &str) -> (u64, u64, u64, u64) {
 pub enum RequestKind {
     Check,
     Install,
+    /// The service's own: check, and install a newer release when there is one.
+    Automatic,
 }
 
 /// Responsibility: Carry one request from the agent to the service.
@@ -123,6 +130,62 @@ pub struct UpdateState {
     /// The guard is installing (since then).
     pub installing_since: Option<DateTime<Utc>>,
     pub last_install: Option<InstallRun>,
+    /// When the service last checked (and installed) on its own.
+    pub last_automatic: Option<DateTime<Utc>>,
+}
+
+/// The local hour from which the daily automatic update runs (the program updates' hour).
+pub const AUTOMATIC_FROM_HOUR: u32 = crate::system_care::AUTO_UPDATE_FROM_HOUR;
+/// How long after the service starts it checks on its own (the network comes up meanwhile).
+pub const AFTER_START: std::time::Duration = std::time::Duration::from_secs(90);
+/// No automatic try within this long of the last one.
+const AUTOMATIC_GAP_MINUTES: i64 = 60;
+
+/// Is an automatic update due? `checked_since_start`: this run of the service has made its
+/// start check already. Due once [`AFTER_START`] after the service starts, and on the first
+/// pass of a local day from [`AUTOMATIC_FROM_HOUR`] on; never before [`AFTER_START`] (the
+/// network may not be up yet) and never within an hour of the last try.
+pub fn automatic_due(
+    last_automatic: Option<DateTime<Utc>>,
+    since_start: std::time::Duration,
+    checked_since_start: bool,
+    now: DateTime<chrono::Local>,
+) -> bool {
+    use chrono::Timelike;
+    if since_start < AFTER_START {
+        return false;
+    }
+    if last_automatic.is_some_and(|last| {
+        now.with_timezone(&Utc) - last < chrono::Duration::minutes(AUTOMATIC_GAP_MINUTES)
+    }) {
+        return false;
+    }
+    let at_start = !checked_since_start;
+    let daily = now.hour() >= AUTOMATIC_FROM_HOUR
+        && last_automatic
+            .is_none_or(|last| last.with_timezone(&chrono::Local).date_naive() < now.date_naive());
+    at_start || daily
+}
+
+/// The service asks itself for an automatic update (unless a request waits or an update
+/// runs). Returns whether it did.
+pub fn request_automatic(data_directory: &Path, now: DateTime<Utc>) -> bool {
+    let state = read_state(data_directory);
+    if pending_request(data_directory).is_some()
+        || state.busy.is_some()
+        || state.installing_since.is_some()
+    {
+        return false;
+    }
+    write_json(
+        &data_directory.join(REQUEST_FILE),
+        &UpdateRequest {
+            kind: RequestKind::Automatic,
+            requested_by: "자동".into(),
+            requested_at: now,
+        },
+    )
+    .is_ok()
 }
 
 /// Responsibility: Tell the Focus app about updates.
@@ -324,7 +387,12 @@ pub fn handle_request(
     };
     // Taken first, so a failing request is not tried again every few seconds.
     let _ = fs::remove_file(data_directory.join(REQUEST_FILE));
-    change_state(data_directory, |state| state.busy = Some(request.kind));
+    change_state(data_directory, |state| {
+        state.busy = Some(request.kind);
+        if request.kind == RequestKind::Automatic {
+            state.last_automatic = Some(Utc::now());
+        }
+    });
     tracing::info!(
         "self-update {:?} requested by {}",
         request.kind,
@@ -333,7 +401,8 @@ pub fn handle_request(
     let checked = fetch().map(|releases| newest_available(&releases));
     let outcome = match (request.kind, checked) {
         (_, Err(error)) => Err(error),
-        (RequestKind::Check, Ok(available)) => {
+        (RequestKind::Check | RequestKind::Automatic, Ok(available @ None))
+        | (RequestKind::Check, Ok(available)) => {
             change_state(data_directory, |state| {
                 state.available = available;
                 state.last_check = Some(Utc::now());
@@ -347,20 +416,32 @@ pub fn handle_request(
             });
             Err("설치할 새 버전이 없습니다".into())
         }
-        (RequestKind::Install, Ok(Some(release))) => download(&release).and_then(|setup| {
-            change_state(data_directory, |state| {
-                state.installing_since = Some(Utc::now());
-            });
-            tracing::info!("installing {} with the update guard", release.version);
-            start_guard(&setup).inspect_err(|_| {
-                change_state(data_directory, |state| state.installing_since = None);
-            })
-        }),
+        (RequestKind::Install | RequestKind::Automatic, Ok(Some(release))) => {
+            install(data_directory, &release, download, start_guard)
+        }
     };
     change_state(data_directory, |state| {
         state.busy = None;
         state.error = outcome.err().unwrap_or_default();
     });
+}
+
+/// Download `release` and hand it to the update guard.
+fn install(
+    data_directory: &Path,
+    release: &Release,
+    download: &dyn Fn(&Release) -> Result<PathBuf, String>,
+    start_guard: &dyn Fn(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    download(release).and_then(|setup| {
+        change_state(data_directory, |state| {
+            state.installing_since = Some(Utc::now());
+        });
+        tracing::info!("installing {} with the update guard", release.version);
+        start_guard(&setup).inspect_err(|_| {
+            change_state(data_directory, |state| state.installing_since = None);
+        })
+    })
 }
 
 #[cfg(test)]
@@ -454,6 +535,91 @@ mod tests {
         request(&folder, RequestKind::Check, "work", Utc::now()).unwrap();
         handle_request(&folder, &|| Err("offline".into()), &download, &start_guard);
         assert_eq!(read_state(&folder).error, "offline");
+        let _ = fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn the_service_updates_on_its_own_after_it_starts_and_once_a_day() {
+        use chrono::TimeZone;
+        let local = |day: u32, hour: u32| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 11, day, hour, 0, 0)
+                .unwrap()
+        };
+        let utc = |day: u32, hour: u32| local(day, hour).with_timezone(&Utc);
+        let soon = std::time::Duration::from_secs(10);
+        // A minute and a half after the service starts, once.
+        assert!(!automatic_due(Some(utc(11, 1)), soon, false, local(11, 9)));
+        // Never tried, or the first pass of the day: also only once the network is up.
+        assert!(!automatic_due(None, soon, false, local(11, 9)));
+        assert!(automatic_due(None, AFTER_START, true, local(11, 9)));
+        assert!(automatic_due(
+            Some(utc(11, 1)),
+            AFTER_START,
+            false,
+            local(11, 9)
+        ));
+        assert!(!automatic_due(
+            Some(utc(11, 1)),
+            AFTER_START,
+            true,
+            local(11, 9)
+        ));
+        // Never within an hour of the last try (a failed install starts the service again).
+        assert!(!automatic_due(
+            Some(utc(11, 9) - chrono::Duration::minutes(5)),
+            AFTER_START,
+            false,
+            local(11, 9)
+        ));
+        // Once a day from 4 o'clock, also while the service has been running for days.
+        let running = AFTER_START * 100;
+        assert!(!automatic_due(
+            Some(utc(10, 22)),
+            running,
+            true,
+            local(11, 3)
+        ));
+        assert!(automatic_due(
+            Some(utc(10, 22)),
+            running,
+            true,
+            local(11, 4)
+        ));
+        assert!(!automatic_due(
+            Some(utc(11, 4)),
+            running,
+            true,
+            local(11, 15)
+        ));
+    }
+
+    #[test]
+    fn an_automatic_request_installs_only_a_newer_release() {
+        let folder =
+            std::env::temp_dir().join(format!("dw_self_update_auto_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).unwrap();
+        let started = std::cell::RefCell::new(0);
+        let download = |_: &Release| Ok(folder.join("setup.exe"));
+        let start_guard = |_: &Path| {
+            *started.borrow_mut() += 1;
+            Ok(())
+        };
+        // Nothing newer: recorded as checked, no error, nothing installed.
+        assert!(request_automatic(&folder, Utc::now()));
+        handle_request(&folder, &|| Ok(json!([])), &download, &start_guard);
+        let state = read_state(&folder);
+        assert!(state.last_automatic.is_some() && state.last_check.is_some());
+        assert_eq!((state.error.as_str(), *started.borrow()), ("", 0));
+        // A newer release: installed like the button.
+        let newer = format!("{}9", this_version());
+        let releases = json!([release(&format!("v{newer}"), false)]);
+        assert!(request_automatic(&folder, Utc::now()));
+        handle_request(&folder, &|| Ok(releases.clone()), &download, &start_guard);
+        assert_eq!(*started.borrow(), 1);
+        // While it installs, the service does not ask again.
+        assert!(!request_automatic(&folder, Utc::now()));
         let _ = fs::remove_dir_all(&folder);
     }
 }

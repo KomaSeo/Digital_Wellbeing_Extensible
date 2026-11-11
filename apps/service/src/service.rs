@@ -157,6 +157,9 @@ const CARE_INTERVAL: Duration = Duration::from_secs(5);
 fn care_loop(job: CareJob) {
     use machine::system_care;
     let data_directory = machine::data_dir();
+    let started = std::time::Instant::now();
+    // The self-update's check after the service starts has been made (or was not due).
+    let mut checked_since_start = false;
     loop {
         let config: ai_focus_rule::AiFocusConfig =
             std::fs::read_to_string(machine::ai_focus_path())
@@ -184,12 +187,28 @@ fn care_loop(job: CareJob) {
                     &system_care::winget_upgrade,
                 )
             }
-            CareJob::SelfUpdate => machine::self_update::handle_request(
-                &data_directory,
-                &machine::self_update::fetch_releases,
-                &|release| machine::self_update::download_setup(&data_directory, release),
-                &crate::update_guard::start,
-            ),
+            CareJob::SelfUpdate => {
+                use machine::self_update;
+                let since_start = started.elapsed();
+                if self_update::automatic_due(
+                    self_update::read_state(&data_directory).last_automatic,
+                    since_start,
+                    checked_since_start,
+                    chrono::Local::now(),
+                ) && self_update::request_automatic(&data_directory, chrono::Utc::now())
+                {
+                    info!("automatic self-update check");
+                }
+                if since_start >= self_update::AFTER_START {
+                    checked_since_start = true;
+                }
+                self_update::handle_request(
+                    &data_directory,
+                    &self_update::fetch_releases,
+                    &|release| self_update::download_setup(&data_directory, release),
+                    &crate::update_guard::start,
+                )
+            }
         }
         thread::sleep(CARE_INTERVAL);
     }

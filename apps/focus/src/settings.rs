@@ -1367,10 +1367,12 @@ impl SettingsTab {
         let state = &status.state;
         ui.label(format!("지금 버전: {}", status.version));
         ui.small(
-            "새 버전은 GitHub의 릴리스 페이지에서 받습니다. 업데이트는 저절로 하지 않고, 아래 버튼으로만 \
-             합니다. 설치하는 동안(보통 1분 안) 이 PC의 모든 앱과 브라우저가 닫히고 Focus 앱도 \
-             닫힙니다. 그래서 엄격 모드여도 업데이트로 규칙을 피할 수는 없습니다. 끝나면 \
-             시작 메뉴에서 Focus 앱을 다시 엽니다. 할 일, 설정, 로그인은 그대로 남습니다.",
+            "새 버전은 GitHub의 릴리스 페이지에서 받습니다. 서비스가 PC를 켠 뒤 1분 30초쯤 지나서, \
+             그리고 하루 한 번(새벽 4시 이후 PC가 켜져 있는 첫 때) 새 버전을 확인하고, 있으면 저절로 \
+             설치합니다. 아래 버튼으로 언제든 직접 할 수도 있습니다. 설치하는 동안(보통 1분 안) 이 \
+             PC의 모든 앱과 브라우저가 닫히고 Focus 앱도 닫힙니다. 그래서 엄격 모드여도 업데이트로 \
+             규칙을 피할 수는 없습니다. 끝나면 시작 메뉴에서 Focus 앱을 다시 엽니다. 할 일, 설정, \
+             로그인은 그대로 남습니다.",
         );
         let busy = status.pending.is_some() || state.busy.is_some();
         if let Some(since) = state.installing_since {
@@ -1386,6 +1388,9 @@ impl SettingsTab {
                 ui.spinner();
                 ui.label(match status.pending.or(state.busy) {
                     Some(RequestKind::Install) => "새 버전을 받는 중입니다…",
+                    Some(RequestKind::Automatic) => {
+                        "새 버전이 있는지 확인하고, 있으면 받는 중입니다(자동)…"
+                    }
                     _ => "새 버전이 있는지 확인하는 중입니다…",
                 });
             });
