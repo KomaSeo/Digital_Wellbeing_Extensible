@@ -453,7 +453,8 @@ impl FocusApp {
                             YELLOW,
                             format!(
                                 "{}부터 일시 정지 중입니다. 다시 시작하면 멈춘 만큼 끝나는 시각이 \
-                                 늦춰집니다. 일시 정지 중에도 창 검사는 계속됩니다.",
+                                 늦춰집니다. 엄격 모드에서는 일시 정지 중에 Focus 앱이 화면을 \
+                                 덮어 컴퓨터를 쓸 수 없습니다.",
                                 local_time(since)
                             ),
                         );
@@ -469,7 +470,8 @@ impl FocusApp {
                             .add_enabled(ready, egui::Button::new("일시 정지"))
                             .on_hover_text(
                                 "할 일의 시간을 멈춥니다. 다시 시작하면 멈춘 만큼 끝나는 시각이 \
-                                 늦춰집니다. 일시 정지 중에도 창 검사는 계속됩니다.",
+                                 늦춰집니다. 엄격 모드에서는 일시 정지 중에 Focus 앱이 화면을 \
+                                 덮어 컴퓨터를 쓸 수 없습니다.",
                             );
                         if pause.clicked() {
                             self.send("pause_task", json!({}));

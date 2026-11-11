@@ -357,6 +357,14 @@ impl TaskPlanner {
 
     /// There are to-dos but none is assigned: the agent locks every app until the user asks
     /// for their task.
+    /// The current task is paused ("일시 정지").
+    pub fn paused(&self) -> bool {
+        self.state
+            .get()
+            .assignment
+            .is_some_and(|assignment| assignment.paused_since.is_some())
+    }
+
     pub fn waiting_for_task(&self) -> bool {
         self.state.get().assignment.is_none() && self.is_active()
     }
@@ -1103,8 +1111,9 @@ impl TaskPlanner {
     }
 
     /// The user pauses the current task ("일시 정지", the owner: "사용자가 직접 일시 정지는 할
-    /// 수 있도록 만들어 줄래?"): its time stands still until [`Self::unpause`]. The window
-    /// checks go on meanwhile, so a pause frees nothing. An appointment (fixed times) cannot
+    /// 수 있도록 만들어 줄래?"): its time stands still until [`Self::unpause`]. In strict mode
+    /// the Focus app covers the screen meanwhile (`machine::lockdown`, `TaskLock::Paused`), so
+    /// a pause frees nothing. An appointment (fixed times) cannot
     /// be paused, nor a task whose time is up (it is reported first).
     pub fn pause(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
         let _busy = self.busy.lock();

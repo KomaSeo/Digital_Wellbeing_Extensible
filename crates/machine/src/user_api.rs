@@ -348,7 +348,7 @@ fn status(api: &AgentApi) -> Status {
 }
 
 /// The lockdown in force now (see [`crate::lockdown`]): a broken AI connection, a sync login
-/// not made yet, to-dos with none assigned, or a stop ("사용 중지").
+/// not made yet, a paused task, to-dos with none assigned, or a stop ("사용 중지").
 pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lockdown> {
     crate::lockdown::lockdown(
         crate::settings::is_protected(&crate::data_dir()),
@@ -358,6 +358,8 @@ pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lo
                 Some(crate::lockdown::TaskLock::Stopped)
             } else if crate::login::required(&crate::data_dir()) {
                 Some(crate::lockdown::TaskLock::LoginRequired)
+            } else if planner.paused() {
+                Some(crate::lockdown::TaskLock::Paused)
             } else {
                 planner
                     .waiting_for_task()

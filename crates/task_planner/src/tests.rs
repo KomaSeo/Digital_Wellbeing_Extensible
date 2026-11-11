@@ -2192,6 +2192,8 @@ fn the_user_pauses_a_task_and_its_time_stands_still_until_they_go_on() {
         paused.paused_since,
         Some(start + chrono::Duration::minutes(4))
     );
+    // Paused: the agent covers the screen (machine::lockdown).
+    assert!(fixture.planner.paused());
     fixture
         .planner
         .resume(planned_end + chrono::Duration::minutes(5))
@@ -2211,6 +2213,7 @@ fn the_user_pauses_a_task_and_its_time_stands_still_until_they_go_on() {
     // Going on at 64 minutes: the 60 minutes paused are logged and added to the end.
     let back = start + chrono::Duration::minutes(64);
     let running = fixture.planner.unpause(back).unwrap();
+    assert!(!fixture.planner.paused());
     assert_eq!(running.paused_since, None);
     assert_eq!(
         running.until,

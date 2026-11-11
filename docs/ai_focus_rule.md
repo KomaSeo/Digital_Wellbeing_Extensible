@@ -551,8 +551,9 @@ Other open windows (title only; judge each in `others`):
 - `NoTask`는 맡은 할 일이 없어서 사용자가 "할 일 받기"를 누르기를 기다리는 경우입니다(**할 일을 기다리는 잠금**, [`task_planner.md`](task_planner.md) 4.7절).
 - `Stopped`는 사용자가 일하기 탭의 **사용 중지**를 누른 경우입니다([`task_planner.md`](task_planner.md) 4.13절).
 - `LoginRequired`는 여러 기기 동기화를 쓰는 PC에서 이 Windows 계정이 아직 로그인하지 않은 경우입니다([`sync.md`](sync.md)).
+- `Paused`는 사용자가 지금 할 일을 일시 정지한 경우입니다([`task_planner.md`](task_planner.md) 4.14절). 엄격 모드에서만 잠급니다.
 `Stopped`는 다른 모든 이유보다 먼저 보입니다. 네 이유 모두 엄격 모드일 때만 걸립니다(예전에는 `Stopped`만 설정 단계에서도 걸렸습니다). 나머지 셋이 함께 있으면 AI 연결이 먼저 보입니다. 예전 버전(rc.54까지)에는 컴퓨터 없이 하는 일을 하는 동안의 잠금(`AwayFromComputer`)도 있었습니다([`task_planner.md`](task_planner.md) 4.11절).
-- **화면 덮기.** 할 일을 기다리는 잠금, 사용 중지의 잠금, 로그인이 필요한 잠금에서는 프로그램을 끄지 않습니다(`Lockdown.covers_screen`). 대신 Focus 앱이 테두리 없이 모든 모니터를 덮고, 다른 모든 창보다 위에 있으며, 1초마다 다시 모든 화면을 덮고 맨 앞으로 나옵니다(`apps/focus/src/cover.rs`; Windows에서는 `HWND_TOPMOST`와 가상 화면 전체 크기, 다른 운영체제에서는 전체 화면). 일하기 탭이 보이고, 잠금이 풀리면 창은 원래 자리와 크기로 돌아갑니다. 덮는 동안에는 창을 닫거나 숨길 수 없습니다.
+- **화면 덮기.** 할 일을 기다리는 잠금, 사용 중지의 잠금, 로그인이 필요한 잠금, 일시 정지의 잠금에서는 프로그램을 끄지 않습니다(`Lockdown.covers_screen`). 대신 Focus 앱이 테두리 없이 모든 모니터를 덮고, 다른 모든 창보다 위에 있으며, 1초마다 다시 모든 화면을 덮고 맨 앞으로 나옵니다(`apps/focus/src/cover.rs`; Windows에서는 `HWND_TOPMOST`와 가상 화면 전체 크기, 다른 운영체제에서는 전체 화면). 일하기 탭이 보이고, 잠금이 풀리면 창은 원래 자리와 크기로 돌아갑니다. 덮는 동안에는 창을 닫거나 숨길 수 없습니다.
   - 다른 앱과 창은 열린 채로 남습니다. 그래서 백그라운드 앱이 꺼지지 않고, 할 일을 받으면 하던 창이 그대로 있습니다. 소유자가 "앱이나 웹사이트를 도륙내는 대신에, digital wellbeing focus앱이 전체화면으로 전환되게 만들고 항상 맨 앞으로 나오게 만들 수 있나?"라고 묻고, 방식을 듣고 "그래"라고 해서 바뀌었습니다. 예전에는 아래의 AI 연결 잠금처럼 남기는 프로그램 말고는 모두 껐습니다.
   - **마지막 수단:** 덮는 동안 Windows가 돌아가는 데 필요한 프로그램이 아닌 앱이 5초(`COVER_GRACE`) 넘게 맨 앞에 있으면(Alt+Tab, 다른 "항상 위" 창), 그 앱 하나만 끕니다(`LockdownRule::held_in_front`). agent는 맨 앞 창을 AI 집중 규칙의 모니터에게서 받습니다(`FocusMonitor::foreground_window`).
   - Focus 앱이 돌고 있지 않으면(작업 관리자로 끔, 트레이에서 끝내기) 덮을 것이 없으므로, 예전처럼 남기는 프로그램 말고는 모두 끕니다.
@@ -565,7 +566,7 @@ Other open windows (title only; judge each in `others`):
 - AI 연결이 끊겨서 잠긴 경우, 브라우저는 끄지 않는 대신, 모니터가 Claude와 Anthropic 페이지가 아닌 탭을 모두 닫습니다(`close_always_blocked_sites`, `lockdown_allows_page`). 남기는 탭은 제목에 "Claude"나 "Anthropic"이 든 탭, 빈 새 탭(주소를 적기 위해), Google 로그인 페이지(Claude에 로그인하기 위해)입니다. 뒤쪽 창의 다른 탭은 최소화합니다.
 - 소유자가 Claude 웹사이트를 예외로 하라고 했습니다. 키를 다시 연결하려면 Claude Console에서 새 키를 만들어야 하기 때문입니다.
 - Claude Desktop(`claude.exe`)은 어느 잠금에서도 끕니다. Claude Desktop에도 웹을 보는 기능이 있어서, 잠금을 걸어 두고 Claude Desktop으로 웹을 볼 수 있기 때문입니다. 키를 고치는 데에는 브라우저의 Claude Console만 있으면 됩니다. 예전에는 AI 연결이 끊긴 잠금에서 Claude Desktop을 남겼지만, 소유자가 그 예외는 Claude Desktop이 아니라 Claude 대시보드(Claude Console)를 뜻했다고 알려 주어 바뀌었습니다(`docs/design_decisions.md` 8.88). Claude Desktop을 "검사하지 않는 앱"에 넣었으면 남습니다.
-- 할 일을 기다리는 잠금, 사용 중지의 잠금, 로그인이 필요한 잠금에서 Focus 앱이 돌고 있지 않아 프로그램을 끌 때는 브라우저도 끕니다(`Lockdown.browsers_allowed`가 `false`). 이 잠금들은 Focus 앱의 버튼이나 보고로 풀리므로 웹사이트가 필요 없기 때문입니다. Windows가 돌아가는 데 필요한 프로그램, 이 앱, "검사하지 않는 앱"은 이 잠금에서도 남습니다.
+- 할 일을 기다리는 잠금, 사용 중지의 잠금, 로그인이 필요한 잠금, 일시 정지의 잠금에서 Focus 앱이 돌고 있지 않아 프로그램을 끌 때는 브라우저도 끕니다(`Lockdown.browsers_allowed`가 `false`). 이 잠금들은 Focus 앱의 버튼이나 보고로 풀리므로 웹사이트가 필요 없기 때문입니다. Windows가 돌아가는 데 필요한 프로그램, 이 앱, "검사하지 않는 앱"은 이 잠금에서도 남습니다.
 - Linux에서는 agent의 "세션"이 사용자의 모든 프로세스(개발 도구 포함)이므로 프로그램을 끄지 않고, 상태와 탭 닫기만 동작합니다.
 
 **잠금에서 벗어나는 법.** 잠긴 동안에는 API 키의 변경이 예약되지 않고 바로 적용됩니다(`settings::put`의 `fix_now`). 모델이 문제(`UnknownModel`)이면 기본 모델과 다시 검사 모델의 변경도 바로 적용됩니다. 정기 확인은 두 모델이 모두 있는지 봅니다. 사용자는 Focus 앱의 설정 탭 → AI 연결에서 동작하는 키를 넣고 **적용**을 누릅니다. agent는 3초 안에 새 키를 확인하고, 키가 동작하면 잠금을 풉니다. 크레딧 문제는 Anthropic 웹사이트에서 크레딧을 채우면 30초 안에 풀립니다.

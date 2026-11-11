@@ -16,6 +16,7 @@
 //! the time the AI gives it is not spent away from the computer. Then browsers close too.
 //! Tasks done away from the computer no longer lock (the owner: "그래 할 일에서도 없애자"):
 //! the window checks judge what has to do with them.
+//! A paused task locks the same way (its time stands still meanwhile).
 //! In every lock but a broken connection, nothing is closed: the Focus app covers every
 //! screen, always in front ([`Lockdown::covers_screen`]); only a program kept in front of it
 //! is closed, and every program when the Focus app does not run.
@@ -41,6 +42,8 @@ pub enum LockdownCause {
     Stopped,
     /// This Windows account has not logged in to the owner's sync login yet.
     LoginRequired,
+    /// The user paused the current task ("일시 정지").
+    Paused,
 }
 
 /// Responsibility: Say why the planner wants every app locked.
@@ -55,6 +58,11 @@ pub enum TaskLock {
     /// The PC syncs and has logins, and this Windows account has not logged in
     /// (`crate::login`).
     LoginRequired,
+    /// The user paused the current task: its time stands still, so the computer must not be
+    /// usable meanwhile, or a pause would make the task longer for free (the owner: "일시 정지해서
+    /// 지금 할 일을 늘리는 꼼수가 가능해. 그러니 일시 정지를 할 때는 화면을 똑같이 덮어서 못쓰게
+    /// 하렴").
+    Paused,
 }
 
 /// Responsibility: Describe a lockdown in force for the Focus app and the settings.
@@ -132,6 +140,11 @@ pub fn lockdown(
         TaskLock::LoginRequired => (
             LockdownCause::LoginRequired,
             "이 PC는 여러 기기 동기화를 씁니다. 쓰려면 먼저 로그인하세요(Focus 앱 맨 위)"
+                .to_string(),
+        ),
+        TaskLock::Paused => (
+            LockdownCause::Paused,
+            "할 일을 일시 정지했습니다. 이어서 하려면 일하기 탭에서 \"다시 시작\"을 누르세요"
                 .to_string(),
         ),
     };
@@ -373,6 +386,11 @@ mod tests {
         assert_eq!(stopped.cause, LockdownCause::Stopped);
         assert!(!stopped.browsers_allowed);
         assert!(lockdown(false, &broken, Some(TaskLock::Stopped)).is_none());
+        // A paused task covers the screen in strict mode, like waiting for a task.
+        let paused = lockdown(true, &Connection::Working, Some(TaskLock::Paused)).unwrap();
+        assert_eq!(paused.cause, LockdownCause::Paused);
+        assert!(paused.covers_screen && !paused.browsers_allowed);
+        assert!(lockdown(false, &Connection::Working, Some(TaskLock::Paused)).is_none());
     }
 
     #[test]
