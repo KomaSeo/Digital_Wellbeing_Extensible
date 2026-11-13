@@ -1661,7 +1661,7 @@ impl SettingsTab {
              업데이트합니다. 설치되어 있지 않으면 모든 사용자에게 설치합니다. 지우기나 다른 명령은 \
              하지 않습니다. 이름은 winget의 이름(id)으로 적습니다. 아래 \"설치된 프로그램에서 \
              고르기\"에서 고르거나, 명령 프롬프트에서 winget search 카카오톡 처럼 찾으면 \"ID\" 칸에 \
-             나옵니다. 예: Kakao.KakaoTalk. 넣기는 예약되고, 빼기는 바로 적용됩니다.",
+             나옵니다. 예: Kakao.KakaoTalk. 넣기와 빼기는 엄격 모드에서도 바로 적용됩니다.",
         );
         if let Some(drafts) = &mut self.drafts {
             names_ui(

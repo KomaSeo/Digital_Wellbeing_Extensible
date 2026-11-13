@@ -388,8 +388,10 @@ pub fn direction(name: &str, edit: &Edit, in_force: &Value) -> Direction {
         ("ai_focus", ["always_allow"] | ["private_apps"]) => removing_is_stricter(),
         // Only measures: the extra questions decide nothing.
         ("ai_focus", ["comparison_percent"]) => Neutral,
-        // Fewer programs the service may update as administrator.
-        ("ai_focus", ["updatable_programs"]) => removing_is_stricter(),
+        // Takes effect at once both ways (the owner: "프로그램 업데이트 리스트를 추가는 엄격모드에서
+        // 금지 하지 않도록 해줄래? 어차피 사용은 AI가 감시하니까"): an installed program is
+        // still judged by the window checks.
+        ("ai_focus", ["updatable_programs"]) => Neutral,
         ("ai_focus", ["revoked_grants"] | ["always_blocked_sites"]) => adding_is_stricter(),
         // An id no longer blocked is dropped from the list: that lifts nothing.
         ("ai_focus", ["unblocked"]) => removing_is_stricter(),
@@ -460,6 +462,7 @@ mod tests {
             "always_allow": ["a.exe"], "strikes_to_block": 2, "send_screenshot": false,
             "daily_budget_usd": 1.0, "recheck_minutes": 15, "check_interval_secs": 60,
             "revoked_grants": [], "unblocked": [], "model": "m",
+            "updatable_programs": ["Kakao.KakaoTalk"],
         });
         let direction_of = |after: Value| {
             let edits = diff(&in_force, &after);
@@ -471,7 +474,16 @@ mod tests {
             changed[key] = value;
             changed
         };
-        use Direction::{Looser, Stricter};
+        use Direction::{Looser, Neutral, Stricter};
+        // The program update list takes effect at once both ways.
+        assert_eq!(
+            direction_of(with(
+                "updatable_programs",
+                json!(["Kakao.KakaoTalk", "Slack.Slack"])
+            )),
+            Neutral
+        );
+        assert_eq!(direction_of(with("updatable_programs", json!([]))), Neutral);
         assert_eq!(direction_of(with("always_allow", json!([]))), Stricter);
         assert_eq!(
             direction_of(with("always_allow", json!(["a.exe", "b.exe"]))),

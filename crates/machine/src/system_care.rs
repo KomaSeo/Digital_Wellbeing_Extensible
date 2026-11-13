@@ -680,11 +680,33 @@ pub fn winget_upgrade(program: &str) -> (UpdateOutcome, String) {
         return upgrade;
     }
     tracing::info!("{program} is not installed; installing it");
-    match run_winget(
+    let for_everyone = match run_winget(
         &winget,
         &[&["install", "--scope", "machine"][..], &common].concat(),
     ) {
-        Ok((code, stdout, stderr)) => install_outcome_of(code, short_output(&stdout, &stderr)),
+        Ok((code, stdout, stderr)) => (code, short_output(&stdout, &stderr)),
+        Err(message) => return (UpdateOutcome::Failed, message),
+    };
+    if for_everyone.0.map(|code| code as u32) != Some(WINGET_NO_APPLICABLE_INSTALLER) {
+        return install_outcome_of(for_everyone.0, for_everyone.1);
+    }
+    // Many catalogue entries do not say whose the install is, so "--scope machine" finds no
+    // installer for them; their installers mostly need an administrator and install for
+    // everyone anyway (Clip Studio Paint on the owner's PC). Once more without the scope.
+    tracing::info!("{program}: no installer says \"machine\"; installing without a scope");
+    match run_winget(&winget, &[&["install"][..], &common].concat()) {
+        Ok((code, stdout, stderr)) => {
+            let (outcome, output) = install_outcome_of(code, short_output(&stdout, &stderr));
+            let output = if outcome == UpdateOutcome::Installed {
+                format!(
+                    "설치 파일이 누구에게 설치하는지 밝히지 않아 범위를 정하지 않고 설치했습니다. \
+                     작업 계정의 시작 메뉴에 보이지 않으면 서비스 계정에만 설치된 것입니다. {output}"
+                )
+            } else {
+                output
+            };
+            (outcome, output)
+        }
         Err(message) => (UpdateOutcome::Failed, message),
     }
 }
@@ -821,6 +843,9 @@ pub fn outcome_of(code: Option<i32>, output: String) -> (UpdateOutcome, String) 
 pub fn install_outcome_of(code: Option<i32>, output: String) -> (UpdateOutcome, String) {
     match code.map(|code| code as u32) {
         Some(0) => (UpdateOutcome::Installed, output),
+        // The install found the program installed after all (the upgrade, which matches
+        // installed programs differently, did not) and nothing newer: up to date.
+        Some(WINGET_NO_UPDATE) => (UpdateOutcome::AlreadyUpToDate, output),
         Some(WINGET_NO_APPLICABLE_INSTALLER) => (
             UpdateOutcome::Failed,
             format!(
@@ -1233,6 +1258,12 @@ Git                           Git.Git                      < 2.40.0             
         assert_eq!(
             install_outcome_of(Some(0), String::new()).0,
             UpdateOutcome::Installed
+        );
+        // Slack on the owner's PC: the upgrade said "not installed", the install found it
+        // installed and up to date.
+        assert_eq!(
+            install_outcome_of(Some(0x8A15_002Bu32 as i32), String::new()).0,
+            UpdateOutcome::AlreadyUpToDate
         );
         let (outcome, message) = install_outcome_of(Some(0x8A15_0010u32 as i32), String::new());
         assert_eq!(outcome, UpdateOutcome::Failed);

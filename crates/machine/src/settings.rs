@@ -453,7 +453,36 @@ pub fn unprotect(data_directory: &Path, now: DateTime<Utc>, unlock: Unlock) -> R
             .map_err(|error| format!("could not remove {OLD_LOCK_FILE}: {error}"))?;
     }
     clear_blocks(data_directory);
+    apply_all_scheduled(data_directory, now);
     Ok(())
+}
+
+/// Apply every scheduled update at once (strict mode has just ended, and outside it every edit
+/// takes effect at once; the owner: "엄격 모드 풀렸을 때 예약된 프롬프트, 설정 업데이트가 있다면
+/// 바로 적용해줘"). One that no longer applies stays scheduled, where the owner can withdraw it.
+fn apply_all_scheduled(data_directory: &Path, now: DateTime<Utc>) {
+    let mut reservations = read_reservations(data_directory);
+    let scheduled = std::mem::take(&mut reservations.scheduled);
+    for reservation in scheduled {
+        match apply_edits(data_directory, &reservation.name, &reservation.edits) {
+            Ok(()) => record(
+                &mut reservations,
+                &reservation,
+                ReservationOutcome::Applied,
+                now,
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    "scheduled update {} could not be applied when strict mode ended: {error}",
+                    reservation.id
+                );
+                reservations.scheduled.push(reservation);
+            }
+        }
+    }
+    if let Err(error) = write_reservations(data_directory, &reservations) {
+        tracing::warn!("could not save the scheduled updates: {error}");
+    }
 }
 
 /// Empty every user's blocks file.
@@ -1200,6 +1229,44 @@ mod tests {
         )
         .is_err());
         assert!(put(&data_directory, now, "machine", &json!({}), "", &[]).is_err());
+    }
+
+    #[test]
+    fn ending_strict_mode_applies_the_scheduled_updates_at_once() {
+        let data_directory = temp_dir("end_applies");
+        let start = Utc::now();
+        put(
+            &data_directory,
+            start,
+            "ai_focus",
+            &json!({ "model": "m" }),
+            "",
+            &[],
+        )
+        .unwrap();
+        protect(
+            &data_directory,
+            start,
+            ProtectionChoice::Password {
+                password: "pass1".into(),
+            },
+        )
+        .unwrap();
+        let outcome = put(
+            &data_directory,
+            start,
+            "ai_focus",
+            &json!({ "model": "cheap" }),
+            "settings tab",
+            &[],
+        )
+        .unwrap();
+        assert!(outcome.scheduled.is_some());
+        assert_eq!(in_force(&data_directory, "ai_focus")["model"], "m");
+        unprotect(&data_directory, start, Unlock::Password("pass1")).unwrap();
+        assert_eq!(in_force(&data_directory, "ai_focus")["model"], "cheap");
+        let reservations = snapshot(&data_directory).unwrap().reservations;
+        assert!(reservations.scheduled.is_empty(), "{reservations:?}");
     }
 
     #[test]
