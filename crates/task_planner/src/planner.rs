@@ -357,6 +357,14 @@ impl TaskPlanner {
 
     /// There are to-dos but none is assigned: the agent locks every app until the user asks
     /// for their task.
+    /// The current task's time is up and the user has not reported on it (not an appointment,
+    /// which ends on its own).
+    pub fn report_due(&self, now: DateTime<Utc>) -> bool {
+        self.state.get().assignment.is_some_and(|assignment| {
+            assignment.appointment_id.is_none() && assignment.time_is_up(now)
+        })
+    }
+
     /// The current task is paused ("일시 정지").
     pub fn paused(&self) -> bool {
         self.state

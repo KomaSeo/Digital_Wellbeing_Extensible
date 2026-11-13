@@ -360,6 +360,8 @@ pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lo
                 Some(crate::lockdown::TaskLock::LoginRequired)
             } else if planner.paused() {
                 Some(crate::lockdown::TaskLock::Paused)
+            } else if planner.report_due(chrono::Utc::now()) {
+                Some(crate::lockdown::TaskLock::ReportDue)
             } else {
                 planner
                     .waiting_for_task()

@@ -414,6 +414,31 @@ impl FocusApp {
                 assignment.why,
                 local_time(assignment.at)
             ));
+            // The to-do as the user wrote it, under what the AI made of it (the owner: "일 하기
+            // 창에서 AI 지시문 및 판단 결과만 나오는 데 할 일의 원문도 뜨게 만들어줘").
+            if let Some(todo) = assignment.todo_id.as_deref().and_then(|todo_id| {
+                planner.open_todos.iter().find(|todo| todo.id == todo_id)
+            }) {
+                egui::CollapsingHeader::new(format!("할 일 원문: {}", todo.title))
+                    .id_salt(("todo_original", &todo.id))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if !todo.notes.is_empty() {
+                            ui.label(format!("메모: {}", todo.notes));
+                        }
+                        if !todo.constraints.is_empty() {
+                            ui.label(format!("조건: {}", todo.constraints));
+                        }
+                        ui.small(format!(
+                            "마감 {} · 중요도 {} · 예상 {}",
+                            todo.deadline
+                                .map_or("없음".into(), |deadline| deadline.to_string()),
+                            todo.priority,
+                            todo.estimate_minutes
+                                .map_or("없음".into(), |minutes| minutes_text(minutes as i64)),
+                        ));
+                    });
+            }
             if let Some(until) = assignment.until {
                 // A paused task's time stands still.
                 let clock = assignment.paused_since.unwrap_or_else(Utc::now);
@@ -440,7 +465,8 @@ impl FocusApp {
                     ui.colored_label(
                         RED,
                         "시간이 다 되었습니다. 아래 \"완료 보고\"에서 끝냈는지 알려 주세요. 보고하기 \
-                         전에는 다른 일로 넘어가지 않습니다.",
+                         전에는 다른 일로 넘어가지 않고, 엄격 모드에서는 보고할 때까지 이 앱이 화면을 \
+                         덮습니다.",
                     );
                 }
             }
@@ -918,19 +944,44 @@ impl FocusApp {
         if todos.is_empty() {
             ui.label("목록이 비어 있습니다.");
         }
-        self.form_ui(ui, planner);
+        if self.todo_ui.form_open && self.todo_ui.editing.is_some() {
+            // Editing opens a window of its own over the list (the owner: "고치기 버튼 누르면
+            // 목록 맨 밑에 고치기 뜨게 하지 말고 새 창을 띄워서"); adding stays below the list.
+            let mut open = true;
+            egui::Window::new("할 일 고치기")
+                .id(egui::Id::new("todo_edit_window"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
+                .default_width(520.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ui.ctx(), |ui| self.form_ui(ui, planner));
+            if !open {
+                self.todo_ui.form_open = false;
+                self.todo_ui.editing = None;
+            }
+            if ui.button("+ 할 일 추가").clicked() {
+                self.todo_ui.form = TodoForm::default();
+                self.todo_ui.editing = None;
+            }
+        } else {
+            self.form_ui(ui, planner);
+        }
         self.last_change_ui(ui);
     }
 
     fn todo_details_ui(&mut self, ui: &mut egui::Ui, todo: &TodoItem, planner: &PlannerStatus) {
         let idle = !self.pending.load(Ordering::SeqCst);
         ui.indent(("details", &todo.id), |ui| {
-            if !todo.constraints.is_empty() {
-                ui.label(format!("제약: {}", todo.constraints));
-            }
             if !todo.notes.is_empty() {
-                ui.label(&todo.notes);
+                ui.label(format!("메모: {}", todo.notes));
             }
+            ui.label(if todo.constraints.is_empty() {
+                "조건: 없음 (AI는 할 일을 고를 때 제목, 마감, 중요도, 예상 시간만 봅니다)"
+                    .to_string()
+            } else {
+                format!("조건: {}", todo.constraints)
+            });
             ui.small(format!(
                 "마감 {} · 중요도 {} · 예상 {} · 들인 시간 {}",
                 todo.deadline
@@ -1117,7 +1168,7 @@ impl FocusApp {
                         .hint_text("무엇을 하면 끝인지, 무엇이 필요한지"),
                 );
                 ui.end_row();
-                ui.label("제약");
+                ui.label("조건");
                 ui.add(
                     egui::TextEdit::singleline(&mut form.constraints)
                         .desired_width(320.0)

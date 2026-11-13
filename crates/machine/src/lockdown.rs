@@ -16,7 +16,8 @@
 //! the time the AI gives it is not spent away from the computer. Then browsers close too.
 //! Tasks done away from the computer no longer lock (the owner: "그래 할 일에서도 없애자"):
 //! the window checks judge what has to do with them.
-//! A paused task locks the same way (its time stands still meanwhile).
+//! A paused task locks the same way (its time stands still meanwhile), and so does a task
+//! whose time is up until the user reports on it.
 //! In every lock but a broken connection, nothing is closed: the Focus app covers every
 //! screen, always in front ([`Lockdown::covers_screen`]); only a program kept in front of it
 //! is closed, and every program when the Focus app does not run.
@@ -44,6 +45,8 @@ pub enum LockdownCause {
     LoginRequired,
     /// The user paused the current task ("일시 정지").
     Paused,
+    /// The current task's time is up and the user has not reported on it yet.
+    ReportDue,
 }
 
 /// Responsibility: Say why the planner wants every app locked.
@@ -63,6 +66,12 @@ pub enum TaskLock {
     /// 지금 할 일을 늘리는 꼼수가 가능해. 그러니 일시 정지를 할 때는 화면을 똑같이 덮어서 못쓰게
     /// 하렴").
     Paused,
+    /// The current task's time is up and the user has not reported whether it is finished:
+    /// without the lock, not reporting would make the task last as long as the user likes (the
+    /// owner: "일 하는 시간 끝났을 때 보고 안하고 넘기면 무한정 일을 연장할 수 있더라. … "일시
+    /// 정지"한 것처럼 화면을 덮고 사용자가 완료 결과를 보고하게 만들어"). Not for
+    /// appointments, which end on their own.
+    ReportDue,
 }
 
 /// Responsibility: Describe a lockdown in force for the Focus app and the settings.
@@ -140,6 +149,11 @@ pub fn lockdown(
         TaskLock::LoginRequired => (
             LockdownCause::LoginRequired,
             "이 PC는 여러 기기 동기화를 씁니다. 쓰려면 먼저 로그인하세요(Focus 앱 맨 위)"
+                .to_string(),
+        ),
+        TaskLock::ReportDue => (
+            LockdownCause::ReportDue,
+            "할 일의 시간이 끝났습니다. 일하기 탭에서 끝냈는지 보고하세요(끝냈다, 연장하기, 못 끝냄 등)"
                 .to_string(),
         ),
         TaskLock::Paused => (
@@ -391,6 +405,10 @@ mod tests {
         assert_eq!(paused.cause, LockdownCause::Paused);
         assert!(paused.covers_screen && !paused.browsers_allowed);
         assert!(lockdown(false, &Connection::Working, Some(TaskLock::Paused)).is_none());
+        // A task whose time is up covers the screen until it is reported on.
+        let due = lockdown(true, &Connection::Working, Some(TaskLock::ReportDue)).unwrap();
+        assert_eq!(due.cause, LockdownCause::ReportDue);
+        assert!(due.covers_screen && !due.browsers_allowed);
     }
 
     #[test]

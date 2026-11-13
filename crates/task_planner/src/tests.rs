@@ -2491,3 +2491,21 @@ fn an_older_follow_up_shows_its_date_from_the_notes() {
     );
     assert!(!text.contains("reply politely"), "{text}");
 }
+
+#[test]
+fn a_task_whose_time_is_up_waits_for_a_report() {
+    let fixture = harness(true, &["a"]);
+    let start = Utc::now();
+    let assignment = fixture.planner.assign(start).unwrap();
+    let until = assignment.until.unwrap();
+    assert!(!fixture
+        .planner
+        .report_due(until - chrono::Duration::minutes(1)));
+    // Time up: the agent covers the screen until the user reports (machine::lockdown).
+    assert!(fixture
+        .planner
+        .report_due(until + chrono::Duration::minutes(1)));
+    assert!(fixture
+        .planner
+        .report_due(until + chrono::Duration::hours(5)));
+}
