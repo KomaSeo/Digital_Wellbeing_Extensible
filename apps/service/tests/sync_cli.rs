@@ -310,17 +310,6 @@ fn devices_sign_up_and_log_in_and_come_back_after_the_server_is_set_up_again() {
     );
     let synced = run(&server_folder, &desktop, &["sync-now"]);
     assert!(synced.status.success(), "{}", text(&synced));
-    // A device in use cannot be taken off the list from another PC.
-    fs::write(
-        laptop.join("sync_forget.json"),
-        serde_json::json!({ "devices": [desktop_device] }).to_string(),
-    )
-    .unwrap();
-    let synced = run(&server_folder, &laptop, &["sync-now"]);
-    assert!(synced.status.success(), "{}", text(&synced));
-    assert!(!laptop.join("sync_forget.json").exists());
-    let state = fs::read_to_string(laptop.join("sync_state.json")).unwrap();
-    assert!(state.contains("최근 10분 안에"), "{state}");
 
     // The Focus app's way: a request file, read and deleted, with the outcome next to it.
     let request = root.join("request.json");

@@ -73,6 +73,8 @@ struct AppointmentForm {
     start: String,
     end: String,
     reason: String,
+    /// The weekdays it repeats on (index 0 = Monday); none: it takes place once.
+    repeat: [bool; 7],
 }
 
 impl AppointmentForm {
@@ -87,7 +89,17 @@ impl AppointmentForm {
             start: start.format("%H:%M").to_string(),
             end: end.format("%H:%M").to_string(),
             reason: reason.to_string(),
+            repeat: std::array::from_fn(|weekday| {
+                appointment.repeat_weekdays.contains(&(weekday as u8))
+            }),
         }
+    }
+
+    /// The checked weekdays (0 = Monday).
+    fn repeat_weekdays(&self) -> Vec<u8> {
+        (0..7u8)
+            .filter(|weekday| self.repeat[usize::from(*weekday)])
+            .collect()
     }
 
     /// Start and end in UTC; an end earlier than the start is on the next day.
@@ -552,23 +564,45 @@ impl FocusApp {
         self.change_ui(ui, report_due, current_todo.as_ref());
     }
 
-    /// The user's own notes and steps for the current to-do; the AI sees them when it
-    /// reviews "I finished it".
+    /// The user's own notes and steps for a to-do (the current one in the Work tab, the
+    /// opened one in the To-do tab); the AI sees them when it reviews "I finished it". A step's
+    /// text is edited in place and saved when the field loses focus.
     fn notes_ui(&mut self, ui: &mut egui::Ui, todo_id: &str, planner: &PlannerStatus) {
         if self.todo_ui.notes_for.as_deref() != Some(todo_id) {
             self.todo_ui.notes_for = Some(todo_id.to_string());
             self.todo_ui.notes = planner.task_notes.get(todo_id).cloned().unwrap_or_default();
+            self.todo_ui.new_step.clear();
         }
         let mut save = false;
-        egui::CollapsingHeader::new("메모와 단계")
-            .id_salt("task_notes")
+        let steps = &self.todo_ui.notes.steps;
+        let header = if steps.is_empty() {
+            "메모와 단계".to_string()
+        } else {
+            format!(
+                "메모와 단계 (단계 {}개 중 {}개 끝남)",
+                steps.len(),
+                steps.iter().filter(|step| step.done).count()
+            )
+        };
+        egui::CollapsingHeader::new(header)
+            .id_salt(("task_notes", todo_id))
             .default_open(true)
             .show(ui, |ui| {
                 let mut remove = None;
                 for (index, step) in self.todo_ui.notes.steps.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        save |= ui.checkbox(&mut step.done, &step.text).changed();
-                        if ui.small_button("x").clicked() {
+                        save |= ui
+                            .checkbox(&mut step.done, "")
+                            .on_hover_text("끝낸 단계에 표시합니다")
+                            .changed();
+                        save |= ui
+                            .add(egui::TextEdit::singleline(&mut step.text).desired_width(320.0))
+                            .lost_focus();
+                        if ui
+                            .small_button("x")
+                            .on_hover_text("이 단계를 지웁니다")
+                            .clicked()
+                        {
                             remove = Some(index);
                         }
                     });
@@ -991,6 +1025,8 @@ impl FocusApp {
                     .map_or("없음".into(), |minutes| minutes_text(minutes as i64)),
                 minutes_text(planner.minutes_total.get(&todo.id).copied().unwrap_or(0)),
             ));
+            // The user's own steps and notes, as in the Work tab: saved at once, no AI.
+            self.notes_ui(ui, &todo.id, planner);
             ui.horizontal_wrapped(|ui| {
                 // An "Improve: …" to-do is made by the app from a to-do finished early; it
                 // goes away when it is done or its time is used up.
@@ -1342,13 +1378,23 @@ impl FocusApp {
     /// needs no AI.
     fn appointments_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
         let idle = !self.pending.load(Ordering::SeqCst);
-        crate::style::section(ui, format!("약속 ({})", planner.appointments.len()));
+        // A repeating appointment shows once, at its next day.
+        let mut shown_series = std::collections::BTreeSet::new();
+        let appointments: Vec<&task_planner::Appointment> = planner
+            .appointments
+            .iter()
+            .filter(|appointment| {
+                shown_series.insert(task_planner::series_id(&appointment.id).to_string())
+            })
+            .collect();
+        crate::style::section(ui, format!("약속 ({})", appointments.len()));
         ui.small(
             "약속은 시간이 정해진 일(만남, 수업, 병원)입니다. 약속 시간이 되면 하던 일 대신 약속이 \
              저절로 시작되고, 끝나는 시각에 저절로 끝납니다. 약속을 받을지는 AI가 설정의 약속 규칙에 \
-             따라 정합니다.",
+             따라 정합니다. 반복하는 약속은 다음 번 날짜로 한 줄만 보입니다.",
         );
-        for appointment in &planner.appointments {
+        for appointment in appointments {
+            let series = task_planner::series_id(&appointment.id).to_string();
             ui.horizontal_wrapped(|ui| {
                 if planner
                     .assignment
@@ -1360,6 +1406,12 @@ impl FocusApp {
                 }
                 ui.label(appointment_time_text(appointment.start, appointment.end));
                 ui.strong(&appointment.title);
+                if appointment.repeats() {
+                    ui.label(format!(
+                        "({} 반복)",
+                        task_planner::weekdays_korean(&appointment.repeat_weekdays)
+                    ));
+                }
                 if !appointment.notes.is_empty() {
                     ui.small(&appointment.notes);
                 }
@@ -1379,20 +1431,41 @@ impl FocusApp {
                             start: appointment.start,
                             end: appointment.end,
                             away_from_computer: None,
+                            repeat_weekdays: appointment.repeat_weekdays.clone(),
                         },
                         "",
                     );
-                    self.todo_ui.appointment_editing = Some(appointment.id.clone());
+                    // Editing a repeating appointment edits every day of it.
+                    self.todo_ui.appointment_editing = Some(series.clone());
                     self.todo_ui.appointment_form_open = true;
                 }
-                if ui
-                    .add_enabled(idle, egui::Button::new("지우기").small())
-                    .clicked()
+                if appointment.repeats()
+                    && ui
+                        .add_enabled(idle, egui::Button::new("이번만 빼기").small())
+                        .on_hover_text("이 날짜의 약속만 뺍니다. 다음 반복부터는 그대로 합니다.")
+                        .clicked()
                 {
                     self.send(
                         "todo_change",
                         json!({
                             "change": { "kind": "remove_appointment", "appointment_id": appointment.id },
+                            "reason": "",
+                        }),
+                    );
+                }
+                let remove_label = if appointment.repeats() {
+                    "반복 전체 지우기"
+                } else {
+                    "지우기"
+                };
+                if ui
+                    .add_enabled(idle, egui::Button::new(remove_label).small())
+                    .clicked()
+                {
+                    self.send(
+                        "todo_change",
+                        json!({
+                            "change": { "kind": "remove_appointment", "appointment_id": series },
                             "reason": "",
                         }),
                     );
@@ -1449,6 +1522,13 @@ impl FocusApp {
                             .hint_text("15:30, 오후 3시 반 …"),
                     );
                     ui.end_row();
+                    ui.label("반복");
+                    ui.horizontal(|ui| {
+                        for (weekday, name) in ["월", "화", "수", "목", "금", "토", "일"].iter().enumerate() {
+                            ui.checkbox(&mut form.repeat[weekday], *name);
+                        }
+                    });
+                    ui.end_row();
                     ui.label("메모");
                     ui.add(
                         egui::TextEdit::singleline(&mut form.notes)
@@ -1465,7 +1545,17 @@ impl FocusApp {
                     ui.end_row();
                 });
             let times = form.times();
+            let repeat_weekdays = form.repeat_weekdays();
             match times {
+                Some((start, end)) if !repeat_weekdays.is_empty() => {
+                    ui.label(format!(
+                        "→ {}부터 {} {}–{}",
+                        start.with_timezone(&Local).format("%Y-%m-%d"),
+                        task_planner::weekdays_korean(&repeat_weekdays),
+                        start.with_timezone(&Local).format("%H:%M"),
+                        end.with_timezone(&Local).format("%H:%M"),
+                    ));
+                }
                 Some((start, end)) => {
                     ui.label(format!("→ {}", appointment_time_text(start, end)));
                 }
@@ -1496,6 +1586,7 @@ impl FocusApp {
                             "notes": form.notes.trim(),
                             "start": start,
                             "end": end,
+                            "repeat_weekdays": form.repeat_weekdays(),
                         });
                         let change = match &editing {
                             Some(appointment_id) => json!({
@@ -1750,7 +1841,14 @@ fn change_summary_korean(record: &TodoChangeRecord) -> String {
             )
         }
         TodoChange::RemoveAppointment { appointment_id } => {
-            format!("약속 \"{}\" 지우기", appointment_title(appointment_id))
+            match task_planner::occurrence_day(appointment_id) {
+                Some(day) => format!(
+                    "약속 \"{}\" {} 한 번만 빼기",
+                    appointment_title(appointment_id),
+                    day.format("%m-%d")
+                ),
+                None => format!("약속 \"{}\" 지우기", appointment_title(appointment_id)),
+            }
         }
     }
 }

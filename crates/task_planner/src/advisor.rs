@@ -10,8 +10,8 @@
 //!    owner's appointment rules.
 
 use crate::model::{
-    Appointment, AppointmentInput, Assignment, ChangeKind, ChangeRecord, DoneRecord, TaskNotes,
-    TodoChange, TodoChangeRecord, TodoItem, WhenTimeIsUp,
+    occurrence_day, series_id, Appointment, AppointmentInput, Assignment, ChangeKind, ChangeRecord,
+    DoneRecord, TaskNotes, TodoChange, TodoChangeRecord, TodoItem, WhenTimeIsUp,
 };
 use ai_focus_rule::claude::{jpeg_block, text_block, ClaudeClient};
 use ai_focus_rule::{AiFocusConfig, JudgeError};
@@ -645,6 +645,31 @@ fn appointments_text(appointments: &[Appointment]) -> String {
     or_none(&lines.join("\n")).to_string()
 }
 
+/// "\n- repeats every week on Monday, Wednesday from that day on", or nothing for an
+/// appointment that takes place once.
+fn repeat_text(weekdays: &[u8]) -> String {
+    const NAMES: [&str; 7] = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ];
+    if weekdays.is_empty() {
+        return String::new();
+    }
+    let names: Vec<&str> = weekdays
+        .iter()
+        .filter_map(|weekday| NAMES.get(usize::from(*weekday)).copied())
+        .collect();
+    format!(
+        "\n- repeats every week on {} from that day on, at the same time",
+        names.join(", ")
+    )
+}
+
 /// The question for an appointment: what is asked, the rules, what is already fixed.
 pub(crate) fn appointment_text(request: &AppointmentRequest) -> String {
     let appointment = request.appointment;
@@ -682,19 +707,20 @@ pub(crate) fn appointment_text(request: &AppointmentRequest) -> String {
     let asked = match request.replaces {
         Some(replaced) => format!(
             "The user asks to change this accepted appointment:\n\
-             - title: {title}\n- notes: {notes}\n- from {start} to {end} ({minutes} min)\n\
+             - title: {title}\n- notes: {notes}\n- from {start} to {end} ({minutes} min){repeat}\n\
              into this one:",
             title = replaced.title,
             notes = or_none(&replaced.notes),
             start = local(replaced.start),
             end = local(replaced.end),
             minutes = (replaced.end - replaced.start).num_minutes(),
+            repeat = repeat_text(&replaced.repeat_weekdays),
         ),
         None => "The user asks to add this appointment:".to_string(),
     };
     format!(
         "Now: {now}\n\n{rules}{asked}\n\
-         - title: {title}\n- notes: {notes}\n- from {start} to {end} ({minutes} min)\n\
+         - title: {title}\n- notes: {notes}\n- from {start} to {end} ({minutes} min){repeat}\n\
          Their reason: \"{reason}\"\n\n\
          Appointments already accepted:\n{appointments}\n\nCurrent assignment: {current}\n\n\
          {polish}Earlier to-do and appointment changes (newest first):\n{past}",
@@ -704,6 +730,7 @@ pub(crate) fn appointment_text(request: &AppointmentRequest) -> String {
         start = local(appointment.start),
         end = local(appointment.end),
         minutes = (appointment.end - appointment.start).num_minutes(),
+        repeat = repeat_text(&appointment.repeat_weekdays),
         reason = or_none(request.reason),
         appointments = appointments_text(request.appointments),
         current = request
@@ -1376,8 +1403,12 @@ pub fn change_summary(change: &TodoChange, before: Option<&TodoItem>) -> String 
                 .with_timezone(&Local)
                 .format("%Y-%m-%d %H:%M")
         ),
-        TodoChange::RemoveAppointment { appointment_id } => {
-            format!("remove the appointment {appointment_id}")
-        }
+        TodoChange::RemoveAppointment { appointment_id } => match occurrence_day(appointment_id) {
+            Some(day) => format!(
+                "skip the repeating appointment {} on {day} only",
+                series_id(appointment_id)
+            ),
+            None => format!("remove the appointment {appointment_id}"),
+        },
     }
 }

@@ -87,6 +87,7 @@ pub fn tools() -> Value {
                     "start": { "type": "string", "description": "Local time, YYYY-MM-DD HH:MM" },
                     "end": { "type": "string", "description": "Local time, YYYY-MM-DD HH:MM" },
                     "notes": { "type": "string", "description": "With whom, where" },
+                    "repeat_weekdays": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 6 }, "description": "Optional: the weekdays it repeats on every week from the start's day on, at the same time (0 = Monday ... 6 = Sunday). Leave out for an appointment that takes place once." },
                     "reason": { "type": "string", "description": "Optional" }
                 },
                 "required": ["title", "start", "end"]
@@ -94,7 +95,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "remove_appointment",
-            "description": "Remove an appointment (ids from get_status). Needs no review.",
+            "description": "Remove an appointment (ids from get_status). Needs no review. The id of one day of a repeating appointment (it ends in @YYYY-MM-DD) skips only that day; the id without the date removes every day.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "appointment_id": { "type": "string" } },
@@ -302,6 +303,7 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                             "notes": arguments["notes"].as_str().unwrap_or_default(),
                             "start": time("start")?,
                             "end": time("end")?,
+                            "repeat_weekdays": arguments["repeat_weekdays"].as_array().cloned().unwrap_or_default(),
                         },
                     },
                     "reason": arguments["reason"].as_str().unwrap_or_default(),
@@ -555,6 +557,7 @@ pub fn summary(status: &Status) -> Value {
             "notes": appointment.notes,
             "start_local": appointment.start.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string(),
             "end_local": appointment.end.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string(),
+            "repeat_weekdays": appointment.repeat_weekdays,
         })).collect::<Vec<_>>()),
         "report_due": planner.is_some_and(|planner| planner.report_due),
         "stopped_using": planner.is_some_and(|planner| planner.stopped_at.is_some()),

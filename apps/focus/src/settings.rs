@@ -616,8 +616,7 @@ impl SettingsTab {
                     }
                 });
             }
-            ui.horizontal(|ui| {
-                ui.add_space(20.0);
+            ui.indent("admin_devices_note", |ui| {
                 ui.small(
                     "고른 컴퓨터에서만, 그 컴퓨터의 관리자 승인으로 끌 수 있습니다. 끄면 모든 \
                      컴퓨터에서 꺼집니다. 나중에 컴퓨터를 넣는 것은 예약되어 확인 질문을 거치고, \
@@ -2928,6 +2927,9 @@ fn to_value<T: Serialize>(value: &T) -> Value {
 }
 
 fn file_name(name: &str) -> &str {
+    if name == "protection" {
+        return "엄격 모드를 끌 수 있는 컴퓨터";
+    }
     EDITABLE
         .iter()
         .find(|(editable_name, _)| *editable_name == name)
@@ -3049,7 +3051,13 @@ fn device_label(sync: &machine::user_api::SyncStatus, id: &str) -> String {
         .devices
         .iter()
         .find(|(device_id, _)| device_id == id)
-        .map(|(_, name)| format!("{name} ({id})"))
+        .map(|(_, name)| {
+            if name == id {
+                name.clone()
+            } else {
+                format!("{name} ({id})")
+            }
+        })
         .unwrap_or_else(|| id.to_string());
     if id == sync.device_id {
         format!("{named} — 이 컴퓨터")

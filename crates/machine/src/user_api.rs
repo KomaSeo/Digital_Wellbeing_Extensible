@@ -811,15 +811,19 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             .map_err(|error| error.to_string())?;
             if record.approved {
                 // Approved (by the AI, or in the setup stage): in force at once.
-                crate::settings::apply_now(
-                    &data_directory,
-                    "planner",
-                    &todo_list_edits(&planner.writes_for(&record)),
-                )?;
-                planner
-                    .config_store()
-                    .reload()
-                    .map_err(|error| error.to_string())?;
+                // Skipping one day of a repeating appointment writes nothing to the list.
+                let writes = planner.writes_for(&record);
+                if !writes.is_empty() {
+                    crate::settings::apply_now(
+                        &data_directory,
+                        "planner",
+                        &todo_list_edits(&writes),
+                    )?;
+                    planner
+                        .config_store()
+                        .reload()
+                        .map_err(|error| error.to_string())?;
+                }
                 // An edited appointment that runs now starts again on its new times.
                 if let TodoChange::EditAppointment { appointment_id, .. } = &record.change {
                     planner

@@ -30,11 +30,12 @@ pub use advisor::{
 pub use ai_focus_rule::store::JsonStore;
 pub use deadline::parse_deadline;
 pub use model::{
-    Appointment, AppointmentInput, Assignment, AssignmentSource, AssignmentSpan, ChangeKind,
-    ChangeRecord, Confirmations, DoneRecord, Evidence, ExtensionOffer, IdleSpan, PlannerConfig,
-    PlannerInstructions, PlannerState, PlannerStatus, PolishItem, ProposalInput, ProposalRecord,
-    TaskNotes, TaskStep, TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem,
-    TodoListWrite, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
+    occurrence_day, series_id, weekdays_korean, Appointment, AppointmentInput, Assignment,
+    AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, Confirmations, DoneRecord,
+    Evidence, ExtensionOffer, IdleSpan, PlannerConfig, PlannerInstructions, PlannerState,
+    PlannerStatus, PolishItem, ProposalInput, ProposalRecord, TaskNotes, TaskStep, TimetableEntry,
+    TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan, WeekPlanDay,
+    WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
 pub use planner::{PlannerError, TaskPlanner};
 

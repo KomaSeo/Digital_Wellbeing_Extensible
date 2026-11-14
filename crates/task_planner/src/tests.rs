@@ -1,6 +1,7 @@
 //! Responsibility: Test TaskPlanner end to end with a fake AI advisor.
 
 use super::*;
+use crate::model::series_id;
 use ai_focus_rule::{platform, AiFocusConfig, AiFocusStore, FocusMonitor, JudgeError};
 use chrono::Utc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -717,6 +718,7 @@ fn in_the_setup_stage_edits_and_removals_need_neither_the_ai_nor_a_reason() {
             start: Utc::now() + chrono::Duration::hours(2),
             end: Utc::now() + chrono::Duration::hours(3),
             away_from_computer: None,
+            repeat_weekdays: Vec::new(),
         },
     };
     let _ = fixture
@@ -1532,6 +1534,7 @@ fn appointment_change(
             start,
             end: start + chrono::Duration::minutes(minutes),
             away_from_computer: away,
+            repeat_weekdays: Vec::new(),
         },
     }
 }
@@ -1739,6 +1742,119 @@ fn an_appointment_is_fixed_at_its_time_and_ends_by_itself() {
     assert!(fixture.planner.waiting_for_task());
     let offer = fixture.planner.extension_offer(after_grace).unwrap();
     assert_eq!(offer.appointment.title, "meeting");
+}
+
+#[test]
+fn a_repeating_appointment_takes_place_on_its_weekdays_and_one_day_can_be_skipped() {
+    let fixture = harness(true, &["a", "b"]);
+    let now = Utc::now();
+    let start = now + chrono::Duration::minutes(20);
+    let every_day = match appointment_change("class", start, 60, None) {
+        TodoChange::AddAppointment { mut appointment } => {
+            appointment.repeat_weekdays = vec![6, 0, 1, 2, 3, 4, 5, 5];
+            TodoChange::AddAppointment { appointment }
+        }
+        _ => unreachable!(),
+    };
+    let record = add_appointment(&fixture, now, every_day).unwrap();
+    let series = record.appointment.unwrap();
+    // Kept once on the list, with its days in order.
+    assert_eq!(series.repeat_weekdays, [0, 1, 2, 3, 4, 5, 6]);
+    assert_eq!(fixture.planner.config_store().get().appointments.len(), 1);
+    // Listed once per day for the coming week, at the same time.
+    let occurrences = fixture.planner.appointments(now);
+    assert!(occurrences.len() >= 7, "{}", occurrences.len());
+    for (day, occurrence) in occurrences.iter().enumerate() {
+        assert_eq!(series_id(&occurrence.id), series.id);
+        assert_eq!(occurrence.start, start + chrono::Duration::days(day as i64));
+    }
+    // Another appointment at its time on a later day overlaps it.
+    let overlapping = add_appointment(
+        &fixture,
+        now,
+        appointment_change("lunch", start + chrono::Duration::days(3), 30, None),
+    );
+    assert!(
+        matches!(overlapping, Err(PlannerError::AppointmentOverlaps(title)) if title == "class")
+    );
+    // It runs today, and again tomorrow after today's has ended.
+    fixture
+        .planner
+        .resume(start + chrono::Duration::seconds(5))
+        .unwrap();
+    let today = fixture
+        .planner
+        .status()
+        .assignment
+        .unwrap()
+        .appointment_id
+        .unwrap();
+    assert_eq!(today, occurrences[0].id);
+    let tomorrow_start = start + chrono::Duration::days(1);
+    fixture
+        .planner
+        .resume(tomorrow_start - chrono::Duration::hours(2))
+        .unwrap();
+    assert!(fixture.planner.status().assignment.is_none());
+    fixture
+        .planner
+        .resume(tomorrow_start + chrono::Duration::seconds(5))
+        .unwrap();
+    let tomorrow = fixture
+        .planner
+        .status()
+        .assignment
+        .unwrap()
+        .appointment_id
+        .unwrap();
+    assert_eq!(tomorrow, occurrences[1].id);
+    // Skipping the day after tomorrow takes only that day off; the list stays as it is.
+    let skipped = occurrences[2].id.clone();
+    let record = fixture
+        .planner
+        .review_todo_change(
+            now,
+            TodoChange::RemoveAppointment {
+                appointment_id: skipped.clone(),
+            },
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(record.approved);
+    assert!(fixture.planner.writes_for(&record).is_empty());
+    let left: Vec<String> = fixture
+        .planner
+        .appointments(now)
+        .into_iter()
+        .map(|appointment| appointment.id)
+        .collect();
+    assert!(!left.contains(&skipped));
+    assert!(left.contains(&occurrences[3].id));
+    assert_eq!(fixture.planner.config_store().get().appointments.len(), 1);
+    // Editing a day of it edits the appointment on the list.
+    let record = add_appointment(
+        &fixture,
+        now,
+        edit_appointment(&occurrences[3].id, "evening class", start, 60),
+    )
+    .unwrap();
+    match &record.change {
+        TodoChange::EditAppointment { appointment_id, .. } => {
+            assert_eq!(appointment_id, &series.id)
+        }
+        _ => unreachable!(),
+    }
+    // Removing it by its own id removes every day.
+    add_appointment(
+        &fixture,
+        now,
+        TodoChange::RemoveAppointment {
+            appointment_id: series.id.clone(),
+        },
+    )
+    .unwrap();
+    assert!(fixture.planner.config_store().get().appointments.is_empty());
 }
 
 fn edit_appointment(

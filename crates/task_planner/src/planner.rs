@@ -20,11 +20,11 @@ use crate::advisor::{
     TodoChangeRequest, WeekPlanAnswer, WeekPlanRequest,
 };
 use crate::model::{
-    Appointment, Assignment, AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord,
-    DoneRecord, Evidence, ExtensionOffer, IdleSpan, PlannerConfig, PlannerState, PlannerStatus,
-    PolishItem, ProposalInput, TaskNotes, TaskStep, TimetableEntry, TimetableKind, TodoChange,
-    TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp,
-    APPOINTMENT_GRACE_MINUTES,
+    occurrence_day, series_id, Appointment, AppointmentInput, Assignment, AssignmentSource,
+    AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, Evidence, ExtensionOffer, IdleSpan,
+    PlannerConfig, PlannerState, PlannerStatus, PolishItem, ProposalInput, TaskNotes, TaskStep,
+    TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan,
+    WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -57,6 +57,9 @@ const MAX_APPOINTMENT_MINUTES: i64 = 24 * 60;
 const MAX_EXTENSION_MINUTES: u32 = 240;
 /// Ended appointments stay in `planner.json` this long, then the next change drops them.
 const APPOINTMENTS_KEPT_FOR: Duration = Duration::days(7);
+/// How many days ahead the occurrences of a repeating appointment are listed (to the user,
+/// to the AI, for the next appointment's start).
+const OCCURRENCE_DAYS_AHEAD: i64 = 7;
 
 /// Responsibility: Report why an assignment or a change request was refused.
 #[derive(Debug, Error)]
@@ -201,9 +204,7 @@ impl TaskPlanner {
     pub fn appointments(&self, now: DateTime<Utc>) -> Vec<Appointment> {
         let state = self.state.get();
         let mut appointments: Vec<Appointment> = self
-            .config
-            .get()
-            .appointments
+            .occurrences(now)
             .into_iter()
             .filter(|appointment| {
                 runs_until(&state, appointment) > now
@@ -214,12 +215,55 @@ impl TaskPlanner {
         appointments
     }
 
-    /// The appointment that ended last, within the last half hour, if it may be extended.
-    pub fn extension_offer(&self, now: DateTime<Utc>) -> Option<ExtensionOffer> {
-        let state = self.state.get();
+    /// The appointments on the list as they take place from yesterday to
+    /// [`OCCURRENCE_DAYS_AHEAD`] days from now: a repeating one once per day it repeats on,
+    /// ended or not.
+    fn occurrences(&self, now: DateTime<Utc>) -> Vec<Appointment> {
+        let today = now.with_timezone(&Local).date_naive();
+        let first = today - Duration::days(1);
+        let last = today + Duration::days(OCCURRENCE_DAYS_AHEAD);
         self.config
             .get()
             .appointments
+            .iter()
+            .flat_map(|appointment| appointment.occurrences(first, last))
+            .collect()
+    }
+
+    /// A listed appointment (an occurrence) that `appointment` overlaps on one of its days
+    /// in the coming week; the occurrences of `replaced_series` do not count.
+    fn overlapping(
+        &self,
+        now: DateTime<Utc>,
+        appointment: &AppointmentInput,
+        replaced_series: Option<&str>,
+    ) -> Option<Appointment> {
+        let today = now.with_timezone(&Local).date_naive();
+        let asked = Appointment {
+            id: String::new(),
+            title: appointment.title.clone(),
+            notes: String::new(),
+            start: appointment.start,
+            end: appointment.end,
+            away_from_computer: false,
+            repeat_weekdays: appointment.repeat_weekdays.clone(),
+        }
+        .occurrences(
+            today - Duration::days(1),
+            today + Duration::days(OCCURRENCE_DAYS_AHEAD),
+        );
+        self.appointments(now).into_iter().find(|existing| {
+            replaced_series != Some(series_id(&existing.id))
+                && asked.iter().any(|occurrence| {
+                    existing.start < occurrence.end && occurrence.start < existing.end
+                })
+        })
+    }
+
+    /// The appointment that ended last, within the last half hour, if it may be extended.
+    pub fn extension_offer(&self, now: DateTime<Utc>) -> Option<ExtensionOffer> {
+        let state = self.state.get();
+        self.occurrences(now)
             .into_iter()
             .filter(|appointment| !state.ended_appointments.contains(&appointment.id))
             .map(|appointment| {
@@ -617,9 +661,7 @@ impl TaskPlanner {
                 None
             }
             TodoChange::AddAppointment { appointment } => {
-                if let Some(overlapping) = self.appointments(now).into_iter().find(|existing| {
-                    existing.start < appointment.end && appointment.start < existing.end
-                }) {
+                if let Some(overlapping) = self.overlapping(now, appointment, None) {
                     return Err(PlannerError::AppointmentOverlaps(overlapping.title));
                 }
                 None
@@ -637,23 +679,27 @@ impl TaskPlanner {
                 {
                     return Err(PlannerError::UnknownAppointment(appointment_id.clone()));
                 }
-                if let Some(overlapping) = self.appointments(now).into_iter().find(|existing| {
-                    &existing.id != appointment_id
-                        && existing.start < appointment.end
-                        && appointment.start < existing.end
-                }) {
+                if let Some(overlapping) =
+                    self.overlapping(now, appointment, Some(appointment_id.as_str()))
+                {
                     return Err(PlannerError::AppointmentOverlaps(overlapping.title));
                 }
                 None
             }
             TodoChange::RemoveAppointment { appointment_id } => {
-                if !self
-                    .config
-                    .get()
-                    .appointments
-                    .iter()
-                    .any(|existing| &existing.id == appointment_id)
-                {
+                // An occurrence's id: only that day's occurrence comes off.
+                let known = if occurrence_day(appointment_id).is_some() {
+                    self.appointments(now)
+                        .iter()
+                        .any(|existing| &existing.id == appointment_id)
+                } else {
+                    self.config
+                        .get()
+                        .appointments
+                        .iter()
+                        .any(|existing| &existing.id == appointment_id)
+                };
+                if !known {
                     return Err(PlannerError::UnknownAppointment(appointment_id.clone()));
                 }
                 None
@@ -818,7 +864,7 @@ impl TaskPlanner {
                         .filter(|existing| {
                             replaces
                                 .as_ref()
-                                .is_none_or(|replaced| replaced.id != existing.id)
+                                .is_none_or(|replaced| replaced.id != series_id(&existing.id))
                         })
                         .collect();
                     let review = (self.advisor)(&self.focus.store().get()).and_then(|advisor| {
@@ -860,9 +906,28 @@ impl TaskPlanner {
                     // map); while it runs, the window checks ask whether the window has to
                     // do with it.
                     away_from_computer: false,
+                    repeat_weekdays: appointment.repeat_weekdays.clone(),
                 };
                 appointment_before = replaces;
                 (approved, reply, ai_failed, Some(accepted))
+            }
+            TodoChange::RemoveAppointment { appointment_id }
+                if occurrence_day(appointment_id).is_some() =>
+            {
+                // Skipping one day of a repeating appointment ends that occurrence.
+                self.state.update(|planner_state| {
+                    planner_state
+                        .ended_appointments
+                        .insert(appointment_id.clone());
+                })?;
+                (
+                    true,
+                    "이번 한 번만 약속을 뺐습니다. 다음 반복부터는 그대로 합니다.".to_string(),
+                    false,
+                    self.occurrences(now)
+                        .into_iter()
+                        .find(|existing| &existing.id == appointment_id),
+                )
             }
             TodoChange::RemoveAppointment { appointment_id } => (
                 true,
@@ -980,7 +1045,9 @@ impl TaskPlanner {
                 .get()
                 .appointments
                 .iter()
-                .filter(|existing| record.at - existing.end > APPOINTMENTS_KEPT_FOR)
+                .filter(|existing| {
+                    !existing.repeats() && record.at - existing.end > APPOINTMENTS_KEPT_FOR
+                })
                 .map(|existing| TodoListWrite::RemoveAppointment(existing.id.clone()))
                 .chain(
                     record
@@ -995,6 +1062,12 @@ impl TaskPlanner {
                 .map(TodoListWrite::PutAppointment)
                 .into_iter()
                 .collect(),
+            // One occurrence: ended in the planner's state, the list stays.
+            TodoChange::RemoveAppointment { appointment_id }
+                if occurrence_day(appointment_id).is_some() =>
+            {
+                Vec::new()
+            }
             TodoChange::RemoveAppointment { appointment_id } => {
                 vec![TodoListWrite::RemoveAppointment(appointment_id.clone())]
             }
@@ -1011,13 +1084,18 @@ impl TaskPlanner {
     ) -> Result<(), PlannerError> {
         let _busy = self.busy.lock();
         self.state.update(|planner_state| {
-            planner_state.appointment_extensions.remove(appointment_id);
+            // Days skipped of a repeating appointment stay skipped.
+            planner_state
+                .appointment_extensions
+                .retain(|id, _| series_id(id) != appointment_id);
             planner_state.ended_appointments.remove(appointment_id);
         })?;
-        let running_it =
-            self.state.get().assignment.is_some_and(|assignment| {
-                assignment.appointment_id.as_deref() == Some(appointment_id)
-            });
+        let running_it = self.state.get().assignment.is_some_and(|assignment| {
+            assignment
+                .appointment_id
+                .as_deref()
+                .is_some_and(|running| series_id(running) == appointment_id)
+        });
         if running_it {
             self.end(now)?;
         }
@@ -1705,9 +1783,12 @@ impl TaskPlanner {
                     .iter()
                     .map(|appointment| appointment.id.clone())
                     .collect();
-                planner_state
-                    .ended_appointments
-                    .retain(|id| still_listed.contains(id));
+                // An occurrence's id goes a week after its day.
+                let week_ago = now.with_timezone(&Local).date_naive() - Duration::days(7);
+                planner_state.ended_appointments.retain(|id| {
+                    still_listed.iter().any(|listed| listed == series_id(id))
+                        && occurrence_day(id).is_none_or(|day| day >= week_ago)
+                });
             })?;
         }
         match request {
@@ -2190,13 +2271,19 @@ fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, Pl
                 .collect::<Vec<_>>()
                 .join(" ");
             appointment.notes = appointment.notes.trim().to_string();
+            appointment.repeat_weekdays.sort_unstable();
+            appointment.repeat_weekdays.dedup();
+            let repeats = !appointment.repeat_weekdays.is_empty();
             let minutes = (appointment.end - appointment.start).num_minutes();
             let title_length = appointment.title.chars().count();
             if !(2..=MAX_TITLE_CHARS).contains(&title_length)
                 || appointment.notes.chars().count() > MAX_NOTES_CHARS
-                || minutes < 1
-                || minutes > MAX_APPOINTMENT_MINUTES
-                || appointment.end <= now
+                || !(1..=MAX_APPOINTMENT_MINUTES).contains(&minutes)
+                || (appointment.end <= now && !repeats)
+                || appointment
+                    .repeat_weekdays
+                    .iter()
+                    .any(|weekday| *weekday > 6)
             {
                 return Err(PlannerError::BadAppointment);
             }
@@ -2206,8 +2293,9 @@ fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, Pl
             appointment_id,
             appointment,
         } => match clean_change(TodoChange::AddAppointment { appointment }, now)? {
+            // Editing one occurrence of a repeating appointment edits the appointment.
             TodoChange::AddAppointment { appointment } => TodoChange::EditAppointment {
-                appointment_id,
+                appointment_id: series_id(&appointment_id).to_string(),
                 appointment,
             },
             _ => unreachable!("an addition stays an addition"),

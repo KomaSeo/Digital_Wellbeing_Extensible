@@ -1,7 +1,7 @@
 //! Responsibility: Define the planner's data: the admin's to-do list, the current assignment,
 //! change requests and finished to-dos.
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -82,6 +82,85 @@ pub struct Appointment {
     /// Away from the computer: every app and website is locked while it runs.
     #[serde(default)]
     pub away_from_computer: bool,
+    /// The weekdays it repeats on (0 = Monday … 6 = Sunday); empty: it takes place once. A
+    /// repeating appointment takes place from the day of `start` on, on each of these
+    /// weekdays, at the same clock time and for as long.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repeat_weekdays: Vec<u8>,
+}
+
+/// Between an appointment's id and the date in the id of one occurrence of it
+/// (`a1730000000000@2026-11-16`).
+const OCCURRENCE_SEPARATOR: char = '@';
+
+/// The id of the appointment on the list that `appointment_id` (an appointment's id or one
+/// occurrence's) belongs to.
+pub fn series_id(appointment_id: &str) -> &str {
+    appointment_id
+        .split(OCCURRENCE_SEPARATOR)
+        .next()
+        .unwrap_or(appointment_id)
+}
+
+/// The day of an occurrence's id; `None` for the id of an appointment on the list.
+pub fn occurrence_day(appointment_id: &str) -> Option<NaiveDate> {
+    appointment_id
+        .split_once(OCCURRENCE_SEPARATOR)
+        .and_then(|(_, day)| day.parse().ok())
+}
+
+/// "월·수·금" for the weekdays (0 = Monday).
+pub fn weekdays_korean(weekdays: &[u8]) -> String {
+    const NAMES: [&str; 7] = ["월", "화", "수", "목", "금", "토", "일"];
+    let names: Vec<&str> = weekdays
+        .iter()
+        .filter_map(|weekday| NAMES.get(usize::from(*weekday)).copied())
+        .collect();
+    if names.len() == 7 {
+        "매일".to_string()
+    } else {
+        format!("매주 {}", names.join("·"))
+    }
+}
+
+impl Appointment {
+    pub fn repeats(&self) -> bool {
+        !self.repeat_weekdays.is_empty()
+    }
+
+    /// The appointment as it takes place on the local days `first` to `last`: itself when it
+    /// does not repeat; otherwise one appointment per day it repeats on, with the id
+    /// `<id>@<date>`.
+    pub fn occurrences(&self, first: NaiveDate, last: NaiveDate) -> Vec<Appointment> {
+        if !self.repeats() {
+            return vec![self.clone()];
+        }
+        let local_start = self.start.with_timezone(&Local);
+        let clock = local_start.time();
+        let length = self.end - self.start;
+        first
+            .max(local_start.date_naive())
+            .iter_days()
+            .take_while(|day| *day <= last)
+            .filter(|day| {
+                let weekday = day.weekday().num_days_from_monday() as u8;
+                self.repeat_weekdays.contains(&weekday)
+            })
+            .filter_map(|day| {
+                let start = day
+                    .and_time(clock)
+                    .and_local_timezone(Local)
+                    .earliest()?
+                    .with_timezone(&Utc);
+                Some(Appointment {
+                    id: format!("{}{OCCURRENCE_SEPARATOR}{day}", self.id),
+                    start,
+                    end: start + length,
+                    ..self.clone()
+                })
+            })
+            .collect()
+    }
 }
 
 /// How long an appointment goes on past its planned end: meetings with other people run
@@ -109,6 +188,9 @@ pub struct AppointmentInput {
     /// Left out: the AI judges it.
     #[serde(default)]
     pub away_from_computer: Option<bool>,
+    /// As [`Appointment::repeat_weekdays`].
+    #[serde(default)]
+    pub repeat_weekdays: Vec<u8>,
 }
 
 /// Responsibility: Hold the admin's planner settings and to-do list (planner.json).
