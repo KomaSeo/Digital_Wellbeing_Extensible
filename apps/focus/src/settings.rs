@@ -281,10 +281,12 @@ pub struct SettingsTab {
     session: u32,
     error: String,
     confirm_protect: bool,
-    /// The sync device whose administrator may end an administrator protection (`None`: any).
-    protect_admin_device: Option<String>,
-    /// The choice above was set (to this computer, at first).
+    /// The computers whose administrator may end an administrator protection being chosen.
+    protect_admin_devices: BTreeSet<String>,
+    /// [`Self::protect_admin_devices`] has been filled with this PC once.
     protect_admin_device_chosen: bool,
+    /// The computer chosen to add to the list of a protection in force.
+    admin_device_to_add: Option<String>,
     /// The protection the user is choosing, and its length or password.
     protect_kind: ProtectKind,
     protect_days: u32,
@@ -364,8 +366,9 @@ impl SettingsTab {
             session,
             error: String::new(),
             confirm_protect: false,
-            protect_admin_device: None,
+            protect_admin_devices: BTreeSet::new(),
             protect_admin_device_chosen: false,
+            admin_device_to_add: None,
             protect_kind: ProtectKind::Until,
             protect_days: 7,
             protect_hours: 0,
@@ -408,7 +411,7 @@ impl SettingsTab {
             .map(|lockdown| lockdown.fix_now.clone())
             .unwrap_or_default();
         self.refresh();
-        sync_ui(ui, sync, self.session, &mut self.message);
+        sync_ui(ui, sync);
         if self.reservations_ui(ui) {
             // Answered or withdrawn: the drafts are rebased on what is now true.
             self.fetched_at = None;
@@ -584,56 +587,41 @@ impl SettingsTab {
             ProtectKind::Administrator,
             "관리자 권한: Windows가 관리자 승인을 물을 때 승인할 수 있어야 끌 수 있습니다",
         );
-        // With sync: whose administrator. This computer by default, since the one choosing
-        // is here; any computer's administrator is a choice too.
+        // With sync: which computers' administrators. This computer by default, since the one
+        // choosing is here; never "any computer", or a computer registered later could end it.
         if let (ProtectKind::Administrator, Some(sync)) = (self.protect_kind, sync) {
             if !self.protect_admin_device_chosen {
-                self.protect_admin_device = Some(sync.device_id.clone());
+                self.protect_admin_devices.insert(sync.device_id.clone());
                 self.protect_admin_device_chosen = true;
             }
-            let name_of = |id: &str| {
-                sync.devices
-                    .iter()
-                    .find(|(device_id, _)| device_id == id)
-                    .map(|(_, name)| format!("{name} ({id})"))
-                    .unwrap_or_else(|| id.to_string())
-            };
-            let shown = match &self.protect_admin_device {
-                Some(id) => name_of(id),
-                None => "아무 컴퓨터".to_string(),
-            };
+            let mut ids: Vec<String> = sync.devices.iter().map(|(id, _)| id.clone()).collect();
+            if !ids.contains(&sync.device_id) {
+                ids.insert(0, sync.device_id.clone());
+            }
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
-                ui.label("어느 컴퓨터의 관리자가 끌 수 있나");
-                egui::ComboBox::from_id_salt("protect_admin_device")
-                    .selected_text(shown)
-                    .show_ui(ui, |ui| {
-                        let mut ids: Vec<String> =
-                            sync.devices.iter().map(|(id, _)| id.clone()).collect();
-                        if !ids.contains(&sync.device_id) {
-                            ids.insert(0, sync.device_id.clone());
-                        }
-                        for id in ids {
-                            let label = if id == sync.device_id {
-                                format!("{} — 이 컴퓨터", name_of(&id))
-                            } else {
-                                name_of(&id)
-                            };
-                            ui.selectable_value(&mut self.protect_admin_device, Some(id), label);
-                        }
-                        ui.selectable_value(
-                            &mut self.protect_admin_device,
-                            None,
-                            "아무 컴퓨터(동기화하는 어느 컴퓨터든 그 컴퓨터의 관리자)",
-                        );
-                    });
+                ui.label("어느 컴퓨터의 관리자가 끌 수 있나(하나 이상)");
             });
+            for id in ids {
+                let label = device_label(sync, &id);
+                let mut chosen = self.protect_admin_devices.contains(&id);
+                ui.horizontal(|ui| {
+                    ui.add_space(32.0);
+                    if ui.checkbox(&mut chosen, label).changed() {
+                        if chosen {
+                            self.protect_admin_devices.insert(id.clone());
+                        } else {
+                            self.protect_admin_devices.remove(&id);
+                        }
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
                 ui.small(
                     "고른 컴퓨터에서만, 그 컴퓨터의 관리자 승인으로 끌 수 있습니다. 끄면 모든 \
-                     컴퓨터에서 꺼집니다. 그 컴퓨터를 동기화에서 빼면 엄격 모드를 끌 수 없게 \
-                     됩니다.",
+                     컴퓨터에서 꺼집니다. 나중에 컴퓨터를 넣는 것은 예약되어 확인 질문을 거치고, \
+                     빼는 것은 바로 됩니다. 고른 컴퓨터는 서버가 기기 목록에서 지우지 않습니다.",
                 );
             });
         }
@@ -659,10 +647,15 @@ impl SettingsTab {
         let mode = match self.protect_kind {
             ProtectKind::Until => Some(json!({ "kind": "until", "until": self.protect_until() })),
             ProtectKind::Permanent => Some(json!({ "kind": "permanent" })),
-            ProtectKind::Administrator => Some(json!({
-                "kind": "administrator",
-                "device": sync.and(self.protect_admin_device.clone()),
-            })),
+            // Without sync: any administrator of this PC (the list fills itself once it syncs).
+            ProtectKind::Administrator => match sync {
+                Some(_) if self.protect_admin_devices.is_empty() => None,
+                Some(_) => Some(json!({
+                    "kind": "administrator",
+                    "devices": self.protect_admin_devices.iter().collect::<Vec<_>>(),
+                })),
+                None => Some(json!({ "kind": "administrator", "devices": [] })),
+            },
             ProtectKind::Password => {
                 let password = self.protect_password.clone();
                 (password.chars().count() >= 4 && password == self.protect_password_again)
@@ -671,6 +664,9 @@ impl SettingsTab {
         };
         if self.protect_kind == ProtectKind::Password && mode.is_none() {
             ui.small("비밀번호는 4글자 이상이고, 두 칸이 같아야 합니다.");
+        }
+        if self.protect_kind == ProtectKind::Administrator && mode.is_none() {
+            ui.small("끌 수 있는 컴퓨터를 하나 이상 고르세요.");
         }
         ui.checkbox(
             &mut self.confirm_protect,
@@ -701,6 +697,95 @@ impl SettingsTab {
         Utc::now() + chrono::Duration::hours(hours.max(1))
     }
 
+    /// The computers whose administrator may end the protection in force: take one off at
+    /// once (not the last), or ask to add one (scheduled, like every looser change).
+    fn admin_devices_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        listed: &[String],
+        sync: Option<&machine::user_api::SyncStatus>,
+    ) {
+        for id in listed {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.label(match sync {
+                    Some(sync) => device_label(sync, id),
+                    None => id.clone(),
+                });
+                if listed.len() > 1
+                    && ui
+                        .small_button("빼기")
+                        .on_hover_text(
+                            "이 컴퓨터의 관리자는 더는 끌 수 없게 됩니다. 바로 적용됩니다.",
+                        )
+                        .clicked()
+                {
+                    match call_value(
+                        self.session,
+                        "protection_admin_remove",
+                        json!({ "device": id }),
+                    ) {
+                        Ok(_) => {
+                            self.message = format!("\"{id}\"의 관리자는 이제 끌 수 없습니다.");
+                            self.fetched_at = None;
+                        }
+                        Err(error) => self.error = error,
+                    }
+                }
+            });
+        }
+        let Some(sync) = sync else {
+            return;
+        };
+        let others: Vec<String> = sync
+            .devices
+            .iter()
+            .map(|(id, _)| id.clone())
+            .filter(|id| !listed.contains(id))
+            .collect();
+        if others.is_empty() {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            let shown = self
+                .admin_device_to_add
+                .as_deref()
+                .map_or("넣을 컴퓨터".to_string(), |id| device_label(sync, id));
+            egui::ComboBox::from_id_salt("admin_device_to_add")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for id in &others {
+                        ui.selectable_value(
+                            &mut self.admin_device_to_add,
+                            Some(id.clone()),
+                            device_label(sync, id),
+                        );
+                    }
+                });
+            let chosen = self.admin_device_to_add.clone();
+            if ui
+                .add_enabled(chosen.is_some(), egui::Button::new("넣기(예약)"))
+                .on_hover_text("끌 수 있는 컴퓨터를 늘리는 것은 느슨한 변경이라 확인 질문을 거쳐 적용됩니다.")
+                .clicked()
+            {
+                if let Some(id) = chosen {
+                    match call_value(self.session, "protection_admin_add", json!({ "device": id })) {
+                        Ok(_) => {
+                            self.message = format!(
+                                "\"{id}\"를 넣는 것을 예약했습니다. 확인 질문에 정해진 횟수만큼 \"예\"라고 \
+                                 답하면 적용됩니다."
+                            );
+                            self.admin_device_to_add = None;
+                            self.fetched_at = None;
+                        }
+                        Err(error) => self.error = error,
+                    }
+                }
+            }
+        });
+    }
+
     /// How the protection in force may end, and the way to end it.
     fn unlock_ui(
         &mut self,
@@ -725,37 +810,26 @@ impl SettingsTab {
                 }
             }
             "administrator" => {
-                let this_device = sync.map(|sync| sync.device_id.as_str());
-                let elsewhere = protection
-                    .device
-                    .as_deref()
-                    .filter(|required| Some(*required) != this_device);
-                if let Some(required) = elsewhere {
-                    let name = sync
-                        .and_then(|sync| {
-                            sync.devices
-                                .iter()
-                                .find(|(device_id, _)| device_id == required)
-                                .map(|(_, name)| name.clone())
-                        })
-                        .unwrap_or_else(|| required.to_string());
-                    ui.label(format!(
-                        "관리자 권한으로 끄는 엄격 모드입니다. \"{name}\" 컴퓨터에서, 그 컴퓨터의 관리자 \
-                         승인으로만 끌 수 있습니다. 거기서 끄면 이 컴퓨터에서도 꺼집니다."
-                    ));
-                } else if protection.device.is_some() {
+                let this_device = sync.map(|sync| sync.device_id.clone());
+                let listed = &protection.devices;
+                let here = listed.is_empty()
+                    || this_device
+                        .as_ref()
+                        .is_some_and(|device| listed.contains(device));
+                if listed.is_empty() {
                     ui.label(
-                        "관리자 권한으로 끄는 엄격 모드입니다. 이 컴퓨터에서 Windows의 관리자 승인 \
-                         창에서 승인해야 꺼집니다. 끄면 모든 컴퓨터에서 꺼집니다.",
+                        "관리자 권한으로 끄는 엄격 모드입니다. Windows의 관리자 승인 창에서 승인해야 \
+                         꺼집니다. 이 PC가 동기화를 시작하면, 그때 등록된 컴퓨터들의 관리자만 끌 수 \
+                         있게 됩니다.",
                     );
                 } else {
                     ui.label(
-                        "관리자 권한으로 끄는 엄격 모드입니다. Windows의 관리자 승인 창에서 승인해야 \
-                         꺼집니다.",
+                        "관리자 권한으로 끄는 엄격 모드입니다. 아래 컴퓨터에서, 그 컴퓨터의 관리자 \
+                         승인으로만 끌 수 있습니다. 끄면 모든 컴퓨터에서 꺼집니다.",
                     );
+                    self.admin_devices_ui(ui, listed, sync);
                 }
-                if elsewhere.is_none() && ui.button("관리자 권한으로 엄격 모드 끄기").clicked()
-                {
+                if here && ui.button("관리자 권한으로 엄격 모드 끄기").clicked() {
                     match crate::elevate::run_settings_unlock() {
                         Ok(()) => {
                             self.message =
@@ -765,6 +839,9 @@ impl SettingsTab {
                         }
                         Err(error) => self.error = error,
                     }
+                }
+                if !here {
+                    ui.small("이 컴퓨터는 목록에 없어서 여기서는 끌 수 없습니다.");
                 }
             }
             "password" => {
@@ -2865,12 +2942,7 @@ fn local(time: DateTime<Utc>) -> String {
 
 /// Whether this PC syncs with other devices, and how the last sync went (`docs/sync.md`).
 /// Logging in is at the top of this tab ([`crate::login`]).
-fn sync_ui(
-    ui: &mut egui::Ui,
-    sync: Option<&machine::user_api::SyncStatus>,
-    session: u32,
-    message: &mut String,
-) {
+fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
     crate::style::section(ui, "기기 동기화");
     let Some(sync) = sync else {
         ui.weak(
@@ -2918,35 +2990,32 @@ fn sync_ui(
             "https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases",
         );
     }
-    devices_ui(ui, sync, session, message);
+    devices_ui(ui, sync);
 }
 
-/// The paired devices with their version and last sync, and a button that takes another
-/// device's entry off the server's list (an old entry of a computer installed again, or a
-/// computer no longer used).
-fn devices_ui(
-    ui: &mut egui::Ui,
-    sync: &machine::user_api::SyncStatus,
-    session: u32,
-    message: &mut String,
-) {
+/// The paired devices with their version and last sync. The server keeps the list itself:
+/// a device that has not synced for 30 days leaves it (never one whose administrator may end
+/// the strict mode), and a computer logs in again by itself (the owner: "기기 자동 삭제·추가
+/// 기능을 서버에 추가하고 유저 manual 삭제는 없애기").
+fn devices_ui(ui: &mut egui::Ui, sync: &machine::user_api::SyncStatus) {
     if sync.device_details.is_empty() {
         return;
     }
     egui::CollapsingHeader::new(format!("서버에 붙은 기기({}대)", sync.device_details.len()))
         .id_salt("sync_devices")
         .show(ui, |ui| {
-            ui.small(
-                "같은 컴퓨터는 다시 설치해도 같은 기기로 붙습니다. 예전 버전에서 다시 설치해 생긴 \
-                 옛 기기나 더는 쓰지 않는 컴퓨터는 \"목록에서 지우기\"로 지웁니다. 최근 10분 안에 \
-                 동기화한 기기는 서버가 지우지 않습니다. 지운 컴퓨터를 다시 쓰면 그 컴퓨터는 저절로 \
-                 다시 붙습니다.",
-            );
+            ui.small(format!(
+                "서버가 기기 목록을 저절로 관리합니다. 새 컴퓨터는 로그인하면 붙고, 같은 컴퓨터는 \
+                 다시 설치해도 같은 기기로 붙습니다. {}일 동안 동기화하지 않은 기기는 서버가 목록에서 \
+                 지웁니다. 다만 엄격 모드를 끌 수 있는 컴퓨터는 지우지 않습니다. 지운 컴퓨터를 다시 \
+                 켜서 쓰면 저절로 다시 붙습니다.",
+                machine::user_api::DEVICE_PRUNE_DAYS
+            ));
             egui::Grid::new("sync_device_list")
                 .striped(true)
-                .num_columns(5)
+                .num_columns(4)
                 .show(ui, |ui| {
-                    for heading in ["기기", "이름", "버전", "마지막 동기화", ""] {
+                    for heading in ["기기", "이름", "버전", "마지막 동기화"] {
                         ui.strong(heading);
                     }
                     ui.end_row();
@@ -2968,36 +3037,23 @@ fn devices_ui(
                                 .format("%m월 %d일 %H:%M")
                                 .to_string()
                         }));
-                        // The server keeps a device that synced in the last 10 minutes.
-                        let in_use = device.last_seen.is_some_and(|seen| {
-                            (chrono::Utc::now() - seen).num_minutes() < 10
-                        });
-                        if this_pc {
-                            ui.label("");
-                        } else if in_use {
-                            ui.weak("사용 중").on_hover_text(
-                                "최근 10분 안에 동기화한 기기라서 목록에서 지울 수 없습니다",
-                            );
-                        } else if sync.forget_waiting.contains(&device.id) {
-                            ui.weak("다음 동기화 때 지웁니다");
-                        } else if ui.small_button("목록에서 지우기").clicked() {
-                            *message = match call_value(
-                                session,
-                                "sync_forget_device",
-                                json!({ "id": device.id }),
-                            ) {
-                                Ok(_) => format!(
-                                    "\"{}\"를 다음 동기화 때 서버의 목록에서 지웁니다.",
-                                    device.id
-                                ),
-                                Err(error) => format!("지우지 못했습니다: {error}"),
-                            };
-                        }
                         ui.end_row();
                     }
                 });
-            for (device, reason) in &sync.not_forgotten {
-                ui.colored_label(YELLOW, format!("\"{device}\"를 지우지 않았습니다: {reason}"));
-            }
         });
+}
+
+/// A sync device as "name (id)", with "— 이 컴퓨터" for this PC.
+fn device_label(sync: &machine::user_api::SyncStatus, id: &str) -> String {
+    let named = sync
+        .devices
+        .iter()
+        .find(|(device_id, _)| device_id == id)
+        .map(|(_, name)| format!("{name} ({id})"))
+        .unwrap_or_else(|| id.to_string());
+    if id == sync.device_id {
+        format!("{named} — 이 컴퓨터")
+    } else {
+        named
+    }
 }

@@ -37,6 +37,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Documents every device shares.
+/// The shared document that holds the strict mode.
+const PROTECTION_DOCUMENT: &str = "settings_protection.json";
+
 pub const SHARED_DOCUMENTS: [&str; 7] = [
     "policy.json",
     "ai_focus.json",
@@ -86,9 +89,12 @@ pub struct Device {
     pub machine_id: Option<String>,
 }
 
-/// A device that synced this recently is in use and cannot be taken off the list from
-/// another one.
-const FORGET_AFTER_MINUTES: i64 = 10;
+/// A device that has not synced for this long is taken off the list by the server (the owner:
+/// "기기 자동 삭제·추가 기능을 서버에 추가하고 유저 manual 삭제는 없애기", 30 days). A computer
+/// still in use logs in again by itself and comes back; a computer whose administrator may
+/// end the strict mode ([`unlock_devices`]) is never taken off, or the strict mode could
+/// never end.
+pub const PRUNE_AFTER_DAYS: i64 = 30;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Devices {
@@ -149,17 +155,38 @@ pub fn protection_may_end(protection: &Value, now: DateTime<Utc>, by_device: Opt
             .and_then(|until| serde_json::from_value::<DateTime<Utc>>(until.clone()).ok())
             .is_some_and(|until| now >= until),
         Some("administrator") => {
-            match (
-                protection.pointer("/mode/device").and_then(Value::as_str),
-                by_device,
-            ) {
-                (Some(required), Some(device)) => required == device,
+            let allowed = unlock_devices(protection);
+            match by_device {
+                Some(device) if !allowed.is_empty() => allowed.iter().any(|id| id == device),
                 _ => true,
             }
         }
         Some("password") => true,
         _ => false,
     }
+}
+
+/// The devices whose administrator may end an administrator protection (as
+/// `settings_protection.json` holds it): its list, and the one device older versions named.
+/// Empty: any administrator (or not such a protection).
+pub fn unlock_devices(protection: &Value) -> Vec<String> {
+    if protection.pointer("/mode/kind").and_then(Value::as_str) != Some("administrator") {
+        return Vec::new();
+    }
+    let mut devices: Vec<String> = protection
+        .pointer("/mode/devices")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    if let Some(device) = protection.pointer("/mode/device").and_then(Value::as_str) {
+        if !devices.iter().any(|id| id == device) {
+            devices.push(device.to_string());
+        }
+    }
+    devices
 }
 
 /// Is `name` a document the server keeps? `usage/<device>/<file>` only for `device_id`.
@@ -540,6 +567,15 @@ impl SyncServer {
 
     pub fn remove_device(&self, id: &str) -> Result<(), String> {
         let _busy = self.busy.lock();
+        let keep = self
+            .load_document(PROTECTION_DOCUMENT)
+            .map(|stored| unlock_devices(&stored.content))
+            .unwrap_or_default();
+        if keep.iter().any(|kept| kept == id) {
+            return Err(format!(
+                "'{id}' is a computer whose administrator may end the strict mode; it stays"
+            ));
+        }
         let mut devices = self.load_devices();
         let before = devices.devices.len();
         devices.devices.retain(|device| device.id != id);
@@ -661,30 +697,21 @@ impl SyncServer {
         }
         let device_id = device.id.clone();
         let key = device.key.clone();
-        // Other devices this one asks to take off the list: not itself, and not one in use.
-        let mut not_forgotten = Vec::new();
-        for forget in &request.forget_devices {
-            let reason = match devices.devices.iter().find(|device| &device.id == forget) {
-                None => continue,
-                Some(_) if *forget == device_id => "이 PC 자신은 지울 수 없습니다".to_string(),
-                Some(device)
-                    if device
-                        .last_seen
-                        .is_some_and(|seen| (now - seen).num_minutes() < FORGET_AFTER_MINUTES) =>
-                {
-                    format!(
-                        "최근 {FORGET_AFTER_MINUTES}분 안에 동기화한 기기라서 지우지 않았습니다"
-                    )
-                }
-                Some(_) => {
-                    // Not added to `removed`: a computer still in use logs in again by
-                    // itself and comes back.
-                    devices.devices.retain(|device| &device.id != forget);
-                    continue;
-                }
-            };
-            not_forgotten.push((forget.clone(), reason));
-        }
+        // Devices that have not synced for [`PRUNE_AFTER_DAYS`] leave the list, but never this
+        // one, nor one whose administrator may end the strict mode. A device's own request to
+        // take others off (`forget_devices`, from older versions) is ignored: the user no
+        // longer removes devices by hand.
+        let keep = self
+            .load_document(PROTECTION_DOCUMENT)
+            .map(|stored| unlock_devices(&stored.content))
+            .unwrap_or_default();
+        devices.devices.retain(|device| {
+            device.id == device_id
+                || keep.contains(&device.id)
+                || now - device.last_seen.unwrap_or(device.added_at)
+                    < chrono::Duration::days(PRUNE_AFTER_DAYS)
+        });
+        let not_forgotten: Vec<(String, String)> = Vec::new();
         self.save_devices(&devices)?;
 
         // Every device runs the newest version any of them runs: an older one would drop
@@ -971,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reinstalled_computer_gets_its_entry_back_and_quiet_devices_can_be_forgotten() {
+    fn a_reinstalled_computer_gets_its_entry_back_and_quiet_devices_leave_by_themselves() {
         let folder = std::env::temp_dir().join(format!("dw_server_forget_{}", std::process::id()));
         let _ = fs::remove_dir_all(&folder);
         fs::create_dir_all(&folder).unwrap();
@@ -987,23 +1014,42 @@ mod tests {
         let old_desktop = server
             .join_device("Desktop", None, Some("machine-b"))
             .unwrap();
-        let other = server
-            .join_device("Desktop", None, Some("machine-c"))
+        let unlocker = server
+            .join_device("Office", None, Some("machine-c"))
             .unwrap();
-        assert_ne!(other.device_id, old_desktop.device_id);
-        assert_eq!(server.devices().len(), 3);
+        let other = server
+            .join_device("Desktop", None, Some("machine-d"))
+            .unwrap();
+        assert_eq!(server.devices().len(), 4);
+        // The office computer's administrator may end the strict mode.
+        server
+            .accept(
+                &laptop.device_id,
+                &crate::protocol::Push {
+                    name: PROTECTION_DOCUMENT.into(),
+                    base_revision: 0,
+                    content: serde_json::json!({
+                        "protected_since": Utc::now(),
+                        "mode": { "kind": "administrator", "devices": [unlocker.device_id] },
+                    }),
+                },
+                Utc::now(),
+            )
+            .unwrap();
 
-        // The old desktop last synced an hour ago, the other one just now.
+        // The old desktop and the office computer have been quiet for 31 days, the other
+        // desktop for 29.
         let mut devices = server.load_devices();
         for device in &mut devices.devices {
-            if device.id == old_desktop.device_id {
-                device.last_seen = Some(Utc::now() - chrono::Duration::hours(1));
+            if device.id == old_desktop.device_id || device.id == unlocker.device_id {
+                device.last_seen = Some(Utc::now() - chrono::Duration::days(31));
             }
             if device.id == other.device_id {
-                device.last_seen = Some(Utc::now());
+                device.last_seen = Some(Utc::now() - chrono::Duration::days(29));
             }
         }
         server.save_devices(&devices).unwrap();
+        // An older version still asks to take a device off by hand: ignored.
         let request = SyncRequest {
             sent_at: Utc::now(),
             counter: 1,
@@ -1011,11 +1057,7 @@ mod tests {
             known: Default::default(),
             app_version: crate::protocol::app_version().to_string(),
             machine_id: Some("machine-a".into()),
-            forget_devices: vec![
-                old_desktop.device_id.clone(),
-                other.device_id.clone(),
-                again.device_id.clone(),
-            ],
+            forget_devices: vec![other.device_id.clone()],
         };
         let sealed = envelope::seal(
             &again.device_id,
@@ -1031,15 +1073,31 @@ mod tests {
             .into_iter()
             .map(|device| device.id)
             .collect();
-        assert!(!left.contains(&old_desktop.device_id));
-        assert!(left.contains(&other.device_id) && left.contains(&again.device_id));
-        assert_eq!(response.not_forgotten.len(), 2);
-        assert_eq!(response.device_details.len(), 2);
-        // Forgotten is not banned: that computer may log in again.
+        assert!(
+            !left.contains(&old_desktop.device_id),
+            "quiet for 30 days: off"
+        );
+        assert!(
+            left.contains(&unlocker.device_id),
+            "may end the strict mode: kept"
+        );
+        assert!(left.contains(&other.device_id), "asked by hand: kept");
+        assert!(left.contains(&again.device_id));
+        assert!(response.not_forgotten.is_empty());
+        // Taken off is not banned: that computer logs in again by itself.
         assert!(!server
             .load_devices()
             .removed
             .contains(&old_desktop.device_id));
+        // Not even the server's own command takes off a computer that may end it.
+        assert!(server.remove_device(&unlocker.device_id).is_err());
+        // An administrator protection with a list ends only from a listed computer.
+        let protection = serde_json::json!({
+            "mode": { "kind": "administrator", "devices": ["office"], "device": "home" },
+        });
+        assert!(protection_may_end(&protection, Utc::now(), Some("office")));
+        assert!(protection_may_end(&protection, Utc::now(), Some("home")));
+        assert!(!protection_may_end(&protection, Utc::now(), Some("vm")));
         let _ = fs::remove_dir_all(&folder);
     }
 }

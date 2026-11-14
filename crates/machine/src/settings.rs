@@ -51,6 +51,9 @@ pub const EDITABLE: [(&str, &str); 3] = [
 const OLD_APPROVALS_NEEDED: usize = 3;
 
 pub(crate) const PROTECTION_FILE: &str = "settings_protection.json";
+/// The name of the protection in scheduled updates (adding a computer whose administrator may
+/// end it). Not an editable setting: `put` refuses it.
+const PROTECTION_EDIT_NAME: &str = "protection";
 const RESERVATIONS_FILE: &str = "settings_reservations.json";
 /// Written by versions that had a settings lock: its presence means the settings were
 /// protected; pending edits of that time become scheduled updates.
@@ -120,11 +123,19 @@ pub enum ProtectionMode {
     /// Not before `until`; then with one press.
     Until { until: DateTime<Utc> },
     /// Only by a program run with administrator rights (Windows asks for an administrator's
-    /// approval, `digital-wellbeing-service settings-unlock`). With `device` (a sync device
-    /// id), only on that computer: its administrator, not another computer's.
+    /// approval, `digital-wellbeing-service settings-unlock`), and only on one of the
+    /// computers listed ([`Self::administrator_devices`]): their administrators, not another
+    /// computer's (the owner: "어느 컴퓨터의 관리자가 끌 수 있나를 리스트 형식으로 만들어서").
+    /// An empty list (a PC that does not sync) means any administrator of this PC; once the PC
+    /// syncs, the list is filled with the computers registered then
+    /// ([`pin_administrator_devices`]), so a computer added later cannot end it.
     Administrator {
+        /// The one computer older versions named; kept as the list's first for them.
         #[serde(default)]
         device: Option<String>,
+        /// The sync devices whose administrator may end the protection.
+        #[serde(default)]
+        devices: Vec<String>,
     },
     /// With the password set when protecting (kept as a hash only).
     Password {
@@ -142,13 +153,44 @@ pub enum ProtectionChoice {
         until: DateTime<Utc>,
     },
     Administrator {
-        /// The sync device whose administrator may turn it off (`None`: any).
+        /// One sync device whose administrator may turn it off (older Focus apps).
         #[serde(default)]
         device: Option<String>,
+        /// The sync devices whose administrator may turn it off (empty: any administrator of
+        /// a PC that does not sync).
+        #[serde(default)]
+        devices: Vec<String>,
     },
     Password {
         password: String,
     },
+}
+
+impl ProtectionMode {
+    /// The computers whose administrator may end an administrator protection: its list and
+    /// the one computer older versions named. Empty: any administrator (or not such a
+    /// protection).
+    pub fn administrator_devices(&self) -> Vec<String> {
+        let ProtectionMode::Administrator { device, devices } = self else {
+            return Vec::new();
+        };
+        let mut all = devices.clone();
+        if let Some(device) = device {
+            if !all.contains(device) {
+                all.push(device.clone());
+            }
+        }
+        all
+    }
+
+    /// An administrator protection for exactly `devices` (the first one also as `device`, for
+    /// older versions).
+    fn administrator_for(devices: Vec<String>) -> Self {
+        ProtectionMode::Administrator {
+            device: devices.first().cloned(),
+            devices,
+        }
+    }
 }
 
 /// Responsibility: Carry how the user asks to turn the protection off.
@@ -362,11 +404,16 @@ pub fn protect(
     }
     let mode = match choice {
         ProtectionChoice::Permanent => ProtectionMode::Permanent,
-        ProtectionChoice::Administrator { device } => ProtectionMode::Administrator {
-            device: device
-                .map(|device| device.trim().to_string())
-                .filter(|device| !device.is_empty()),
-        },
+        ProtectionChoice::Administrator { device, devices } => {
+            let mut chosen: Vec<String> = Vec::new();
+            for id in devices.into_iter().chain(device) {
+                let id = id.trim().to_string();
+                if !id.is_empty() && !chosen.contains(&id) {
+                    chosen.push(id);
+                }
+            }
+            ProtectionMode::administrator_for(chosen)
+        }
         ProtectionChoice::Until { until } => {
             if until < now + chrono::Duration::minutes(MIN_PROTECTION_MINUTES) {
                 return Err(format!(
@@ -407,14 +454,17 @@ pub fn may_unprotect(
             until.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
         )),
         (ProtectionMode::Until { .. }, _) => Ok(()),
-        (
-            ProtectionMode::Administrator {
-                device: Some(required),
-            },
-            Unlock::Administrator { device },
-        ) if device.as_deref() != Some(required.as_str()) => Err(format!(
-            "\"{required}\" 컴퓨터의 관리자 권한으로만 엄격 모드를 끌 수 있습니다"
-        )),
+        (mode @ ProtectionMode::Administrator { .. }, Unlock::Administrator { device })
+            if !mode.administrator_devices().is_empty()
+                && !device
+                    .as_ref()
+                    .is_some_and(|device| mode.administrator_devices().contains(device)) =>
+        {
+            Err(format!(
+                "다음 컴퓨터의 관리자 권한으로만 엄격 모드를 끌 수 있습니다: {}",
+                mode.administrator_devices().join(", ")
+            ))
+        }
         (ProtectionMode::Administrator { .. }, Unlock::Administrator { .. }) => Ok(()),
         (ProtectionMode::Administrator { .. }, _) => Err(
             "관리자 권한으로만 엄격 모드를 끌 수 있습니다(관리자 승인 창에서 승인하세요)".into(),
@@ -485,6 +535,111 @@ fn apply_all_scheduled(data_directory: &Path, now: DateTime<Utc>) {
     }
 }
 
+/// While an administrator protection names no computer and this PC syncs, name the computers
+/// `registered` now (the owner chose "그때 등록된 PC들로 목록 고정"): a computer registered
+/// later cannot end the protection. Returns whether it wrote the file.
+pub fn pin_administrator_devices(data_directory: &Path, registered: &[String]) -> bool {
+    let _write = write_lock();
+    let Some(mut protection) = protection(data_directory) else {
+        return false;
+    };
+    if !matches!(protection.mode, ProtectionMode::Administrator { .. })
+        || !protection.mode.administrator_devices().is_empty()
+        || registered.is_empty()
+    {
+        return false;
+    }
+    protection.mode = ProtectionMode::administrator_for(registered.to_vec());
+    write_protection(data_directory, &protection).is_ok()
+}
+
+/// Take `device` off the computers that may end the administrator protection, at once (it
+/// makes the protection stricter). Refused for the last one.
+pub fn remove_administrator_device(data_directory: &Path, device: &str) -> Result<(), String> {
+    let _write = write_lock();
+    let mut protection =
+        protection(data_directory).ok_or("엄격 모드가 켜져 있지 않습니다".to_string())?;
+    let mut devices = protection.mode.administrator_devices();
+    if !matches!(protection.mode, ProtectionMode::Administrator { .. }) {
+        return Err("관리자 권한으로 끄는 엄격 모드가 아닙니다".into());
+    }
+    if !devices.iter().any(|listed| listed == device) {
+        return Err(format!("'{device}'는 목록에 없습니다"));
+    }
+    devices.retain(|listed| listed != device);
+    if devices.is_empty() {
+        return Err("마지막 컴퓨터는 뺄 수 없습니다. 그러면 엄격 모드를 끌 수 없게 됩니다".into());
+    }
+    protection.mode = ProtectionMode::administrator_for(devices);
+    write_protection(data_directory, &protection)
+}
+
+/// Schedule `device` to join the computers that may end the administrator protection (it
+/// makes the protection looser, so it waits for the confirmations like other looser edits).
+pub fn schedule_administrator_device(
+    data_directory: &Path,
+    now: DateTime<Utc>,
+    device: &str,
+    via: &str,
+) -> Result<ScheduledUpdate, String> {
+    let _write = write_lock();
+    let protection =
+        protection(data_directory).ok_or("엄격 모드가 켜져 있지 않습니다".to_string())?;
+    if !matches!(protection.mode, ProtectionMode::Administrator { .. }) {
+        return Err("관리자 권한으로 끄는 엄격 모드가 아닙니다".into());
+    }
+    let device = device.trim();
+    if device.is_empty() {
+        return Err("컴퓨터를 고르세요".into());
+    }
+    if protection
+        .mode
+        .administrator_devices()
+        .iter()
+        .any(|listed| listed == device)
+    {
+        return Err(format!("'{device}'는 이미 목록에 있습니다"));
+    }
+    let mut reservations = read_reservations(data_directory);
+    let numbers = confirmations(data_directory);
+    let mut reservation = new_reservation(
+        now,
+        PROTECTION_EDIT_NAME,
+        vec![Edit::AddItems {
+            path: vec!["mode".into(), "devices".into()],
+            items: vec![Value::String(device.to_string())],
+        }],
+        via,
+        ReservationOrigin::Settings,
+        (
+            numbers.settings_interval_seconds(),
+            numbers.settings_times(),
+        ),
+        "",
+    );
+    while reservations
+        .scheduled
+        .iter()
+        .any(|existing| existing.id == reservation.id)
+    {
+        reservation.id.push('x');
+    }
+    let scheduled = ScheduledUpdate {
+        id: reservation.id.clone(),
+        first_question_at: reservation.next_question_at(),
+        edits: reservation.describe(),
+    };
+    reservations.scheduled.push(reservation);
+    write_reservations(data_directory, &reservations)?;
+    Ok(scheduled)
+}
+
+fn write_protection(data_directory: &Path, protection: &Protection) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(protection).map_err(|error| error.to_string())?;
+    write_atomic(&data_directory.join(PROTECTION_FILE), &bytes)
+        .map_err(|error| format!("could not save {PROTECTION_FILE}: {error}"))
+}
+
 /// Empty every user's blocks file.
 fn clear_blocks(data_directory: &Path) {
     let Ok(entries) = fs::read_dir(data_directory.join("blocks")) else {
@@ -550,6 +705,9 @@ pub fn put(
     fix_now: &[Vec<String>],
 ) -> Result<PutOutcome, String> {
     let _write = write_lock();
+    if name == PROTECTION_EDIT_NAME {
+        return Err("엄격 모드는 설정처럼 고칠 수 없습니다".into());
+    }
     let file = file_of(name)?;
     validate(name, content)?;
     // Both sides as the program reads them (defaults filled in), so only real changes count.
@@ -819,6 +977,9 @@ fn record(
 }
 
 fn file_of(name: &str) -> Result<&'static str, String> {
+    if name == PROTECTION_EDIT_NAME {
+        return Ok(PROTECTION_FILE);
+    }
     EDITABLE
         .iter()
         .find(|(editable_name, _)| *editable_name == name)
@@ -919,6 +1080,7 @@ pub fn normalize(name: &str, content: &Value) -> Result<Value, String> {
         "policy" => round_trip::<list_based_rule::ListConfig>(content),
         "ai_focus" => round_trip::<ai_focus_rule::AiFocusConfig>(content),
         "planner" => round_trip::<task_planner::PlannerConfig>(content),
+        PROTECTION_EDIT_NAME => round_trip::<Protection>(content),
         _ => Err(format!("'{name}' is not an editable setting")),
     }
     .map_err(|error| format!("{name}: {error}"))
@@ -936,6 +1098,7 @@ fn validate(name: &str, content: &Value) -> Result<(), String> {
         "planner" => {
             serde_json::from_value::<task_planner::PlannerConfig>(content.clone()).map(drop)
         }
+        PROTECTION_EDIT_NAME => serde_json::from_value::<Protection>(content.clone()).map(drop),
         _ => return Err(format!("'{name}' is not an editable setting")),
     };
     result.map_err(|error| format!("{name}: {error}"))
@@ -1043,7 +1206,10 @@ mod tests {
         protect(
             &data_directory,
             now,
-            ProtectionChoice::Administrator { device: None },
+            ProtectionChoice::Administrator {
+                device: None,
+                devices: Vec::new(),
+            },
         )
         .unwrap();
         assert!(unprotect(&data_directory, now, Unlock::Press).is_err());
@@ -1055,6 +1221,7 @@ mod tests {
         let data_directory = temp_dir("unprotect_administrator_device");
         let choice = ProtectionChoice::Administrator {
             device: Some("desktop".into()),
+            devices: Vec::new(),
         };
         protect(&data_directory, now, choice).unwrap();
         let elsewhere = Unlock::Administrator {
@@ -1068,6 +1235,58 @@ mod tests {
         };
         unprotect(&data_directory, now, there).unwrap();
         assert!(!is_protected(&data_directory));
+
+        // Administrators of a list of computers: any listed one, none other; the last one
+        // stays, a removal applies at once, an addition is scheduled.
+        let data_directory = temp_dir("unprotect_administrator_list");
+        let choice = ProtectionChoice::Administrator {
+            device: None,
+            devices: vec!["desktop".into(), "laptop".into()],
+        };
+        protect(&data_directory, now, choice).unwrap();
+        let on = |device: &str| Unlock::Administrator {
+            device: Some(device.into()),
+        };
+        assert!(may_unprotect(&protection(&data_directory).unwrap(), now, &on("vm")).is_err());
+        assert!(may_unprotect(&protection(&data_directory).unwrap(), now, &on("laptop")).is_ok());
+        remove_administrator_device(&data_directory, "laptop").unwrap();
+        assert!(may_unprotect(&protection(&data_directory).unwrap(), now, &on("laptop")).is_err());
+        assert!(remove_administrator_device(&data_directory, "desktop").is_err());
+        let scheduled =
+            schedule_administrator_device(&data_directory, now, "laptop", "test").unwrap();
+        assert!(may_unprotect(&protection(&data_directory).unwrap(), now, &on("laptop")).is_err());
+        assert!(put(&data_directory, now, "protection", &json!({}), "", &[]).is_err());
+        let interval = confirmations(&data_directory).settings_interval_seconds();
+        let mut at = now;
+        for _ in 0..confirmations(&data_directory).settings_times() {
+            at += Duration::seconds(interval as i64 + 1);
+            answer(&data_directory, at, &scheduled.id, true).unwrap();
+        }
+        assert!(may_unprotect(&protection(&data_directory).unwrap(), now, &on("laptop")).is_ok());
+        unprotect(&data_directory, now, on("desktop")).unwrap();
+
+        // "Any computer" (a PC that did not sync): pinned to the computers registered once
+        // it syncs, so a computer added later cannot end it.
+        let data_directory = temp_dir("unprotect_administrator_pin");
+        protect(
+            &data_directory,
+            now,
+            ProtectionChoice::Administrator {
+                device: None,
+                devices: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert!(pin_administrator_devices(
+            &data_directory,
+            &["desktop".to_string(), "laptop".to_string()]
+        ));
+        assert!(!pin_administrator_devices(
+            &data_directory,
+            &["vm".to_string()]
+        ));
+        assert!(may_unprotect(&protection(&data_directory).unwrap(), now, &on("vm")).is_err());
+        assert!(may_unprotect(&protection(&data_directory).unwrap(), now, &on("desktop")).is_ok());
 
         // Password: only the right one; the file keeps a hash only.
         let data_directory = temp_dir("unprotect_password");
@@ -1101,7 +1320,10 @@ mod tests {
         protect(
             &data_directory,
             now,
-            ProtectionChoice::Administrator { device: None },
+            ProtectionChoice::Administrator {
+                device: None,
+                devices: Vec::new(),
+            },
         )
         .unwrap();
         unprotect(&data_directory, now, Unlock::Administrator { device: None }).unwrap();

@@ -180,13 +180,13 @@ pub struct SyncStatus {
     /// Every paired device with its version and last sync, as the server last told.
     #[serde(default)]
     pub device_details: Vec<sync::protocol::DeviceSummary>,
-    /// Devices waiting to be taken off the list with the next sync.
-    #[serde(default)]
-    pub forget_waiting: Vec<String>,
     /// Devices the last sync asked to take off the list that the server kept: (id, why).
     #[serde(default)]
     pub not_forgotten: Vec<(String, String)>,
 }
+
+/// Days without a sync after which the server takes a device off its list.
+pub const DEVICE_PRUNE_DAYS: i64 = sync::server::PRUNE_AFTER_DAYS;
 
 /// Read from `sync.json` and `sync_state.json` (written by the service).
 pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
@@ -198,7 +198,6 @@ pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
     let text = |value: &Value| value.as_str().map(str::to_string);
     Some(SyncStatus {
         device_details: serde_json::from_value(state["device_details"].clone()).unwrap_or_default(),
-        forget_waiting: sync::client::ForgetRequest::load(data_directory).devices,
         not_forgotten: serde_json::from_value(state["not_forgotten"].clone()).unwrap_or_default(),
         devices: serde_json::from_value(state["devices"].clone()).unwrap_or_default(),
         account: text(&config["account"]["name"]),
@@ -254,25 +253,31 @@ pub struct ProtectionView {
     #[serde(default)]
     pub until: Option<DateTime<Utc>>,
     /// The sync device whose administrator may turn an administrator protection off
-    /// (`None`: any computer's).
+    /// (`None`: any computer's); older Focus apps read it.
     #[serde(default)]
     pub device: Option<String>,
+    /// The sync devices whose administrator may turn an administrator protection off (empty:
+    /// any administrator of a PC that does not sync).
+    #[serde(default)]
+    pub devices: Vec<String>,
 }
 
 impl ProtectionView {
     pub fn of(protection: &crate::settings::Protection) -> Self {
         use crate::settings::ProtectionMode;
-        let (kind, until, device) = match &protection.mode {
-            ProtectionMode::Permanent => ("permanent", None, None),
-            ProtectionMode::Until { until } => ("until", Some(*until), None),
-            ProtectionMode::Administrator { device } => ("administrator", None, device.clone()),
-            ProtectionMode::Password { .. } => ("password", None, None),
+        let (kind, until) = match &protection.mode {
+            ProtectionMode::Permanent => ("permanent", None),
+            ProtectionMode::Until { until } => ("until", Some(*until)),
+            ProtectionMode::Administrator { .. } => ("administrator", None),
+            ProtectionMode::Password { .. } => ("password", None),
         };
+        let devices = protection.mode.administrator_devices();
         Self {
             since: protection.protected_since,
             kind: kind.to_string(),
             until,
-            device,
+            device: devices.first().cloned(),
+            devices,
         }
     }
 }
@@ -571,6 +576,23 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
         }
         // A time protection whose time is over, or a password protection with its password.
         // An administrator protection ends only through `settings-unlock` run as administrator.
+        "protection_admin_remove" => {
+            let device = params["device"].as_str().ok_or("params.device required")?;
+            crate::settings::remove_administrator_device(&data_directory, device)?;
+            tracing::info!("strict mode: {device} may no longer end it");
+            return Ok(json!({ "ok": true }));
+        }
+        "protection_admin_add" => {
+            let device = params["device"].as_str().ok_or("params.device required")?;
+            let scheduled = crate::settings::schedule_administrator_device(
+                &data_directory,
+                Utc::now(),
+                device,
+                "settings tab",
+            )?;
+            tracing::info!("strict mode: adding {device} is scheduled");
+            return serde_json::to_value(scheduled).map_err(|error| error.to_string());
+        }
         "settings_unprotect" => {
             let unlock = match params["password"].as_str() {
                 Some(password) => crate::settings::Unlock::Password(password),
@@ -658,22 +680,6 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             planner
                 .assign(Utc::now())
                 .map_err(|error| error.to_string())?;
-        }
-        "sync_forget_device" => {
-            // Another device's entry (an old one of a computer installed again, or one no
-            // longer used) leaves the server's list with the next sync of this PC. It loosens
-            // nothing: a computer still in use logs in again by itself.
-            let data_directory = crate::data_dir();
-            let id = params["id"].as_str().ok_or("params.id required")?;
-            let status = sync_status(&data_directory).ok_or("이 PC는 동기화하지 않습니다")?;
-            if id == status.device_id {
-                return Err("이 PC 자신은 목록에서 지울 수 없습니다".into());
-            }
-            if !status.devices.iter().any(|(device, _)| device == id) {
-                return Err(format!("'{id}'라는 기기가 목록에 없습니다"));
-            }
-            sync::client::ForgetRequest::add(&data_directory, id)?;
-            tracing::info!("device '{id}' will be taken off the sync list");
         }
         "logout" => {
             let user = crate::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;

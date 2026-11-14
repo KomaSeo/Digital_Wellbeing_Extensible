@@ -585,6 +585,13 @@ pub fn sync_loop(data_directory: PathBuf) {
                             refusal.name, refusal.reason
                         );
                     }
+                    // An administrator protection that names no computer is tied to the
+                    // computers registered now; the next round carries it to the others.
+                    let registered: Vec<String> =
+                        report.devices.iter().map(|(id, _)| id.clone()).collect();
+                    if machine::settings::pin_administrator_devices(&data_directory, &registered) {
+                        info!("strict mode: only these computers' administrators may end it: {registered:?}");
+                    }
                     last_error = None;
                 }
                 Err(error) => {
