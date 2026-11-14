@@ -1,7 +1,7 @@
 //! Responsibility: Show how the user spent a chosen period (the Statistics tab's timetable):
-//! each day as a bar from 0 to 24 o'clock and as a list of stretches. A stretch is a task (at
-//! the computer or away from it), an appointment, or "알 수 없음": during a task done at the
-//! computer the user did not touch it.
+//! the days as columns and the hours as rows like a calendar, each stretch as a colored block
+//! that tells what was done when the mouse is over it. A stretch is a task (at the computer or
+//! away from it), an appointment, or "멈춤": the task was paused.
 
 use chrono::{DateTime, Duration, Local, NaiveDate, Timelike, Utc};
 use eframe::egui;
@@ -178,56 +178,235 @@ impl TimetableView {
                     ui.label(format!("{} — {task}", duration_text(minutes)));
                 }
             });
-        for (day, stretches) in by_day(entries).into_iter().rev() {
-            ui.separator();
-            ui.strong(format!(
-                "{} ({})",
-                day.format("%Y-%m-%d"),
-                weekday_korean(day)
-            ));
-            day_bar(ui, &stretches);
-            for entry in &stretches {
-                let start = entry.start.with_timezone(&Local).format("%H:%M");
-                let end = entry.end.with_timezone(&Local).format("%H:%M");
-                let minutes = (entry.end - entry.start).num_minutes();
-                ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(kind_color(entry.kind), "■");
-                    ui.label(format!("{start}–{end} ({})", duration_text(minutes)));
-                    if entry.kind == TimetableKind::Unknown {
-                        ui.label(format!("멈춤 (그때의 할 일: {})", entry.task));
-                    } else {
-                        ui.label(&entry.task);
+        let days = by_day(entries);
+        let period_days =
+            period_days(&self.from, &self.to).unwrap_or_else(|| days.keys().copied().collect());
+        calendar(ui, &period_days, &days);
+        egui::CollapsingHeader::new("하루마다 목록으로 보기")
+            .id_salt("timetable_list")
+            .show(ui, |ui| {
+                for (day, stretches) in days.iter().rev() {
+                    ui.separator();
+                    ui.strong(format!(
+                        "{} ({})",
+                        day.format("%Y-%m-%d"),
+                        weekday_korean(*day)
+                    ));
+                    for entry in stretches {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.colored_label(kind_color(entry.kind), "■");
+                            ui.label(time_range_text(entry));
+                            ui.label(task_text(entry));
+                        });
                     }
-                });
-            }
-        }
+                }
+            });
     }
 }
 
-/// One day as a bar from 0 to 24 o'clock, with hour marks every 6 hours.
-fn day_bar(ui: &mut egui::Ui, stretches: &[TimetableEntry]) {
-    let width = ui.available_width().min(720.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 18.0), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 2.0, ui.visuals().faint_bg_color);
-    let x_of = |minute: f32| rect.left() + rect.width() * (minute / (24.0 * 60.0)).clamp(0.0, 1.0);
-    for entry in stretches {
-        let start = minute_of_day(entry.start);
-        let mut end = minute_of_day(entry.end);
-        if end <= start {
-            end = 24.0 * 60.0;
-        }
-        let stretch = egui::Rect::from_min_max(
-            egui::pos2(x_of(start), rect.top()),
-            egui::pos2(x_of(end).max(x_of(start) + 1.0), rect.bottom()),
-        );
-        painter.rect_filled(stretch, 0.0, kind_color(entry.kind));
+/// "09:00–10:30 (1시간 30분)".
+fn time_range_text(entry: &TimetableEntry) -> String {
+    let start = entry.start.with_timezone(&Local).format("%H:%M");
+    let end = entry.end.with_timezone(&Local).format("%H:%M");
+    let minutes = (entry.end - entry.start).num_minutes();
+    format!("{start}–{end} ({})", duration_text(minutes))
+}
+
+fn task_text(entry: &TimetableEntry) -> String {
+    if entry.kind == TimetableKind::Unknown {
+        format!("멈춤 (그때의 할 일: {})", entry.task)
+    } else {
+        entry.task.clone()
     }
-    for hour in [6.0, 12.0, 18.0] {
-        let x = x_of(hour * 60.0);
-        painter.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            egui::Stroke::new(1.0_f32, ui.visuals().weak_text_color()),
-        );
+}
+
+/// Every day from `from` to `to`, at most 31 of them; `None` when the dates do not read.
+fn period_days(from: &str, to: &str) -> Option<Vec<NaiveDate>> {
+    let first: NaiveDate = from.trim().parse().ok()?;
+    let last: NaiveDate = to.trim().parse().ok()?;
+    if last < first {
+        return None;
     }
+    Some(
+        first
+            .iter_days()
+            .take_while(|day| *day <= last)
+            .take(31)
+            .collect(),
+    )
+}
+
+const HOUR_HEIGHT: f32 = 26.0;
+const AXIS_WIDTH: f32 = 42.0;
+const HEADER_HEIGHT: f32 = 34.0;
+
+/// The whole hours that hold every stretch: from the hour of the earliest start to the hour
+/// after the latest end, so empty night hours above and below take no room.
+fn hour_range(days: &BTreeMap<NaiveDate, Vec<TimetableEntry>>) -> (u32, u32) {
+    let stretches = || days.values().flatten();
+    let first = stretches()
+        .map(|entry| minute_of_day(entry.start))
+        .fold(f32::MAX, f32::min);
+    let last = stretches()
+        .map(|entry| match minute_of_day(entry.end) {
+            0.0 => 24.0 * 60.0,
+            minute => minute,
+        })
+        .fold(0.0, f32::max);
+    if first > last {
+        return (0, 24);
+    }
+    (
+        (first / 60.0).floor() as u32,
+        ((last / 60.0).ceil() as u32).clamp(1, 24),
+    )
+}
+
+/// The days as columns and the hours as rows, like a calendar's week view. Each stretch is a
+/// colored block; the mouse over a block shows what was done then.
+fn calendar(
+    ui: &mut egui::Ui,
+    period_days: &[NaiveDate],
+    days: &BTreeMap<NaiveDate, Vec<TimetableEntry>>,
+) {
+    if period_days.is_empty() {
+        return;
+    }
+    let column_width =
+        ((ui.available_width() - AXIS_WIDTH) / period_days.len() as f32).clamp(64.0, 220.0);
+    let (first_hour, last_hour) = hour_range(days);
+    egui::ScrollArea::horizontal()
+        .id_salt("timetable_calendar")
+        .show(ui, |ui| {
+            let size = egui::vec2(
+                AXIS_WIDTH + column_width * period_days.len() as f32,
+                HEADER_HEIGHT + HOUR_HEIGHT * (last_hour - first_hour) as f32,
+            );
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            let visuals = ui.visuals().clone();
+            let line = egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color);
+            let grid_top = rect.top() + HEADER_HEIGHT;
+            let y_of = |minute: f32| {
+                grid_top
+                    + HOUR_HEIGHT
+                        * (minute / 60.0 - first_hour as f32)
+                            .clamp(0.0, (last_hour - first_hour) as f32)
+            };
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(rect.left() + AXIS_WIDTH, grid_top), rect.max),
+                0.0,
+                visuals.faint_bg_color,
+            );
+            let small = egui::FontId::proportional(11.0);
+            for hour in first_hour..=last_hour {
+                let y = y_of(hour as f32 * 60.0);
+                painter.line_segment(
+                    [
+                        egui::pos2(rect.left() + AXIS_WIDTH, y),
+                        egui::pos2(rect.right(), y),
+                    ],
+                    line,
+                );
+                if hour < last_hour {
+                    painter.text(
+                        egui::pos2(rect.left() + AXIS_WIDTH - 4.0, y),
+                        egui::Align2::RIGHT_TOP,
+                        format!("{hour}시"),
+                        small.clone(),
+                        visuals.weak_text_color(),
+                    );
+                }
+            }
+            let today = Local::now().date_naive();
+            for (column, day) in period_days.iter().enumerate() {
+                let left = rect.left() + AXIS_WIDTH + column_width * column as f32;
+                painter.line_segment(
+                    [
+                        egui::pos2(left, rect.top()),
+                        egui::pos2(left, rect.bottom()),
+                    ],
+                    line,
+                );
+                let header_color = if *day == today {
+                    visuals.selection.bg_fill
+                } else {
+                    visuals.text_color()
+                };
+                painter.text(
+                    egui::pos2(left + column_width / 2.0, rect.top() + 2.0),
+                    egui::Align2::CENTER_TOP,
+                    weekday_korean(*day),
+                    small.clone(),
+                    header_color,
+                );
+                painter.text(
+                    egui::pos2(left + column_width / 2.0, rect.top() + 15.0),
+                    egui::Align2::CENTER_TOP,
+                    day.format("%m-%d").to_string(),
+                    egui::FontId::proportional(13.0),
+                    header_color,
+                );
+                for (index, entry) in days.get(day).into_iter().flatten().enumerate() {
+                    let start = minute_of_day(entry.start);
+                    let mut end = minute_of_day(entry.end);
+                    if end <= start {
+                        end = 24.0 * 60.0;
+                    }
+                    let block = egui::Rect::from_min_max(
+                        egui::pos2(left + 2.0, y_of(start) + 1.0),
+                        egui::pos2(
+                            left + column_width - 2.0,
+                            (y_of(end) - 1.0).max(y_of(start) + 3.0),
+                        ),
+                    );
+                    painter.rect_filled(block, 3.0, kind_color(entry.kind));
+                    if block.height() >= 14.0 {
+                        painter.with_clip_rect(block.shrink(2.0)).text(
+                            block.left_top() + egui::vec2(3.0, 1.0),
+                            egui::Align2::LEFT_TOP,
+                            &entry.task,
+                            small.clone(),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                    // A block too thin for the mouse still answers in a strip at least 6 points high.
+                    let hover_area =
+                        block.expand2(egui::vec2(0.0, ((6.0 - block.height()) / 2.0).max(0.0)));
+                    ui.interact(
+                        hover_area,
+                        ui.id().with(("timetable_block", *day, index)),
+                        egui::Sense::hover(),
+                    )
+                    .on_hover_ui(|ui| {
+                        ui.strong(task_text(entry));
+                        ui.horizontal(|ui| {
+                            ui.colored_label(kind_color(entry.kind), "■");
+                            ui.label(kind_label(entry.kind));
+                        });
+                        ui.label(format!(
+                            "{} ({})",
+                            day.format("%Y-%m-%d"),
+                            weekday_korean(*day)
+                        ));
+                        ui.label(time_range_text(entry));
+                    });
+                }
+            }
+            let now_minute = minute_of_day(Utc::now());
+            let now_shown =
+                (first_hour as f32 * 60.0..=last_hour as f32 * 60.0).contains(&now_minute);
+            if let Some(now_column) = period_days
+                .iter()
+                .position(|day| *day == today)
+                .filter(|_| now_shown)
+            {
+                let left = rect.left() + AXIS_WIDTH + column_width * now_column as f32;
+                let y = y_of(now_minute);
+                painter.line_segment(
+                    [egui::pos2(left, y), egui::pos2(left + column_width, y)],
+                    egui::Stroke::new(2.0_f32, crate::RED),
+                );
+            }
+        });
 }
