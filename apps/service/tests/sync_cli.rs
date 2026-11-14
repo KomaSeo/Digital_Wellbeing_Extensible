@@ -475,7 +475,7 @@ fn the_unlock_list_is_pinned_and_shrinks_on_every_computer() {
         .unwrap()
         .mode
         .administrator_devices();
-    assert_eq!(on_desktop, [laptop_id.clone()]);
+    assert_eq!(on_desktop, std::slice::from_ref(&laptop_id));
     assert!(settings::unprotect(
         &desktop,
         now,
@@ -501,20 +501,22 @@ fn the_unlock_list_is_pinned_and_shrinks_on_every_computer() {
     let _ = fs::remove_dir_all(&root);
 }
 
-/// The way around the wait: a computer that is not on the list writes itself onto it (its
-/// administrator can write any file there) and then ends the strict mode.
+/// The owner asked: "만약 엄격모드의 컴퓨터 목록이 다 없어지면 못 푸나?" When every computer on
+/// the list is gone, another synced computer schedules itself onto the list, answers the
+/// confirmations, and then its administrator ends the strict mode on every computer.
 #[test]
-fn a_computer_cannot_write_itself_onto_the_unlock_list_without_the_confirmations() {
-    use chrono::Utc;
-    use machine::settings::{self, ProtectionChoice};
+fn a_computer_joins_the_unlock_list_after_the_confirmations_when_the_listed_one_is_gone() {
+    use chrono::{Duration as Days, Utc};
+    use machine::settings::{self, AnswerOutcome, ProtectionChoice, Unlock};
 
     let root: PathBuf =
-        std::env::temp_dir().join(format!("dw_sync_unlock_forged_{}", std::process::id()));
+        std::env::temp_dir().join(format!("dw_sync_unlock_recovery_{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let server_folder = root.join("server");
     let laptop = root.join("laptop");
+    let desktop = root.join("desktop");
     let new_pc = root.join("newpc");
-    for folder in [&server_folder, &laptop, &new_pc] {
+    for folder in [&server_folder, &laptop, &desktop, &new_pc] {
         fs::create_dir_all(folder).unwrap();
     }
     let port = TcpListener::bind("127.0.0.1:0")
@@ -531,18 +533,23 @@ fn a_computer_cannot_write_itself_onto_the_unlock_list_without_the_confirmations
         "long password\nlong password\n",
     );
     assert!(signed_up.status.success(), "{}", text(&signed_up));
-    let logged_in = run_with_input(
-        &server_folder,
-        &new_pc,
-        &["sync-login", &address, "me", "--device", "newpc"],
-        "long password\n",
-    );
-    assert!(logged_in.status.success(), "{}", text(&logged_in));
-    let laptop_id = settings::this_device_id(&laptop).unwrap();
-    let new_pc_id = settings::this_device_id(&new_pc).unwrap();
+    for (folder, name) in [(&desktop, "desktop"), (&new_pc, "newpc")] {
+        let logged_in = run_with_input(
+            &server_folder,
+            folder,
+            &["sync-login", &address, "me", "--device", name],
+            "long password\n",
+        );
+        assert!(logged_in.status.success(), "{}", text(&logged_in));
+    }
+    let id_of = |folder: &Path| settings::this_device_id(folder).expect("a device id");
+    let (laptop_id, new_pc_id) = (id_of(&laptop), id_of(&new_pc));
+
+    // Only the laptop's administrator may end the strict mode; every computer gets it.
+    let now = Utc::now();
     settings::protect(
         &laptop,
-        Utc::now(),
+        now,
         ProtectionChoice::Administrator {
             device: None,
             devices: vec![laptop_id.clone()],
@@ -550,25 +557,82 @@ fn a_computer_cannot_write_itself_onto_the_unlock_list_without_the_confirmations
     )
     .unwrap();
     sync_now(&server_folder, &laptop);
-    sync_now(&server_folder, &new_pc);
+    for folder in [&desktop, &new_pc] {
+        sync_now(&server_folder, folder);
+        assert!(settings::is_protected(folder));
+    }
+
+    // The laptop is gone. The new PC's administrator may not end it ...
+    let not_listed = settings::unprotect(
+        &new_pc,
+        now,
+        Unlock::Administrator {
+            device: Some(new_pc_id.clone()),
+        },
+    );
+    assert!(not_listed.is_err(), "{not_listed:?}");
     assert!(settings::is_protected(&new_pc));
 
-    // Written by hand: still on, with the new PC on the list.
-    let path = new_pc.join("settings_protection.json");
-    let mut forged: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    forged["mode"]["devices"] = serde_json::json!([laptop_id, new_pc_id]);
-    fs::write(&path, serde_json::to_vec_pretty(&forged).unwrap()).unwrap();
-    let printed = sync_now(&server_folder, &new_pc);
-    println!("{printed}");
-    sync_now(&server_folder, &laptop);
-    let on_laptop = settings::protection(&laptop)
+    // ... so it schedules itself onto the list. The reservation travels with sync too.
+    let scheduled =
+        settings::schedule_administrator_device(&new_pc, now, &new_pc_id, "settings tab").unwrap();
+    sync_now(&server_folder, &new_pc);
+    sync_now(&server_folder, &desktop);
+    let on_desktop = fs::read_to_string(desktop.join("settings_reservations.json")).unwrap();
+    assert!(on_desktop.contains(&scheduled.id), "{on_desktop}");
+
+    // No question before its time; then three "yes", two days apart (the defaults).
+    assert!(settings::answer(&new_pc, now, &scheduled.id, true).is_err());
+    let mut asked_at = scheduled.first_question_at;
+    let mut answers = 0;
+    loop {
+        answers += 1;
+        match settings::answer(&new_pc, asked_at, &scheduled.id, true).unwrap() {
+            AnswerOutcome::Approved {
+                next_question_at, ..
+            } => asked_at = next_question_at,
+            AnswerOutcome::Applied => break,
+            other => panic!("unexpected answer outcome: {other:?}"),
+        }
+        assert!(answers < 10, "the update never applied");
+    }
+    assert_eq!(answers, 3);
+    assert!(
+        asked_at - now >= Days::days(6),
+        "applied after {}",
+        asked_at - now
+    );
+    let listed = settings::protection(&new_pc)
         .unwrap()
         .mode
         .administrator_devices();
     assert!(
-        !on_laptop.contains(&new_pc_id),
-        "the forged list reached the laptop: {on_laptop:?}"
+        listed.contains(&laptop_id) && listed.contains(&new_pc_id),
+        "{listed:?}"
     );
+
+    // The server takes the longer list, and the desktop gets it.
+    let printed = sync_now(&server_folder, &new_pc);
+    assert!(!printed.contains("refused"), "{printed}");
+    sync_now(&server_folder, &desktop);
+    let on_desktop = settings::protection(&desktop)
+        .unwrap()
+        .mode
+        .administrator_devices();
+    assert!(on_desktop.contains(&new_pc_id), "{on_desktop:?}");
+
+    // Now the new PC's administrator ends it, and it ends on the desktop too.
+    settings::unprotect(
+        &new_pc,
+        asked_at,
+        Unlock::Administrator {
+            device: Some(new_pc_id.clone()),
+        },
+    )
+    .unwrap();
+    let printed = sync_now(&server_folder, &new_pc);
+    assert!(!printed.contains("refused"), "{printed}");
+    sync_now(&server_folder, &desktop);
+    assert!(!settings::is_protected(&desktop));
     let _ = fs::remove_dir_all(&root);
 }
