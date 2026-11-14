@@ -16,15 +16,16 @@
 //! locks every app too, and getting off it early needs an urgent reason.
 
 use crate::advisor::{
-    AdvisorProvider, AppointmentRequest, PickRequest, Review, ReviewRequest, ReviewedTodo,
-    TodoChangeRequest, WeekPlanAnswer, WeekPlanRequest,
+    AdvisorProvider, AppointmentRequest, FollowUpRequest, PickRequest, Review, ReviewRequest,
+    ReviewedTodo, TodoChangeRequest, WeekPlanAnswer, WeekPlanRequest,
 };
 use crate::model::{
     occurrence_day, series_id, Appointment, AppointmentInput, Assignment, AssignmentSource,
-    AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, Evidence, ExtensionOffer, IdleSpan,
-    PlannerConfig, PlannerState, PlannerStatus, PolishItem, ProposalInput, TaskNotes, TaskStep,
-    TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan,
-    WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
+    AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, Evidence, ExtensionOffer, FollowUpKind,
+    FollowUpSource, FollowUpSuggestion, IdleSpan, PlannerConfig, PlannerState, PlannerStatus,
+    PolishItem, ProposalInput, TaskNotes, TaskStep, TimetableEntry, TimetableKind, TodoChange,
+    TodoChangeRecord, TodoItem, TodoListWrite, WaitingItem, WeekPlan, WeekPlanDay, WeekPlanTodo,
+    WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
 use ai_focus_rule::store::JsonStore;
 use ai_focus_rule::{FocusMonitor, JudgeError};
@@ -60,6 +61,10 @@ const APPOINTMENTS_KEPT_FOR: Duration = Duration::days(7);
 /// How many days ahead the occurrences of a repeating appointment are listed (to the user,
 /// to the AI, for the next appointment's start).
 const OCCURRENCE_DAYS_AHEAD: i64 = 7;
+/// Follow-ups taken from one answer of the AI.
+const MAX_FOLLOW_UPS_PER_SOURCE: usize = 3;
+/// When the AI gives no day to check on what is awaited.
+const DEFAULT_WAIT_DAYS: i64 = 3;
 
 /// Responsibility: Report why an assignment or a change request was refused.
 #[derive(Debug, Error)]
@@ -116,6 +121,10 @@ pub enum PlannerError {
     Ai(#[from] JudgeError),
     #[error("저장하지 못했습니다: {0}")]
     Io(#[from] std::io::Error),
+    #[error("없는 후속 제안이나 기다리는 일입니다('{0}')")]
+    UnknownFollowUp(String),
+    #[error("제목은 2~{MAX_TITLE_CHARS}글자입니다")]
+    BadTitle,
 }
 
 /// Responsibility: Own the planner's config and state stores, and run assign / request_change
@@ -349,6 +358,7 @@ impl TaskPlanner {
                 .any(|appointment| &appointment.id == appointment_id && appointment.start <= now)
             {
                 info!("appointment {appointment_id} is over");
+                self.queue_appointment_follow_up(now, appointment_id)?;
                 self.end(now)?;
             }
         }
@@ -514,8 +524,277 @@ impl TaskPlanner {
                 .is_some_and(|assignment| assignment.time_is_up(now)),
             minutes_this_round,
             appointments: self.appointments(now),
+            follow_up_suggestions: state.follow_up_suggestions.clone(),
+            waiting: state.waiting.clone(),
             open_todos,
         }
+    }
+
+    // --- follow-ups and waiting ---------------------------------------------------------
+
+    /// Ask the AI for the follow-ups of every to-do finished and appointment ended since the
+    /// last time (one question each) and keep what it suggests for the user to take or drop.
+    /// An item the AI cannot answer for is dropped, so a missing key never blocks the user.
+    /// Returns the number of follow-ups suggested now.
+    pub fn suggest_follow_ups(&self, now: DateTime<Utc>) -> Result<usize, PlannerError> {
+        let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
+        let state = self.state.get();
+        if state.follow_up_queue.is_empty() {
+            return Ok(0);
+        }
+        let config = self.config.get();
+        let open = self.open_todos();
+        let now_local = local_now_text();
+        let today = now.with_timezone(&Local).date_naive();
+        let advisor = (self.advisor)(&self.focus.store().get());
+        let mut suggested: Vec<FollowUpSuggestion> = Vec::new();
+        for (source_index, source) in state.follow_up_queue.iter().enumerate() {
+            let answer = advisor
+                .as_ref()
+                .map_err(|error| error.to_string())
+                .and_then(|advisor| {
+                    advisor
+                        .suggest_follow_ups(&FollowUpRequest {
+                            instructions: config.instructions.follow_up_or_default(),
+                            now_local: &now_local,
+                            life_rules: &config.life_rules,
+                            follow_up_rules: &config.follow_up_rules,
+                            source,
+                            open: &open,
+                            waiting: &state.waiting,
+                        })
+                        .map_err(|error| error.to_string())
+                });
+            let answer = match answer {
+                Ok(answer) => answer,
+                Err(error) => {
+                    tracing::warn!("no follow-ups for \"{}\": {error}", source.title);
+                    continue;
+                }
+            };
+            for (index, follow_up) in answer
+                .follow_ups
+                .iter()
+                .take(MAX_FOLLOW_UPS_PER_SOURCE)
+                .enumerate()
+            {
+                let title = clip(&follow_up.title, MAX_TITLE_CHARS);
+                let duplicate = open
+                    .iter()
+                    .any(|todo| todo.title.trim().eq_ignore_ascii_case(&title));
+                if title.chars().count() < 2 || duplicate {
+                    continue;
+                }
+                let kind = if follow_up.kind == "wait" {
+                    FollowUpKind::Wait
+                } else {
+                    FollowUpKind::Todo
+                };
+                let date = follow_up.date.trim().parse::<NaiveDate>().ok().or_else(|| {
+                    (kind == FollowUpKind::Wait).then(|| today + Duration::days(DEFAULT_WAIT_DAYS))
+                });
+                suggested.push(FollowUpSuggestion {
+                    id: format!("f{}-{source_index}-{index}", now.timestamp_millis()),
+                    kind,
+                    title,
+                    notes: clip(&follow_up.notes, MAX_NOTES_CHARS),
+                    date,
+                    after: source.title.clone(),
+                });
+            }
+        }
+        let asked: Vec<String> = state
+            .follow_up_queue
+            .iter()
+            .map(|source| source.key.clone())
+            .collect();
+        let count = suggested.len();
+        self.state.update(|planner_state| {
+            planner_state
+                .follow_up_queue
+                .retain(|source| !asked.contains(&source.key));
+            planner_state.follow_up_suggestions.extend(suggested);
+        })?;
+        info!("{count} follow-ups suggested");
+        Ok(count)
+    }
+
+    /// The user takes (`take`) or drops a suggested follow-up, with the title and date they
+    /// may have changed. A to-do taken is returned as the write that puts it on the list
+    /// (no AI: the user approved what the AI suggested); something to wait for is kept here.
+    pub fn decide_follow_up(
+        &self,
+        now: DateTime<Utc>,
+        id: &str,
+        take: bool,
+        title: Option<&str>,
+        date: Option<NaiveDate>,
+    ) -> Result<Vec<TodoListWrite>, PlannerError> {
+        let suggestion = self
+            .state
+            .get()
+            .follow_up_suggestions
+            .into_iter()
+            .find(|suggestion| suggestion.id == id)
+            .ok_or_else(|| PlannerError::UnknownFollowUp(id.to_string()))?;
+        let title = clip(title.unwrap_or(&suggestion.title), MAX_TITLE_CHARS);
+        if take && title.chars().count() < 2 {
+            return Err(PlannerError::BadTitle);
+        }
+        let date = date.or(suggestion.date);
+        let today = now.with_timezone(&Local).date_naive();
+        self.state.update(|planner_state| {
+            planner_state
+                .follow_up_suggestions
+                .retain(|suggestion| suggestion.id != id);
+            if take && suggestion.kind == FollowUpKind::Wait {
+                planner_state.waiting.push(WaitingItem {
+                    id: format!("w{}", now.timestamp_millis()),
+                    title: title.clone(),
+                    notes: suggestion.notes.clone(),
+                    check_on: date.unwrap_or(today + Duration::days(DEFAULT_WAIT_DAYS)),
+                    since: now,
+                });
+            }
+        })?;
+        if !take || suggestion.kind == FollowUpKind::Wait {
+            return Ok(Vec::new());
+        }
+        Ok(vec![TodoListWrite::Put(TodoItem {
+            id: format!("p{}", now.timestamp_millis()),
+            notes: suggestion.notes,
+            deadline: date,
+            proposed: true,
+            ..TodoItem::new(title)
+        })])
+    }
+
+    /// The user adds something to wait for by hand.
+    pub fn add_waiting(
+        &self,
+        now: DateTime<Utc>,
+        title: &str,
+        notes: &str,
+        check_on: NaiveDate,
+    ) -> Result<(), PlannerError> {
+        let title = clip(title, MAX_TITLE_CHARS);
+        if title.chars().count() < 2 {
+            return Err(PlannerError::BadTitle);
+        }
+        let item = WaitingItem {
+            id: format!("w{}", now.timestamp_millis()),
+            title,
+            notes: clip(notes, MAX_NOTES_CHARS),
+            check_on,
+            since: now,
+        };
+        self.state
+            .update(|planner_state| planner_state.waiting.push(item))?;
+        Ok(())
+    }
+
+    /// Take something off the waiting list (`arrived`: it came, so dealing with it becomes a
+    /// to-do; otherwise it is no longer awaited).
+    pub fn end_waiting(
+        &self,
+        now: DateTime<Utc>,
+        id: &str,
+        arrived: bool,
+    ) -> Result<Vec<TodoListWrite>, PlannerError> {
+        let item = self
+            .state
+            .get()
+            .waiting
+            .into_iter()
+            .find(|item| item.id == id)
+            .ok_or_else(|| PlannerError::UnknownFollowUp(id.to_string()))?;
+        self.state
+            .update(|planner_state| planner_state.waiting.retain(|item| item.id != id))?;
+        if !arrived {
+            return Ok(Vec::new());
+        }
+        Ok(vec![TodoListWrite::Put(TodoItem {
+            id: format!("p{}", now.timestamp_millis()),
+            notes: item.notes,
+            proposed: true,
+            ..TodoItem::new(clip(&format!("처리하기: {}", item.title), MAX_TITLE_CHARS))
+        })])
+    }
+
+    /// What has been awaited until its day to check on it becomes a to-do to check on it
+    /// (the owner: "확인하는 할 일을 추가하는 방향으로"), returned as the writes that put them on
+    /// the list.
+    pub fn waiting_due(&self, now: DateTime<Utc>) -> Result<Vec<TodoListWrite>, PlannerError> {
+        let today = now.with_timezone(&Local).date_naive();
+        let due: Vec<WaitingItem> = self
+            .state
+            .get()
+            .waiting
+            .into_iter()
+            .filter(|item| item.check_on <= today)
+            .collect();
+        if due.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.state
+            .update(|planner_state| planner_state.waiting.retain(|item| item.check_on > today))?;
+        Ok(due
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let notes = format!(
+                    "{}부터 기다렸습니다. 왔는지 확인하고, 오지 않았으면 다시 연락하세요. {}",
+                    item.since.with_timezone(&Local).format("%Y-%m-%d"),
+                    item.notes
+                );
+                TodoListWrite::Put(TodoItem {
+                    id: format!("p{}{index}", now.timestamp_millis()),
+                    notes: clip(notes.trim(), MAX_NOTES_CHARS),
+                    deadline: Some(item.check_on),
+                    proposed: true,
+                    ..TodoItem::new(clip(&format!("확인하기: {}", item.title), MAX_TITLE_CHARS))
+                })
+            })
+            .collect())
+    }
+
+    /// Note a finished to-do or an ended appointment, to ask the AI for its follow-ups at the
+    /// next "할 일 받기". An appointment is noted once (it may end again after an extension).
+    fn queue_follow_up(&self, source: FollowUpSource) -> Result<(), PlannerError> {
+        self.state.update(|planner_state| {
+            if !planner_state
+                .follow_up_queue
+                .iter()
+                .any(|queued| queued.key == source.key)
+            {
+                planner_state.follow_up_queue.push(source);
+            }
+        })?;
+        Ok(())
+    }
+
+    /// [`Self::queue_follow_up`] for the appointment occurrence `appointment_id`.
+    fn queue_appointment_follow_up(
+        &self,
+        now: DateTime<Utc>,
+        appointment_id: &str,
+    ) -> Result<(), PlannerError> {
+        let Some(appointment) = self
+            .occurrences(now)
+            .into_iter()
+            .find(|appointment| appointment.id == appointment_id)
+        else {
+            // Removed: nothing ended.
+            return Ok(());
+        };
+        self.queue_follow_up(FollowUpSource {
+            key: format!("appointment:{}", appointment.id),
+            kind: "appointment".into(),
+            title: appointment.title,
+            notes: appointment.notes,
+            report: String::new(),
+            ended_at: now,
+        })
     }
 
     /// Save the user's notes and steps for an open to-do. They change nothing the rules
@@ -1776,6 +2055,7 @@ impl TaskPlanner {
             .assignment
             .and_then(|assignment| assignment.appointment_id)
         {
+            self.queue_appointment_follow_up(now, &appointment_id)?;
             self.state.update(|planner_state| {
                 planner_state.ended_appointments.insert(appointment_id);
                 let still_listed: Vec<String> = self
@@ -1844,6 +2124,16 @@ impl TaskPlanner {
                         0
                     };
                     let finished = todo.clone();
+                    if !is_polish(&todo.id) {
+                        self.queue_follow_up(FollowUpSource {
+                            key: format!("todo:{}@{}", todo.id, now.timestamp()),
+                            kind: "to-do".into(),
+                            title: todo.title.clone(),
+                            notes: todo.notes.clone(),
+                            report: reason.chars().take(MAX_NOTES_CHARS).collect(),
+                            ended_at: now,
+                        })?;
+                    }
                     self.state.update(|planner_state| {
                         planner_state.done.push(record);
                         if let Some(base_id) = finished.id.strip_prefix(POLISH_PREFIX) {

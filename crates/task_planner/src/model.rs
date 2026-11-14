@@ -212,6 +212,10 @@ pub struct PlannerConfig {
     /// so they could be used to dodge work; like the life rules they change only in the
     /// settings.
     pub appointment_rules: String,
+    /// The owner's rules for which follow-ups the AI suggests after a to-do or an appointment
+    /// ("회의가 끝나면 회의록은 오늘 안에").
+    #[serde(default)]
+    pub follow_up_rules: String,
     /// The owner's standing rules for how time is spent ("no leisure before
     /// 18:00 on weekdays", "a 30-minute break after two hours of work"). Every
     /// AI decision of the planner follows them. They change only in the settings
@@ -306,6 +310,8 @@ pub struct PlannerInstructions {
     pub appointment_review: String,
     /// Whether the current task gets more time ("연장하기").
     pub extension_review: String,
+    /// Which follow-ups to suggest after a finished to-do or an ended appointment.
+    pub follow_up: String,
 }
 
 impl PlannerInstructions {
@@ -340,6 +346,10 @@ impl PlannerInstructions {
 
     pub fn appointment_review_or_default(&self) -> &str {
         or_default(&self.appointment_review, crate::advisor::APPOINTMENT_PROMPT)
+    }
+
+    pub fn follow_up_or_default(&self) -> &str {
+        or_default(&self.follow_up, crate::advisor::FOLLOW_UP_PROMPT)
     }
 
     pub fn extension_review_or_default(&self) -> &str {
@@ -858,6 +868,69 @@ pub struct PlannerState {
     /// until they write another.
     #[serde(default)]
     pub situation: String,
+    /// To-dos finished and appointments ended since the last "할 일 받기": the AI is asked
+    /// for their follow-ups then.
+    #[serde(default)]
+    pub follow_up_queue: Vec<FollowUpSource>,
+    /// Follow-ups the AI suggested that the user has not taken or dropped yet.
+    #[serde(default)]
+    pub follow_up_suggestions: Vec<FollowUpSuggestion>,
+    /// What the user waits for from others (a reply, a delivery); never picked as a task.
+    #[serde(default)]
+    pub waiting: Vec<WaitingItem>,
+}
+
+/// Responsibility: Name a finished to-do or an ended appointment whose follow-ups the AI is
+/// to suggest (the owner: "할 일과 약속 끝날 때마다 AI에게 후속을 물어봐").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FollowUpSource {
+    /// `todo:<id>` or `appointment:<id>`: the same appointment is asked about once.
+    pub key: String,
+    /// "to-do" or "appointment".
+    pub kind: String,
+    pub title: String,
+    #[serde(default)]
+    pub notes: String,
+    /// What the user wrote when reporting it finished, if anything.
+    #[serde(default)]
+    pub report: String,
+    pub ended_at: DateTime<Utc>,
+}
+
+/// Responsibility: Say whether a follow-up is the user's own next action or something the
+/// user waits for from others ("다음에 움직이는 사람이 나인가, 남인가").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUpKind {
+    Todo,
+    Wait,
+}
+
+/// Responsibility: Hold one follow-up the AI suggested, until the user takes or drops it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FollowUpSuggestion {
+    pub id: String,
+    pub kind: FollowUpKind,
+    pub title: String,
+    #[serde(default)]
+    pub notes: String,
+    /// The deadline of a to-do, or the day to check on what is awaited.
+    #[serde(default)]
+    pub date: Option<NaiveDate>,
+    /// The title of the to-do or appointment it follows.
+    pub after: String,
+}
+
+/// Responsibility: Hold one thing the user waits for from others, until it arrives or the
+/// day to check on it comes (then it becomes a to-do).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitingItem {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub notes: String,
+    pub check_on: NaiveDate,
+    pub since: DateTime<Utc>,
 }
 
 impl PlannerState {
@@ -916,4 +989,10 @@ pub struct PlannerStatus {
     /// An appointment that just ended (within the last half hour) and may be extended.
     #[serde(default)]
     pub extension_offer: Option<ExtensionOffer>,
+    /// Follow-ups the AI suggested, waiting for the user to take or drop them.
+    #[serde(default)]
+    pub follow_up_suggestions: Vec<FollowUpSuggestion>,
+    /// What the user waits for from others.
+    #[serde(default)]
+    pub waiting: Vec<WaitingItem>,
 }

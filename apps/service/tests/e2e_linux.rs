@@ -296,6 +296,7 @@ fn end_to_end(real_key: Option<String>) {
         injection_attempts_are_rejected(session);
         early_finish_is_judged_by_its_kind(session);
         a_changed_to_do_is_split_into_new_to_dos(session);
+        follow_ups_are_suggested_after_a_finished_to_do(session);
         the_week_plan_is_an_overview_of_this_week(session);
         the_assistant_does_what_the_user_says(session, true);
     } else {
@@ -1023,6 +1024,112 @@ fn a_changed_to_do_is_split_into_new_to_dos(session: u32) {
         "the original became the first part: {open:?}"
     );
     strict_mode(session, false);
+}
+
+/// Real AI: at the next "할 일 받기", a finished meeting gets the minutes as a to-do and a sent
+/// mail gets the reply to wait for, by the owner's follow-up rules (the owner: "후속을 AI가
+/// 제안하고 내가 승인하게").
+fn follow_ups_are_suggested_after_a_finished_to_do(session: u32) {
+    let rules = "After a meeting: write the minutes, due the same day. After sending a mail \
+                 that needs an answer: wait for the reply, check after three days.";
+    let finish = |todo_value: Value, report: &str| {
+        let id = todo_value["id"].as_str().unwrap().to_string();
+        call_value(
+            session,
+            "settings_put",
+            json!({ "name": "planner", "content": {
+                "enabled": true, "todos": [todo_value], "follow_up_rules": rules,
+            } }),
+        )
+        .unwrap();
+        wait_for(Duration::from_secs(15), || {
+            let current_status: Status = call(session, "status", json!({})).ok()?;
+            let planner = current_status.planner?;
+            (planner.active && planner.open_todos.iter().any(|todo| todo.id == id)).then_some(())
+        })
+        .expect("the agent picked up the planner settings");
+        call(session, "assign", json!({})).unwrap();
+        // Outside strict mode "done" needs no AI.
+        let status = call(
+            session,
+            "request_change",
+            json!({ "request": { "kind": "done" }, "reason": report }),
+        )
+        .unwrap();
+        assert!(
+            status
+                .last_decision
+                .is_some_and(|decision| decision.approved),
+            "{id} finished"
+        );
+    };
+    finish(
+        todo(
+            "f-meeting",
+            "Weekly design team meeting",
+            "Discuss the new onboarding screens with Jisoo and Min.",
+            Some(0),
+            3,
+        ),
+        "The meeting is over; we decided to drop the second onboarding screen.",
+    );
+    finish(
+        todo(
+            "f-mail",
+            "Email the signed contract to the landlord",
+            "He has to sign it too and send it back.",
+            Some(0),
+            3,
+        ),
+        "Sent it to the landlord; now he has to sign and return it.",
+    );
+    let status = call(session, "assign_after_follow_ups", json!({})).unwrap();
+    let planner = status.planner.expect("planner status");
+    for suggestion in &planner.follow_up_suggestions {
+        println!(
+            "follow-up after {:?}: {:?} {} ({:?}) {}",
+            suggestion.after, suggestion.kind, suggestion.title, suggestion.date, suggestion.notes
+        );
+    }
+    assert!(
+        planner.assignment.is_none(),
+        "no task while follow-ups wait for the user"
+    );
+    let todo_follow_up = planner
+        .follow_up_suggestions
+        .iter()
+        .find(|suggestion| suggestion.kind == task_planner::FollowUpKind::Todo)
+        .expect("the minutes as a to-do");
+    assert!(
+        todo_follow_up.title.to_lowercase().contains("minutes"),
+        "{}",
+        todo_follow_up.title
+    );
+    assert!(planner
+        .follow_up_suggestions
+        .iter()
+        .any(|suggestion| suggestion.kind == task_planner::FollowUpKind::Wait));
+    // Take every suggestion; then a task comes.
+    for suggestion in &planner.follow_up_suggestions {
+        call(
+            session,
+            "follow_up_decide",
+            json!({ "id": suggestion.id, "take": true }),
+        )
+        .unwrap();
+    }
+    let status = call(session, "assign_after_follow_ups", json!({})).unwrap();
+    let planner = status.planner.expect("planner status");
+    assert!(planner.follow_up_suggestions.is_empty());
+    assert!(!planner.waiting.is_empty(), "the reply is awaited");
+    assert!(
+        planner
+            .open_todos
+            .iter()
+            .any(|todo| todo.title == todo_follow_up.title),
+        "the minutes are on the list"
+    );
+    assert!(planner.assignment.is_some(), "now a task is given");
 }
 
 fn todo(id: &str, title: &str, notes: &str, due_in_days: Option<i64>, priority: u8) -> Value {

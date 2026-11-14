@@ -17,6 +17,10 @@
 //! | `stop_use`       | `{}` ("사용 중지": end the task, lock every app, stop all but blocking) | [`Status`] |
 //! | `resume_use`     | `{}` ("다시 사용하기")                    | [`Status`] |
 //! | `assign`         | `{}` (planner active)                    | [`Status`] |
+//! | `assign_after_follow_ups` | `{ situation? }`: the follow-ups first; no task while any wait | [`Status`] |
+//! | `follow_up_decide` | `{ id, take, title?, date? }` (a suggested follow-up) | [`Status`] |
+//! | `waiting_add` | `{ title, notes?, check_on: "YYYY-MM-DD" }` | [`Status`] |
+//! | `waiting_end` | `{ id, arrived }` (arrived: dealing with it becomes a to-do) | [`Status`] |
 //! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
 //! | `request_access` | `{ "target": GrantTarget, "duration": GrantDuration, "purpose": "…" }` | [`Status`], `last_access` set |
 //! | `propose_todo`   | `{ "todo": ProposalInput, "via": "…" }` (= `todo_change` add) | [`Status`], `last_proposal` set |
@@ -383,6 +387,23 @@ pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lo
 }
 
 /// The settings edits that write `writes` to `planner.json`.
+/// Put `writes` into `planner.json` at once (they come from the user's own decisions, like a
+/// follow-up taken) and reload it.
+fn apply_list_writes(
+    data_directory: &std::path::Path,
+    planner: &task_planner::TaskPlanner,
+    writes: &[TodoListWrite],
+) -> Result<(), String> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    crate::settings::apply_now(data_directory, "planner", &todo_list_edits(writes))?;
+    planner
+        .config_store()
+        .reload()
+        .map_err(|error| error.to_string())
+}
+
 fn todo_list_edits(writes: &[TodoListWrite]) -> Vec<crate::setting_edits::Edit> {
     use crate::setting_edits::Edit;
     writes
@@ -689,7 +710,10 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .update(|config| config.session_active = false)
                 .map_err(|error| error.to_string())?;
         }
-        "assign" => {
+        // "assign_after_follow_ups" (the Focus app's "할 일 받기"): first the follow-ups of
+        // what ended since (the owner: "다음 '할 일 받기' 때 보여줘"); while any wait for the
+        // user, no task is given.
+        "assign" | "assign_after_follow_ups" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
             // The situation the user wrote next to "할 일 받기" (kept for later picks too).
             if let Some(situation) = params["situation"].as_str() {
@@ -697,9 +721,63 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                     .set_situation(situation)
                     .map_err(|error| error.to_string())?;
             }
-            planner
-                .assign(Utc::now())
+            // What was awaited until today becomes a to-do to check on it.
+            let due = planner
+                .waiting_due(Utc::now())
                 .map_err(|error| error.to_string())?;
+            apply_list_writes(&data_directory, planner, &due)?;
+            let ask_first = method == "assign_after_follow_ups";
+            if ask_first {
+                if let Err(error) = planner.suggest_follow_ups(Utc::now()) {
+                    tracing::warn!("follow-ups: {error}");
+                }
+            }
+            if !ask_first || planner.status().follow_up_suggestions.is_empty() {
+                planner
+                    .assign(Utc::now())
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        // The user takes (with their edits) or drops a suggested follow-up.
+        "follow_up_decide" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            let id = params["id"].as_str().ok_or("params.id required")?;
+            let take = params["take"].as_bool().unwrap_or(false);
+            let date = match params["date"].as_str().map(str::trim) {
+                None | Some("") => None,
+                Some(text) => Some(
+                    text.parse::<chrono::NaiveDate>()
+                        .map_err(|_| "params.date: a date like 2026-11-20".to_string())?,
+                ),
+            };
+            let writes = planner
+                .decide_follow_up(Utc::now(), id, take, params["title"].as_str(), date)
+                .map_err(|error| error.to_string())?;
+            apply_list_writes(&data_directory, planner, &writes)?;
+        }
+        "waiting_add" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            let check_on = params["check_on"]
+                .as_str()
+                .and_then(|text| text.trim().parse::<chrono::NaiveDate>().ok())
+                .ok_or("params.check_on: a date like 2026-11-20")?;
+            planner
+                .add_waiting(
+                    Utc::now(),
+                    params["title"].as_str().unwrap_or_default(),
+                    params["notes"].as_str().unwrap_or_default(),
+                    check_on,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        // `arrived`: it came, so dealing with it becomes a to-do; otherwise it is dropped.
+        "waiting_end" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            let id = params["id"].as_str().ok_or("params.id required")?;
+            let writes = planner
+                .end_waiting(Utc::now(), id, params["arrived"].as_bool().unwrap_or(false))
+                .map_err(|error| error.to_string())?;
+            apply_list_writes(&data_directory, planner, &writes)?;
         }
         "logout" => {
             let user = crate::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;

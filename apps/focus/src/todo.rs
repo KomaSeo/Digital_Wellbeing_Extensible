@@ -60,6 +60,13 @@ pub struct TodoUiState {
     appointment_editing: Option<String>,
     /// "사용 중지" was pressed once: ask to confirm.
     confirm_stop: bool,
+    /// The title and date ("2026-11-20", "내일") of each suggested follow-up as the user edits
+    /// them before taking it, by suggestion id.
+    follow_up_edits: std::collections::BTreeMap<String, (String, String)>,
+    /// The form for something to wait for, added by hand.
+    waiting_form_open: bool,
+    waiting_title: String,
+    waiting_check_on: String,
 }
 
 /// Responsibility: Hold the fields of an appointment as the user types them.
@@ -282,6 +289,7 @@ impl FocusApp {
         }
         self.list_ui(ui, &planner);
         self.appointments_ui(ui, &planner);
+        self.waiting_ui(ui, &planner);
     }
 
     /// "사용 중지": asks once to confirm, then ends the task and, in strict mode, locks every
@@ -388,6 +396,10 @@ impl FocusApp {
             .as_ref()
             .filter(|_| status.session_active);
         let Some(assignment) = assignment else {
+            let deciding = !planner.follow_up_suggestions.is_empty();
+            if deciding {
+                self.follow_ups_ui(ui, planner);
+            }
             crate::style::notice(ui, crate::style::Tone::Information, WAITING_TEXT);
             if status.settings_protected {
                 ui.colored_label(
@@ -410,16 +422,21 @@ impl FocusApp {
             );
             ui.small("적은 상황은 AI가 할 일을 고를 때 함께 보고, 바꿀 때까지 남습니다.");
             ui.horizontal(|ui| {
+                let ready = idle && !deciding;
                 if ui
-                    .add_enabled(idle, crate::style::primary("할 일 받기", idle))
+                    .add_enabled(ready, crate::style::primary("할 일 받기", ready))
                     .clicked()
                 {
                     let situation = self.todo_ui.situation.clone().unwrap_or_default();
-                    self.send("assign", json!({ "situation": situation }));
+                    // The follow-ups of what ended since come first (no task while any wait).
+                    self.send("assign_after_follow_ups", json!({ "situation": situation }));
+                }
+                if deciding {
+                    ui.label("위의 후속 제안을 모두 넣거나 빼면 할 일을 받을 수 있습니다.");
                 }
                 if !idle {
                     ui.spinner();
-                    ui.label("AI가 고르는 중…");
+                    ui.label("AI가 후속을 묻고 할 일을 고르는 중…");
                 }
             });
             return;
@@ -570,6 +587,161 @@ impl FocusApp {
             .and_then(|todo_id| planner.open_todos.iter().find(|todo| &todo.id == todo_id))
             .cloned();
         self.change_ui(ui, report_due, current_todo.as_ref());
+    }
+
+    /// The follow-ups the AI suggested for what ended since the last task: take each (as is or
+    /// edited) or drop it. A to-do taken goes on the list without the AI; something to wait
+    /// for goes on the waiting list in the To-do tab.
+    fn follow_ups_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
+        let idle = !self.pending.load(Ordering::SeqCst);
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.strong(format!(
+                "후속 제안 ({}) — 끝난 일에 이어서 할 일이나 기다릴 일을 AI가 제안했습니다",
+                planner.follow_up_suggestions.len()
+            ));
+            ui.small(
+                "넣을 것은 \"넣기\", 필요 없는 것은 \"빼기\"를 누르세요. 제목과 날짜는 고친 뒤 넣을 수 \
+                 있습니다. 어떤 후속을 제안할지는 설정 탭 → AI 규칙의 \"후속 규칙\"에서 정합니다.",
+            );
+            for suggestion in &planner.follow_up_suggestions {
+                let (title, date) = self
+                    .todo_ui
+                    .follow_up_edits
+                    .entry(suggestion.id.clone())
+                    .or_insert_with(|| {
+                        (
+                            suggestion.title.clone(),
+                            suggestion
+                                .date
+                                .map(|date| date.to_string())
+                                .unwrap_or_default(),
+                        )
+                    });
+                let waiting = suggestion.kind == task_planner::FollowUpKind::Wait;
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    if waiting {
+                        ui.colored_label(YELLOW, "기다리기");
+                    } else {
+                        ui.colored_label(GREEN, "할 일");
+                    }
+                    ui.add(egui::TextEdit::singleline(title).desired_width(320.0));
+                    ui.label(if waiting { "확인할 날" } else { "마감" });
+                    ui.add(
+                        egui::TextEdit::singleline(date)
+                            .desired_width(100.0)
+                            .hint_text(if waiting { "3일 뒤, 11/20" } else { "없음, 내일" }),
+                    );
+                });
+                ui.small(format!("\"{}\"에 이어서", suggestion.after));
+                if !suggestion.notes.is_empty() {
+                    ui.small(&suggestion.notes);
+                }
+                let parsed_date = if date.trim().is_empty() {
+                    Some(None)
+                } else {
+                    task_planner::parse_deadline(date, Local::now().date_naive()).map(Some)
+                };
+                if parsed_date.is_none() {
+                    ui.colored_label(RED, "날짜를 읽지 못했습니다. 2026-11-20, 내일, 금요일처럼 적으세요.");
+                }
+                let (title, id) = (title.clone(), suggestion.id.clone());
+                ui.horizontal(|ui| {
+                    let ready = idle && parsed_date.is_some() && title.trim().chars().count() >= 2;
+                    if ui.add_enabled(ready, egui::Button::new("넣기")).clicked() {
+                        let date = parsed_date.flatten().map(|date| date.to_string());
+                        self.send(
+                            "follow_up_decide",
+                            json!({ "id": id, "take": true, "title": title.trim(), "date": date }),
+                        );
+                    }
+                    if ui.add_enabled(idle, egui::Button::new("빼기")).clicked() {
+                        self.send("follow_up_decide", json!({ "id": id, "take": false }));
+                    }
+                });
+            }
+        });
+    }
+
+    /// What the user waits for from others: when it comes, dealing with it becomes a to-do
+    /// ("답이 왔다"); on its day to check, it becomes a to-do to check on it by itself.
+    fn waiting_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
+        let idle = !self.pending.load(Ordering::SeqCst);
+        crate::style::section(ui, format!("기다리는 일 ({})", planner.waiting.len()));
+        ui.small(
+            "남에게서 기다리는 것(답장, 택배, 결재)입니다. AI는 이것을 할 일로 고르지 않습니다. 오면 \
+             \"답이 왔다\"를 누르세요. 그 처리가 할 일이 됩니다. 확인할 날이 되면 \"확인하기\" 할 일로 \
+             바뀝니다.",
+        );
+        for item in &planner.waiting {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("{} 확인", item.check_on.format("%m-%d")));
+                ui.strong(&item.title);
+                if !item.notes.is_empty() {
+                    ui.small(&item.notes);
+                }
+                if ui
+                    .add_enabled(idle, egui::Button::new("답이 왔다").small())
+                    .clicked()
+                {
+                    self.send("waiting_end", json!({ "id": item.id, "arrived": true }));
+                }
+                if ui
+                    .add_enabled(idle, egui::Button::new("지우기").small())
+                    .clicked()
+                {
+                    self.send("waiting_end", json!({ "id": item.id, "arrived": false }));
+                }
+            });
+        }
+        if !self.todo_ui.waiting_form_open {
+            if ui.button("+ 기다리는 일 추가").clicked() {
+                self.todo_ui.waiting_form_open = true;
+                self.todo_ui.waiting_title.clear();
+                self.todo_ui.waiting_check_on = "3일 뒤".to_string();
+            }
+            return;
+        }
+        let check_on =
+            task_planner::parse_deadline(&self.todo_ui.waiting_check_on, Local::now().date_naive());
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("무엇을");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.todo_ui.waiting_title)
+                        .desired_width(260.0)
+                        .hint_text("예: 집주인 답장"),
+                );
+                ui.label("확인할 날");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.todo_ui.waiting_check_on)
+                        .desired_width(100.0)
+                        .hint_text("3일 뒤, 11/20"),
+                );
+                if let Some(day) = check_on {
+                    ui.small(format!("→ {day}"));
+                }
+            });
+            ui.horizontal(|ui| {
+                let ready = idle
+                    && check_on.is_some()
+                    && self.todo_ui.waiting_title.trim().chars().count() >= 2;
+                if ui.add_enabled(ready, egui::Button::new("넣기")).clicked() {
+                    self.send(
+                        "waiting_add",
+                        json!({
+                            "title": self.todo_ui.waiting_title.trim(),
+                            "check_on": check_on.map(|day| day.to_string()),
+                        }),
+                    );
+                    self.todo_ui.waiting_form_open = false;
+                }
+                if ui.button("취소").clicked() {
+                    self.todo_ui.waiting_form_open = false;
+                }
+            });
+        });
     }
 
     /// The user's own notes and steps for a to-do (the current one in the Work tab, the

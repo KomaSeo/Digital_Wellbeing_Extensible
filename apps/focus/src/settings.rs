@@ -37,7 +37,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use task_planner::{
     Confirmations, PlannerConfig, APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT,
-    PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
+    FOLLOW_UP_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
 };
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
@@ -142,6 +142,18 @@ const APPOINTMENT_RULES: Block = Block {
     paths: &[&["appointment_rules"]],
     has_default: false,
 };
+const FOLLOW_UP_RULES: Block = Block {
+    id: "follow_up_rules",
+    file: "planner",
+    paths: &[&["follow_up_rules"]],
+    has_default: false,
+};
+const FOLLOW_UP_INSTRUCTION: Block = Block {
+    id: "instruction_follow_up",
+    file: "planner",
+    paths: &[&["instructions", "follow_up"]],
+    has_default: true,
+};
 const APPOINTMENT_INSTRUCTION: Block = Block {
     id: "instruction_appointment_review",
     file: "planner",
@@ -243,12 +255,14 @@ const TIME_ZONE: Block = Block {
     has_default: false,
 };
 /// Every group; an edit outside them (such as a timestamp) is not the user's.
-const BLOCKS: [&Block; 24] = [
+const BLOCKS: [&Block; 26] = [
     &API_KEY,
     &MODEL,
     &BUDGET,
     &LIFE_RULES,
     &APPOINTMENT_RULES,
+    &FOLLOW_UP_RULES,
+    &FOLLOW_UP_INSTRUCTION,
     &APPOINTMENT_INSTRUCTION,
     &EXTENSION_INSTRUCTION,
     &PICK_INSTRUCTION,
@@ -525,7 +539,7 @@ impl SettingsTab {
         crate::style::notice(
             ui,
             crate::style::Tone::Warning,
-            &format!(
+            format!(
                 "엄격 모드가 {start}에 켜집니다. 그때까지는 설정 단계라서 변경이 바로 적용되고, \
                  예약을 취소할 수 있습니다."
             ),
@@ -1256,13 +1270,32 @@ impl SettingsTab {
         }
         self.block_bar(ui, &APPOINTMENT_RULES, snapshot, protected);
 
+        crate::style::section(ui, "후속 규칙");
+        ui.label(
+            "할 일을 끝내거나 약속이 끝나면, 다음에 \"할 일 받기\"를 누를 때 AI가 이어서 할 일(할 일)이나 \
+             남에게서 기다릴 일(기다리기)을 제안합니다. 이 규칙은 무엇을 언제까지 제안할지 정합니다. \
+             사용자는 제안을 넣거나 뺍니다.",
+        );
+        if let Some(drafts) = &mut self.drafts {
+            ui.add(
+                egui::TextEdit::multiline(&mut drafts.planner.follow_up_rules)
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(
+                        "예: 회의가 끝나면 회의록 쓰기를 그날 안에. 실험이 끝나면 결과 정리를 그날 안에. \
+                         메일을 보내면 답장 기다리기, 3일 뒤 확인. 운동, 식사 같은 일상에는 제안하지 않는다.",
+                    ),
+            );
+        }
+        self.block_bar(ui, &FOLLOW_UP_RULES, snapshot, protected);
+
         crate::style::section(ui, "AI 지시문");
         ui.label(
             "플래너의 AI에게 무엇을 어떤 기준으로 판단하라고 알려 주는 글입니다. 정확도를 위해 \
              영어로 씁니다. 비어 있으면 프로그램에 들어 있는 기본 지시문을 씁니다.",
         );
         type Accessor = fn(&mut PlannerConfig) -> &mut String;
-        let instructions: [(&str, Accessor, &str, &'static Block); 7] = [
+        let instructions: [(&str, Accessor, &str, &'static Block); 8] = [
             (
                 "지금 할 일과 시간 고르기",
                 |planner| &mut planner.instructions.pick,
@@ -1292,6 +1325,12 @@ impl SettingsTab {
                 |planner| &mut planner.instructions.week_plan,
                 WEEK_PLAN_PROMPT,
                 &WEEK_PLAN_INSTRUCTION,
+            ),
+            (
+                "후속 제안(할 일이나 약속이 끝난 뒤)",
+                |planner| &mut planner.instructions.follow_up,
+                FOLLOW_UP_PROMPT,
+                &FOLLOW_UP_INSTRUCTION,
             ),
             (
                 "약속을 받을지 심사",

@@ -22,20 +22,22 @@ mod planner;
 pub use admin_ui::PlannerAdminUi;
 pub use advisor::{
     change_summary, claude_advisor_provider, Advisor, AdvisorProvider, AppointmentRequest,
-    AppointmentReview, ClaudeAdvisor, ListChange, Pick, PickRequest, Review, ReviewRequest,
-    ReviewedTodo, TodoChangeRequest, TodoReview, WeekPlanAnswer, WeekPlanAnswerDay,
-    WeekPlanAnswerTodo, WeekPlanRequest, APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT,
-    PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
+    AppointmentReview, ClaudeAdvisor, FollowUpAnswer, FollowUpRequest, ListChange, Pick,
+    PickRequest, Review, ReviewRequest, ReviewedTodo, SuggestedFollowUp, TodoChangeRequest,
+    TodoReview, WeekPlanAnswer, WeekPlanAnswerDay, WeekPlanAnswerTodo, WeekPlanRequest,
+    APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT, FOLLOW_UP_PROMPT, PICK_PROMPT,
+    PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
 };
 pub use ai_focus_rule::store::JsonStore;
 pub use deadline::parse_deadline;
 pub use model::{
     occurrence_day, series_id, weekdays_korean, Appointment, AppointmentInput, Assignment,
     AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, Confirmations, DoneRecord,
-    Evidence, ExtensionOffer, IdleSpan, PlannerConfig, PlannerInstructions, PlannerState,
-    PlannerStatus, PolishItem, ProposalInput, ProposalRecord, TaskNotes, TaskStep, TimetableEntry,
-    TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WeekPlan, WeekPlanDay,
-    WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
+    Evidence, ExtensionOffer, FollowUpKind, FollowUpSource, FollowUpSuggestion, IdleSpan,
+    PlannerConfig, PlannerInstructions, PlannerState, PlannerStatus, PolishItem, ProposalInput,
+    ProposalRecord, TaskNotes, TaskStep, TimetableEntry, TimetableKind, TodoChange,
+    TodoChangeRecord, TodoItem, TodoListWrite, WaitingItem, WeekPlan, WeekPlanDay, WeekPlanTodo,
+    WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
 pub use planner::{PlannerError, TaskPlanner};
 

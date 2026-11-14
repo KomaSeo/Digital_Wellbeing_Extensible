@@ -42,9 +42,29 @@ struct FakeAdvisor {
     saw_current_away: AtomicBool,
     /// The list changes the next change review makes.
     list_changes: parking_lot::Mutex<Vec<ListChange>>,
+    /// The follow-ups every follow-up question gets, and the titles and follow-up rules the
+    /// questions were about.
+    follow_ups: parking_lot::Mutex<Vec<crate::advisor::SuggestedFollowUp>>,
+    saw_follow_up_sources: parking_lot::Mutex<Vec<(String, String)>>,
 }
 
 impl Advisor for FakeAdvisor {
+    fn suggest_follow_ups(
+        &self,
+        request: &crate::advisor::FollowUpRequest,
+    ) -> Result<crate::advisor::FollowUpAnswer, JudgeError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(JudgeError::NoApiKey);
+        }
+        self.saw_follow_up_sources.lock().push((
+            request.source.title.clone(),
+            request.follow_up_rules.to_string(),
+        ));
+        Ok(crate::advisor::FollowUpAnswer {
+            follow_ups: self.follow_ups.lock().clone(),
+        })
+    }
+
     fn pick(&self, request: &PickRequest) -> Result<Pick, JudgeError> {
         self.picks.fetch_add(1, Ordering::SeqCst);
         *self.saw_repick_reason.lock() = request.repick_reason.map(str::to_string);
@@ -230,6 +250,8 @@ fn harness_with_state(enabled: bool, ids: &[&str], state: JsonStore<PlannerState
         saw_other_appointments: parking_lot::Mutex::new(Vec::new()),
         saw_current_away: AtomicBool::new(false),
         list_changes: parking_lot::Mutex::new(Vec::new()),
+        follow_ups: parking_lot::Mutex::new(Vec::new()),
+        saw_follow_up_sources: parking_lot::Mutex::new(Vec::new()),
     });
     let provided = Arc::clone(&advisor);
     let planner = TaskPlanner::new(
@@ -2240,6 +2262,168 @@ fn reports_about_the_to_do_itself_use_the_completion_instruction() {
         PlannerInstructions::default().completion_review_or_default(),
         crate::advisor::COMPLETION_PROMPT
     );
+}
+
+#[test]
+fn a_finished_to_do_and_an_ended_appointment_get_follow_ups_the_user_takes_or_drops() {
+    use crate::advisor::SuggestedFollowUp;
+    use crate::model::FollowUpKind;
+    let fixture = harness(true, &["a", "b"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.follow_up_rules = "After a meeting: the minutes, today.".into())
+        .unwrap();
+    *fixture.advisor.follow_ups.lock() = vec![
+        SuggestedFollowUp {
+            kind: "todo".into(),
+            title: "Write the minutes".into(),
+            notes: "Send them to the team".into(),
+            date: "2026-11-20".into(),
+        },
+        SuggestedFollowUp {
+            kind: "wait".into(),
+            title: "Reply from the landlord".into(),
+            notes: String::new(),
+            date: String::new(),
+        },
+        // Already on the list: never suggested again.
+        SuggestedFollowUp {
+            kind: "todo".into(),
+            title: "title b".into(),
+            notes: String::new(),
+            date: String::new(),
+        },
+    ];
+    let mut now = Utc::now();
+    // Nothing finished yet: nothing to ask about.
+    assert_eq!(fixture.planner.suggest_follow_ups(now).unwrap(), 0);
+    let assignment = fixture.planner.assign(now).unwrap();
+    assert_eq!(assignment.todo_id.as_deref(), Some("a"));
+    now += chrono::Duration::minutes(30);
+    fixture
+        .planner
+        .request_change(
+            now,
+            ChangeKind::Done,
+            "finished it, sent to Kim",
+            Evidence::default(),
+        )
+        .unwrap();
+    // An appointment that ends is asked about too.
+    let start = now + chrono::Duration::minutes(5);
+    add_appointment(
+        &fixture,
+        now,
+        appointment_change("Team meeting", start, 30, None),
+    )
+    .unwrap();
+    fixture
+        .planner
+        .resume(start + chrono::Duration::minutes(1))
+        .unwrap();
+    let after = start + chrono::Duration::minutes(30 + APPOINTMENT_GRACE_MINUTES + 1);
+    fixture.planner.resume(after).unwrap();
+    // At the next "할 일 받기": one question per item, with the owner's rules.
+    assert_eq!(fixture.planner.suggest_follow_ups(after).unwrap(), 4);
+    let asked = fixture.advisor.saw_follow_up_sources.lock().clone();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[1].0, "Team meeting");
+    assert!(asked.iter().all(|(_, rules)| rules.contains("minutes")));
+    // Asked once: nothing more until something else ends.
+    assert_eq!(fixture.planner.suggest_follow_ups(after).unwrap(), 0);
+    let suggestions = fixture.planner.status().follow_up_suggestions;
+    assert_eq!(suggestions.len(), 4);
+    let to_do = &suggestions[0];
+    assert_eq!(to_do.kind, FollowUpKind::Todo);
+    assert_eq!(to_do.after, "title a");
+    let wait = &suggestions[1];
+    // Without a date from the AI, the check is a few days later.
+    assert_eq!(wait.kind, FollowUpKind::Wait);
+    assert!(wait.date.is_some());
+    // Taking the to-do (renamed) puts it on the list, without the AI.
+    let reviews = fixture.advisor.reviews.load(Ordering::SeqCst);
+    let writes = fixture
+        .planner
+        .decide_follow_up(
+            after,
+            &to_do.id,
+            true,
+            Some("Write the meeting minutes"),
+            None,
+        )
+        .unwrap();
+    match writes.as_slice() {
+        [TodoListWrite::Put(todo)] => {
+            assert_eq!(todo.title, "Write the meeting minutes");
+            assert_eq!(todo.deadline, "2026-11-20".parse().ok());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), reviews);
+    // Taking the wait puts it on the waiting list; dropping the others leaves nothing.
+    assert!(fixture
+        .planner
+        .decide_follow_up(after, &wait.id, true, None, None)
+        .unwrap()
+        .is_empty());
+    for other in &suggestions[2..] {
+        fixture
+            .planner
+            .decide_follow_up(after, &other.id, false, None, None)
+            .unwrap();
+    }
+    let status = fixture.planner.status();
+    assert!(status.follow_up_suggestions.is_empty());
+    assert_eq!(status.waiting.len(), 1);
+    // Before its day it stays; on its day it becomes a to-do to check on it.
+    let waiting = status.waiting[0].clone();
+    assert!(fixture.planner.waiting_due(after).unwrap().is_empty());
+    let check_day = waiting
+        .check_on
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .unwrap()
+        .with_timezone(&Utc);
+    match fixture.planner.waiting_due(check_day).unwrap().as_slice() {
+        [TodoListWrite::Put(todo)] => {
+            assert!(
+                todo.title.starts_with("확인하기: Reply from the landlord"),
+                "{}",
+                todo.title
+            );
+            assert_eq!(todo.deadline, Some(waiting.check_on));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(fixture.planner.status().waiting.is_empty());
+    // Added by hand and arrived: dealing with it becomes a to-do.
+    fixture
+        .planner
+        .add_waiting(after, "Parcel from the shop", "", waiting.check_on)
+        .unwrap();
+    let id = fixture.planner.status().waiting[0].id.clone();
+    match fixture
+        .planner
+        .end_waiting(after, &id, true)
+        .unwrap()
+        .as_slice()
+    {
+        [TodoListWrite::Put(todo)] => assert_eq!(todo.title, "처리하기: Parcel from the shop"),
+        other => panic!("{other:?}"),
+    }
+    // A failing AI drops the item instead of blocking the user.
+    fixture.planner.assign(after).unwrap();
+    let later = after + chrono::Duration::minutes(40);
+    fixture
+        .planner
+        .request_change(later, ChangeKind::Done, "done", Evidence::default())
+        .unwrap();
+    fixture.advisor.fail.store(true, Ordering::SeqCst);
+    assert_eq!(fixture.planner.suggest_follow_ups(later).unwrap(), 0);
+    fixture.advisor.fail.store(false, Ordering::SeqCst);
+    assert_eq!(fixture.planner.suggest_follow_ups(later).unwrap(), 0);
 }
 
 #[test]

@@ -233,6 +233,8 @@ fn answer(request: &Value) -> Value {
             .and_then(|rest| rest.split(']').next())
             .unwrap_or_default();
         json!({ "todo_id": first_id, "task": "work on it", "why": "first", "minutes": 30 })
+    } else if system.contains("Suggest what follows from it") {
+        json!({ "follow_ups": [] })
     } else if system.contains("decide whether to accept this one") {
         // An appointment review: the question also lists earlier changes, so only the
         // appointment's own title can ask for a rejection.
