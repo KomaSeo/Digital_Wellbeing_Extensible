@@ -24,8 +24,8 @@ pub use advisor::{
     change_summary, claude_advisor_provider, Advisor, AdvisorProvider, AppointmentRequest,
     AppointmentReview, ClaudeAdvisor, ListChange, Pick, PickRequest, Review, ReviewRequest,
     ReviewedTodo, TodoChangeRequest, TodoReview, WeekPlanAnswer, WeekPlanAnswerDay,
-    WeekPlanAnswerTodo, WeekPlanRequest, APPOINTMENT_PROMPT, EXTENSION_PROMPT, PICK_PROMPT,
-    PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
+    WeekPlanAnswerTodo, WeekPlanRequest, APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT,
+    PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
 };
 pub use ai_focus_rule::store::JsonStore;
 pub use deadline::parse_deadline;

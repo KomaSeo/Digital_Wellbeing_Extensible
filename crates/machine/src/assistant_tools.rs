@@ -489,6 +489,7 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                 "built_in_instructions": {
                     "pick": task_planner::PICK_PROMPT,
                     "change_review": task_planner::REVIEW_PROMPT,
+                    "completion_review": task_planner::COMPLETION_PROMPT,
                     "proposal_review": task_planner::PROPOSAL_PROMPT,
                     "week_plan": task_planner::WEEK_PLAN_PROMPT,
                     "appointment_review": task_planner::APPOINTMENT_PROMPT,

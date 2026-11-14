@@ -2180,6 +2180,69 @@ fn stopping_ends_the_task_and_holds_everything_until_resumed() {
 }
 
 #[test]
+fn reports_about_the_to_do_itself_use_the_completion_instruction() {
+    let fixture = harness(true, &["a", "b", "c"]);
+    let mut now = Utc::now();
+    fixture.planner.assign(now).unwrap();
+    // "끝냈다" and the other reports about the to-do: the completion instruction.
+    for request in [
+        ChangeKind::Done,
+        ChangeKind::AlreadyDone,
+        ChangeKind::Changed,
+    ] {
+        now += chrono::Duration::minutes(1);
+        let _ = fixture.planner.request_change(
+            now,
+            request.clone(),
+            "the report's reason",
+            Evidence::default(),
+        );
+        assert_eq!(
+            *fixture.advisor.saw_instructions.lock(),
+            crate::advisor::COMPLETION_PROMPT,
+            "{request:?}"
+        );
+        if fixture.planner.status().assignment.is_none() {
+            fixture.planner.assign(now).unwrap();
+        }
+    }
+    // Stopping (like getting another task): the change review instruction.
+    now += chrono::Duration::minutes(1);
+    if fixture.planner.status().assignment.is_none() {
+        fixture.planner.assign(now).unwrap();
+    }
+    let _ = fixture.planner.request_change(
+        now,
+        ChangeKind::End,
+        "dinner time now",
+        Evidence::default(),
+    );
+    assert_eq!(
+        *fixture.advisor.saw_instructions.lock(),
+        crate::advisor::REVIEW_PROMPT
+    );
+    // An owner's change review written before the two were apart still judges the reports,
+    // until the owner writes a completion instruction.
+    let mut instructions = PlannerInstructions {
+        change_review: "The owner's own review.".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        instructions.completion_review_or_default(),
+        "The owner's own review."
+    );
+    instructions.completion_review = "The owner's completion review.".into();
+    assert_eq!(
+        instructions.completion_review_or_default(),
+        "The owner's completion review."
+    );
+    assert_eq!(
+        PlannerInstructions::default().completion_review_or_default(),
+        crate::advisor::COMPLETION_PROMPT
+    );
+}
+
+#[test]
 fn extending_a_task_uses_its_own_instruction_and_moves_the_end() {
     let fixture = harness(true, &["a"]);
     let now = Utc::now();

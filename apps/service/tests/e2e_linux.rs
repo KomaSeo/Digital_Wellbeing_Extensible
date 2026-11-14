@@ -295,6 +295,7 @@ fn end_to_end(real_key: Option<String>) {
         );
         injection_attempts_are_rejected(session);
         early_finish_is_judged_by_its_kind(session);
+        a_changed_to_do_is_split_into_new_to_dos(session);
         the_week_plan_is_an_overview_of_this_week(session);
         the_assistant_does_what_the_user_says(session, true);
     } else {
@@ -973,6 +974,54 @@ fn early_finish_is_judged_by_its_kind(session: u32) {
             .estimate_minutes
             .is_some_and(|minutes| minutes >= 200));
     }
+    strict_mode(session, false);
+}
+
+/// Real AI: "일이 변경되었어요" with a reason that says the to-do is too big and how to split
+/// it turns it into new to-dos (the owner: "쪼개기는 새 할 일로").
+fn a_changed_to_do_is_split_into_new_to_dos(session: u32) {
+    let mut review = todo(
+        "e-review",
+        "Write the literature review chapter",
+        "Chapter 2 of the thesis: survey about 40 papers on sleep and memory.",
+        Some(14),
+        4,
+    );
+    review["estimate_minutes"] = json!(900);
+    assign(session, &[review], "");
+    strict_mode(session, true);
+    let status = call(
+        session,
+        "request_change",
+        json!({
+            "request": { "kind": "changed" },
+            "reason": "This is far too big for one to-do. Split it into three: 1) make a list of \
+                       the 40 papers with their main finding, 2) write a one-paragraph summary \
+                       of each paper, 3) draft the chapter from the summaries.",
+        }),
+    )
+    .unwrap();
+    let decision = status.last_decision.clone().expect("the AI decided");
+    println!(
+        "changed: approved {} ({}); list: {:?}",
+        decision.approved, decision.reply, decision.list_summary
+    );
+    assert!(decision.approved, "a concrete split is a fair change");
+    let open: Vec<String> = status
+        .planner
+        .expect("planner status")
+        .open_todos
+        .into_iter()
+        .map(|todo| todo.title)
+        .collect();
+    println!("open to-dos after the split: {open:?}");
+    assert!(open.len() >= 3, "split into new to-dos: {open:?}");
+    assert!(
+        !open
+            .iter()
+            .any(|title| title == "Write the literature review chapter"),
+        "the original became the first part: {open:?}"
+    );
     strict_mode(session, false);
 }
 

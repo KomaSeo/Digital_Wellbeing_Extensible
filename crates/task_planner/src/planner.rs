@@ -1364,11 +1364,13 @@ impl TaskPlanner {
             .as_ref()
             .and_then(|assignment| assignment.todo_id.clone());
         let review = advisor.review(&ReviewRequest {
-            // "연장하기" has its own instruction.
-            instructions: if matches!(request, ChangeKind::Extend { .. }) {
-                config.instructions.extension_review_or_default()
-            } else {
-                config.instructions.change_review_or_default()
+            // "연장하기" and the reports about the to-do itself have their own instructions.
+            instructions: match request {
+                ChangeKind::Extend { .. } => config.instructions.extension_review_or_default(),
+                ChangeKind::Done | ChangeKind::AlreadyDone | ChangeKind::Changed => {
+                    config.instructions.completion_review_or_default()
+                }
+                _ => config.instructions.change_review_or_default(),
             },
             now_local: &now_local,
             life_rules: &config.life_rules,

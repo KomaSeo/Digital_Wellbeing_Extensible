@@ -36,8 +36,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use task_planner::{
-    Confirmations, PlannerConfig, APPOINTMENT_PROMPT, EXTENSION_PROMPT, PICK_PROMPT,
-    PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
+    Confirmations, PlannerConfig, APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT,
+    PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
 };
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
@@ -122,6 +122,12 @@ const REVIEW_INSTRUCTION: Block = Block {
     id: "instruction_change_review",
     file: "planner",
     paths: &[&["instructions", "change_review"]],
+    has_default: true,
+};
+const COMPLETION_INSTRUCTION: Block = Block {
+    id: "instruction_completion_review",
+    file: "planner",
+    paths: &[&["instructions", "completion_review"]],
     has_default: true,
 };
 const PROPOSAL_INSTRUCTION: Block = Block {
@@ -237,7 +243,7 @@ const TIME_ZONE: Block = Block {
     has_default: false,
 };
 /// Every group; an edit outside them (such as a timestamp) is not the user's.
-const BLOCKS: [&Block; 23] = [
+const BLOCKS: [&Block; 24] = [
     &API_KEY,
     &MODEL,
     &BUDGET,
@@ -247,6 +253,7 @@ const BLOCKS: [&Block; 23] = [
     &EXTENSION_INSTRUCTION,
     &PICK_INSTRUCTION,
     &REVIEW_INSTRUCTION,
+    &COMPLETION_INSTRUCTION,
     &PROPOSAL_INSTRUCTION,
     &WEEK_PLAN_INSTRUCTION,
     &BLACKLIST,
@@ -1216,7 +1223,7 @@ impl SettingsTab {
     fn rules_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
         crate::style::section(ui, "생활 규칙");
         ui.label(
-            "AI의 모든 결정(지금 할 일 고르기, 변경 요청 심사, 할 일 변경 심사, 앞으로 7일 계획)이 따르는 \
+            "AI의 모든 결정(지금 할 일 고르기, 변경 요청 심사, 완료 보고 심사, 할 일 변경 심사, 앞으로 7일 계획)이 따르는 \
              규칙입니다.",
         );
         if let Some(drafts) = &mut self.drafts {
@@ -1255,7 +1262,7 @@ impl SettingsTab {
              영어로 씁니다. 비어 있으면 프로그램에 들어 있는 기본 지시문을 씁니다.",
         );
         type Accessor = fn(&mut PlannerConfig) -> &mut String;
-        let instructions: [(&str, Accessor, &str, &'static Block); 6] = [
+        let instructions: [(&str, Accessor, &str, &'static Block); 7] = [
             (
                 "지금 할 일과 시간 고르기",
                 |planner| &mut planner.instructions.pick,
@@ -1263,7 +1270,13 @@ impl SettingsTab {
                 &PICK_INSTRUCTION,
             ),
             (
-                "하는 일을 바꾸는 요청 심사",
+                "완료 보고 심사(끝냈다, 이미 처리했어요, 일이 변경되었어요)",
+                |planner| &mut planner.instructions.completion_review,
+                COMPLETION_PROMPT,
+                &COMPLETION_INSTRUCTION,
+            ),
+            (
+                "하는 일을 바꾸는 요청 심사(다른 일 받기, AI 검사 멈추기)",
                 |planner| &mut planner.instructions.change_review,
                 REVIEW_PROMPT,
                 &REVIEW_INSTRUCTION,
@@ -1298,8 +1311,28 @@ impl SettingsTab {
                 .id_salt(("instruction", block.id))
                 .show(ui, |ui| {
                     if let Some(drafts) = &mut self.drafts {
+                        // Before the two were apart, the change review instruction judged the
+                        // reports too; an owner's version of it still does while this is empty.
+                        let older_own = (block.id == COMPLETION_INSTRUCTION.id)
+                            .then(|| drafts.planner.instructions.change_review.clone())
+                            .filter(|text| !text.trim().is_empty());
                         let own = accessor(&mut drafts.planner);
-                        if own.trim().is_empty() {
+                        if let (true, Some(older_own)) = (own.trim().is_empty(), &older_own) {
+                            ui.horizontal(|ui| {
+                                ui.small(
+                                    "비어 있어서, \"하는 일을 바꾸는 요청 심사\"에 고쳐 둔 지시문을 \
+                                     씁니다(예전에는 그 지시문이 완료 보고도 심사했습니다).",
+                                );
+                                if ui.small_button("기본 지시문을 복사해서 고치기").clicked()
+                                {
+                                    *own = built_in.to_string();
+                                }
+                            });
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(older_own).small().weak())
+                                    .wrap(),
+                            );
+                        } else if own.trim().is_empty() {
                             ui.horizontal(|ui| {
                                 ui.small("기본 지시문을 씁니다.");
                                 if ui.small_button("기본 지시문을 복사해서 고치기").clicked()

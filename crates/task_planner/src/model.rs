@@ -294,8 +294,10 @@ fn clamp(value: u32, range: std::ops::RangeInclusive<u32>) -> u32 {
 pub struct PlannerInstructions {
     /// Which to-do to work on now, and for how long.
     pub pick: String,
-    /// Whether a change request (done, switch, end, notify only) is approved.
+    /// Whether a change request (another task, stop) is approved.
     pub change_review: String,
+    /// Whether a report about the current to-do (done, already done, changed) is approved.
+    pub completion_review: String,
     /// Whether a to-do change (add, edit, remove) is approved; fills in a new to-do.
     pub proposal_review: String,
     /// How much work each of the next seven days needs, and how much free time is left.
@@ -313,6 +315,19 @@ impl PlannerInstructions {
 
     pub fn change_review_or_default(&self) -> &str {
         or_default(&self.change_review, crate::advisor::REVIEW_PROMPT)
+    }
+
+    /// The owner's completion instruction; while it is empty, the owner's change review
+    /// instruction when there is one (before the two were apart it judged the reports too);
+    /// else [`crate::advisor::COMPLETION_PROMPT`].
+    pub fn completion_review_or_default(&self) -> &str {
+        if !self.completion_review.trim().is_empty() {
+            &self.completion_review
+        } else if !self.change_review.trim().is_empty() {
+            &self.change_review
+        } else {
+            crate::advisor::COMPLETION_PROMPT
+        }
     }
 
     pub fn proposal_review_or_default(&self) -> &str {
