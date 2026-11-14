@@ -291,6 +291,11 @@ pub struct SettingsTab {
     protect_kind: ProtectKind,
     protect_days: u32,
     protect_hours: u32,
+    /// Start the protection later rather than now, on this day ("내일", "11/20") at this
+    /// clock time ("08:00", "오전 8시").
+    protect_later: bool,
+    protect_start_day: String,
+    protect_start_clock: String,
     protect_password: String,
     protect_password_again: String,
     /// The password typed to turn a password protection off.
@@ -372,6 +377,9 @@ impl SettingsTab {
             protect_kind: ProtectKind::Until,
             protect_days: 7,
             protect_hours: 0,
+            protect_later: false,
+            protect_start_day: "내일".to_string(),
+            protect_start_clock: "08:00".to_string(),
             protect_password: String::new(),
             protect_password_again: String::new(),
             unlock_password: String::new(),
@@ -399,11 +407,13 @@ impl SettingsTab {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         protected: bool,
         protection: Option<&machine::user_api::ProtectionView>,
+        scheduled: Option<&machine::user_api::ProtectionView>,
         lockdown: Option<&Lockdown>,
         sync: Option<&machine::user_api::SyncStatus>,
     ) {
@@ -456,7 +466,7 @@ impl SettingsTab {
             Section::Blocking => self.blocking_ui(ui, &snapshot, protected),
             Section::Checks => self.checks_ui(ui, &snapshot, protected),
             Section::System => self.system_ui(ui, &snapshot, protected),
-            Section::Protection => self.protection_ui(ui, protected, protection, sync),
+            Section::Protection => self.protection_ui(ui, protected, protection, scheduled, sync),
         }
         self.autosave(ui.ctx());
     }
@@ -472,6 +482,7 @@ impl SettingsTab {
         ui: &mut egui::Ui,
         protected: bool,
         protection: Option<&machine::user_api::ProtectionView>,
+        scheduled: Option<&machine::user_api::ProtectionView>,
         sync: Option<&machine::user_api::SyncStatus>,
     ) {
         crate::style::section(ui, "엄격 모드");
@@ -486,9 +497,68 @@ impl SettingsTab {
                 numbers.settings_times()
             ));
             self.unlock_ui(ui, protection, sync);
+        } else if let Some(scheduled) = scheduled {
+            self.scheduled_ui(ui, scheduled);
         } else {
             self.protect_ui(ui, sync);
         }
+    }
+
+    /// A protection set to start later: when, how it will end, and cancelling it.
+    fn scheduled_ui(&mut self, ui: &mut egui::Ui, scheduled: &machine::user_api::ProtectionView) {
+        let start = scheduled
+            .since
+            .map(|since| {
+                since
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        crate::style::notice(
+            ui,
+            crate::style::Tone::Warning,
+            &format!(
+                "엄격 모드가 {start}에 켜집니다. 그때까지는 설정 단계라서 변경이 바로 적용되고, \
+                 예약을 취소할 수 있습니다."
+            ),
+        );
+        let ends = match scheduled.kind.as_str() {
+            "until" => scheduled.until.map_or(String::new(), |until| {
+                format!(
+                    "{}까지 끌 수 없습니다",
+                    until.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                )
+            }),
+            "permanent" => "프로그램 안에서는 끌 수 없습니다".to_string(),
+            "administrator" => "관리자 권한으로 끕니다".to_string(),
+            "password" => "비밀번호로 끕니다".to_string(),
+            _ => String::new(),
+        };
+        ui.label(format!("끄는 방법: {ends}"));
+        if ui.button("예약 취소").clicked() {
+            match call_value(self.session, "settings_protect_cancel", json!({})) {
+                Ok(_) => {
+                    self.message = "엄격 모드 예약을 취소했습니다.".to_string();
+                    self.fetched_at = None;
+                }
+                Err(error) => self.error = error,
+            }
+        }
+    }
+
+    /// When the protection being chosen starts: `None` for a start that does not read.
+    fn protect_start(&self) -> Option<DateTime<Utc>> {
+        if !self.protect_later {
+            return Some(Utc::now());
+        }
+        let day = task_planner::parse_deadline(&self.protect_start_day, Local::now().date_naive())?;
+        let clock = crate::todo::parse_clock(&self.protect_start_clock)?;
+        day.and_time(clock)
+            .and_local_timezone(Local)
+            .earliest()
+            .map(|start| start.with_timezone(&Utc))
+            .filter(|start| *start > Utc::now())
     }
 
     /// The confirmation numbers in force (the defaults until the settings are fetched).
@@ -554,6 +624,60 @@ impl SettingsTab {
             interval_text(numbers.settings_interval_seconds()),
             numbers.settings_times()
         ));
+        ui.label("엄격 모드를 언제 켤지 고르세요.");
+        ui.radio_value(&mut self.protect_later, false, "지금");
+        ui.radio_value(
+            &mut self.protect_later,
+            true,
+            "정한 때에(그때까지는 설정 단계이고, 예약을 취소할 수 있습니다)",
+        );
+        if self.protect_later {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.protect_start_day)
+                        .desired_width(110.0)
+                        .hint_text("오늘, 내일, 11/20"),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.protect_start_clock)
+                        .desired_width(110.0)
+                        .hint_text("08:00, 오전 8시"),
+                );
+                for hours in [1, 3] {
+                    if ui.small_button(format!("{hours}시간 뒤")).clicked() {
+                        let start = Local::now() + chrono::Duration::hours(hours);
+                        self.protect_start_day = start.format("%Y-%m-%d").to_string();
+                        self.protect_start_clock = start.format("%H:%M").to_string();
+                    }
+                }
+                if ui.small_button("내일 아침 8시").clicked() {
+                    self.protect_start_day = "내일".to_string();
+                    self.protect_start_clock = "08:00".to_string();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                match self.protect_start() {
+                    Some(start) => {
+                        let local = start.with_timezone(&Local);
+                        let weekday = ["월", "화", "수", "목", "금", "토", "일"]
+                            [local.weekday().num_days_from_monday() as usize];
+                        ui.small(format!(
+                            "{} ({weekday}) {}에 켜집니다. 이 시각이 되면 동기화한 모든 PC에서 저절로 \
+                             켜집니다.",
+                            local.format("%Y-%m-%d"),
+                            local.format("%H:%M")
+                        ))
+                    }
+                    None => ui.colored_label(
+                        RED,
+                        "날짜나 시각을 읽지 못했거나 이미 지난 때입니다. 날짜는 내일, 11/20처럼, 시각은 \
+                         08:00, 오전 8시처럼 적으세요.",
+                    ),
+                };
+            });
+        }
         ui.label("엄격 모드를 어떻게 끌 수 있게 할지 고르세요.");
         ui.radio_value(
             &mut self.protect_kind,
@@ -566,7 +690,11 @@ impl SettingsTab {
                 ui.add(egui::DragValue::new(&mut self.protect_days).range(0..=365));
                 ui.label("일");
                 ui.add(egui::DragValue::new(&mut self.protect_hours).range(0..=23));
-                ui.label("시간 동안");
+                ui.label(if self.protect_later {
+                    "시간 동안(켜진 때부터)"
+                } else {
+                    "시간 동안"
+                });
             });
             let until = self.protect_until();
             ui.horizontal(|ui| {
@@ -671,14 +799,23 @@ impl SettingsTab {
             &mut self.confirm_protect,
             "고른 방법이 아니면 엄격 모드를 끌 수 없다는 것을 이해했습니다.",
         );
+        let start = self.protect_start();
+        let ready = self.confirm_protect && mode.is_some() && start.is_some();
+        let button = if self.protect_later {
+            "엄격 모드 예약하기"
+        } else {
+            "엄격 모드 켜기"
+        };
         if ui
-            .add_enabled(
-                self.confirm_protect && mode.is_some(),
-                crate::style::primary("엄격 모드 켜기", self.confirm_protect && mode.is_some()),
-            )
+            .add_enabled(ready, crate::style::primary(button, ready))
             .clicked()
         {
-            match call_value(self.session, "settings_protect", json!({ "mode": mode })) {
+            let starts_at = start.filter(|_| self.protect_later);
+            match call_value(
+                self.session,
+                "settings_protect",
+                json!({ "mode": mode, "starts_at": starts_at }),
+            ) {
                 Ok(_) => {
                     self.confirm_protect = false;
                     self.protect_password.clear();
@@ -690,10 +827,10 @@ impl SettingsTab {
         }
     }
 
-    /// The end of a time protection chosen now.
+    /// The end of a time protection chosen now: its length after its start.
     fn protect_until(&self) -> DateTime<Utc> {
         let hours = i64::from(self.protect_days) * 24 + i64::from(self.protect_hours);
-        Utc::now() + chrono::Duration::hours(hours.max(1))
+        self.protect_start().unwrap_or_else(Utc::now) + chrono::Duration::hours(hours.max(1))
     }
 
     /// The computers whose administrator may end the protection in force: take one off at

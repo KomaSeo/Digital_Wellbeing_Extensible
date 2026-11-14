@@ -770,6 +770,7 @@ impl eframe::App for FocusApp {
                             ui,
                             status.settings_protected,
                             status.settings_protection.as_ref(),
+                            status.settings_protection_scheduled.as_ref(),
                             status.lockdown.as_ref(),
                             status.sync.as_ref(),
                         )

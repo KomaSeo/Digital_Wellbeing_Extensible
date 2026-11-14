@@ -119,7 +119,7 @@ impl AppointmentForm {
 }
 
 /// A clock time as written: "14:00", "14시", "2시 30분", "오후 2시", "오전 9시 반".
-fn parse_clock(text: &str) -> Option<NaiveTime> {
+pub(crate) fn parse_clock(text: &str) -> Option<NaiveTime> {
     let text = text.trim();
     let (afternoon, rest) = if let Some(rest) = text.strip_prefix("오후") {
         (true, rest.trim())
@@ -210,11 +210,19 @@ impl FocusApp {
         }
         if !status.settings_protected {
             // Setup: anyone can change anything at once until the settings are protected.
-            crate::style::notice(
-                ui,
-                crate::style::Tone::Warning,
-                "설정 단계: 아직 엄격 모드를 켜지 않아서, 어떤 변경이든 바로 적용됩니다.",
-            );
+            let banner = match status
+                .settings_protection_scheduled
+                .as_ref()
+                .and_then(|scheduled| scheduled.since)
+            {
+                Some(start) => format!(
+                    "설정 단계: 엄격 모드가 {}에 켜집니다. 그때까지는 어떤 변경이든 바로 적용됩니다.",
+                    start.with_timezone(&Local).format("%m-%d %H:%M")
+                ),
+                None => "설정 단계: 아직 엄격 모드를 켜지 않아서, 어떤 변경이든 바로 적용됩니다."
+                    .to_string(),
+            };
+            crate::style::notice(ui, crate::style::Tone::Warning, &banner);
             if ui.link("설정 탭에서 엄격 모드 켜기").clicked() {
                 self.tab = Tab::Settings;
                 self.settings.show_protection();

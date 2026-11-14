@@ -29,7 +29,8 @@
 //! | `settings_answer` | `{ "id": "…", "approve": true\|false }` (once the question is due) | [`crate::settings::AnswerOutcome`] |
 //! | `settings_withdraw` | `{ "id": "…" }`                        | `{ "ok": true }` |
 //! | `timetable` | `{ "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" }` | [`task_planner::TimetableEntry`] list |
-//! | `settings_protect` | `{ mode? }` ([`crate::settings::ProtectionChoice`]; permanent without) | [`ProtectionView`] |
+//! | `settings_protect` | `{ mode?, starts_at? }` ([`crate::settings::ProtectionChoice`]; permanent without; `starts_at`: start later) | [`ProtectionView`] |
+//! | `settings_protect_cancel` | `{}` (cancel a protection set to start later) | `{ ok }` |
 //! | `settings_unprotect` | `{ password? }` (time over, or the password) | `{ protected: false }`; every block lifted |
 //! | `program_update` | `{ "program": "Kakao.KakaoTalk" }` (listed in `updatable_programs`) | [`crate::system_care::CareStatus`] |
 //! | `system_care_status` | `{}`                                 | [`crate::system_care::CareStatus`] |
@@ -133,6 +134,9 @@ pub struct Status {
     /// How the protection may end (`None` during setup).
     #[serde(default)]
     pub settings_protection: Option<ProtectionView>,
+    /// A protection set to start later (`since` is its start), during setup.
+    #[serde(default)]
+    pub settings_protection_scheduled: Option<ProtectionView>,
     /// Scheduled settings updates whose "is this update really right?" question is due.
     #[serde(default)]
     pub settings_questions_due: usize,
@@ -336,6 +340,8 @@ fn status(api: &AgentApi) -> Status {
         last_todo_change: None,
         settings_protected: crate::settings::is_protected(&crate::data_dir()),
         settings_protection: crate::settings::protection(&crate::data_dir())
+            .map(|protection| ProtectionView::of(&protection)),
+        settings_protection_scheduled: crate::settings::scheduled_protection(&crate::data_dir())
             .map(|protection| ProtectionView::of(&protection)),
         settings_questions_due: crate::settings::questions_due(&crate::data_dir(), Utc::now()),
         ai_cost_today_usd: monitor.usage().map(|usage| usage.today_cost()),
@@ -565,14 +571,28 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                     .map_err(|error| format!("params.mode: {error}"))?,
                 None => crate::settings::ProtectionChoice::Permanent,
             };
-            let protection = crate::settings::protect(&data_directory, Utc::now(), choice)?;
+            let starts_at = match params.get("starts_at") {
+                Some(Value::Null) | None => None,
+                Some(start) => Some(
+                    serde_json::from_value::<chrono::DateTime<Utc>>(start.clone())
+                        .map_err(|error| format!("params.starts_at: {error}"))?,
+                ),
+            };
+            let protection =
+                crate::settings::protect_from(&data_directory, Utc::now(), choice, starts_at)?;
             tracing::info!(
-                "settings protected since {:?} ({:?})",
+                "settings protected from {:?} ({:?})",
                 protection.protected_since,
                 ProtectionView::of(&protection).kind
             );
             return serde_json::to_value(ProtectionView::of(&protection))
                 .map_err(|error| error.to_string());
+        }
+        // A protection set to start later is cancelled before its time (setup stage).
+        "settings_protect_cancel" => {
+            crate::settings::cancel_scheduled_protection(&data_directory, Utc::now())?;
+            tracing::info!("the strict mode set to start later was cancelled");
+            return Ok(json!({ "ok": true }));
         }
         // A time protection whose time is over, or a password protection with its password.
         // An administrator protection ends only through `settings-unlock` run as administrator.

@@ -382,14 +382,35 @@ pub fn protection(data_directory: &Path) -> Option<Protection> {
                 protected_since: Some(Utc::now()),
                 mode: ProtectionMode::Permanent,
             });
-        // Turned off (a file is kept so that sync carries the change to other devices).
-        return protection.protected_since.is_some().then_some(protection);
+        // Turned off (a file is kept so that sync carries the change to other devices), or
+        // set to start later ([`scheduled_protection`]).
+        return protection
+            .protected_since
+            .is_some_and(|since| since <= Utc::now())
+            .then_some(protection);
     }
     data_directory
         .join(OLD_LOCK_FILE)
         .exists()
         .then(Protection::default)
 }
+
+/// A protection set to start later (its `protected_since` is still to come): until then the
+/// settings are in the setup stage, and it may be cancelled ([`cancel_scheduled_protection`]).
+/// At its time it is in force by itself, on every device the file reached by sync.
+pub fn scheduled_protection(data_directory: &Path) -> Option<Protection> {
+    let protection: Protection =
+        serde_json::from_str(&fs::read_to_string(data_directory.join(PROTECTION_FILE)).ok()?)
+            .ok()?;
+    protection
+        .protected_since
+        .is_some_and(|since| since > Utc::now())
+        .then_some(protection)
+}
+
+/// The latest start a protection may be set to (the owner's examples: "몇 시간 뒤, 내일
+/// 아침부터").
+pub const MAX_PROTECTION_START_DAYS: i64 = 30;
 
 /// End the setup: from now on every looser edit is scheduled. The protection ends only the
 /// way `choice` allows ([`unprotect`]).
@@ -398,9 +419,27 @@ pub fn protect(
     now: DateTime<Utc>,
     choice: ProtectionChoice,
 ) -> Result<Protection, String> {
+    protect_from(data_directory, now, choice, None)
+}
+
+/// [`protect`] from `starts_at` when it is later than now (the owner: "엄격 모드 예약 설정이
+/// 가능하도록 만들어라. 예를 들면 몇 시간 뒤, 내일 아침부터"). Until then the settings stay in
+/// the setup stage; setting it again before it starts replaces the start.
+pub fn protect_from(
+    data_directory: &Path,
+    now: DateTime<Utc>,
+    choice: ProtectionChoice,
+    starts_at: Option<DateTime<Utc>>,
+) -> Result<Protection, String> {
     let _write = write_lock();
     if let Some(current) = protection(data_directory) {
         return Ok(current);
+    }
+    let start = starts_at.filter(|start| *start > now).unwrap_or(now);
+    if start > now + chrono::Duration::days(MAX_PROTECTION_START_DAYS) {
+        return Err(format!(
+            "엄격 모드는 {MAX_PROTECTION_START_DAYS}일 안에 시작해야 합니다"
+        ));
     }
     let mode = match choice {
         ProtectionChoice::Permanent => ProtectionMode::Permanent,
@@ -415,7 +454,7 @@ pub fn protect(
             ProtectionMode::administrator_for(chosen)
         }
         ProtectionChoice::Until { until } => {
-            if until < now + chrono::Duration::minutes(MIN_PROTECTION_MINUTES) {
+            if until < start + chrono::Duration::minutes(MIN_PROTECTION_MINUTES) {
                 return Err(format!(
                     "엄격 모드의 기간은 적어도 {MIN_PROTECTION_MINUTES}분이어야 합니다"
                 ));
@@ -432,13 +471,33 @@ pub fn protect(
         }
     };
     let protection = Protection {
-        protected_since: Some(now),
+        protected_since: Some(start),
         mode,
     };
     let bytes = serde_json::to_vec_pretty(&protection).map_err(|error| error.to_string())?;
     write_atomic(&data_directory.join(PROTECTION_FILE), &bytes)
         .map_err(|error| format!("could not save {PROTECTION_FILE}: {error}"))?;
     Ok(protection)
+}
+
+/// Cancel a protection set to start later. One that has started ends only the way it was
+/// chosen ([`unprotect`]).
+pub fn cancel_scheduled_protection(
+    data_directory: &Path,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let _write = write_lock();
+    if protection(data_directory).is_some() {
+        return Err("엄격 모드가 이미 켜졌습니다".into());
+    }
+    let Some(scheduled) = scheduled_protection(data_directory) else {
+        return Ok(());
+    };
+    // Written, not removed, so that sync carries the cancellation to the other devices.
+    let cancelled = json!({ "protected_since": null, "mode": scheduled.mode, "cancelled_at": now });
+    let bytes = serde_json::to_vec_pretty(&cancelled).map_err(|error| error.to_string())?;
+    write_atomic(&data_directory.join(PROTECTION_FILE), &bytes)
+        .map_err(|error| format!("could not save {PROTECTION_FILE}: {error}"))
 }
 
 /// Whether `protection` may end now, and if not, why (in Korean, for the Focus app).
@@ -1172,6 +1231,69 @@ mod tests {
             .scheduled
             .expect("a scheduled update")
             .id
+    }
+
+    #[test]
+    fn a_protection_set_to_start_later_is_in_force_only_from_then() {
+        let now = Utc::now();
+        let data_directory = temp_dir("protect_later");
+        let starts_at = now + chrono::Duration::hours(3);
+        // A time protection counts from its start: an end before start + 10 minutes is refused.
+        assert!(protect_from(
+            &data_directory,
+            now,
+            ProtectionChoice::Until {
+                until: starts_at + chrono::Duration::minutes(5)
+            },
+            Some(starts_at)
+        )
+        .is_err());
+        assert!(protect_from(
+            &data_directory,
+            now,
+            ProtectionChoice::Permanent,
+            Some(now + chrono::Duration::days(MAX_PROTECTION_START_DAYS + 1))
+        )
+        .is_err());
+        protect_from(
+            &data_directory,
+            now,
+            ProtectionChoice::Until {
+                until: starts_at + chrono::Duration::hours(2),
+            },
+            Some(starts_at),
+        )
+        .unwrap();
+        // Not yet: still the setup stage, and it may be cancelled or set again.
+        assert!(!is_protected(&data_directory));
+        assert_eq!(
+            scheduled_protection(&data_directory)
+                .unwrap()
+                .protected_since,
+            Some(starts_at)
+        );
+        cancel_scheduled_protection(&data_directory, now).unwrap();
+        assert!(scheduled_protection(&data_directory).is_none());
+        assert!(!is_protected(&data_directory));
+        // Its time came (written as it would be by then): in force, and no longer cancelled.
+        let started = now - chrono::Duration::minutes(1);
+        protect_from(
+            &data_directory,
+            now,
+            ProtectionChoice::Permanent,
+            Some(starts_at),
+        )
+        .unwrap();
+        let mut protection: Protection = serde_json::from_str(
+            &fs::read_to_string(data_directory.join(PROTECTION_FILE)).unwrap(),
+        )
+        .unwrap();
+        protection.protected_since = Some(started);
+        write_protection(&data_directory, &protection).unwrap();
+        assert!(is_protected(&data_directory));
+        assert!(scheduled_protection(&data_directory).is_none());
+        assert!(cancel_scheduled_protection(&data_directory, now).is_err());
+        assert!(is_protected(&data_directory));
     }
 
     #[test]

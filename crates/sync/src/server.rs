@@ -137,9 +137,13 @@ struct Stored {
 
 /// Is the protection on in this `settings_protection.json` content?
 pub fn protected(content: &Value) -> bool {
-    content
-        .get("protected_since")
-        .is_some_and(|since| !since.is_null())
+    // A protection set to start later is not in force before its time (and may be cancelled).
+    // A value that is not a time still protects.
+    match content.get("protected_since") {
+        None | Some(Value::Null) => false,
+        Some(since) => serde_json::from_value::<DateTime<Utc>>(since.clone())
+            .map_or(true, |since| since <= Utc::now()),
+    }
 }
 
 /// May this protection (as `settings_protection.json` holds it) end now, ended by the device
@@ -1123,6 +1127,14 @@ mod tests {
         assert!(protection_may_end(&protection, Utc::now(), Some("office")));
         assert!(protection_may_end(&protection, Utc::now(), Some("home")));
         assert!(!protection_may_end(&protection, Utc::now(), Some("vm")));
+        // A protection set to start later is not on before its time, and may be cancelled.
+        let later = Utc::now() + chrono::Duration::hours(3);
+        assert!(!protected(&json!({ "protected_since": later })));
+        assert!(protected(
+            &json!({ "protected_since": Utc::now() - chrono::Duration::minutes(1) })
+        ));
+        assert!(protected(&json!({ "protected_since": "not a time" })));
+        assert!(!protected(&json!({ "protected_since": null })));
         // The list may shrink (not to nothing), grow, and an empty one may be named.
         let listed = |devices: serde_json::Value| {
             serde_json::json!({ "protected_since": "2026-11-01T00:00:00Z",
