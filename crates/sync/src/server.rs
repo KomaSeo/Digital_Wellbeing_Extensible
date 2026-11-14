@@ -166,6 +166,30 @@ pub fn protection_may_end(protection: &Value, now: DateTime<Utc>, by_device: Opt
     }
 }
 
+/// Is `pushed` the administrator protection `stored` with fewer computers that may end it,
+/// and nothing else changed? An empty list means any computer, so naming computers narrows
+/// it (the owner: "빼기는 바로", and an older protection that named none is tied to the
+/// computers registered then). The list never becomes empty: then no computer could end it.
+pub fn narrows_unlock_list(stored: &Value, pushed: &Value) -> bool {
+    let without_list = |protection: &Value| {
+        let mut mode = protection.get("mode").cloned().unwrap_or(Value::Null);
+        if let Some(fields) = mode.as_object_mut() {
+            fields.remove("device");
+            fields.remove("devices");
+        }
+        mode
+    };
+    let is_administrator = |protection: &Value| {
+        protection.pointer("/mode/kind").and_then(Value::as_str) == Some("administrator")
+    };
+    let (before, after) = (unlock_devices(stored), unlock_devices(pushed));
+    is_administrator(stored)
+        && is_administrator(pushed)
+        && without_list(stored) == without_list(pushed)
+        && !after.is_empty()
+        && (before.is_empty() || after.iter().all(|device| before.contains(device)))
+}
+
 /// The devices whose administrator may end an administrator protection (as
 /// `settings_protection.json` holds it): its list, and the one device older versions named.
 /// Empty: any administrator (or not such a protection).
@@ -817,9 +841,11 @@ impl SyncServer {
                 {
                     return Err("the protection cannot be turned off".into());
                 }
-                // How a protection ends is chosen once, when protecting.
+                // How a protection ends is chosen once, when protecting; only the list of
+                // computers that may end an administrator one may shrink (stricter).
                 if protected(&push.content)
                     && push.content.get("mode") != stored.content.get("mode")
+                    && !narrows_unlock_list(&stored.content, &push.content)
                 {
                     return Err("the protection cannot be changed".into());
                 }
@@ -1098,6 +1124,34 @@ mod tests {
         assert!(protection_may_end(&protection, Utc::now(), Some("office")));
         assert!(protection_may_end(&protection, Utc::now(), Some("home")));
         assert!(!protection_may_end(&protection, Utc::now(), Some("vm")));
+        // The list may shrink (not to nothing) and an empty one may be named; nothing grows.
+        let listed = |devices: serde_json::Value| {
+            serde_json::json!({ "protected_since": "2026-11-01T00:00:00Z",
+                "mode": { "kind": "administrator", "devices": devices } })
+        };
+        let any = serde_json::json!({ "protected_since": "2026-11-01T00:00:00Z",
+            "mode": { "kind": "administrator", "device": null } });
+        assert!(narrows_unlock_list(
+            &listed(json!(["a", "b"])),
+            &listed(json!(["a"]))
+        ));
+        assert!(narrows_unlock_list(&any, &listed(json!(["a", "b"]))));
+        assert!(!narrows_unlock_list(
+            &listed(json!(["a"])),
+            &listed(json!(["a", "b"]))
+        ));
+        assert!(!narrows_unlock_list(
+            &listed(json!(["a"])),
+            &listed(json!(["b"]))
+        ));
+        assert!(!narrows_unlock_list(
+            &listed(json!(["a"])),
+            &listed(json!([]))
+        ));
+        assert!(!narrows_unlock_list(
+            &listed(json!(["a"])),
+            &serde_json::json!({ "mode": { "kind": "password", "devices": ["a"] } })
+        ));
         let _ = fs::remove_dir_all(&folder);
     }
 }

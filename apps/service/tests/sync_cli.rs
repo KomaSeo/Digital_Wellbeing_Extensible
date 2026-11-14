@@ -387,3 +387,188 @@ fn devices_sign_up_and_log_in_and_come_back_after_the_server_is_set_up_again() {
     drop(server);
     let _ = fs::remove_dir_all(&root);
 }
+
+/// Sync `data_folder` now and return what the program printed.
+fn sync_now(server_folder: &Path, data_folder: &Path) -> String {
+    let synced = run(server_folder, data_folder, &["sync-now"]);
+    assert!(synced.status.success(), "{}", text(&synced));
+    text(&synced)
+}
+
+/// An older administrator protection (any computer) is tied to the computers registered
+/// then, and taking a computer off the list ends on every computer: both make it stricter,
+/// so the server takes them while the strict mode is on.
+#[test]
+fn the_unlock_list_is_pinned_and_shrinks_on_every_computer() {
+    use chrono::Utc;
+    use machine::settings::{self, ProtectionChoice, Unlock};
+
+    let root: PathBuf =
+        std::env::temp_dir().join(format!("dw_sync_unlock_list_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let server_folder = root.join("server");
+    let laptop = root.join("laptop");
+    let desktop = root.join("desktop");
+    for folder in [&server_folder, &laptop, &desktop] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let address = format!("127.0.0.1:{port}");
+    let _server = start_server(&server_folder, port);
+    let signed_up = run_with_input(
+        &server_folder,
+        &laptop,
+        &["sync-signup", &address, "me", "--device", "laptop"],
+        "long password\nlong password\n",
+    );
+    assert!(signed_up.status.success(), "{}", text(&signed_up));
+    let logged_in = run_with_input(
+        &server_folder,
+        &desktop,
+        &["sync-login", &address, "me", "--device", "desktop"],
+        "long password\n",
+    );
+    assert!(logged_in.status.success(), "{}", text(&logged_in));
+    let laptop_id = settings::this_device_id(&laptop).unwrap();
+    let desktop_id = settings::this_device_id(&desktop).unwrap();
+
+    // As an older version left it: any computer's administrator may end it.
+    let now = Utc::now();
+    settings::protect(
+        &laptop,
+        now,
+        ProtectionChoice::Administrator {
+            device: None,
+            devices: Vec::new(),
+        },
+    )
+    .unwrap();
+    sync_now(&server_folder, &laptop);
+    sync_now(&server_folder, &desktop);
+    assert!(settings::is_protected(&desktop));
+
+    // The service pins it to the computers registered now; the other computer gets the list.
+    assert!(settings::pin_administrator_devices(
+        &desktop,
+        &[laptop_id.clone(), desktop_id.clone()]
+    ));
+    let printed = sync_now(&server_folder, &desktop);
+    assert!(!printed.contains("refused"), "{printed}");
+    sync_now(&server_folder, &laptop);
+    let on_laptop = settings::protection(&laptop)
+        .unwrap()
+        .mode
+        .administrator_devices();
+    assert_eq!(on_laptop.len(), 2, "{on_laptop:?}");
+
+    // The desktop is taken off the list there; the laptop gets that too, and the desktop's
+    // administrator can no longer end it.
+    settings::remove_administrator_device(&laptop, &desktop_id).unwrap();
+    let printed = sync_now(&server_folder, &laptop);
+    assert!(!printed.contains("refused"), "{printed}");
+    sync_now(&server_folder, &desktop);
+    let on_desktop = settings::protection(&desktop)
+        .unwrap()
+        .mode
+        .administrator_devices();
+    assert_eq!(on_desktop, [laptop_id.clone()]);
+    assert!(settings::unprotect(
+        &desktop,
+        now,
+        Unlock::Administrator {
+            device: Some(desktop_id.clone())
+        }
+    )
+    .is_err());
+
+    // The laptop's administrator ends it everywhere.
+    settings::unprotect(
+        &laptop,
+        now,
+        Unlock::Administrator {
+            device: Some(laptop_id.clone()),
+        },
+    )
+    .unwrap();
+    let printed = sync_now(&server_folder, &laptop);
+    assert!(!printed.contains("refused"), "{printed}");
+    sync_now(&server_folder, &desktop);
+    assert!(!settings::is_protected(&desktop));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The way around the wait: a computer that is not on the list writes itself onto it (its
+/// administrator can write any file there) and then ends the strict mode.
+#[test]
+fn a_computer_cannot_write_itself_onto_the_unlock_list_without_the_confirmations() {
+    use chrono::Utc;
+    use machine::settings::{self, ProtectionChoice};
+
+    let root: PathBuf =
+        std::env::temp_dir().join(format!("dw_sync_unlock_forged_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let server_folder = root.join("server");
+    let laptop = root.join("laptop");
+    let new_pc = root.join("newpc");
+    for folder in [&server_folder, &laptop, &new_pc] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let address = format!("127.0.0.1:{port}");
+    let _server = start_server(&server_folder, port);
+    let signed_up = run_with_input(
+        &server_folder,
+        &laptop,
+        &["sync-signup", &address, "me", "--device", "laptop"],
+        "long password\nlong password\n",
+    );
+    assert!(signed_up.status.success(), "{}", text(&signed_up));
+    let logged_in = run_with_input(
+        &server_folder,
+        &new_pc,
+        &["sync-login", &address, "me", "--device", "newpc"],
+        "long password\n",
+    );
+    assert!(logged_in.status.success(), "{}", text(&logged_in));
+    let laptop_id = settings::this_device_id(&laptop).unwrap();
+    let new_pc_id = settings::this_device_id(&new_pc).unwrap();
+    settings::protect(
+        &laptop,
+        Utc::now(),
+        ProtectionChoice::Administrator {
+            device: None,
+            devices: vec![laptop_id.clone()],
+        },
+    )
+    .unwrap();
+    sync_now(&server_folder, &laptop);
+    sync_now(&server_folder, &new_pc);
+    assert!(settings::is_protected(&new_pc));
+
+    // Written by hand: still on, with the new PC on the list.
+    let path = new_pc.join("settings_protection.json");
+    let mut forged: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    forged["mode"]["devices"] = serde_json::json!([laptop_id, new_pc_id]);
+    fs::write(&path, serde_json::to_vec_pretty(&forged).unwrap()).unwrap();
+    let printed = sync_now(&server_folder, &new_pc);
+    println!("{printed}");
+    sync_now(&server_folder, &laptop);
+    let on_laptop = settings::protection(&laptop)
+        .unwrap()
+        .mode
+        .administrator_devices();
+    assert!(
+        !on_laptop.contains(&new_pc_id),
+        "the forged list reached the laptop: {on_laptop:?}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
