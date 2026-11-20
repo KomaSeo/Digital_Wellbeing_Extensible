@@ -23,9 +23,9 @@ use crate::focus_link::{FocusLink, WatchedTask};
 use crate::model::{
     occurrence_day, series_id, Appointment, AppointmentInput, Assignment, AssignmentSource,
     AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, Evidence, ExtensionOffer, IdleSpan,
-    PlannerConfig, PlannerState, PlannerStatus, PolishItem, ProposalInput, TaskNotes, TaskStep,
-    TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite,
-    WaitingItem, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
+    PlannerConfig, PlannerState, PlannerStatus, ProposalInput, TaskNotes, TaskStep, TimetableEntry,
+    TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WaitingItem, WeekPlan,
+    WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
 use ai_client::JudgeError;
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
@@ -81,8 +81,6 @@ pub enum PlannerError {
     BadProposal,
     #[error("\"{0}\"은(는) 이미 목록에 있습니다")]
     Duplicate(String),
-    #[error("\"{0}\"은(는) 일찍 끝낸 일을 다듬도록 앱이 만든 할 일입니다. 끝내거나 다듬기 시간을 다 쓰면 없어집니다")]
-    MadeByTheApp(String),
     #[error("할 일 시간이 다 됐습니다. 먼저 끝냈는지 보고하세요(끝냈다 또는 다 못 했다)")]
     ReportFirst,
     #[error("지금 할 일은 목록의 할 일이 아닙니다(약속이나 목록 밖의 일)")]
@@ -165,7 +163,6 @@ impl TaskPlanner {
     pub(crate) fn open_todos(&self) -> Vec<TodoItem> {
         let state = self.state.get();
         let config = self.config.get();
-        let now = Utc::now();
         config
             .todos
             .into_iter()
@@ -177,13 +174,6 @@ impl TaskPlanner {
                     .cloned(),
             )
             .filter(|todo| todo.repeat || !state.is_done(&todo.id))
-            .chain(
-                state
-                    .polish
-                    .iter()
-                    .filter(|(_, polish)| now - polish.since < POLISH_KEPT_FOR)
-                    .map(|(todo_id, polish)| polish_todo(todo_id, polish)),
-            )
             .collect()
     }
 
@@ -802,9 +792,6 @@ impl TaskPlanner {
                 None
             }
             TodoChange::Edit { todo_id, .. } | TodoChange::Remove { todo_id } => {
-                if is_polish(todo_id) {
-                    return Err(PlannerError::MadeByTheApp(todo_id.clone()));
-                }
                 if review_by == TodoChangeReview::ByTheAi
                     && reason.chars().count() < MIN_REASON_CHARS
                 {
@@ -1514,8 +1501,7 @@ impl TaskPlanner {
 
     /// "끝냈다" without the AI's review, approved at once and logged like a reviewed report:
     /// outside strict mode (the settings are not protected), where the owner wants no AI
-    /// judging. No reason is needed, and no improvement time follows (that needs the AI's
-    /// judgement of the work).
+    /// judging. No reason is needed.
     pub fn report_done_without_review(
         &self,
         now: DateTime<Utc>,
@@ -1723,8 +1709,8 @@ impl TaskPlanner {
 
     /// Turn the AI's list changes into checked writes to `planner.json` (plus notes and steps
     /// for `planner_state.json`) and one line each for the user. Changes that name no open
-    /// to-do, an app-made "Improve" to-do, or a title that is empty or already listed are
-    /// dropped; at most a few are kept.
+    /// to-do, or a title that is empty or already listed are dropped; at most a few are
+    /// kept.
     fn list_change_writes(
         &self,
         now: DateTime<Utc>,
@@ -1742,9 +1728,7 @@ impl TaskPlanner {
             .collect();
         let (mut writes, mut summary, mut notes_updates) = (Vec::new(), Vec::new(), Vec::new());
         for (index, change) in changes.iter().take(MAX_LIST_CHANGES).enumerate() {
-            let target = open
-                .iter()
-                .find(|todo| todo.id == change.todo_id && !is_polish(&todo.id));
+            let target = open.iter().find(|todo| todo.id == change.todo_id);
             let deadline = change.deadline.trim().parse::<NaiveDate>().ok();
             match (change.action.as_str(), target) {
                 ("add", _) => {
@@ -1913,48 +1897,8 @@ impl TaskPlanner {
                         title: todo.title.clone(),
                         at: now,
                     };
-                    // Open-ended work finished early keeps the planned time that is left,
-                    // to be spent improving it later.
-                    // The to-do's estimate against all the time spent on it; without an
-                    // estimate, this assignment's planned time against the time it ran.
-                    let polish_left = if !already
-                        && review.outcome == "open_ended"
-                        && !is_polish(&todo.id)
-                        && !todo.repeat
-                    {
-                        match todo.estimate_minutes {
-                            Some(estimate) => {
-                                i64::from(estimate) - self.minutes_spent_on(&todo.id, now)
-                            }
-                            None => current
-                                .as_ref()
-                                .and_then(|assignment| {
-                                    assignment.until.map(|until| {
-                                        (until - assignment.at).num_minutes()
-                                            - (now - assignment.at).num_minutes().max(0)
-                                    })
-                                })
-                                .unwrap_or(0),
-                        }
-                    } else {
-                        0
-                    };
-                    let finished = todo.clone();
-                    self.state.update(|planner_state| {
-                        planner_state.done.push(record);
-                        if let Some(base_id) = finished.id.strip_prefix(POLISH_PREFIX) {
-                            planner_state.polish.remove(base_id);
-                        } else if polish_left >= MIN_POLISH_MINUTES {
-                            planner_state.polish.insert(
-                                finished.id.clone(),
-                                PolishItem {
-                                    todo: finished.clone(),
-                                    minutes_left: polish_left,
-                                    since: now,
-                                },
-                            );
-                        }
-                    })?;
+                    self.state
+                        .update(|planner_state| planner_state.done.push(record))?;
                 }
                 // The next task comes when the user asks for it ("할 일 받기").
                 self.end(now)?;
@@ -2182,26 +2126,9 @@ fn runs_until(state: &PlannerState, appointment: &Appointment) -> DateTime<Utc> 
         .unwrap_or(appointment.end + Duration::minutes(crate::model::APPOINTMENT_GRACE_MINUTES))
 }
 
-/// Log how long the current assignment ran, as it ends at `ended`; time spent improving a
-/// finished to-do comes off its time left.
+/// Log how long the current assignment ran, as it ends at `ended`.
 fn close_span(planner_state: &mut PlannerState, ended: DateTime<Utc>) {
-    planner_state
-        .polish
-        .retain(|_, polish| ended - polish.since < POLISH_KEPT_FOR);
     if let Some(current) = &planner_state.assignment {
-        if let Some(base_id) = current
-            .todo_id
-            .as_deref()
-            .and_then(|todo_id| todo_id.strip_prefix(POLISH_PREFIX))
-        {
-            let spent = current.span_until(ended).minutes();
-            if let Some(polish) = planner_state.polish.get_mut(base_id) {
-                polish.minutes_left -= spent;
-                if polish.minutes_left < MIN_POLISH_MINUTES {
-                    planner_state.polish.remove(base_id);
-                }
-            }
-        }
         if planner_state.assignment_log.len() >= ASSIGNMENT_LOG_CAPACITY {
             planner_state.assignment_log.pop_front();
         }
@@ -2286,39 +2213,6 @@ fn checked_week_plan(
             .filter(|warning| !warning.is_empty())
             .take(10)
             .collect(),
-    }
-}
-
-/// Ids of "Improve: …" to-dos start with this, followed by the finished to-do's id.
-const POLISH_PREFIX: &str = "polish:";
-/// Less time left than this is not worth an "Improve: …" to-do.
-const MIN_POLISH_MINUTES: i64 = 10;
-/// An "Improve: …" to-do not done within this time is dropped: work finished that long ago
-/// has usually been handed in or no longer matters.
-const POLISH_KEPT_FOR: Duration = Duration::days(14);
-
-fn is_polish(todo_id: &str) -> bool {
-    todo_id.starts_with(POLISH_PREFIX)
-}
-
-/// The "Improve: …" to-do for a finished to-do with time left.
-fn polish_todo(todo_id: &str, polish: &PolishItem) -> TodoItem {
-    TodoItem {
-        id: format!("{POLISH_PREFIX}{todo_id}"),
-        title: format!("Improve: {}", polish.todo.title),
-        notes: format!(
-            "Finished earlier than planned; up to {} more minutes to make it better. {}",
-            polish.minutes_left, polish.todo.notes
-        )
-        .trim()
-        .to_string(),
-        constraints: polish.todo.constraints.clone(),
-        deadline: None,
-        priority: polish.todo.priority,
-        estimate_minutes: u32::try_from(polish.minutes_left).ok(),
-        proposed: polish.todo.proposed,
-        repeat: false,
-        away_from_computer: None,
     }
 }
 

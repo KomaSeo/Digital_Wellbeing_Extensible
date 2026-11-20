@@ -804,7 +804,7 @@ fn the_week_plan_is_an_overview_of_this_week(session: u32) {
 }
 
 /// Real AI: a finished to-do with a provable result needs proof; work that can always be
-/// improved is accepted, and the planned time left comes back as an "Improve: …" to-do.
+/// improved is judged as such, without proof.
 fn early_finish_is_judged_by_its_kind(session: u32) {
     let mut mail = todo(
         "c-mail",
@@ -854,29 +854,13 @@ fn early_finish_is_judged_by_its_kind(session: u32) {
     strict_mode(session, false);
     assign(session, &[report], "");
     strict_mode(session, true);
-    let (rushed, status) = finish(
+    let (rushed, _) = finish(
         "I wrote a first full draft of all sections; it is good enough to share.",
         "",
     );
     // With no time logged on it, the AI may well find a "full draft" implausible and say no;
-    // the time kept for improving is covered by the planner's unit tests.
+    // only the kind of result is checked.
     assert_eq!(rushed.outcome, "open_ended");
-    if rushed.approved {
-        let improve = status
-            .planner
-            .expect("planner status")
-            .open_todos
-            .into_iter()
-            .find(|todo| todo.id == "polish:d-report")
-            .expect("an Improve to-do keeps the time left");
-        println!(
-            "{} for up to {:?} minutes",
-            improve.title, improve.estimate_minutes
-        );
-        assert!(improve
-            .estimate_minutes
-            .is_some_and(|minutes| minutes >= 200));
-    }
     strict_mode(session, false);
 }
 

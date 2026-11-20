@@ -931,9 +931,7 @@ fn the_todo_change_question_carries_the_rules_and_the_item() {
 
 #[test]
 fn a_question_starts_with_the_cached_rules_and_list_and_ends_with_what_changes() {
-    let mut polish = todo("polish:a");
-    polish.title = "Improve: title a".into();
-    let open = vec![todo("a"), todo("b"), polish];
+    let open = vec![todo("a"), todo("b")];
     let first = crate::advisor::question("rules", &open, "Now: 14:05".into());
     let second = crate::advisor::question("rules", &open, "Now: 14:40".into());
     // The cached start is the same for both calls and marked for an hour.
@@ -944,8 +942,8 @@ fn a_question_starts_with_the_cached_rules_and_list_and_ends_with_what_changes()
         start.contains("rules") && start.contains("\n[a] "),
         "{start}"
     );
-    // The time and the "polish:" to-dos (their time left changes) come after it.
-    assert!(!start.contains("polish:a") && !start.contains("14:05"));
+    // The time comes after it.
+    assert!(!start.contains("14:05"));
     assert!(first[1].get("cache_control").is_none());
     // The to-do change review sends the same question without the cache mark.
     let unmarked = crate::advisor::uncached(first.clone());
@@ -966,10 +964,8 @@ fn a_question_starts_with_the_cached_rules_and_list_and_ends_with_what_changes()
         situation: "카페, 노트북만 있음",
     });
     assert!(pick.contains("카페, 노트북만 있음"), "{pick}");
-    assert!(
-        pick.contains("[polish:a] ") && !pick.contains("[b] "),
-        "{pick}"
-    );
+    // The list is in the cached start only.
+    assert!(!pick.contains("[b] "), "{pick}");
 }
 
 #[test]
@@ -1210,7 +1206,7 @@ fn notes_are_saved_for_open_todos_and_reach_the_done_review() {
 }
 
 #[test]
-fn open_ended_work_finished_early_keeps_the_time_left_for_improving_it() {
+fn open_ended_work_finished_early_is_simply_done() {
     let fixture = harness(true, &["a", "b"]);
     fixture
         .planner
@@ -1244,235 +1240,14 @@ fn open_ended_work_finished_early_keeps_the_time_left_for_improving_it() {
     );
     let (planned, elapsed, spent) = *fixture.advisor.saw_minutes.lock();
     assert_eq!((planned, elapsed, spent), (Some(45), 30, 30));
-    let polish = &fixture.planner.state_store_for_tests().get().polish["a"];
-    assert_eq!(polish.minutes_left, 210);
-    let open = fixture.planner.open_todos();
-    let improve = open
-        .iter()
-        .find(|todo| todo.id == "polish:a")
-        .expect("an Improve to-do is open");
-    assert_eq!(improve.title, "Improve: title a");
-    assert_eq!(improve.estimate_minutes, Some(210));
-
-    // 25 minutes improving it come off the time left (within the switch's 30 minutes).
-    *fixture.advisor.outcome.lock() = "not_applicable".into();
-    let improving_from = finished_at + chrono::Duration::minutes(5);
-    fixture
-        .planner
-        .request_change(
-            improving_from,
-            ChangeKind::SwitchTodo {
-                todo_id: "polish:a".into(),
-            },
-            "time to improve the report",
-            Evidence::default(),
-        )
-        .unwrap();
-    fixture
-        .planner
-        .request_change(
-            improving_from + chrono::Duration::minutes(25),
-            ChangeKind::SwitchTodo {
-                todo_id: "b".into(),
-            },
-            "b is due soon after all",
-            Evidence::default(),
-        )
-        .unwrap();
-    assert_eq!(
-        fixture.planner.state_store_for_tests().get().polish["a"].minutes_left,
-        185
-    );
-
-    // Finishing the improvement removes it.
-    fixture
-        .planner
-        .request_change(
-            Utc::now(),
-            ChangeKind::SwitchTodo {
-                todo_id: "polish:a".into(),
-            },
-            "back to the report",
-            Evidence::default(),
-        )
-        .unwrap();
-    fixture
-        .planner
-        .request_change(
-            Utc::now(),
-            ChangeKind::Done,
-            "the report is polished",
-            Evidence::default(),
-        )
-        .unwrap();
-    assert!(fixture
-        .planner
-        .state_store_for_tests()
-        .get()
-        .polish
-        .is_empty());
-    assert!(!fixture
-        .planner
-        .open_todos()
-        .iter()
-        .any(|todo| todo.id.starts_with("polish:")));
-}
-
-#[test]
-fn decisive_or_nearly_full_work_leaves_no_improve_todo() {
-    for (outcome, estimate) in [("decisive", 240), ("open_ended", 35)] {
-        let fixture = harness(true, &["a", "b"]);
-        fixture
-            .planner
-            .config_store()
-            .update(|config| config.todos[0].estimate_minutes = Some(estimate))
-            .unwrap();
-        let start = Utc::now() - chrono::Duration::minutes(30);
-        fixture.planner.assign(start).unwrap();
-        *fixture.advisor.outcome.lock() = outcome.into();
-        fixture
-            .planner
-            .request_change(
-                start + chrono::Duration::minutes(30),
-                ChangeKind::Done,
-                "mail sent to the client",
-                Evidence::default(),
-            )
-            .unwrap();
-        assert!(
-            fixture
-                .planner
-                .state_store_for_tests()
-                .get()
-                .polish
-                .is_empty(),
-            "{outcome} {estimate}"
-        );
-    }
-}
-
-#[test]
-fn improve_todos_cannot_be_edited_or_removed() {
-    let fixture = harness(true, &["a", "b"]);
-    fixture
-        .planner
-        .config_store()
-        .update(|config| config.todos[0].estimate_minutes = Some(240))
-        .unwrap();
-    fixture.planner.assign(Utc::now()).unwrap();
-    *fixture.advisor.outcome.lock() = "open_ended".into();
-    fixture
-        .planner
-        .request_change(
-            Utc::now(),
-            ChangeKind::Done,
-            "the report is written",
-            Evidence::default(),
-        )
-        .unwrap();
-    let reviews_before = fixture.advisor.reviews.load(Ordering::SeqCst);
-    let refused = fixture.planner.review_todo_change(
-        Utc::now(),
-        TodoChange::Remove {
-            todo_id: "polish:a".into(),
-        },
-        "no need to improve it",
-        "e2e",
-    );
-    assert!(matches!(refused, Err(PlannerError::MadeByTheApp(_))));
-    assert_eq!(
-        fixture.advisor.reviews.load(Ordering::SeqCst),
-        reviews_before,
-        "the AI is not asked"
-    );
-}
-
-#[test]
-fn without_an_estimate_only_this_assignment_counts_for_improving() {
-    let fixture = harness(true, &["a", "b"]);
-    // An earlier 40 minutes on a, then a new 30-minute assignment finished after 10 minutes.
-    let start = Utc::now() - chrono::Duration::minutes(70);
-    fixture.planner.assign(start).unwrap();
-    fixture
-        .planner
-        .request_change(
-            start + chrono::Duration::minutes(40),
-            ChangeKind::SwitchTodo {
-                todo_id: "a".into(),
-            },
-            "start a fresh session on a",
-            Evidence::default(),
-        )
-        .unwrap();
-    *fixture.advisor.outcome.lock() = "open_ended".into();
-    fixture
-        .planner
-        .request_change(
-            start + chrono::Duration::minutes(50),
-            ChangeKind::Done,
-            "the draft is usable",
-            Evidence::default(),
-        )
-        .unwrap();
-    // The approved switch runs for the review's 30 minutes; 10 of them were used.
-    assert_eq!(
-        fixture.planner.state_store_for_tests().get().polish["a"].minutes_left,
-        20
-    );
-}
-
-#[test]
-fn improve_todos_are_dropped_after_two_weeks() {
-    let fixture = harness(true, &["b"]);
-    let finished = todo("a");
-    fixture
-        .planner
-        .state_store_for_tests()
-        .update(|state| {
-            for (todo_id, days_ago) in [("a", 15), ("c", 13)] {
-                state.polish.insert(
-                    todo_id.into(),
-                    PolishItem {
-                        todo: TodoItem {
-                            id: todo_id.into(),
-                            ..finished.clone()
-                        },
-                        minutes_left: 60,
-                        since: Utc::now() - chrono::Duration::days(days_ago),
-                    },
-                );
-            }
-        })
-        .unwrap();
-    let improving: Vec<_> = fixture
+    // The to-do is done and nothing takes its place (the "Improve: …" to-dos are gone).
+    let open: Vec<String> = fixture
         .planner
         .open_todos()
         .into_iter()
         .map(|todo| todo.id)
-        .filter(|todo_id| todo_id.starts_with("polish:"))
         .collect();
-    assert_eq!(improving, ["polish:c"]);
-    // The next change of assignment also removes it from the state.
-    fixture.planner.assign(Utc::now()).unwrap();
-    fixture
-        .planner
-        .request_change(
-            Utc::now(),
-            ChangeKind::SwitchTodo {
-                todo_id: "polish:c".into(),
-            },
-            "time to improve c",
-            Evidence::default(),
-        )
-        .unwrap();
-    let kept: Vec<_> = fixture
-        .planner
-        .state_store_for_tests()
-        .get()
-        .polish
-        .into_keys()
-        .collect();
-    assert_eq!(kept, ["c"]);
+    assert_eq!(open, ["b"]);
 }
 
 #[test]
@@ -2570,15 +2345,8 @@ fn a_to_do_done_before_counts_as_done_without_this_assignments_time() {
         .recent_done
         .iter()
         .any(|done_record| done_record.todo_id == assigned));
-    // The 30 minutes of this assignment are not counted on the to-do, and no improvement
-    // time is kept.
+    // The 30 minutes of this assignment are not counted on the to-do.
     assert_eq!(status.minutes_total.get(&assigned).copied().unwrap_or(0), 0);
-    assert!(fixture
-        .planner
-        .state_store_for_tests()
-        .get()
-        .polish
-        .is_empty());
 }
 
 #[test]

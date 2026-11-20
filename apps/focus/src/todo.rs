@@ -1122,16 +1122,10 @@ impl FocusApp {
             // The user's own steps and notes, as in the Work tab: saved at once, no AI.
             self.notes_ui(ui, &todo.id, planner);
             ui.horizontal_wrapped(|ui| {
-                // An "Improve: …" to-do is made by the app from a to-do finished early; it
-                // goes away when it is done or its time is used up.
-                let improvement = todo.id.starts_with("polish:");
-                if improvement {
-                    ui.weak("일찍 끝낸 일의 다듬기 시간");
-                }
-                if !improvement && ui.button("고치기").clicked() {
+                if ui.button("고치기").clicked() {
                     self.open_edit_form(todo);
                 }
-                if !improvement && ui.button("지우기").clicked() {
+                if ui.button("지우기").clicked() {
                     self.todo_ui.removing = Some(todo.id.clone());
                     self.todo_ui.remove_reason.clear();
                 }

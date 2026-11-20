@@ -34,7 +34,7 @@ pub use model::{
     occurrence_day, series_id, weekdays_korean, Appointment, AppointmentInput, Assignment,
     AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, Confirmations, DoneRecord,
     Evidence, ExtensionOffer, IdleSpan, PlannerConfig, PlannerInstructions, PlannerState,
-    PlannerStatus, PolishItem, ProposalInput, ProposalRecord, TaskNotes, TaskStep, TimetableEntry,
+    PlannerStatus, ProposalInput, ProposalRecord, TaskNotes, TaskStep, TimetableEntry,
     TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WaitingItem, WeekPlan,
     WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };

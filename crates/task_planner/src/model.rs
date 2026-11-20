@@ -499,7 +499,7 @@ pub enum ChangeKind {
     },
     /// The current to-do had already been done before this assignment, at another time or
     /// place ("이미 처리했어요"): it is done, but this assignment's time is not counted as
-    /// spent on it, and no improvement time follows.
+    /// spent on it.
     AlreadyDone,
     /// The current to-do itself changed ("일이 변경되었어요": its deadline, scope or content,
     /// or it is no longer needed), as the reason says. Approved, the AI's list changes edit
@@ -546,19 +546,6 @@ pub struct ChangeRecord {
 pub struct Evidence {
     pub text: String,
     pub screenshot_jpeg: Option<Vec<u8>>,
-}
-
-/// Responsibility: Keep the time left to improve open-ended work the user finished early.
-///
-/// It shows up as an "Improve: …" to-do (id `polish:<id>`) that the AI picks in spare time;
-/// time spent on it is taken off, and it goes away when the time is used up or "done" is
-/// approved for it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PolishItem {
-    /// The finished to-do as it was.
-    pub todo: TodoItem,
-    pub minutes_left: i64,
-    pub since: DateTime<Utc>,
 }
 
 /// Responsibility: Say what the user asks to change in the to-do list.
@@ -837,9 +824,6 @@ pub struct PlannerState {
     /// The user's notes and steps per to-do id.
     #[serde(default)]
     pub task_notes: BTreeMap<String, TaskNotes>,
-    /// Open-ended to-dos finished early, by to-do id, with the time left to improve them.
-    #[serde(default)]
-    pub polish: BTreeMap<String, PolishItem>,
     /// The last overview of this week the user asked for.
     #[serde(default)]
     pub week_plan: Option<WeekPlan>,

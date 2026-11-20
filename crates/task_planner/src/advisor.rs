@@ -32,11 +32,8 @@ user asked for their next task just now and starts at once.
 Pick exactly one open to-do to work on now. Weigh deadlines first (overdue, \
 then due today or tomorrow), then priority, then fit with the time of day. \
 Prefer continuing the previous assignment if it is still open and nothing more \
-urgent appeared; constant switching wastes the user's time. To-dos whose id \
-starts with \"polish:\" are work the user finished early that can still be \
-improved; their estimate is the time left for that. When nothing is overdue or \
-due today, prefer them over rest and leisure (unless the life rules call for a \
-break now). To-dos marked \"routine\" are routines \
+urgent appeared; constant switching wastes the user's time. To-dos marked \
+\"routine\" are routines \
 (sleep, getting ready, exercise, meals) that stay on the list after they are done: \
 use the recently finished list, the time of day and the life rules to judge whether \
 one is due now. Respect each to-do's constraints, and dates in them such as \"not \
@@ -223,9 +220,7 @@ submission page). Without convincing proof, reject and say exactly what proof \
 would do.
 - \"open_ended\": work that can always be done better (writing a report, \
 practising a talk, studying for an exam, coding). Do not demand proof and do not \
-reject only because it was quick: approve when it is plausibly in a usable state. \
-The app keeps the planned time that is left and later asks the user to spend it \
-improving the work, so a rushed finish gains nothing.
+reject only because it was quick: approve when it is plausibly in a usable state.
 Already done at another time: judge it like \"done\" (is it plausible, and is there \
 proof where the result is decisive?). The current task being a fixed appointment \
 changes nothing here.
@@ -762,7 +757,7 @@ pub(crate) fn appointment_text(request: &AppointmentRequest) -> String {
          - title: {title}\n- notes: {notes}\n- from {start} to {end} ({minutes} min){repeat}\n\
          Their reason: \"{reason}\"\n\n\
          Appointments already accepted:\n{appointments}\n\nCurrent assignment: {current}\n\n\
-         {polish}Earlier to-do and appointment changes (newest first):\n{past}",
+         Earlier to-do and appointment changes (newest first):\n{past}",
         now = request.now_local,
         title = appointment.title,
         notes = or_none(&appointment.notes),
@@ -776,7 +771,6 @@ pub(crate) fn appointment_text(request: &AppointmentRequest) -> String {
             .current
             .map(|assignment| assignment_text(assignment, Utc::now()))
             .unwrap_or_else(|| "(none)".into()),
-        polish = polish_text(request.open),
         past = or_none(&past.join("\n")),
     )
 }
@@ -1077,21 +1071,15 @@ work) are not listed.";
 /// The first block is marked for the prompt cache for an hour: the list is most of what a
 /// question costs, and the next question of the same kind within the hour reads it at a
 /// twentieth of the price (a write costs twice). Questions of one kind share their
-/// instructions (`system`) too, so the whole start of the prompt matches. The "polish:"
-/// to-dos change by the minute (their time left), so they go with `text` ([`polish_text`]).
+/// instructions (`system`) too, so the whole start of the prompt matches.
 pub(crate) fn question(life_rules: &str, open: &[TodoItem], text: String) -> Vec<Value> {
-    let listed: Vec<TodoItem> = open
-        .iter()
-        .filter(|todo| !is_polish_item(todo))
-        .cloned()
-        .collect();
     vec![
         json!({
             "type": "text",
             "text": format!(
                 "{}Open to-dos. {TODOS_FORMAT}\n{}",
                 rules_text(life_rules),
-                todos_text(&listed)
+                todos_text(open)
             ),
             "cache_control": { "type": "ephemeral", "ttl": "1h" },
         }),
@@ -1109,29 +1097,6 @@ pub(crate) fn uncached(mut content: Vec<Value>) -> Vec<Value> {
         }
     }
     content
-}
-
-fn is_polish_item(todo: &TodoItem) -> bool {
-    todo.id.starts_with("polish:")
-}
-
-/// The "polish:" to-dos, which are open to-dos too, for the changing part of a question;
-/// nothing when there are none.
-fn polish_text(open: &[TodoItem]) -> String {
-    let polish: Vec<TodoItem> = open
-        .iter()
-        .filter(|todo| is_polish_item(todo))
-        .cloned()
-        .collect();
-    if polish.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "More open to-dos (improving work finished early; listed here because their time \
-             left changes):\n{}\n\n",
-            todos_text(&polish)
-        )
-    }
 }
 
 /// The owner's life rules as a section of the question; nothing when empty.
@@ -1164,7 +1129,7 @@ pub(crate) fn pick_text(request: &PickRequest) -> String {
         })
         .collect();
     format!(
-        "Now: {now}\n\n{polish}Upcoming appointments (fixed):\n\
+        "Now: {now}\n\nUpcoming appointments (fixed):\n\
          {appointments}\n\nRecently finished:\n{done}\n\n\
          Previous assignment: {prev}\n{repick}{situation}\nRecent foreground activity (oldest \
          first):\n{history}",
@@ -1179,7 +1144,6 @@ pub(crate) fn pick_text(request: &PickRequest) -> String {
                 request.situation.trim()
             )
         },
-        polish = polish_text(request.open),
         appointments = appointments_text(request.appointments),
         done = or_none(&done.join("\n")),
         prev = request
@@ -1204,7 +1168,7 @@ fn describe(request: &ChangeKind, target_title: Option<&str>) -> String {
         ChangeKind::AlreadyDone => "report that the current to-do had already been done before \
                                     this assignment, at another time or place (judge it like \
                                     \"done\": is it plausible, and is there proof where the \
-                                    result is decisive?); no improvement time follows"
+                                    result is decisive?)"
             .into(),
         ChangeKind::Changed => "report that the current to-do itself changed (its deadline, \
                                 scope or content, or it is no longer needed), as their reason \
@@ -1283,7 +1247,7 @@ pub(crate) fn review_text(request: &ReviewRequest) -> String {
     format!(
         "Now: {now}\n\nCurrent assignment: {current}\n{current_todo}{timing}{notes}{evidence}\n\
          The user asks to: {ask}\nTheir reason: \"{reason}\"\n{target_todo}\n\
-         {polish}Earlier change requests (newest first):\n{past}\n\n\
+         Earlier change requests (newest first):\n{past}\n\n\
          Recent foreground activity (oldest first):\n{history}",
         now = request.now_local,
         current = request
@@ -1333,7 +1297,6 @@ pub(crate) fn review_text(request: &ReviewRequest) -> String {
             .unwrap_or_default(),
         ask = describe(request.request, request.target_title),
         reason = request.reason,
-        polish = polish_text(request.open),
         past = or_none(&past.join("\n")),
         history = or_none(request.history),
     )
@@ -1402,12 +1365,11 @@ pub(crate) fn todo_change_text(request: &TodoChangeRequest) -> String {
         ),
     };
     format!(
-        "Now: {now}\n\n{asked}\nTheir reason: \"{reason}\"\n\n{polish}\
+        "Now: {now}\n\n{asked}\nTheir reason: \"{reason}\"\n\n\
          Earlier to-do changes (newest first):\n{past}\n\n\
          Recent foreground activity (oldest first):\n{history}",
         now = request.now_local,
         reason = request.reason,
-        polish = polish_text(request.open),
         past = or_none(&past.join("\n")),
         history = or_none(request.history),
     )
