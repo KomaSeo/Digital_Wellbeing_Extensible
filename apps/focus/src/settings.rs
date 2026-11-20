@@ -34,6 +34,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use system_care::installer::{InstallOutcome, InstallerKind};
 use system_care::{CareStatus, UpdateOutcome};
 use task_planner::{
     Confirmations, PlannerConfig, APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT,
@@ -338,6 +339,13 @@ pub struct SettingsTab {
     care_message: String,
     /// The text that narrows the list of installed programs.
     installed_filter: String,
+    /// The installer file typed or picked for "설치 파일로 설치하기", and its kind.
+    install_path: String,
+    install_kind: InstallerKind,
+    /// Installers in the user's Downloads folder, newest first (read with the care status).
+    downloaded_installers: Vec<PathBuf>,
+    /// What the last "설치 요청" did.
+    install_message: String,
     /// The last `self_update_status` answer (this program's own update).
     self_update: Option<Result<system_care::self_update::UpdateStatus, String>>,
     /// What the last "업데이트 확인" / "지금 업데이트" request did.
@@ -408,6 +416,10 @@ impl SettingsTab {
             care_fetched_at: None,
             care_message: String::new(),
             installed_filter: String::new(),
+            install_path: String::new(),
+            install_kind: InstallerKind::InstallShield,
+            downloaded_installers: Vec::new(),
+            install_message: String::new(),
             self_update: None,
             self_update_message: String::new(),
             confirming_install: false,
@@ -1867,6 +1879,111 @@ impl SettingsTab {
             });
     }
 
+    /// "설치 파일로 설치하기": a signed installer the service runs with administrator rights
+    /// (`system_care::installer`), for programs winget cannot install as wanted.
+    fn installer_ui(&mut self, ui: &mut egui::Ui, care: &CareStatus) {
+        crate::style::section(ui, "설치 파일로 설치하기");
+        ui.small(
+            "winget으로 설치할 수 없는 프로그램(예: 라이선스가 있는 예전 버전)을 설치 파일로 \
+             설치합니다. 이 PC의 서비스(SYSTEM)가 관리자 권한으로, 화면 없이 설치합니다. 서명된 \
+             설치 파일(.exe, .msi)만 받고, 서명이 없거나 Windows의 구성 요소인 파일은 거절합니다. \
+             설치 옵션은 직접 적지 않고, 설치 프로그램의 종류를 고르면 그 종류의 조용한 설치 \
+             옵션만 씁니다. 클릭해야 넘어가는 설치 파일은 끝나지 않아 30분 뒤에 멈춥니다. 엄격 \
+             모드에서도 바로 됩니다.",
+        );
+        if !self.downloaded_installers.is_empty() {
+            ui.small("다운로드 폴더의 설치 파일(누르면 아래 칸에 넣습니다):");
+            ui.horizontal_wrapped(|ui| {
+                for installer in &self.downloaded_installers {
+                    let name = installer
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if ui.small_button(&name).clicked() {
+                        self.install_path = installer.to_string_lossy().to_string();
+                        if name.to_lowercase().ends_with(".msi") {
+                            self.install_kind = InstallerKind::Msi;
+                        } else if self.install_kind == InstallerKind::Msi {
+                            self.install_kind = InstallerKind::InstallShield;
+                        }
+                    }
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label("설치 파일:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.install_path)
+                    .hint_text(r"예: C:\Users\나\Downloads\CSP_504w_setup.exe")
+                    .desired_width(360.0),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("설치 프로그램 종류:");
+            egui::ComboBox::from_id_salt("installer_kind")
+                .selected_text(self.install_kind.label())
+                .show_ui(ui, |ui| {
+                    for kind in InstallerKind::ALL {
+                        ui.selectable_value(&mut self.install_kind, kind, kind.label());
+                    }
+                });
+        });
+        ui.small(
+            "종류를 모르면 설치 파일을 만든 회사의 안내를 보세요. Clip Studio Paint는 \
+             InstallShield(/s)입니다. 종류를 잘못 고르면 설치 파일이 창을 띄우고 기다리다가 30분 \
+             뒤에 멈춥니다.",
+        );
+        let waiting = !care.pending_installs.is_empty() || care.state.installing.is_some();
+        ui.horizontal(|ui| {
+            let ready = !self.install_path.trim().is_empty();
+            if ui
+                .add_enabled(ready, egui::Button::new("설치 요청"))
+                .clicked()
+            {
+                self.install_message = match call_value(
+                    self.session,
+                    "install_program",
+                    json!({ "path": self.install_path.trim(), "kind": self.install_kind }),
+                ) {
+                    Ok(_) => "서명을 확인했고, 서비스에 설치를 맡겼습니다. 몇 초 뒤에 시작됩니다."
+                        .to_string(),
+                    Err(error) => error,
+                };
+                self.care_fetched_at = None;
+            }
+            if waiting {
+                ui.spinner();
+                ui.small(match &care.state.installing {
+                    Some(name) => format!("{name} 설치 중"),
+                    None => "설치를 기다리는 중".to_string(),
+                });
+            }
+        });
+        if !self.install_message.is_empty() {
+            ui.small(&self.install_message);
+        }
+        if !care.state.installs.is_empty() {
+            ui.small("최근 설치:");
+        }
+        for run in care.state.installs.iter().rev().take(5) {
+            let (color, outcome) = match run.outcome {
+                InstallOutcome::Installed => (GREEN, "설치함"),
+                InstallOutcome::RestartNeeded => (YELLOW, "설치함(다시 시작 필요)"),
+                InstallOutcome::Failed => (RED, "실패"),
+                InstallOutcome::Refused => (RED, "거절"),
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.small(local(run.finished_at));
+                ui.label(&run.file_name);
+                ui.small(format!("서명: {}", run.publisher));
+                ui.colored_label(color, outcome);
+                if !run.message.is_empty() {
+                    ui.small(&run.message);
+                }
+            });
+        }
+    }
+
     fn system_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
         // While the service lists the installed programs, keep looking without input.
         if matches!(&self.care, Some(Ok(care)) if care.installed_waiting) {
@@ -1887,6 +2004,7 @@ impl SettingsTab {
                     serde_json::from_value(reply).map_err(|error| error.to_string())
                 }),
             );
+            self.downloaded_installers = downloaded_installers();
         }
         let care = match &self.care {
             Some(Ok(care)) => Some(care.clone()),
@@ -1990,6 +2108,10 @@ impl SettingsTab {
                     }
                 });
             }
+        }
+
+        if let Some(care) = &care {
+            self.installer_ui(ui, care);
         }
 
         crate::style::section(ui, "시간대 지키기");
@@ -3234,4 +3356,34 @@ fn device_label(sync: &agent_api::user_api::SyncStatus, id: &str) -> String {
     } else {
         named
     }
+}
+
+/// The installers (`.exe`, `.msi`) in the user's Downloads folder, newest first, at most 8.
+fn downloaded_installers() -> Vec<PathBuf> {
+    let Some(folder) = directories::UserDirs::new()
+        .and_then(|user_folders| user_folders.download_dir().map(PathBuf::from))
+    else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let mut installers: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let extension = path.extension()?.to_string_lossy().to_lowercase();
+            if extension != "exe" && extension != "msi" {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    installers.sort_by(|first, second| second.0.cmp(&first.0));
+    installers
+        .into_iter()
+        .take(8)
+        .map(|(_, path)| path)
+        .collect()
 }

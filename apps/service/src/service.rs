@@ -142,7 +142,8 @@ fn run_service() -> anyhow::Result<()> {
 enum CareJob {
     /// Put the time zone of the settings back when it changed.
     TimeZone,
-    /// Run requested and daily program updates (each may take minutes).
+    /// Run requested and daily program updates, and requested installers (each may take
+    /// minutes).
     Updates,
     /// Check for an update of this program, or install it through the update guard, when the
     /// owner asked (`system_care::self_update`).
@@ -185,6 +186,11 @@ fn care_loop(job: CareJob) {
                     &config,
                     chrono::Local::now(),
                     &system_care::winget_upgrade,
+                );
+                system_care::installer::run_installs(
+                    &data_directory,
+                    &system_care::installer::check_signature,
+                    &system_care::installer::run_installer,
                 )
             }
             CareJob::SelfUpdate => {

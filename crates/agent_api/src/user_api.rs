@@ -17,6 +17,7 @@
 //! | `stop_use`       | `{}` ("사용 중지": end the task, lock every app, stop all but blocking) | [`Status`] |
 //! | `resume_use`     | `{}` ("다시 사용하기")                    | [`Status`] |
 //! | `assign`         | `{ situation? }` (planner active)        | [`Status`] |
+//! | `install_program` | `{ path, kind }` (a signed installer, run by the service) | `system_care::CareStatus` |
 //! | `waiting_add` | `{ title, notes?, check_on: "YYYY-MM-DD" }` | [`Status`] |
 //! | `waiting_end` | `{ id, arrived }` (arrived: dealing with it becomes a to-do) | [`Status`] |
 //! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
@@ -534,6 +535,36 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let request =
                 system_care::request_update(&data_directory, &config, program, &user, Utc::now())?;
             tracing::info!("update of {} requested by {user}", request.program);
+            return serde_json::to_value(system_care::status(&data_directory, &config))
+                .map_err(|error| error.to_string());
+        }
+        // Install from an installer file the user chose (signed files only, fixed silent
+        // arguments; see `system_care::installer`). No AI decides (the owner's choice).
+        "install_program" => {
+            let path = params["path"]
+                .as_str()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .ok_or("params.path required")?;
+            let kind: system_care::installer::InstallerKind =
+                serde_json::from_value(params["kind"].clone())
+                    .map_err(|error| format!("params.kind: {error}"))?;
+            let user = machine::session::session_user(machine::session::current_session_id())
+                .unwrap_or_default();
+            let request = system_care::installer::request_install(
+                &data_directory,
+                std::path::Path::new(path),
+                kind,
+                &user,
+                Utc::now(),
+                &system_care::installer::check_signature,
+            )?;
+            tracing::info!(
+                "install of {} ({}) requested by {user}",
+                request.file_name,
+                request.publisher
+            );
+            let config = api.monitor.store().get();
             return serde_json::to_value(system_care::status(&data_directory, &config))
                 .map_err(|error| error.to_string());
         }

@@ -18,6 +18,7 @@
 //! service) and `system_care.json` (written by the service only).
 //! Walkthrough (Korean): `docs/multi_account.md` 6.5.
 
+pub mod installer;
 pub mod self_update;
 
 use ai_focus_rule::AiFocusConfig;
@@ -97,6 +98,10 @@ pub struct CareState {
     pub time_zone_resets: Vec<TimeZoneReset>,
     /// Why the time zone could not be read or put back, if it could not.
     pub time_zone_error: String,
+    /// Installer runs (`installer`), newest last.
+    pub installs: Vec<installer::InstallRun>,
+    /// The installer running now (its file name).
+    pub installing: Option<String>,
 }
 
 /// Responsibility: Carry what the Focus app shows about updates and the time zone.
@@ -114,6 +119,8 @@ pub struct CareStatus {
     pub installed: Option<InstalledList>,
     /// A new list was asked for and the service has not written it yet.
     pub installed_waiting: bool,
+    /// Installers waiting for the service, oldest first.
+    pub pending_installs: Vec<installer::InstallRequest>,
 }
 
 /// Responsibility: Describe one program installed on this PC that winget can update.
@@ -229,7 +236,7 @@ pub fn read_state(data_directory: &Path) -> CareState {
         .unwrap_or_default()
 }
 
-fn write_state(data_directory: &Path, state: &CareState) {
+pub(crate) fn write_state(data_directory: &Path, state: &CareState) {
     let path = data_directory.join(STATE_FILE);
     let temporary = path.with_extension("json.tmp");
     let written = serde_json::to_vec_pretty(state)
@@ -255,6 +262,10 @@ pub fn status(data_directory: &Path, config: &AiFocusConfig) -> CareStatus {
         time_zone_now: current_time_zone().unwrap_or_default(),
         installed: read_installed_list(data_directory),
         installed_waiting: data_directory.join(INSTALLED_REQUEST_FILE).exists(),
+        pending_installs: installer::pending_installs(data_directory)
+            .into_iter()
+            .map(|(_, request)| request)
+            .collect(),
     }
 }
 
@@ -778,19 +789,29 @@ fn run_winget(
     winget: &Path,
     arguments: &[&str],
 ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
+    run_hidden(winget, arguments)
+}
+
+/// Run `program` with `arguments`, without a window, for at most 30 minutes (then it is
+/// stopped); its exit code and output.
+#[cfg(windows)]
+pub(crate) fn run_hidden(
+    program: &Path,
+    arguments: &[&str],
+) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut child = Command::new(winget)
+    let mut child = Command::new(program)
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .map_err(|error| format!("winget을 실행하지 못했습니다: {error}"))?;
-    // Read the output on threads, or a full pipe would stop winget.
+        .map_err(|error| format!("프로그램을 실행하지 못했습니다: {error}"))?;
+    // Read the output on threads, or a full pipe would stop the program.
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let stdout_reader = std::thread::spawn(move || {
@@ -1029,7 +1050,7 @@ fn winget_executable_in_manifest(manifest: &str) -> Option<String> {
 
 /// The last few meaningful lines of a program's output (winget draws progress bars).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn short_output(stdout: &[u8], stderr: &[u8]) -> String {
+pub(crate) fn short_output(stdout: &[u8], stderr: &[u8]) -> String {
     let text = format!(
         "{}\n{}",
         String::from_utf8_lossy(stdout),
