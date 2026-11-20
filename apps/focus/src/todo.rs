@@ -333,7 +333,7 @@ impl FocusApp {
         let idle = !self.pending.load(Ordering::SeqCst);
         crate::style::section(ui, "사용 중지");
         ui.label(format!(
-            "{}에 사용을 멈췄습니다. {} AI 검사, 할 일 고르기, AI 비서, 약속 시작도 멈춥니다.",
+            "{}에 사용을 멈췄습니다. {} AI 검사, 할 일 고르기, 약속 시작도 멈춥니다.",
             stopped_at.with_timezone(&Local).format("%m-%d %H:%M"),
             if self.todo_ui.without_review {
                 "엄격 모드가 아니므로 앱과 웹사이트는 잠그지 않습니다."

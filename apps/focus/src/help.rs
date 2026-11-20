@@ -31,9 +31,6 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
     egui::CollapsingHeader::new("할 일 받기, 완료 보고, 약속, 사용 중지")
         .default_open(false)
         .show(ui, task_flow_guide);
-    egui::CollapsingHeader::new("AI 비서 탭으로 말로 쓰기")
-        .default_open(false)
-        .show(ui, assistant_guide);
     egui::CollapsingHeader::new("Claude Desktop으로 이 프로그램 쓰기")
         .default_open(false)
         .show(ui, claude_desktop_guide);
@@ -348,35 +345,6 @@ fn updates_guide(ui: &mut egui::Ui) {
          켜져 있으면, 새벽 4시 이후 PC가 켜져 있는 첫 때에 저절로 업데이트합니다.",
         "프로그램이 스스로 업데이트하려고 관리자 비밀번호 창을 띄우면, 그 창은 취소하고 위의 \"지금 \
          업데이트\"를 쓰세요.",
-    ] {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("•");
-            paragraph(ui, line);
-        });
-    }
-}
-
-fn assistant_guide(ui: &mut egui::Ui) {
-    paragraph(
-        ui,
-        "AI 비서 탭에서는 하고 싶은 일을 평소에 쓰는 말로 적습니다. 그러면 AI 비서(이 PC의 agent \
-         안에서 도는 Claude)가 이 프로그램의 기능을 대신 씁니다. AI 비서는 Claude Desktop과 같은 \
-         도구를 쓰므로, 할 수 있는 일과 할 수 없는 일도 Claude Desktop과 같습니다(아래 \
-         \"Claude Desktop으로 이 프로그램 쓰기\"의 2번과 3번).",
-    );
-    ui.add_space(4.0);
-    ui.strong("이렇게 쓰면 됩니다");
-    for line in [
-        "글을 적고 \"보내기\"를 누릅니다. Ctrl+Enter를 눌러도 보내집니다.",
-        "\"장보기, 빨래 개기, 은행 가기를 할 일에 올려 줘\"처럼 한 번에 여러 개를 말해도 됩니다. \
-         할 일마다 이 프로그램의 AI가 따로 심사합니다.",
-        "AI 비서가 쓴 기능과 이 프로그램의 AI의 답(승인, 거절과 이유)은 회색 줄로 나옵니다.",
-        "답이 오는 동안에는 다음 말을 보낼 수 없습니다. 할 일을 여러 개 심사하면 1분 넘게 걸릴 수 \
-         있습니다.",
-        "\"새 대화\"를 누르면 대화가 지워집니다. 이미 한 일(추가된 할 일 등)은 그대로 남습니다. \
-         주제가 바뀌면 새 대화를 시작하는 편이 AI 비용이 적게 듭니다.",
-        "AI 비서도 다음에 할 일을 고르지 않습니다. \"다른 일 줘\"라고 하면 이유와 함께 '다른 일 \
-         받기'를 요청하고, 무엇을 할지는 이 프로그램의 AI가 정합니다.",
     ] {
         ui.horizontal_wrapped(|ui| {
             ui.label("•");

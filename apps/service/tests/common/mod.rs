@@ -116,14 +116,10 @@ pub fn fake_claude(address: &str) -> (String, Arc<AtomicUsize>) {
                 );
                 continue;
             }
-            let (stop_reason, content) = if request["tools"].is_array() {
-                assistant_answer(&request)
-            } else {
-                (
-                    "end_turn",
-                    json!([{ "type": "text", "text": answer(&request).to_string() }]),
-                )
-            };
+            let (stop_reason, content) = (
+                "end_turn",
+                json!([{ "type": "text", "text": answer(&request).to_string() }]),
+            );
             let reply = json!({
                 "model": "claude-opus-5-5",
                 "stop_reason": stop_reason,
@@ -141,42 +137,6 @@ pub fn fake_claude(address: &str) -> (String, Arc<AtomicUsize>) {
         }
     });
     (url, calls)
-}
-
-/// The AI assistant: "할 일에 올려 줘: A, B" proposes A and B at once; after the tool
-/// results it answers in words.
-fn assistant_answer(request: &Value) -> (&'static str, Value) {
-    let last = request["messages"]
-        .as_array()
-        .and_then(|messages| messages.last())
-        .cloned()
-        .unwrap_or(Value::Null);
-    let blocks = last["content"].as_array().cloned().unwrap_or_default();
-    if blocks.iter().any(|block| block["type"] == "tool_result") {
-        return (
-            "end_turn",
-            json!([{ "type": "text", "text": format!("{}개를 요청했습니다.", blocks.len()) }]),
-        );
-    }
-    let text: String = blocks
-        .iter()
-        .filter_map(|block| block["text"].as_str())
-        .collect();
-    let Some(items) = text.split("할 일에 올려 줘: ").nth(1) else {
-        return (
-            "end_turn",
-            json!([{ "type": "text", "text": "무엇을 도와 드릴까요?" }]),
-        );
-    };
-    let tool_uses: Vec<Value> = items
-        .split(", ")
-        .enumerate()
-        .map(|(index, title)| {
-            json!({ "type": "tool_use", "id": format!("toolu_{index}"), "name": "propose_todo",
-                    "input": { "title": title.trim() } })
-        })
-        .collect();
-    ("tool_use", Value::Array(tool_uses))
 }
 
 fn answer(request: &Value) -> Value {

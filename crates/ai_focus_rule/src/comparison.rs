@@ -33,12 +33,11 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub const COMPARED_MODELS: [&str; 3] = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 
 /// The features whose questions are sampled (usage purposes; see `usage.rs`).
-pub const COMPARED_PURPOSES: [&str; 5] = [
+pub const COMPARED_PURPOSES: [&str; 4] = [
     "focus check",
     "planner review",
     "planner pick",
     "to-do change review",
-    "assistant",
 ];
 
 /// The usage purpose of the comparison calls.
@@ -171,9 +170,6 @@ pub fn answer_of(purpose: &str, reply: Result<&Value, String>) -> ComparedAnswer
         Ok(response) => response,
         Err(error) => return failed(error),
     };
-    if purpose == "assistant" {
-        return assistant_answer(response);
-    }
     let answer: Value = match parse_structured(response) {
         Ok(answer) => answer,
         Err(error) => return failed(error.to_string()),
@@ -206,33 +202,6 @@ pub fn answer_of(purpose: &str, reply: Result<&Value, String>) -> ComparedAnswer
                 lenience: Some(u8::from(approved)),
             }
         }
-    }
-}
-
-/// The assistant's step: which tools it called (in order of name), or that it answered in
-/// words.
-fn assistant_answer(response: &Value) -> ComparedAnswer {
-    let blocks = response["content"].as_array().cloned().unwrap_or_default();
-    let mut tools: Vec<String> = blocks
-        .iter()
-        .filter(|block| block["type"] == "tool_use")
-        .filter_map(|block| block["name"].as_str().map(str::to_string))
-        .collect();
-    tools.sort();
-    let words: String = blocks
-        .iter()
-        .filter(|block| block["type"] == "text")
-        .filter_map(|block| block["text"].as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    ComparedAnswer {
-        key: if tools.is_empty() {
-            "(answer in words)".into()
-        } else {
-            tools.join(", ")
-        },
-        detail: shorten(&words),
-        lenience: None,
     }
 }
 
@@ -435,14 +404,6 @@ mod tests {
             )),
         );
         assert_eq!((pick.key.as_str(), pick.lenience), ("t1", None));
-        let assistant = answer_of(
-            "assistant",
-            Ok(&json!({ "content": [
-                { "type": "tool_use", "name": "get_status", "input": {} },
-                { "type": "tool_use", "name": "add_todo", "input": {} },
-            ] })),
-        );
-        assert_eq!(assistant.key, "add_todo, get_status");
         let failed = answer_of("planner pick", Err("timeout".into()));
         assert_eq!(failed.key, "error");
     }

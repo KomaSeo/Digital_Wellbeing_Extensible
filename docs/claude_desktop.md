@@ -1,7 +1,7 @@
 # Claude Desktop 연결 설명서
 
 이 문서는 사용자가 PC의 Claude Desktop에서 할 일을 관리할 수 있게 연결하는 방법을 설명합니다.
-MCP 서버의 코드는 `apps/mcp/src/main.rs`이고, 도구는 `crates/machine/src/assistant_tools.rs`에 있습니다. Focus 앱의 AI 비서 탭도 같은 도구를 씁니다([`assistant.md`](assistant.md)).
+MCP 서버의 코드는 `apps/mcp/src/main.rs`이고, 도구는 `crates/machine/src/assistant_tools.rs`에 있습니다.
 
 ---
 
@@ -13,7 +13,7 @@ MCP 서버의 코드는 `apps/mcp/src/main.rs`이고, 도구는 `crates/machine/
 | **MCP** | Claude 같은 AI 앱이 바깥 프로그램의 기능(도구)을 부를 때 쓰는 약속입니다. Model Context Protocol의 줄임말입니다. |
 | **MCP 서버** | AI 앱에 도구를 제공하는 프로그램입니다. 이 프로젝트의 MCP 서버는 `digital-wellbeing-mcp.exe`입니다. |
 | **agent** | 로그인한 사용자마다 하나씩 SYSTEM 권한으로 도는, 차단과 할 일 플래너를 맡은 프로그램입니다([`multi_account.md`](multi_account.md)). |
-| **Focus 앱** | 사용자가 작업 계정에서 보는 이 프로그램의 창(`digital-wellbeing-focus.exe`)입니다. 화면은 한국어이고, 왼쪽부터 **일하기**, **할 일**, **AI 비서**, **차단**, **설정**, **통계**, **도움말** 탭이 있습니다. 이 문서는 이 탭들을 일하기 탭, 할 일 탭, AI 비서 탭, 차단 탭, 설정 탭, 통계 탭, 도움말 탭이라고 부릅니다. |
+| **Focus 앱** | 사용자가 작업 계정에서 보는 이 프로그램의 창(`digital-wellbeing-focus.exe`)입니다. 화면은 한국어이고, 왼쪽부터 **일하기**, **할 일**, **차단**, **설정**, **통계**, **도움말** 탭이 있습니다. 이 문서는 이 탭들을 일하기 탭, 할 일 탭, 차단 탭, 설정 탭, 통계 탭, 도움말 탭이라고 부릅니다. |
 | **설정 탭** | Focus 앱의 설정 화면입니다. 사용자는 이 탭에서 생활 규칙, 지시문, 차단 규칙 같은 설정을 고칩니다. 고친 내용은 자동으로 임시 저장되고, 사용자가 그 설정 아래의 **적용**을 눌러야 설정이 됩니다([`multi_account.md`](multi_account.md) 6.4절). |
 | **일하기 탭** | Focus 앱을 열면 처음 보이는 맨 왼쪽 탭입니다. 사용자는 이 탭에서 AI가 고른 지금 할 일을 보고, 변경 요청(완료 보고와 증거 포함)을 보내고, **사용 중지**를 누릅니다([`task_planner.md`](task_planner.md) 7.1절). |
 | **할 일 탭** | 일하기 탭 오른쪽의 탭입니다. 사용자는 이 탭에서 할 일 목록을 고치고 약속을 넣습니다([`task_planner.md`](task_planner.md) 7.1절). |

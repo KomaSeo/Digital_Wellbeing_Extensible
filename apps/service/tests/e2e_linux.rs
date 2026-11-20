@@ -297,9 +297,7 @@ fn end_to_end(real_key: Option<String>) {
         early_finish_is_judged_by_its_kind(session);
         a_changed_to_do_is_split_into_new_to_dos(session);
         the_week_plan_is_an_overview_of_this_week(session);
-        the_assistant_does_what_the_user_says(session, true);
     } else {
-        the_assistant_does_what_the_user_says(session, false);
         // "I finished it" with a proof screenshot taken a second later.
         assign(
             session,
@@ -752,101 +750,6 @@ fn strict_mode(session: u32, on: bool) {
         )
         .unwrap();
     }
-}
-
-/// The AI assistant tab: one sentence adds two to-dos, each reviewed by the app's AI as
-/// usual. With the real AI, a "give me something else" goes to the app's AI as a repick.
-///
-/// With the real AI this step sets its own rules and to-dos (none from an earlier step, and
-/// nothing that depends on the hour the test runs): the current task must be one that
-/// "the material has not come yet, I'm stuck" fits, or the assistant is right not to ask.
-fn the_assistant_does_what_the_user_says(session: u32, real: bool) {
-    if real {
-        let waiting_on_data = assign(
-            session,
-            &[
-                todo(
-                    "s-survey",
-                    "Analyze the lab survey results",
-                    "Due to the professor tonight. Uses the survey data file from a colleague.",
-                    Some(0),
-                    5,
-                ),
-                todo(
-                    "s-review",
-                    "Review a paper for the reading group",
-                    "Can be done any time this week.",
-                    Some(5),
-                    2,
-                ),
-            ],
-            "Work is fine at any hour; there are no fixed sleep or rest hours. Do the work that \
-             is due first.",
-        );
-        assert_eq!(
-            waiting_on_data, "s-survey",
-            "the work due today comes first, so being stuck on its data fits"
-        );
-    }
-    let send = |text: &str| -> machine::assistant::AssistantView {
-        let sent = call_value(session, "assistant_send", json!({ "text": text })).unwrap();
-        assert_eq!(sent["busy"], true);
-        // A second message while the first is being answered is refused.
-        assert!(call_value(session, "assistant_send", json!({ "text": "또" })).is_err());
-        wait_for(Duration::from_secs(300), || {
-            let view: machine::assistant::AssistantView =
-                serde_json::from_value(call_value(session, "assistant_view", json!({})).ok()?)
-                    .ok()?;
-            (!view.busy).then_some(view)
-        })
-        .expect("the assistant answered")
-    };
-    let view = send("할 일에 올려 줘: 장보기, 빨래 개기");
-    for line in &view.lines {
-        println!("assistant {:?}: {}", line.role, line.text);
-    }
-    use machine::assistant::ChatRole;
-    let proposals: Vec<&str> = view
-        .lines
-        .iter()
-        .filter(|line| line.role == ChatRole::Action && line.text.contains("할 일 추가"))
-        .map(|line| line.text.as_str())
-        .collect();
-    assert_eq!(proposals.len(), 2, "{proposals:?}");
-    assert_eq!(view.lines.last().unwrap().role, ChatRole::Assistant);
-    let status = call(session, "status", json!({})).unwrap();
-    let titles: Vec<String> = status
-        .planner
-        .unwrap()
-        .open_todos
-        .into_iter()
-        .map(|todo| todo.title)
-        .collect();
-    for (wanted, line) in [("장보기", proposals[0]), ("빨래", proposals[1])] {
-        if line.contains("→ 승인") || !real {
-            assert!(
-                titles.iter().any(|title| title.contains(wanted)),
-                "{wanted} missing from {titles:?}"
-            );
-        }
-    }
-    if real {
-        let view = send("지금 일은 자료가 아직 안 와서 막혔어. 다른 일 줘.");
-        for line in &view.lines {
-            println!("assistant {:?}: {}", line.role, line.text);
-        }
-        let status = call(session, "status", json!({})).unwrap();
-        let requests = status.planner.unwrap().recent_requests;
-        // The assistant asks for a repick; it never names the next task itself.
-        assert!(
-            requests
-                .first()
-                .is_some_and(|request| request.request == task_planner::ChangeKind::Repick),
-            "{requests:?}"
-        );
-    }
-    let reset = call_value(session, "assistant_reset", json!({})).unwrap();
-    assert_eq!(reset["lines"].as_array().unwrap().len(), 0);
 }
 
 /// A to-do due in `due_in_days` (None: no deadline).

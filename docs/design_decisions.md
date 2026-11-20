@@ -1352,3 +1352,11 @@
   - 그래서 `list_based_rule`, `ai_focus_rule`, `task_planner`는 이제 화면 라이브러리(egui)에 의존하지 않습니다. Focus 앱이 `rule_ui`에서 빌리던 한글 글꼴 설정(`install_system_fonts`)은 Focus 앱 안(`apps/focus/src/fonts.rs`)으로 옮겼습니다.
   - 예전 버전이 Program Files에 남긴 `digital-wellbeing.exe`를 설치할 때 지우는 코드는 남겼습니다. 업데이트하는 PC에 남아 있을 수 있기 때문입니다.
   - 문서에서 단독 실행 모드를 설명하던 부분(설정 화면, 8765 API, 메모리에만 있는 차단 등)은 지우거나 "rc.79에서 지웠다"고 고쳤습니다.
+
+### 8.130 Focus 앱의 AI 비서 탭을 없앤다
+- **소유자 요청:** "아 그리고 생각보다 AI 비서 기능 안 쓰더라 없애도 될 듯"
+- **소유자가 말한 이유:** 생각보다 쓰지 않기 때문입니다.
+- **AI가 정한 세부:**
+  - Focus 앱의 **AI 비서** 탭, agent 안에서 대화를 돌리던 코드(`machine::assistant`), agent 요청 `assistant_send`, `assistant_view`, `assistant_reset`, 도움말의 "AI 비서 탭으로 말로 쓰기", 문서 `docs/assistant.md`를 지웠습니다. Focus 앱의 탭은 여섯 개가 됩니다.
+  - **Claude Desktop 연결(MCP 서버)은 남겼습니다.** AI 비서와 같은 도구(`machine::assistant_tools`)를 쓰지만, 소유자가 없애라고 한 것은 Focus 앱의 AI 비서 기능이기 때문입니다.
+  - 모델 비교에서 AI 비서의 질문을 비교하던 부분도 지웠습니다. 통계 탭의 AI 사용량 표에는 예전 기록이 최근 7일 동안 "AI 비서(없앤 기능)"로 보일 수 있습니다.

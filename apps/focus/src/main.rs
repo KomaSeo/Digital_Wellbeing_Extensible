@@ -20,7 +20,6 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-mod assistant;
 mod block_prompt;
 mod cover;
 mod elevate;
@@ -140,7 +139,6 @@ enum Tab {
     Work,
     /// "할 일": the to-do list and the appointments.
     Todo,
-    Assistant,
     Blocking,
     Settings,
     Statistics,
@@ -154,7 +152,6 @@ struct FocusApp {
     /// Set by the tray thread: switch to the Settings tab on the next frame.
     open_settings: Arc<AtomicBool>,
     settings: settings::SettingsTab,
-    assistant: assistant::AssistantTab,
     session: u32,
     context: egui::Context,
     shared: Arc<Mutex<Shared>>,
@@ -263,7 +260,6 @@ impl FocusApp {
             tab: Tab::Work,
             open_settings,
             settings: settings::SettingsTab::new(session),
-            assistant: assistant::AssistantTab::new(session, context.clone()),
             session,
             context,
             shared,
@@ -692,7 +688,6 @@ impl eframe::App for FocusApp {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Work, "일하기");
                 ui.selectable_value(&mut self.tab, Tab::Todo, "할 일");
-                ui.selectable_value(&mut self.tab, Tab::Assistant, "AI 비서");
                 ui.selectable_value(&mut self.tab, Tab::Blocking, "차단");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "설정");
                 ui.selectable_value(&mut self.tab, Tab::Statistics, "통계");
@@ -757,7 +752,6 @@ impl eframe::App for FocusApp {
                 match self.tab {
                     Tab::Work => self.work_tab(ui, &status),
                     Tab::Todo => self.todo_tab(ui, &status),
-                    Tab::Assistant => self.assistant.ui(ui),
                     Tab::Blocking => self.blocking_tab(ui, &status),
                     Tab::Settings => {
                         self.login.account_ui(

@@ -163,7 +163,6 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         enforcer: Some(Arc::clone(&enforcer)),
         monitor: Arc::clone(&monitor),
         planner: Some(planner),
-        assistant: Default::default(),
     });
     thread::spawn(move || {
         if let Err(error) = machine::user_api::serve(api, session) {

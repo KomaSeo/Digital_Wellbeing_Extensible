@@ -11,7 +11,7 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 - **접근 요청**: 차단된 앱이나 웹사이트가 일에 필요하다고 AI에게 목적을 적어 보내는 것입니다. AI가 허용하면 정한 시간 동안 쓸 수 있습니다.
 - **엄격 모드**: 설정을 잠그는 상태입니다. 예전 버전에서는 **설정 보호**라고 불렀습니다. 엄격 모드를 켜기 전(**설정 단계**)에는 모든 설정 변경이 바로 적용됩니다. 엄격 모드를 켠 뒤에는 규칙을 더 엄격하게 만드는 변경만 바로 적용되고, 느슨하게 만드는 변경은 이틀 간격으로 세 번 확인해야 적용됩니다. 엄격 모드를 끄는 방법은 엄격 모드를 켤 때 기간, 영구, 관리자 권한, 비밀번호 중에서 고르고, 엄격 모드를 끄면 걸린 차단도 모두 풀립니다.
 - **서비스와 agent**: 서비스는 관리자 권한(SYSTEM)으로 도는 Windows 서비스입니다. 서비스는 로그인한 계정마다 agent를 하나씩 띄우고, agent가 그 계정의 앱을 감시하고 차단합니다.
-- **Focus 앱**: 사용자가 보는 창입니다. 왼쪽부터 일하기, 할 일, AI 비서, 차단, 설정, 통계, 도움말 탭이 있고, 창을 열면 일하기 탭이 먼저 보입니다. 일하기 탭은 AI가 고른 지금 할 일과 변경 요청을 보여 주고, 할 일 탭은 할 일 목록과 약속을 보여 줍니다.
+- **Focus 앱**: 사용자가 보는 창입니다. 왼쪽부터 일하기, 할 일, 차단, 설정, 통계, 도움말 탭이 있고, 창을 열면 일하기 탭이 먼저 보입니다. 일하기 탭은 AI가 고른 지금 할 일과 변경 요청을 보여 주고, 할 일 탭은 할 일 목록과 약속을 보여 줍니다.
 
 ## 2. 이 프로그램이 하는 일
 
@@ -19,7 +19,7 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 - AI가 열린 창을 보고 지금 할 일과 상관없는 앱은 끄고, 상관없는 탭은 닫습니다. 막는 순간 "맞는 차단인가요?" 창이 떠서, 사용자는 그 자리에서 접근을 요청할 수 있습니다.
 - 할 일을 끝냈거나, 막혔거나, 시간이 더 필요하면 사용자는 변경 요청을 보내고 AI가 생활 규칙에 비추어 정합니다.
 - 항상 막을 프로그램과 웹사이트, 약속(시각이 정해진 일), 사용 중지 같은 기능이 있습니다.
-- Focus 앱의 AI 비서 탭이나 Claude Desktop으로, 말로 이 프로그램을 쓸 수 있습니다.
+- Claude Desktop으로, 말로 이 프로그램을 쓸 수 있습니다.
 - 엄격 모드를 켠 뒤에는 API 키를 망가뜨리거나, 할 일을 받지 않거나, 시간대를 바꾸는 식으로 규칙을 피할 수 없게 막습니다.
 
 ## 3. 설치하기
@@ -39,7 +39,6 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 | [`docs/ai_focus_rule.md`](docs/ai_focus_rule.md) | AI 검사, 차단, 차단 창, 도우미 프로그램, 모든 앱 잠금 |
 | [`docs/task_planner.md`](docs/task_planner.md) | 할 일, 지금 할 일 고르기, 변경 요청, 약속 |
 | [`docs/access_grants.md`](docs/access_grants.md) | 접근 요청과 허용 |
-| [`docs/assistant.md`](docs/assistant.md) | Focus 앱의 AI 비서 탭 |
 | [`docs/claude_desktop.md`](docs/claude_desktop.md) | Claude Desktop으로 이 프로그램 쓰기 |
 | [`docs/cost_reduction_options.md`](docs/cost_reduction_options.md) | AI 비용을 줄이는 방법과 소유자의 결정 |
 | [`docs/linux_and_tests.md`](docs/linux_and_tests.md) | 리눅스에서 개발하고 시험하는 방법 |
@@ -59,7 +58,7 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 | `crates/list_based_rule` | 항상 막을 프로그램(블랙리스트와 화이트리스트) |
 | `crates/ai_focus_rule` | AI 검사, 차단, 접근 허용, Claude API 호출, 사용량 기록 |
 | `crates/task_planner` | 할 일 목록과 지금 할 일, 변경 요청과 그 AI 심사 |
-| `crates/machine` | 데이터 폴더, 엄격 모드, 모든 앱 잠금, 로그인, agent의 사용자 API, AI 비서 |
+| `crates/machine` | 데이터 폴더, 엄격 모드, 모든 앱 잠금, 로그인, agent의 사용자 API |
 | `crates/sync` | 여러 기기 동기화의 서버와 클라이언트, 암호화, 병합, 로그인 목록 |
 | `installer/` | Inno Setup 설치 스크립트, 릴리스 버전과 릴리스 노트 |
 | `.github/workflows/` | `ci.yml`(리눅스와 Windows의 테스트, 실제 설치 시험), `release.yml`(배포) |

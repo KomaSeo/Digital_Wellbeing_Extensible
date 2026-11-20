@@ -39,17 +39,11 @@
 //! | `installed_programs_refresh` | `{}` (the service lists the programs winget can update) | [`crate::system_care::CareStatus`] |
 //! | `self_update` | `{ "action": "check"\|"install" }` (the service does it; see `crate::self_update`) | [`crate::self_update::UpdateStatus`] |
 //! | `self_update_status` | `{}`                                 | [`crate::self_update::UpdateStatus`] |
-//! | `assistant_send` | `{ "text": "…" }` (starts a turn and returns at once) | [`crate::assistant::AssistantView`] |
-//! | `assistant_view` | `{}`                                     | [`crate::assistant::AssistantView`] |
-//! | `assistant_reset` | `{}` (new conversation)                 | [`crate::assistant::AssistantView`] |
 //!
 //! The `settings_*` methods let a standard user edit the admin settings: during setup an
 //! edit takes effect at once; once protected it is scheduled and takes effect only after
 //! three "yes" answers two days apart; see [`crate::settings`].
 //!
-//! The `assistant_*` methods are the Focus app's AI assistant tab: Claude reads the user's
-//! words and acts through the same tools Claude Desktop gets ([`crate::assistant_tools`]),
-//! each a call to [`dispatch`]; see [`crate::assistant`].
 //!
 //! `propose_todo` asks the AI to add a to-do to the planner's list; it judges
 //! the proposal against the admin's life rules (see `task_planner`).
@@ -295,8 +289,6 @@ pub struct AgentApi {
     /// The enforcer of this session, for its log of terminated programs (`None` in tests).
     pub enforcer: Option<Arc<enforcer::Enforcer>>,
     pub planner: Option<Arc<TaskPlanner>>,
-    /// The AI assistant tab's conversation.
-    pub assistant: crate::assistant::Assistant,
 }
 
 impl AgentApi {
@@ -572,16 +564,6 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let config = api.monitor.store().get();
             return serde_json::to_value(crate::system_care::status(&data_directory, &config))
                 .map_err(|error| error.to_string());
-        }
-        "assistant_view" => {
-            return serde_json::to_value(api.assistant.view()).map_err(|error| error.to_string());
-        }
-        "assistant_reset" => {
-            api.assistant.reset()?;
-            return serde_json::to_value(api.assistant.view()).map_err(|error| error.to_string());
-        }
-        "assistant_send" => {
-            return Err("assistant_send needs the shared agent (dispatch_shared)".into());
         }
         "settings_protect" => {
             // Without a choice (older callers, tests): permanent.
@@ -980,50 +962,6 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     serde_json::to_value(status).map_err(|error| error.to_string())
 }
 
-/// Handle one request, including `assistant_send`, whose turn runs in its own thread with
-/// the agent shared.
-pub fn dispatch_shared(api: &Arc<AgentApi>, method: &str, params: &Value) -> Result<Value, String> {
-    if method != "assistant_send" {
-        return dispatch(api, method, params);
-    }
-    if api
-        .planner
-        .as_ref()
-        .is_some_and(|planner| planner.stopped())
-    {
-        return Err(
-            "사용을 멈춘 동안에는 AI 비서를 쓸 수 없습니다. 먼저 \"다시 사용하기\"를 누르세요"
-                .into(),
-        );
-    }
-    let text = params["text"]
-        .as_str()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .ok_or("params.text required")?
-        .to_string();
-    if !api.assistant.try_begin() {
-        return Err("AI 비서가 아직 앞의 말에 답하는 중입니다".into());
-    }
-    let shared_api = Arc::clone(api);
-    let spawned = thread::Builder::new().spawn(move || {
-        let config = shared_api.monitor.store().get();
-        let now_local = chrono::Local::now().format("%Y-%m-%d %A %H:%M").to_string();
-        let agent = |method: &str, params: Value| dispatch(&shared_api, method, &params);
-        let run_tool = |name: &str, input: &Value| {
-            crate::assistant_tools::call_tool(name, input, &agent, "assistant")
-        };
-        shared_api
-            .assistant
-            .run_turn(&config, &text, &now_local, &run_tool);
-    });
-    if let Err(error) = spawned {
-        api.assistant.release();
-        return Err(format!("could not start the assistant: {error}"));
-    }
-    serde_json::to_value(api.assistant.view()).map_err(|error| error.to_string())
-}
-
 /// Serve forever on the port of `session` (blocking; run in a thread).
 pub fn serve(api: Arc<AgentApi>, session: u32) -> std::io::Result<()> {
     let port = port_for_session(session);
@@ -1074,7 +1012,7 @@ fn handle(api: &Arc<AgentApi>, mut stream: TcpStream) -> std::io::Result<()> {
         Ok(line) => match serde_json::from_str::<Value>(&line) {
             Ok(request) => {
                 let method = request["method"].as_str().unwrap_or_default();
-                match dispatch_shared(api, method, &request["params"]) {
+                match dispatch(api, method, &request["params"]) {
                     Ok(result) => json!({ "result": result }),
                     Err(message) => json!({ "error": message }),
                 }
@@ -1182,7 +1120,6 @@ mod tests {
             enforcer: None,
             monitor,
             planner: None,
-            assistant: Default::default(),
         });
         // A session id far from real ones so the test port is free.
         let session = 900;
@@ -1224,7 +1161,6 @@ mod tests {
             enforcer: None,
             monitor,
             planner: None,
-            assistant: Default::default(),
         });
         let session = 901;
         thread::spawn(move || serve(api, session));
@@ -1260,7 +1196,6 @@ mod tests {
             enforcer: None,
             monitor,
             planner: Some(planner),
-            assistant: Default::default(),
         };
         let error = dispatch(&api, "start_session", &json!({ "task": "유튜브" })).unwrap_err();
         assert!(error.contains("플래너"));
