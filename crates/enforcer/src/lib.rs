@@ -270,10 +270,9 @@ impl Enforcer {
                 if process_id == own_process_id || !self.in_scope(process_id) {
                     return None;
                 }
+                // Never-terminate programs stay in the list: a rule may need to know they run
+                // (the lockdown rule looks for the Focus app). `collect_blocks` never closes them.
                 let name = process.name().to_string_lossy().to_string();
-                if is_never_terminate(&name) {
-                    return None;
-                }
                 Some(ProcessSnapshot {
                     pid: process_id,
                     name,
@@ -376,12 +375,14 @@ fn terminate(process: &sysinfo::Process) -> bool {
 
 /// Merge rule outputs: first event for each pid wins; reasons are prefixed with rule id.
 /// The helpers of every blocked program (`helpers.rs`) are closed with it.
+/// A program in [`never_terminate`] is never closed, whichever rule asks, and is never
+/// anyone's helper.
 fn collect_blocks(rules: &[Arc<dyn BlockRule>], processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();
     for rule in rules {
         for mut event in rule.evaluate(processes) {
-            if !seen.insert(event.pid) {
+            if is_never_terminate(&event.process_name) || !seen.insert(event.pid) {
                 continue;
             }
             event.reason = format!("{}: {}", rule.id(), event.reason);
@@ -396,7 +397,7 @@ fn collect_blocks(rules: &[Arc<dyn BlockRule>], processes: &[ProcessSnapshot]) -
         for helper in helpers::helpers_of(blocked, processes) {
             // A process some rule keeps (an allowed app, a kept browser) is not a helper to
             // close, even in a blocked program's folder.
-            if rules.iter().any(|rule| rule.keeps(helper)) {
+            if is_never_terminate(&helper.name) || rules.iter().any(|rule| rule.keeps(helper)) {
                 continue;
             }
             if seen.insert(helper.pid) {
@@ -486,6 +487,69 @@ mod tests {
             .collect();
         assert_eq!(pids, vec![1, 3]);
     }
+    /// Responsibility: Test rule that asks to close every process it is shown, and remembers
+    /// their names.
+    struct CloseEverythingRule {
+        seen_names: parking_lot::Mutex<Vec<String>>,
+    }
+
+    impl BlockRule for CloseEverythingRule {
+        fn id(&self) -> &str {
+            "close-everything"
+        }
+        fn name(&self) -> &str {
+            "Close everything"
+        }
+        fn description(&self) -> &str {
+            "Asks to close every process"
+        }
+        fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
+            *self.seen_names.lock() = processes
+                .iter()
+                .map(|process| process.name.clone())
+                .collect();
+            processes
+                .iter()
+                .map(|process| BlockEvent::new(process, "everything"))
+                .collect()
+        }
+    }
+
+    /// The lockdown rule decides whether to close every program by whether the Focus app
+    /// runs (`machine::lockdown`), so rules must be shown never-terminate programs too; the
+    /// enforcer still never closes them, directly or as a helper. Until rc.76 they were left
+    /// out of the list, so a pause in strict mode closed every program.
+    #[test]
+    fn rules_see_never_terminate_programs_but_never_close_them() {
+        let rule = Arc::new(CloseEverythingRule {
+            seen_names: parking_lot::Mutex::new(Vec::new()),
+        });
+        let process = |pid: u32, name: &str, exe: &str| ProcessSnapshot {
+            pid,
+            name: name.into(),
+            exe: Some(exe.into()),
+        };
+        let processes = [
+            process(
+                1,
+                "digital-wellbeing-focus.exe",
+                r"C:\Program Files\DigitalWellbeing\digital-wellbeing-focus.exe",
+            ),
+            process(2, "game.exe", r"C:\Games\game.exe"),
+            process(3, "explorer.exe", r"C:\Games\tools\explorer.exe"),
+        ];
+        let rules: [Arc<dyn BlockRule>; 1] = [rule.clone()];
+        let pids: Vec<u32> = collect_blocks(&rules, &processes)
+            .iter()
+            .map(|event| event.pid)
+            .collect();
+        assert!(rule
+            .seen_names
+            .lock()
+            .contains(&"digital-wellbeing-focus.exe".to_string()));
+        assert_eq!(pids, vec![2], "only the game is closed");
+    }
+
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Responsibility: Test rule: block evil.exe while its flag is set.
