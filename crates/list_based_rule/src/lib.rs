@@ -127,9 +127,10 @@ impl ListConfig {
 
     pub fn is_protected(name: &str) -> bool {
         let normalized = Self::normalize_name(name);
-        always_protected()
-            .iter()
-            .any(|protected| *protected == normalized)
+        app_identity::is_own_program(&normalized)
+            || always_protected()
+                .iter()
+                .any(|protected| *protected == normalized)
     }
 
     pub fn should_block(&self, process_name: &str) -> bool {

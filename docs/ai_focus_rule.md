@@ -557,7 +557,7 @@ Other open windows (title only; judge each in `others`):
   - Focus 앱이 돌고 있지 않으면(작업 관리자로 끔, 트레이에서 끝내기) 덮을 것이 없으므로, 예전처럼 남기는 프로그램 말고는 모두 끕니다.
   - AI 연결이 끊긴 잠금은 브라우저로 키를 고쳐야 하므로 화면을 덮지 않고, 아래처럼 프로그램을 끕니다.
 - AI 연결이 끊긴 잠금(과 Focus 앱이 돌지 않을 때의 다른 잠금)에서는 Enforcer의 규칙 `LockdownRule`이 사용자 세션의 프로그램을 모두 끕니다. 다음 프로그램만 남깁니다.
-  - Windows가 돌아가는 데 꼭 필요한 프로그램과 이 앱(Enforcer의 `never_terminate`).
+  - Windows가 돌아가는 데 꼭 필요한 프로그램(Enforcer의 `never_terminate`)과 이 앱의 실행 파일(`app_identity::OWN_PROGRAMS`).
   - Windows 폴더(`C:\Windows`) 아래의 프로그램.
   - Windows 설정(`systemsettings.exe`, 네트워크를 고칠 때), 웹 보기(`msedgewebview2.exe`), 보안 도우미, 작업 관리자(`LOCKDOWN_KEEPS`).
   - 설정의 "검사하지 않는 앱"(`always_allow`)과 브라우저 목록(`browsers`)의 프로그램.
@@ -789,7 +789,7 @@ Anthropic은 공식 Rust SDK를 제공하지 않으므로, 코드는 REST API를
 - `evaluate(processes)`는 `active_process_blocks()`로 차단할 이름 목록을 받습니다. 그리고 `evaluate`는 실행 중인 프로그램 중 이름이 같은 것마다 차단 이벤트(`BlockEvent`)를 만듭니다.
   차단 목록이 비어 있으면, `evaluate`는 바로 빈 목록을 돌려줍니다. Enforcer가 0.8초마다 이 함수를 부르므로, 개발자는 이 경우를 빠르게 처리했습니다.
 - **주의:** 이 규칙은 이름으로 차단합니다. 그래서 `steam.exe`가 차단되면, 그 이름의 프로그램이 **모두** 꺼집니다.
-- Enforcer는 `never_terminate()` 목록(explorer.exe, 이 앱 등)의 프로그램도 이 함수에 넘기지만, 어느 규칙이 끄라고 해도 그 프로그램은 끄지 않고 다른 프로그램의 도우미로도 끄지 않습니다. 잠금 규칙이 Focus 앱이 도는지 알아야 하기 때문에 목록에서 빼지 않습니다(5.13절, rc.77부터. 예전에는 목록에서 뺐기 때문에 잠금 규칙이 Focus 앱을 보지 못하고 모든 앱을 껐습니다). 모니터도 그 프로그램들을 판정하지 않습니다(5.4절 4번). 그래서 Windows 핵심 프로그램은 두 겹으로 보호됩니다.
+- Enforcer가 **보호하는 프로그램**은 Windows와 데스크톱의 핵심 프로그램(`never_terminate()`, explorer.exe 등)과, Enforcer를 만들 때 넘겨받는 이 앱의 실행 파일(`app_identity::OWN_PROGRAMS`, rc.79부터)입니다. Enforcer는 보호하는 프로그램도 이 함수에 넘기지만, 어느 규칙이 끄라고 해도 그 프로그램은 끄지 않고 다른 프로그램의 도우미로도 끄지 않습니다. 잠금 규칙이 Focus 앱이 도는지 알아야 하기 때문에 목록에서 빼지 않습니다(5.13절, rc.77부터. 예전에는 목록에서 뺐기 때문에 잠금 규칙이 Focus 앱을 보지 못하고 모든 앱을 껐습니다). 모니터도 그 프로그램들을 판정하지 않습니다(5.4절 4번). 그래서 Windows 핵심 프로그램은 두 겹으로 보호됩니다.
 
 ### 7.2 `AiFocusRuleHandle`
 

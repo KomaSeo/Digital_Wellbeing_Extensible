@@ -107,7 +107,7 @@ pub fn run(arguments: &[String]) -> anyhow::Result<()> {
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
 
-    let enforcer = Arc::new(Enforcer::new());
+    let enforcer = Arc::new(Enforcer::new(&app_identity::OWN_PROGRAMS));
     // Only the users' sessions: session 0 holds the services and the setup program itself.
     enforcer.set_process_filter(Arc::new(|process_id| {
         machine::session::process_session_id(process_id).is_some_and(|session| session != 0)
@@ -150,11 +150,7 @@ pub fn run(arguments: &[String]) -> anyhow::Result<()> {
 /// Run the setup program silently (a silent setup keeps the owner's data).
 /// This program's own programs that run in the users' sessions and hold files the setup
 /// replaces (the enforcer never closes them).
-const OWN_USER_PROGRAMS: [&str; 3] = [
-    "digital-wellbeing-focus.exe",
-    "digital-wellbeing-mcp.exe",
-    "digital-wellbeing.exe",
-];
+const OWN_USER_PROGRAMS: [&str; 3] = app_identity::USER_SESSION_PROGRAMS;
 
 /// Close this program's own windows and servers in every session.
 fn close_own_programs() {

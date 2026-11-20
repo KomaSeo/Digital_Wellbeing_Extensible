@@ -1362,3 +1362,11 @@
   - Focus 앱의 **AI 비서** 탭, agent 안에서 대화를 돌리던 코드(`machine::assistant`), agent 요청 `assistant_send`, `assistant_view`, `assistant_reset`, 도움말의 "AI 비서 탭으로 말로 쓰기", 문서 `docs/assistant.md`를 지웠습니다. Focus 앱의 탭은 여섯 개가 됩니다.
   - **Claude Desktop 연결(MCP 서버)은 남겼습니다.** AI 비서와 같은 도구(`machine::assistant_tools`)를 쓰지만, 소유자가 없애라고 한 것은 Focus 앱의 AI 비서 기능이기 때문입니다.
   - 모델 비교에서 AI 비서의 질문을 비교하던 부분도 지웠습니다. 통계 탭의 AI 사용량 표에는 예전 기록이 최근 7일 동안 "AI 비서(없앤 기능)"로 보일 수 있습니다.
+
+### 8.131 이 앱의 실행 파일 이름을 한 곳에 둔다
+- **소유자 요청:** (AI가 decoupling 순서로 "2. 실행 파일 이름을 한 곳으로"를 제안한 뒤) "2번도 해도 좋아"
+- **소유자가 말한 이유:** (말하지 않음)
+- **AI가 정한 세부:**
+  - 이 앱의 실행 파일 이름(서비스, Focus 앱, MCP 서버, 예전 창)을 새 크레이트 `app_identity` 한 곳에 둡니다. 예전에는 Enforcer, 서비스, 업데이트 지킴이, 잠금 규칙, Focus 앱 다섯 곳에 같은 이름이 따로 적혀 있었습니다. rc.77에서 고친 버그(일시 정지 때 앱이 모두 꺼짐)도 이 이름 목록이 Enforcer 안에 섞여 있어서 생겼습니다.
+  - 가장 아래층인 Enforcer는 이제 이 앱의 이름을 모릅니다. Enforcer를 만들 때 보호할 프로그램을 넘겨받습니다(`Enforcer::new(&app_identity::OWN_PROGRAMS)`). 생성자 인자로 받게 해서, 넘기는 것을 잊으면 컴파일되지 않습니다.
+  - 잠금 규칙, AI 검사 모니터, 항상 막을 프로그램 목록은 `app_identity::is_own_program`으로 이 앱의 프로그램을 알아봅니다. 동작은 예전과 같습니다.

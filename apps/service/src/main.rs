@@ -32,14 +32,11 @@ mod update_guard;
 use std::fs::{self, OpenOptions};
 use std::sync::Mutex;
 
-/// Executable names inside the install directory.
-pub const SERVICE_EXE: &str = "digital-wellbeing-service.exe";
-pub const FOCUS_EXE: &str = "digital-wellbeing-focus.exe";
+/// Executable names inside the install directory (named once, in `app_identity`).
+pub use app_identity::{FOCUS_EXE, MCP_EXE, SERVICE_EXE};
 /// The old admin settings window. A machine install no longer ships it (settings are edited
 /// in the Focus app); `install` deletes a copy left by an older version.
-pub const LEGACY_ADMIN_EXE: &str = "digital-wellbeing.exe";
-/// MCP server Claude Desktop starts in the user's account (`docs/claude_desktop.md`).
-pub const MCP_EXE: &str = "digital-wellbeing-mcp.exe";
+pub const LEGACY_ADMIN_EXE: &str = app_identity::LEGACY_ADMIN_EXES[0];
 
 fn main() -> anyhow::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();

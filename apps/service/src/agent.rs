@@ -115,7 +115,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     );
     let ai_rule = AiFocusRuleHandle::new(Arc::clone(&monitor));
 
-    let enforcer = Arc::new(Enforcer::new());
+    let enforcer = Arc::new(Enforcer::new(&app_identity::OWN_PROGRAMS));
     enforcer.set_process_filter(Arc::new(move |process_id| {
         process_session_id(process_id) == Some(session)
     }));

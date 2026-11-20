@@ -92,12 +92,6 @@ pub fn never_terminate() -> &'static [&'static str] {
         "pulseaudio.exe",
         "sshd.exe",
         "login.exe",
-        // this app
-        "digital-wellbeing.exe",
-        "digital_wellbeing.exe",
-        "digital-wellbeing-service.exe",
-        "digital-wellbeing-focus.exe",
-        "digital-wellbeing-mcp.exe",
     ]
 }
 
@@ -141,17 +135,34 @@ pub struct Enforcer {
     /// Processes that would not die (pid, start time) -> when to try again.
     /// Without this, protected processes would be retried every tick forever.
     failed_kills: Arc<Mutex<HashMap<(u32, u64), Instant>>>,
+    /// The caller's own programs (normalized names): never closed, like [`never_terminate`].
+    protected: Arc<Vec<String>>,
 }
 
 impl Enforcer {
-    pub fn new() -> Self {
+    /// An enforcer that never closes the programs named in `protected_programs` (the
+    /// caller's own executables, e.g. `app_identity::OWN_PROGRAMS`) nor [`never_terminate`].
+    pub fn new(protected_programs: &[&str]) -> Self {
         Self {
+            protected: Arc::new(
+                protected_programs
+                    .iter()
+                    .map(|name| normalize_process_name(name))
+                    .collect(),
+            ),
             rules: Arc::new(Mutex::new(Vec::new())),
             logs: Arc::new(Mutex::new(VecDeque::with_capacity(LOG_CAPACITY))),
             generation: Arc::new(AtomicU64::new(0)),
             filter: Arc::new(Mutex::new(None)),
             failed_kills: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Whether `name` is never closed: Windows' and the desktop's essentials, or one of the
+    /// programs given to [`Self::new`].
+    pub fn is_protected(&self, name: &str) -> bool {
+        let normalized = normalize_process_name(name);
+        is_never_terminate(&normalized) || self.protected.iter().any(|own| *own == normalized)
     }
 
     /// Restrict enforcement to pids the filter accepts.
@@ -226,7 +237,7 @@ impl Enforcer {
                     return None;
                 }
                 // Never-terminate programs stay in the list: a rule may need to know they run
-                // (the lockdown rule looks for the Focus app). `collect_blocks` never closes them.
+                // (the lockdown rule looks for the Focus app). `collect_blocks` never closes protected ones.
                 let name = process.name().to_string_lossy().to_string();
                 Some(ProcessSnapshot {
                     pid: process_id,
@@ -238,7 +249,8 @@ impl Enforcer {
             })
             .collect();
 
-        let blocks = collect_blocks(&rules, &snapshots);
+        let protected = |name: &str| self.is_protected(name);
+        let blocks = collect_blocks(&rules, &snapshots, &protected);
         let mut killed = 0usize;
         let now = Instant::now();
         let mut failed = self.failed_kills.lock();
@@ -299,12 +311,6 @@ impl Enforcer {
     }
 }
 
-impl Default for Enforcer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Terminate directly. (sysinfo's `kill()` starts `taskkill.exe` on Windows: one
 /// child process per kill, found via the exe's own folder before System32.)
 #[cfg(windows)]
@@ -330,14 +336,17 @@ fn terminate(process: &sysinfo::Process) -> bool {
 
 /// Merge rule outputs: first event for each pid wins; reasons are prefixed with rule id.
 /// The helpers of every blocked program (`helpers.rs`) are closed with it.
-/// A program in [`never_terminate`] is never closed, whichever rule asks, and is never
-/// anyone's helper.
-fn collect_blocks(rules: &[Arc<dyn BlockRule>], processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
+/// A `protected` program is never closed, whichever rule asks, and is never anyone's helper.
+fn collect_blocks(
+    rules: &[Arc<dyn BlockRule>],
+    processes: &[ProcessSnapshot],
+    protected: &dyn Fn(&str) -> bool,
+) -> Vec<BlockEvent> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();
     for rule in rules {
         for mut event in rule.evaluate(processes) {
-            if is_never_terminate(&event.process_name) || !seen.insert(event.pid) {
+            if protected(&event.process_name) || !seen.insert(event.pid) {
                 continue;
             }
             event.reason = format!("{}: {}", rule.id(), event.reason);
@@ -352,7 +361,7 @@ fn collect_blocks(rules: &[Arc<dyn BlockRule>], processes: &[ProcessSnapshot]) -
         for helper in helpers::helpers_of(blocked, processes) {
             // A process some rule keeps (an allowed app, a kept browser) is not a helper to
             // close, even in a blocked program's folder.
-            if is_never_terminate(&helper.name) || rules.iter().any(|rule| rule.keeps(helper)) {
+            if protected(&helper.name) || rules.iter().any(|rule| rule.keeps(helper)) {
                 continue;
             }
             if seen.insert(helper.pid) {
@@ -388,7 +397,7 @@ mod tests {
             process(2, "evilhelper.exe", "/opt/evil/bin/evilhelper.exe"),
             process(3, "good.exe", "/opt/good/good.exe"),
         ];
-        let blocks = collect_blocks(&[rule], &processes);
+        let blocks = collect_blocks(&[rule], &processes, &is_never_terminate);
         let pids: Vec<u32> = blocks.iter().map(|event| event.pid).collect();
         assert_eq!(pids, vec![1, 2]);
         assert!(
@@ -436,7 +445,7 @@ mod tests {
             process(2, "browser.exe", "/opt/evil/browser.exe"),
             process(3, "evilhelper.exe", "/opt/evil/evilhelper.exe"),
         ];
-        let pids: Vec<u32> = collect_blocks(&[flag, keep], &processes)
+        let pids: Vec<u32> = collect_blocks(&[flag, keep], &processes, &is_never_terminate)
             .iter()
             .map(|event| event.pid)
             .collect();
@@ -494,7 +503,9 @@ mod tests {
             process(3, "explorer.exe", r"C:\Games\tools\explorer.exe"),
         ];
         let rules: [Arc<dyn BlockRule>; 1] = [rule.clone()];
-        let pids: Vec<u32> = collect_blocks(&rules, &processes)
+        let enforcer = Enforcer::new(&["Digital-Wellbeing-Focus.exe"]);
+        let protected = |name: &str| enforcer.is_protected(name);
+        let pids: Vec<u32> = collect_blocks(&rules, &processes, &protected)
             .iter()
             .map(|event| event.pid)
             .collect();
@@ -550,7 +561,7 @@ mod tests {
 
     #[test]
     fn restarting_the_loop_retires_the_old_one() {
-        let enforcer = Arc::new(Enforcer::new());
+        let enforcer = Arc::new(Enforcer::new(&[]));
         let first = enforcer.start_background(Duration::from_millis(5));
         let _second = enforcer.start_background(Duration::from_millis(5));
         first.join().unwrap(); // returns only because the first loop stopped
@@ -559,19 +570,19 @@ mod tests {
 
     #[test]
     fn works_with_zero_rules() {
-        let enforcer = Enforcer::new();
+        let enforcer = Enforcer::new(&[]);
         assert_eq!(enforcer.rule_count(), 0);
         let snapshots = [ProcessSnapshot {
             pid: 1,
             name: "evil.exe".into(),
             exe: None,
         }];
-        assert!(collect_blocks(&[], &snapshots).is_empty());
+        assert!(collect_blocks(&[], &snapshots, &is_never_terminate).is_empty());
     }
 
     #[test]
     fn any_rule_block_wins() {
-        let enforcer = Enforcer::new();
+        let enforcer = Enforcer::new(&[]);
         let flag = Arc::new(AtomicBool::new(false));
         enforcer.register_rule(Arc::new(FlagRule {
             id: "flag",
@@ -584,10 +595,10 @@ mod tests {
             exe: None,
         }];
         let rules = enforcer.rules.lock().clone();
-        assert!(collect_blocks(&rules, &snapshots).is_empty());
+        assert!(collect_blocks(&rules, &snapshots, &is_never_terminate).is_empty());
 
         flag.store(true, Ordering::SeqCst);
-        let blocks = collect_blocks(&rules, &snapshots);
+        let blocks = collect_blocks(&rules, &snapshots, &is_never_terminate);
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].reason.contains("flag"));
         assert_eq!(blocks[0].pid, 1);
@@ -595,7 +606,7 @@ mod tests {
 
     #[test]
     fn replace_rule_same_id() {
-        let enforcer = Enforcer::new();
+        let enforcer = Enforcer::new(&[]);
         enforcer.register_rule(Arc::new(FlagRule {
             id: "flag",
             block: Arc::new(AtomicBool::new(false)),

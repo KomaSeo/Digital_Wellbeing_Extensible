@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/app_identity",
     "crates/list_based_rule",
     "crates/enforcer",
     "crates/ai_focus_rule",
@@ -35,6 +36,7 @@ directories = "6"
 egui = "0.31"
 list_based_rule = { path = "crates/list_based_rule" }
 enforcer = { path = "crates/enforcer" }
+app_identity = { path = "crates/app_identity" }
 ai_focus_rule = { path = "crates/ai_focus_rule" }
 machine = { path = "crates/machine" }
 task_planner = { path = "crates/task_planner" }

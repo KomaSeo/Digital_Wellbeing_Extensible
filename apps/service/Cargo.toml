@@ -8,6 +8,7 @@ name = "digital-wellbeing-service"
 path = "src/main.rs"
 
 [dependencies]
+app_identity = { workspace = true }
 enforcer = { workspace = true }
 list_based_rule = { workspace = true }
 ai_focus_rule = { workspace = true }

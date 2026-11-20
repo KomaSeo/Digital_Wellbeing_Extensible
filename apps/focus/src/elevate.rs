@@ -12,7 +12,7 @@ pub(crate) fn run_settings_unlock() -> Result<(), String> {
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
     let program = std::env::current_exe()
         .map_err(|error| error.to_string())?
-        .with_file_name("digital-wellbeing-service.exe");
+        .with_file_name(app_identity::SERVICE_EXE);
     let wide = |text: &std::ffi::OsStr| -> Vec<u16> { text.encode_wide().chain([0]).collect() };
     let verb = wide("runas".as_ref());
     let file = wide(program.as_os_str());
@@ -44,9 +44,9 @@ pub(crate) fn run_settings_unlock() -> Result<(), String> {
 /// The service program next to this one.
 fn service_program() -> Result<std::path::PathBuf, String> {
     let name = if cfg!(windows) {
-        "digital-wellbeing-service.exe"
+        app_identity::SERVICE_EXE
     } else {
-        "digital-wellbeing-service"
+        app_identity::SERVICE_EXE.trim_end_matches(".exe")
     };
     Ok(std::env::current_exe()
         .map_err(|error| error.to_string())?

@@ -152,6 +152,7 @@ dependencies = [
 name = "ai_focus_rule"
 version = "0.1.0"
 dependencies = [
+ "app_identity",
  "base64",
  "chrono",
  "enforcer",
@@ -218,6 +219,10 @@ name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
+name = "app_identity"
+version = "0.1.0"
 
 [[package]]
 name = "arboard"
@@ -1054,6 +1059,7 @@ name = "digital-wellbeing-focus"
 version = "0.1.0"
 dependencies = [
  "ai_focus_rule",
+ "app_identity",
  "chrono",
  "directories",
  "eframe",
@@ -1082,6 +1088,7 @@ version = "0.1.0"
 dependencies = [
  "ai_focus_rule",
  "anyhow",
+ "app_identity",
  "chrono",
  "enforcer",
  "list_based_rule",
@@ -2420,6 +2427,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 name = "list_based_rule"
 version = "0.1.0"
 dependencies = [
+ "app_identity",
  "chrono",
  "enforcer",
  "parking_lot",
@@ -2461,6 +2469,7 @@ name = "machine"
 version = "0.1.0"
 dependencies = [
  "ai_focus_rule",
+ "app_identity",
  "base64",
  "chrono",
  "enforcer",

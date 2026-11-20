@@ -196,12 +196,16 @@ pub fn is_claude_desktop(process_name: &str) -> bool {
     normalize_process_name(process_name) == CLAUDE_DESKTOP
 }
 
-/// Whether a lockdown leaves `process` running: the programs of [`LOCKDOWN_KEEPS`], the
+/// Whether a lockdown leaves `process` running: this program's own executables, the
+/// programs of [`LOCKDOWN_KEEPS`], the
 /// programs `kept` names (always allowed programs and browsers), and Windows' own programs
 /// (under the Windows folder).
 pub fn spared(process: &ProcessSnapshot, kept: impl Fn(&str) -> bool) -> bool {
     let name = normalize_process_name(&process.name);
-    if LOCKDOWN_KEEPS.contains(&name.as_str()) || kept(&process.name) {
+    if LOCKDOWN_KEEPS.contains(&name.as_str())
+        || app_identity::is_own_program(&name)
+        || kept(&process.name)
+    {
         return true;
     }
     let windows_folder = std::env::var("SystemRoot")
@@ -215,7 +219,7 @@ pub fn spared(process: &ProcessSnapshot, kept: impl Fn(&str) -> bool) -> bool {
 
 /// The Focus app's program: while it runs, a lock that covers the screen closes nothing but
 /// a program held in front of it.
-pub const FOCUS_APP: &str = "digital-wellbeing-focus.exe";
+pub const FOCUS_APP: &str = app_identity::FOCUS_EXE;
 
 /// How long a program may stay in front of the covering Focus app before it is closed.
 pub const COVER_GRACE: Duration = Duration::from_secs(5);

@@ -1254,6 +1254,7 @@ impl FocusMonitor {
     fn exempt(&self, config: &AiFocusConfig, window: &Foreground) -> bool {
         window.pid == std::process::id()
             || is_never_terminate(&window.process_name)
+            || app_identity::is_own_program(&normalize_process_name(&window.process_name))
             || config.is_always_allowed(&window.process_name)
     }
 
