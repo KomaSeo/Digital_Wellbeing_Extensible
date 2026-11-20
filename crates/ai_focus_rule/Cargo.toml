@@ -13,8 +13,6 @@ directories = { workspace = true }
 tracing = { workspace = true }
 sysinfo = { workspace = true }
 enforcer = { workspace = true }
-rule_ui = { workspace = true }
-egui = { workspace = true }
 ureq = { version = "2", features = ["json", "native-certs"] }
 web_client = { workspace = true }
 base64 = "0.22"

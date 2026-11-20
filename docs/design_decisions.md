@@ -1343,3 +1343,12 @@
   - 예전 파일에 남은 `follow_up_rules`, `instructions.follow_up`, `follow_up_queue`, `follow_up_suggestions`는 읽을 때 무시합니다. 그래서 업데이트해도 설정이나 상태 파일을 고칠 필요가 없습니다.
   - 변경 요청 심사가 "끝냈다"와 함께 이어서 할 일을 추가하는 기능(8장의 `list_changes`)은 후속 제안과 다른 기능이라 그대로 두었습니다.
   - 할 일을 추가할 때 후속을 함께 제안하는 방식은 소유자와 이야기만 했고 만들지 않았습니다.
+
+### 8.129 예전 독립 실행 창과 그 부품을 지운다
+- **소유자 요청:** (AI가 decoupling 순서로 "1. 예전 코드 지우기"를 제안한 뒤) "1번은 시작해도 좋아", "본 프로그램에서 사용 안되는 legacy코드는 삭제해도 될 거 같은데"
+- **소유자가 말한 이유:** 본 프로그램에서 쓰지 않는 코드이기 때문입니다.
+- **AI가 정한 세부:**
+  - 예전 독립 실행 창(`apps/desktop`, `digital-wellbeing.exe`, 단독 실행 모드와 `--standalone`), 그 창만 쓰던 8765 포트 API(`crates/tool-api`, `scripts/call.ps1`), 설정 화면 trait(`crates/rule_ui`), 규칙 크레이트 안의 영어 설정 화면(`RuleUi` 구현), 쓰이지 않던 플래너 설정 화면(`PlannerAdminUi`)을 지웠습니다. 설치 파일에는 원래 들어 있지 않던 것들이라, 설치된 프로그램의 동작은 바뀌지 않습니다.
+  - 그래서 `list_based_rule`, `ai_focus_rule`, `task_planner`는 이제 화면 라이브러리(egui)에 의존하지 않습니다. Focus 앱이 `rule_ui`에서 빌리던 한글 글꼴 설정(`install_system_fonts`)은 Focus 앱 안(`apps/focus/src/fonts.rs`)으로 옮겼습니다.
+  - 예전 버전이 Program Files에 남긴 `digital-wellbeing.exe`를 설치할 때 지우는 코드는 남겼습니다. 업데이트하는 PC에 남아 있을 수 있기 때문입니다.
+  - 문서에서 단독 실행 모드를 설명하던 부분(설정 화면, 8765 API, 메모리에만 있는 차단 등)은 지우거나 "rc.79에서 지웠다"고 고쳤습니다.

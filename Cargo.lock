@@ -155,11 +155,9 @@ dependencies = [
  "base64",
  "chrono",
  "directories",
- "egui",
  "enforcer",
  "image",
  "parking_lot",
- "rule_ui",
  "serde",
  "serde_json",
  "sysinfo",
@@ -1053,27 +1051,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "digital-wellbeing"
-version = "0.1.0"
-dependencies = [
- "ai_focus_rule",
- "anyhow",
- "eframe",
- "egui",
- "embed-manifest",
- "enforcer",
- "list_based_rule",
- "machine",
- "rule_ui",
- "serde_json",
- "task_planner",
- "tool-api",
- "tracing",
- "tracing-subscriber",
- "windows-service",
-]
-
-[[package]]
 name = "digital-wellbeing-focus"
 version = "0.1.0"
 dependencies = [
@@ -1085,7 +1062,6 @@ dependencies = [
  "list_based_rule",
  "machine",
  "parking_lot",
- "rule_ui",
  "serde",
  "serde_json",
  "task_planner",
@@ -1446,12 +1422,6 @@ checksum = "9e4cadcff7a5353ba72b7fea76bf2122b5ebdbc68e8155aa56dfdea90083fe1b"
 dependencies = [
  "bytemuck",
 ]
-
-[[package]]
-name = "embed-manifest"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94cdc65b1cf9e871453ce2f86f5aaec24ff2eaa36a1fa3e02e441dddc3613b99"
 
 [[package]]
 name = "endi"
@@ -2453,10 +2423,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "directories",
- "egui",
  "enforcer",
  "parking_lot",
- "rule_ui",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -3776,14 +3744,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rule_ui"
-version = "0.1.0"
-dependencies = [
- "egui",
- "enforcer",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4389,9 +4349,7 @@ version = "0.1.0"
 dependencies = [
  "ai_focus_rule",
  "chrono",
- "egui",
  "parking_lot",
- "rule_ui",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -4580,18 +4538,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow 1.0.4",
-]
-
-[[package]]
-name = "tool-api"
-version = "0.1.0"
-dependencies = [
- "enforcer",
- "list_based_rule",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tracing",
 ]
 
 [[package]]

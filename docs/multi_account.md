@@ -124,9 +124,7 @@
 **머신 설치는 `digital-wellbeing.exe`를 설치하지 않습니다.** `digital-wellbeing.exe`는 예전 버전에서 관리자가 설정을 고치던 창입니다.
 - 설치 프로그램은 이 파일을 복사하지 않고, 시작 메뉴에 "Digital Wellbeing settings (admin)" 바로 가기를 만들지 않습니다. 릴리스 zip 파일에도 이 파일이 없습니다.
 - `digital-wellbeing-service.exe install`은 예전 버전이 Program Files 폴더에 남긴 `digital-wellbeing.exe`를 지웁니다. 그 파일이 실행 중이어서 지우지 못하면, 설치기는 경고만 출력하고 다음 설치 때 다시 지웁니다.
-- 누군가 소스에서 빌드한 `digital-wellbeing.exe`를 이 PC에서 실행하면, 그 창은 "설정은 관리 대상 계정의 Focus 앱 설정 탭에 있다"는 안내만 보여 줍니다. 그 창은 설정을 고치지 않고, 규칙을 실행하지 않고, 로컬 API도 열지 않습니다.
-  그 창은 `DigitalWellbeing` 서비스가 등록되어 있는지로 이 PC가 머신 설치인지 판단합니다. (예전에는 `machine.json` 파일이 있는지로 판단했지만, 이 파일은 제거한 뒤에도 남고 누구나 만들 수 있어서 바꿨습니다.)
-- 서비스가 없는 PC에서 실행하거나 `--standalone` 옵션을 주면, `digital-wellbeing.exe`는 한 계정에서 혼자 쓰는 **단독 실행 모드**로 돕니다. 단독 실행 모드는 소스에서 빌드해서 쓰는 사람을 위한 모드입니다(4.5절, 7장 7번).
+- 한 계정에서 혼자 쓰던 **단독 실행 모드**(`digital-wellbeing.exe`, `--standalone`)와 그 창의 8765 포트 API는 rc.79에서 지웠습니다(설계 결정 8.129).
 
 ### 2.2 설치 후 파일 위치
 
@@ -170,7 +168,6 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
 | `apps/focus/src/settings.rs` | Focus 앱의 설정 탭입니다. agent에게서 설정을 받아 보여 주고, 고친 내용을 임시 저장하고, 설정 묶음마다 고친 내용이 바로 적용될지 예약될지 보여 주고, 사용자가 적용한 묶음을 agent에게 보내고, 예약된 업데이트와 확인 질문, 엄격 모드 양식을 보여 줍니다(6.4절). |
 | `apps/focus/src/statistics.rs` | Focus 앱의 통계 탭입니다([`task_planner.md`](task_planner.md) 7.3절). |
 | `apps/focus/src/help.rs` | Focus 앱의 도움말 탭입니다. |
-| `apps/desktop/src/main.rs` | `digital-wellbeing.exe`입니다. 단독 실행 모드의 창이고, 서비스가 등록된 PC에서는 안내 창만 보여 줍니다(2.1절). |
 | `crates/machine/` | 여러 프로그램이 함께 쓰는 코드입니다. 파일 경로, 관리 대상 계정 설정(`MachineConfig`), 세션 번호, agent와 Focus 앱 사이의 통신(`user_api.rs`), 엄격 모드와 예약된 업데이트(`settings.rs`), 설정 파일을 설정 하나하나의 변경으로 나누고 변경의 방향을 정하는 코드(`setting_edits.rs`)가 있습니다. |
 | `crates/enforcer` | 개발자가 `set_process_filter`를 추가했습니다. agent는 이 함수로 자기 세션의 프로그램만 차단하게 만듭니다. `pattern.rs`는 항상 막을 프로그램과 항상 막을 웹사이트의 이름을 글자 그대로 또는 정규식으로 맞춰 봅니다(6.2절). |
 | `crates/ai_focus_rule` | 개발자가 읽기 전용 설정 저장소와 설정 편집 전용 화면 모드를 추가했습니다. |
@@ -192,7 +189,6 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
 | 시작 프로그램에서 끄거나 컴퓨터를 다시 켠다 | 효과가 없습니다. 차단도 풀리지 않습니다(agent가 차단을 파일에 저장해 두고 이어서 적용합니다). | 서비스는 로그인 전에 자동으로 시작하고, 사용자가 로그인할 때마다 agent를 다시 띄웁니다. |
 | agent가 어떤 이유로든 꺼진다 | 서비스가 2초 안에 agent를 다시 띄웁니다. | `Supervisor`가 agent를 감시합니다. |
 | 서비스가 오류로 꺼진다 | Windows가 5초 뒤에 서비스를 다시 시작합니다(최대 3번). | 설치기가 서비스 복구 설정을 넣었습니다. |
-| 8765 포트의 로컬 API로 규칙을 바꾼다 | ❌ 그 API가 열려 있지 않습니다. | 8765 API는 단독 실행 모드의 `digital-wellbeing.exe`만 엽니다. 머신 설치는 이 파일을 설치하지 않고, 서비스가 등록된 PC에서 이 파일을 실행해도 안내 창만 뜹니다(2.1절). |
 | agent의 API(877x 포트)로 규칙을 바꾼다 | 설정 탭과 같습니다. **엄격 모드이면** 느슨한 변경은 예약된 업데이트가 되고, 확인 질문에 정해진 횟수만큼 "예"라는 답을 받기 전까지 ❌ 적용되지 않습니다. | agent의 API에는 데일리 웰빙, 할 일 플래너, 접근 요청에 관한 요청(`status`, `start_session`, `stop_session`, `assign`, `stop_use`, `resume_use`, `request_change`, `request_access`, `todo_change`, `propose_todo`, `todo_change_schedule`, `task_notes_put`)과 설정에 관한 요청(`settings_get`, `settings_put`, `settings_answer`, `settings_withdraw`, `settings_protect`)이 있습니다. agent는 `settings_put`을 받을 때마다 엄격 모드인지 확인하고 변경마다 방향을 판단하며, `settings_answer`를 받으면 질문할 때가 되었는지 확인합니다(6.4절). |
 | Focus 앱을 끈다 | ✅ 끌 수 있습니다. 하지만 차단에는 영향이 없습니다. | 차단은 Focus 앱이 아니라 agent가 합니다. |
 | 지금 할 일을 "유튜브 보기"라고 직접 적는다 | ❌ 적을 수 없습니다. 지금 할 일을 직접 적는 칸이 없고, 남은 할 일이 있으면 agent가 `start_session`을 거부합니다. | 할 일 플래너는 언제나 켜져 있고, 지금 할 일은 언제나 AI가 할 일 목록에서 고릅니다. 사용자가 "유튜브 보기"를 할 일로 추가하려 해도, AI가 생활 규칙에 비추어 심사합니다([`task_planner.md`](task_planner.md) 4.1절, 4.6절). |
@@ -215,7 +211,6 @@ C:\ProgramData\DigitalWellbeing\       SYSTEM과 관리자만 이 폴더를 열 
    cargo build --release
    ```
    빌드가 끝나면 `target\release\` 폴더에 설치에 쓰는 `digital-wellbeing-service.exe`, `digital-wellbeing-focus.exe`, `digital-wellbeing-mcp.exe`가 생깁니다.
-   같은 폴더에 단독 실행 모드의 `digital-wellbeing.exe`도 생기지만, 설치기는 이 파일을 복사하지 않습니다(2.1절).
 
 ### 4.2 설치 명령
 
@@ -342,7 +337,6 @@ GitHub의 릴리스를 거치면 한 번에 몇 분이 걸립니다. 코드를 �
 | 하고 싶은 것 | 명령 (저장소 폴더에서) |
 |---|---|
 | 자동 테스트만 돌리기 | `cargo test --workspace` |
-| 서비스 없이 내 계정에서 전체 기능 써 보기 | `cargo run -p digital-wellbeing --release -- --standalone` (관리자 PowerShell) |
 | 서비스까지 실제로 설치해 시험하기 | `.\scripts\dev-install.ps1 -Manage <작업 계정>` (관리자 PowerShell, 처음 한 번) |
 | 고친 코드로 다시 설치하기 | `.\scripts\dev-install.ps1` |
 | 다시 설치하고 agent 로그를 실시간으로 보기 | `.\scripts\dev-install.ps1 -Tail` |
@@ -652,10 +646,8 @@ GitHub 저장소에 릴리스를 올릴 수 있는 사람은 이 기능으로 �
    다만 확인 질문에 답하는 요청(`settings_answer`)도 같은 포트로 받으므로, 다른 계정도 질문할 때가 된 업데이트에 답할 수 있습니다. 그래도 이틀 간격은 건너뛸 수 없습니다.
    설정 단계에서는 이 PC의 어느 계정이든 `settings_put`으로 설정을 바로 바꿀 수 있습니다. 설정 탭이 "이 PC를 쓰는 누구나 설정을 바꿀 수 있습니다"라고 안내하는 이유입니다.
    남은 할 일이 있으면, 다른 계정도 이유를 적고 AI의 승인을 받아야 지금 할 일을 바꿀 수 있습니다.
-7. **단독 실행 모드의 8765 API에는 인증이 없습니다.** 머신 설치는 `digital-wellbeing.exe`를 설치하지 않고, 서비스가 등록된 PC에서 이 파일을 실행해도 안내 창만 뜨므로, 이 API가 열리지 않습니다.
-   하지만 누군가 소스에서 빌드한 `digital-wellbeing.exe`를 `--standalone` 옵션으로 강제로 실행하면 이 API가 다시 열립니다. 공유 컴퓨터에서는 이 옵션을 쓰지 마세요.
-8. **프로그램은 로그 파일을 나누어 보관하지 않습니다.** 로그 파일이 10MB를 넘으면, 프로그램은 다음에 시작할 때 그 파일을 비웁니다.
-9. **코드 검토에서 나왔지만 아직 고치지 않은 점:**
+7. **프로그램은 로그 파일을 나누어 보관하지 않습니다.** 로그 파일이 10MB를 넘으면, 프로그램은 다음에 시작할 때 그 파일을 비웁니다.
+8. **코드 검토에서 나왔지만 아직 고치지 않은 점:**
    - **agent가 서비스에 묶여 있지 않습니다.** 서비스 프로세스가 비정상 종료되면, Windows가 서비스를 다시 시작하면서 각 세션에 agent를 하나 더 띄울 수 있습니다. 이때 남은 agent가 포트를 잡고 있어서, 새 agent의 Focus 앱 통신이 열리지 않습니다.
    - **agent가 SYSTEM의 특수 권한을 모두 가지고 돕니다.** agent에게는 그 권한이 필요하지 않으므로, 권한을 줄이는 편이 안전합니다.
    - **서비스는 계속 꺼지는 agent를 2초마다 다시 띄웁니다.** 다시 띄우는 간격을 점점 늘리는 장치가 없어서, 그런 경우 로그가 빠르게 커집니다.

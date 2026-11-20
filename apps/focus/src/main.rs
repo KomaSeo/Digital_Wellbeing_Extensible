@@ -25,6 +25,7 @@ mod block_prompt;
 mod cover;
 mod elevate;
 mod help;
+mod fonts;
 mod login;
 mod reopen;
 mod settings;
@@ -69,7 +70,7 @@ fn main() -> eframe::Result<()> {
         TITLE,
         options,
         Box::new(|creation_context| {
-            rule_ui::install_system_fonts(&creation_context.egui_ctx);
+            fonts::install_system_fonts(&creation_context.egui_ctx);
             style::apply(&creation_context.egui_ctx);
             Ok(Box::new(FocusApp::new(creation_context.egui_ctx.clone())))
         }),

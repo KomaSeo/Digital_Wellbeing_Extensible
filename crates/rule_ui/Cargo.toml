@@ -1,8 +1,0 @@
-[package]
-name = "rule_ui"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-egui = { workspace = true }
-enforcer = { workspace = true }

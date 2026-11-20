@@ -13,13 +13,11 @@
 //! "stop" from the Focus app; everything goes through [`TaskPlanner`].
 //! Walkthrough (Korean): `docs/task_planner.md`.
 
-mod admin_ui;
 mod advisor;
 mod deadline;
 mod model;
 mod planner;
 
-pub use admin_ui::PlannerAdminUi;
 pub use advisor::{
     change_summary, claude_advisor_provider, Advisor, AdvisorProvider, AppointmentRequest,
     AppointmentReview, ClaudeAdvisor, ListChange, Pick, PickRequest, Review, ReviewRequest,

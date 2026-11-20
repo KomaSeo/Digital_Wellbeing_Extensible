@@ -3,8 +3,6 @@ resolver = "2"
 members = [
     "crates/list_based_rule",
     "crates/enforcer",
-    "crates/rule_ui",
-    "crates/tool-api",
     "crates/ai_focus_rule",
     "crates/task_planner",
     "crates/machine",
@@ -12,7 +10,6 @@ members = [
     "crates/web_client",
     "apps/service",
     "apps/focus",
-    "apps/desktop",
     "apps/mcp",
 ]
 
@@ -38,8 +35,6 @@ directories = "6"
 egui = "0.31"
 list_based_rule = { path = "crates/list_based_rule" }
 enforcer = { path = "crates/enforcer" }
-rule_ui = { path = "crates/rule_ui" }
-tool-api = { path = "crates/tool-api" }
 ai_focus_rule = { path = "crates/ai_focus_rule" }
 machine = { path = "crates/machine" }
 task_planner = { path = "crates/task_planner" }
