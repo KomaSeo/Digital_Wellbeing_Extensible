@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+setting_edits = { workspace = true }
 browser_pages = { workspace = true }
 ai_client = { workspace = true }
 json_store = { workspace = true }

@@ -387,7 +387,11 @@ fn apply_list_writes(
     if writes.is_empty() {
         return Ok(());
     }
-    crate::settings::apply_now(data_directory, "planner", &todo_list_edits(writes))?;
+    crate::settings::apply_now(
+        data_directory,
+        task_planner::SETTINGS_FILE.name,
+        &todo_list_edits(writes),
+    )?;
     planner
         .config_store()
         .reload()
@@ -461,7 +465,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .map(|lockdown| lockdown.fix_now)
                 .unwrap_or_default();
             // A new model is put in force (or scheduled) only once the API knows it.
-            if name == "ai_focus" {
+            if name == ai_focus_rule::SETTINGS_FILE.name {
                 let in_force = api.monitor.store().get();
                 let edited: ai_focus_rule::AiFocusConfig =
                     serde_json::from_value(params["content"].clone()).unwrap_or_default();
@@ -810,7 +814,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             if record.approved && !record.list_writes.is_empty() {
                 crate::settings::apply_now(
                     &data_directory,
-                    "planner",
+                    task_planner::SETTINGS_FILE.name,
                     &todo_list_edits(&record.list_writes),
                 )?;
                 planner
@@ -866,7 +870,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 if !writes.is_empty() {
                     crate::settings::apply_now(
                         &data_directory,
-                        "planner",
+                        task_planner::SETTINGS_FILE.name,
                         &todo_list_edits(&writes),
                     )?;
                     planner
@@ -941,7 +945,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let scheduled = crate::settings::schedule(
                 &data_directory,
                 Utc::now(),
-                "planner",
+                task_planner::SETTINGS_FILE.name,
                 todo_list_edits(&planner.writes_for(&record)),
                 &record.via,
                 &note,

@@ -29,7 +29,7 @@
 //! these files or the service; the user does not work in one. Standard users cannot change
 //! the system clock, so the waiting cannot be skipped by setting the clock forward.)
 
-use crate::setting_edits::{self, Direction, Edit};
+use crate::setting_edits::{self, Direction, Edit, SettingsFile};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -38,13 +38,36 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-/// The admin settings a user may edit (name -> file in the data folder). `machine.json`
-/// (which accounts are managed) is not among them.
-pub const EDITABLE: [(&str, &str); 3] = [
-    ("policy", "policy.json"),
-    ("ai_focus", "ai_focus.json"),
-    ("planner", "planner.json"),
+/// The rules whose settings a user may edit. Each rule describes its own file (name, how to
+/// read it, which edits are stricter); this list is the only place that names them.
+/// `machine.json` (which accounts are managed) is not among them.
+pub const SETTINGS_FILES: [&SettingsFile; 3] = [
+    &list_based_rule::SETTINGS_FILE,
+    &ai_focus_rule::SETTINGS_FILE,
+    &task_planner::SETTINGS_FILE,
 ];
+
+/// [`SETTINGS_FILES`] as (name, file in the data folder), in the same order.
+pub const EDITABLE: [(&str, &str); 3] = {
+    let mut pairs = [("", ""); 3];
+    let mut index = 0;
+    while index < SETTINGS_FILES.len() {
+        pairs[index] = (SETTINGS_FILES[index].name, SETTINGS_FILES[index].file_name);
+        index += 1;
+    }
+    pairs
+};
+
+/// Which way `edit` of the settings file `name` moves the rules, as that file's rule says
+/// (an unknown file: looser, so it is never applied at once).
+pub fn direction(name: &str, edit: &Edit, in_force: &Value) -> Direction {
+    SETTINGS_FILES
+        .iter()
+        .find(|file| file.name == name)
+        .map_or(Direction::Looser, |file| {
+            setting_edits::direction(file, edit, in_force)
+        })
+}
 
 /// "Yes" answers in a row that put a scheduled update in force, for updates scheduled by
 /// versions that did not record their own number.
@@ -68,7 +91,8 @@ const SETTINGS_QUESTION_INTERVAL_SECONDS: i64 = 2 * 24 * 3600;
 /// The confirmation numbers in force (`planner.json`'s `confirmations`).
 pub fn confirmations(data_directory: &Path) -> task_planner::Confirmations {
     serde_json::from_value::<task_planner::PlannerConfig>(read_json(
-        &data_directory.join(file_of("planner").expect("planner is editable")),
+        &data_directory
+            .join(file_of(task_planner::SETTINGS_FILE.name).expect("planner is editable")),
     ))
     .map(|planner| planner.confirmations)
     .unwrap_or_default()
@@ -781,8 +805,8 @@ pub fn put(
         });
     }
     let (stricter, looser): (Vec<Edit>, Vec<Edit>) = edits.into_iter().partition(|edit| {
-        setting_edits::direction(name, edit, &in_force) != Direction::Looser
-            || (name == "ai_focus"
+        direction(name, edit, &in_force) != Direction::Looser
+            || (name == ai_focus_rule::SETTINGS_FILE.name
                 && fix_now
                     .iter()
                     .any(|path| edit.path().starts_with(path.as_slice())))
@@ -1123,44 +1147,36 @@ fn write_reservations(data_directory: &Path, reservations: &Reservations) -> Res
 /// `content` as the program reads it, written back: missing settings get their defaults.
 /// A missing file (`null`) counts as all defaults.
 pub fn normalize(name: &str, content: &Value) -> Result<Value, String> {
-    fn round_trip<T: serde::de::DeserializeOwned + Serialize>(
-        content: &Value,
-    ) -> Result<Value, String> {
-        let typed: T =
-            serde_json::from_value(content.clone()).map_err(|error| error.to_string())?;
-        serde_json::to_value(typed).map_err(|error| error.to_string())
-    }
     let content = if content.is_null() {
         &Value::Object(Default::default())
     } else {
         content
     };
-    match name {
-        "policy" => round_trip::<list_based_rule::ListConfig>(content),
-        "ai_focus" => round_trip::<ai_focus_rule::AiFocusConfig>(content),
-        "planner" => round_trip::<task_planner::PlannerConfig>(content),
-        PROTECTION_EDIT_NAME => round_trip::<Protection>(content),
-        _ => Err(format!("'{name}' is not an editable setting")),
+    if name == PROTECTION_EDIT_NAME {
+        return setting_edits::round_trip::<Protection>(content)
+            .map_err(|error| format!("{name}: {error}"));
     }
-    .map_err(|error| format!("{name}: {error}"))
+    let file = SETTINGS_FILES
+        .iter()
+        .find(|file| file.name == name)
+        .ok_or_else(|| format!("'{name}' is not an editable setting"))?;
+    (file.normalize)(content).map_err(|error| format!("{name}: {error}"))
 }
 
 /// The content must load as the program that reads the file expects it.
 fn validate(name: &str, content: &Value) -> Result<(), String> {
-    let result = match name {
-        "policy" => {
-            serde_json::from_value::<list_based_rule::ListConfig>(content.clone()).map(drop)
-        }
-        "ai_focus" => {
-            serde_json::from_value::<ai_focus_rule::AiFocusConfig>(content.clone()).map(drop)
-        }
-        "planner" => {
-            serde_json::from_value::<task_planner::PlannerConfig>(content.clone()).map(drop)
-        }
-        PROTECTION_EDIT_NAME => serde_json::from_value::<Protection>(content.clone()).map(drop),
-        _ => return Err(format!("'{name}' is not an editable setting")),
-    };
-    result.map_err(|error| format!("{name}: {error}"))
+    if name == PROTECTION_EDIT_NAME {
+        return serde_json::from_value::<Protection>(content.clone())
+            .map(drop)
+            .map_err(|error| format!("{name}: {error}"));
+    }
+    let file = SETTINGS_FILES
+        .iter()
+        .find(|file| file.name == name)
+        .ok_or_else(|| format!("'{name}' is not an editable setting"))?;
+    (file.normalize)(content)
+        .map(drop)
+        .map_err(|error| format!("{name}: {error}"))
 }
 
 fn read_json(path: &Path) -> Value {
@@ -1226,11 +1242,18 @@ mod tests {
 
     /// Save `content`; return the id of the scheduled update it made.
     fn schedule_file(data_directory: &Path, at: DateTime<Utc>, content: Value) -> String {
-        put(data_directory, at, "planner", &content, "settings tab", &[])
-            .unwrap()
-            .scheduled
-            .expect("a scheduled update")
-            .id
+        put(
+            data_directory,
+            at,
+            task_planner::SETTINGS_FILE.name,
+            &content,
+            "settings tab",
+            &[],
+        )
+        .unwrap()
+        .scheduled
+        .expect("a scheduled update")
+        .id
     }
 
     #[test]
@@ -2075,6 +2098,211 @@ mod tests {
         assert_eq!(
             snapshot(&data_directory).unwrap().reservations.scheduled[0].describe(),
             ["life_rules = x"]
+        );
+    }
+}
+
+/// The stricter/looser tables of every rule, read through [`direction`].
+#[cfg(test)]
+mod direction_tests {
+    use super::*;
+    use serde_json::json;
+    use setting_edits::diff;
+
+    /// Every row of the stricter/looser table, pinned before the table moved into the rule
+    /// crates (rc.81): the same edits must keep the same direction wherever the table lives.
+    #[test]
+    fn the_whole_direction_table_is_pinned() {
+        use Direction::{Looser, Neutral, Stricter};
+        let ai_focus = json!({
+            "always_allow": ["a.exe"], "private_apps": ["p.exe"], "strikes_to_block": 2,
+            "max_grant_minutes": 120, "check_interval_secs": 60, "recheck_minutes": 15,
+            "send_screenshot": false, "allow_permanent_grants": true, "daily_budget_usd": 1.0,
+            "comparison_percent": 1, "updatable_programs": ["Kakao.KakaoTalk"],
+            "revoked_grants": ["g1"], "always_blocked_sites": ["reddit"], "unblocked": ["b1"],
+            "model": "m", "api_key": "k", "browsers": ["chrome.exe"], "updated_at": "t",
+        });
+        let policy = json!({
+            "mode": "blacklist", "blacklist": ["steam.exe"], "whitelist": ["code.exe"],
+            "updated_at": "t",
+        });
+        let planner = json!({
+            "enabled": false, "life_rules": "a", "appointment_rules": "",
+            "confirmations": { "settings_times": 3, "settings_interval_hours": 48 },
+            "instructions": { "pick": "" },
+        });
+        // (file, field, new value, expected); `+x`/`-x` add or remove the list item `x`.
+        let rows: Vec<(&str, &str, Value, Direction)> = vec![
+            ("policy", "blacklist", json!("+dota.exe"), Stricter),
+            ("policy", "blacklist", json!("-steam.exe"), Looser),
+            ("policy", "whitelist", json!("+game.exe"), Looser),
+            ("policy", "whitelist", json!("-code.exe"), Looser),
+            ("policy", "mode", json!("whitelist"), Looser),
+            ("policy", "updated_at", json!("u"), Neutral),
+            ("ai_focus", "strikes_to_block", json!(1), Stricter),
+            ("ai_focus", "strikes_to_block", json!(3), Looser),
+            ("ai_focus", "max_grant_minutes", json!(60), Stricter),
+            ("ai_focus", "max_grant_minutes", json!(180), Looser),
+            ("ai_focus", "check_interval_secs", json!(30), Stricter),
+            ("ai_focus", "check_interval_secs", json!(120), Looser),
+            ("ai_focus", "recheck_minutes", json!(10), Stricter),
+            ("ai_focus", "recheck_minutes", json!(20), Looser),
+            ("ai_focus", "recheck_minutes", json!(0), Stricter),
+            ("ai_focus", "send_screenshot", json!(true), Stricter),
+            ("ai_focus", "allow_permanent_grants", json!(false), Stricter),
+            ("ai_focus", "daily_budget_usd", json!(2.0), Stricter),
+            ("ai_focus", "daily_budget_usd", json!(0.0), Stricter),
+            ("ai_focus", "daily_budget_usd", json!(0.5), Looser),
+            ("ai_focus", "always_allow", json!("+b.exe"), Looser),
+            ("ai_focus", "always_allow", json!("-a.exe"), Stricter),
+            ("ai_focus", "private_apps", json!("+q.exe"), Looser),
+            ("ai_focus", "private_apps", json!("-p.exe"), Stricter),
+            ("ai_focus", "comparison_percent", json!(10), Neutral),
+            (
+                "ai_focus",
+                "updatable_programs",
+                json!("+Zoom.Zoom"),
+                Neutral,
+            ),
+            (
+                "ai_focus",
+                "updatable_programs",
+                json!("-Kakao.KakaoTalk"),
+                Neutral,
+            ),
+            ("ai_focus", "revoked_grants", json!("+g2"), Stricter),
+            ("ai_focus", "revoked_grants", json!("-g1"), Looser),
+            (
+                "ai_focus",
+                "always_blocked_sites",
+                json!("+youtube"),
+                Stricter,
+            ),
+            ("ai_focus", "always_blocked_sites", json!("-reddit"), Looser),
+            ("ai_focus", "unblocked", json!("+b2"), Looser),
+            ("ai_focus", "unblocked", json!("-b1"), Stricter),
+            ("ai_focus", "model", json!("cheap"), Looser),
+            ("ai_focus", "api_key", json!("other"), Looser),
+            ("ai_focus", "browsers", json!("+x.exe"), Looser),
+            ("ai_focus", "updated_at", json!("u"), Neutral),
+            ("planner", "enabled", json!(true), Stricter),
+            ("planner", "life_rules", json!("b"), Looser),
+            ("planner", "appointment_rules", json!("no games"), Looser),
+            (
+                "planner",
+                "confirmations.settings_times",
+                json!(4),
+                Stricter,
+            ),
+            ("planner", "confirmations.settings_times", json!(2), Looser),
+            (
+                "planner",
+                "confirmations.settings_interval_hours",
+                json!(72),
+                Stricter,
+            ),
+            (
+                "planner",
+                "confirmations.settings_interval_hours",
+                json!(24),
+                Looser,
+            ),
+            ("planner", "instructions.pick", json!("mine"), Looser),
+        ];
+        for (file, field, new_value, expected) in rows {
+            let before = match file {
+                "policy" => policy.clone(),
+                "ai_focus" => ai_focus.clone(),
+                _ => planner.clone(),
+            };
+            let mut after = before.clone();
+            let keys: Vec<&str> = field.split('.').collect();
+            let mut slot = &mut after;
+            for key in &keys {
+                slot = slot.get_mut(*key).expect("the field is in the fixture");
+            }
+            match new_value.as_str() {
+                Some(item) if item.starts_with('+') => {
+                    slot.as_array_mut().unwrap().push(json!(&item[1..]))
+                }
+                Some(item) if item.starts_with('-') => slot
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|value| value != &json!(&item[1..])),
+                _ => *slot = new_value.clone(),
+            }
+            let edits = diff(&before, &after);
+            assert_eq!(edits.len(), 1, "{file} {field}: {edits:?}");
+            let found = direction(file, &edits[0], &before);
+            assert_eq!(found, expected, "{file} {field} -> {new_value}");
+        }
+    }
+
+    #[test]
+    fn stricter_and_looser_edits_are_told_apart() {
+        let in_force = json!({
+            "always_allow": ["a.exe"], "strikes_to_block": 2, "send_screenshot": false,
+            "daily_budget_usd": 1.0, "recheck_minutes": 15, "check_interval_secs": 60,
+            "revoked_grants": [], "unblocked": [], "model": "m",
+            "updatable_programs": ["Kakao.KakaoTalk"],
+        });
+        let direction_of = |after: Value| {
+            let edits = diff(&in_force, &after);
+            assert_eq!(edits.len(), 1, "{edits:?}");
+            direction("ai_focus", &edits[0], &in_force)
+        };
+        let with = |key: &str, value: Value| {
+            let mut changed = in_force.clone();
+            changed[key] = value;
+            changed
+        };
+        use Direction::{Looser, Neutral, Stricter};
+        // The program update list takes effect at once both ways.
+        assert_eq!(
+            direction_of(with(
+                "updatable_programs",
+                json!(["Kakao.KakaoTalk", "Slack.Slack"])
+            )),
+            Neutral
+        );
+        assert_eq!(direction_of(with("updatable_programs", json!([]))), Neutral);
+        assert_eq!(direction_of(with("always_allow", json!([]))), Stricter);
+        assert_eq!(
+            direction_of(with("always_allow", json!(["a.exe", "b.exe"]))),
+            Looser
+        );
+        assert_eq!(direction_of(with("strikes_to_block", json!(1))), Stricter);
+        assert_eq!(direction_of(with("strikes_to_block", json!(3))), Looser);
+        assert_eq!(direction_of(with("send_screenshot", json!(true))), Stricter);
+        assert_eq!(direction_of(with("daily_budget_usd", json!(2.0))), Stricter);
+        assert_eq!(direction_of(with("daily_budget_usd", json!(0.0))), Stricter);
+        assert_eq!(direction_of(with("daily_budget_usd", json!(0.5))), Looser);
+        assert_eq!(direction_of(with("recheck_minutes", json!(0))), Stricter);
+        assert_eq!(direction_of(with("recheck_minutes", json!(30))), Looser);
+        assert_eq!(
+            direction_of(with("revoked_grants", json!(["g1"]))),
+            Stricter
+        );
+        assert_eq!(direction_of(with("unblocked", json!(["b1"]))), Looser);
+        assert_eq!(direction_of(with("model", json!("other"))), Looser);
+
+        let policy = json!({ "blacklist": ["game.exe"] });
+        let blacklist = |after: Value| direction("policy", &diff(&policy, &after)[0], &policy);
+        assert_eq!(
+            blacklist(json!({ "blacklist": ["game.exe", "x.exe"] })),
+            Stricter
+        );
+        assert_eq!(blacklist(json!({ "blacklist": [] })), Looser);
+        let planner = json!({ "enabled": false, "life_rules": "a" });
+        let planner_direction =
+            |after: Value| direction("planner", &diff(&planner, &after)[0], &planner);
+        assert_eq!(
+            planner_direction(json!({ "enabled": true, "life_rules": "a" })),
+            Stricter
+        );
+        assert_eq!(
+            planner_direction(json!({ "enabled": false, "life_rules": "b" })),
+            Looser
         );
     }
 }

@@ -526,7 +526,11 @@ pub fn guard_time_zone(
                 path: vec!["time_zone".into()],
                 value: serde_json::Value::String(current.clone()),
             };
-            match crate::settings::apply_now(data_directory, "ai_focus", &[edit]) {
+            match crate::settings::apply_now(
+                data_directory,
+                ai_focus_rule::SETTINGS_FILE.name,
+                &[edit],
+            ) {
                 Ok(()) => TimeZoneAction::Recorded(current),
                 Err(error) => {
                     TimeZoneAction::Failed(format!("시간대를 설정에 적지 못했습니다: {error}"))

@@ -8,6 +8,7 @@ name = "digital-wellbeing-focus"
 path = "src/main.rs"
 
 [dependencies]
+setting_edits = { workspace = true }
 browser_pages = { workspace = true }
 ai_client = { workspace = true }
 app_identity = { workspace = true }

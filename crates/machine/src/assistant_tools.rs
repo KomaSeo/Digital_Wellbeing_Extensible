@@ -509,7 +509,7 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
             // In the setup stage the change takes effect at once, as the Settings tab's Apply
             // does: anyone may change anything then, so an assistant may as well.
             let protected = current["protected"] == json!(true);
-            if name == "ai_focus" && content.get("api_key").is_none() {
+            if name == ai_focus_rule::SETTINGS_FILE.name && content.get("api_key").is_none() {
                 content["api_key"] = current["files"]["ai_focus"]["api_key"].clone();
             }
             let outcome = agent(

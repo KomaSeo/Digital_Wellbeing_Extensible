@@ -2079,7 +2079,7 @@ impl SettingsTab {
                 } else if fixes_the_lockdown {
                     (GREEN, "적용하면 바로(잠금을 풀기 위한 변경)")
                 } else {
-                    match setting_edits::direction(block.file, edit, &in_force) {
+                    match machine::settings::direction(block.file, edit, &in_force) {
                         Direction::Looser => (YELLOW, "적용하면 예약"),
                         _ => (GREEN, "적용하면 바로"),
                     }

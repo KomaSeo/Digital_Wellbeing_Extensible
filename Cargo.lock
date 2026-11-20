@@ -178,6 +178,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "setting_edits",
  "sysinfo",
  "thiserror 2.0.19",
  "tracing",
@@ -1094,6 +1095,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "setting_edits",
  "task_planner",
  "windows-sys 0.59.0",
 ]
@@ -2469,6 +2471,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "setting_edits",
  "thiserror 2.0.19",
  "tracing",
 ]
@@ -2516,6 +2519,7 @@ dependencies = [
  "pbkdf2",
  "serde",
  "serde_json",
+ "setting_edits",
  "sha2",
  "sync",
  "task_planner",
@@ -4058,6 +4062,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "setting_edits"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4397,6 +4409,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "setting_edits",
  "thiserror 2.0.19",
  "tracing",
 ]

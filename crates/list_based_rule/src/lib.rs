@@ -11,6 +11,7 @@ use thiserror::Error;
 
 mod persistence;
 mod rule;
+mod settings_file;
 
 pub use persistence::{FileListPersistence, ListPersistence};
 pub use rule::{ListBasedRule, ListBasedRuleHandle};
@@ -200,3 +201,5 @@ mod config_tests;
 
 #[cfg(test)]
 mod store_tests;
+
+pub use settings_file::SETTINGS_FILE;

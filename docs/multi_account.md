@@ -465,7 +465,7 @@ agent가 뜨지 않으면, 관리자는 관리자 계정에서 `C:\ProgramData\D
 
 **엄격한 변경을 바로 적용하는 이유:** 규칙을 더 엄격하게 만드는 변경으로는 충동적으로 얻는 것이 없습니다. 그런 변경까지 6일을 기다리게 하면, 사용자가 차분할 때 내린 좋은 결정(예: 게임을 블랙리스트에 넣기)이 늦어질 뿐입니다.
 
-**어떤 변경이 엄격한가** (`machine::setting_edits`의 `direction()`): 아래 표에 없는 설정과, 어느 쪽인지 알 수 없는 변경은 모두 느슨한 변경으로 봅니다. 그래서 다음 변경은 언제나 예약됩니다.
+**어떤 변경이 엄격한가** (각 규칙의 `settings_file.rs`, rc.81부터): 각 규칙(항상 막을 프로그램 `list_based_rule`, AI 검사 `ai_focus_rule`, 할 일 플래너 `task_planner`)이 자기 설정 파일에 대해 어느 변경이 엄격한지 스스로 정합니다(`SETTINGS_FILE`). 설정 코드(`machine::settings`)는 규칙 목록(`SETTINGS_FILES`)만 알고, 설정 이름은 모릅니다. 판단표 전체는 테스트(`the_whole_direction_table_is_pinned`)로 고정되어 있습니다. 아래 표에 없는 설정과, 어느 쪽인지 알 수 없는 변경은 모두 느슨한 변경으로 봅니다. 그래서 다음 변경은 언제나 예약됩니다.
 API 키(`api_key`), 모델(`model`), 생활 규칙(`life_rules`), 약속 규칙(`appointment_rules`), 플래너 AI의 지시문(`instructions`), 브라우저 목록(`browsers`), 화이트리스트와 모드와 저장한 목록 묶음(`whitelist`, `mode`, `strategies`), 설정 파일을 거친 할 일 목록 변경(`todos`, `dismissed`).
 
 | 파일 | 설정 | 바로 적용(엄격한 변경) | 예약(느슨한 변경) |
@@ -547,7 +547,7 @@ API 키(`api_key`), 모델(`model`), 생활 규칙(`life_rules`), 약속 규칙(
 그래서 사용자는 표준 계정에서 일하고, 관리자 계정은 설치할 때와 관리 대상 계정을 바꿀 때(`install --manage` 또는 `machine.json`)만 씁니다.
 관리 대상 계정 목록(`machine.json`)은 설정 탭에서 고칠 수 없습니다. 또 ProgramData 폴더의 로그를 읽을 때도 관리자 계정이 필요합니다.
 
-**동작 방식** (`machine::settings`, `machine::setting_edits`, `apps/focus/src/settings.rs`):
+**동작 방식** (`machine::settings`, `crates/setting_edits`, `apps/focus/src/settings.rs`):
 1. Focus 앱은 관리자 권한이 없으므로 ProgramData 폴더를 열 수 없습니다. 대신 설정 탭이나 통계 탭이 보이는 동안, Focus 앱은 3초마다 agent에게 `settings_get`을 보냅니다. agent는 SYSTEM 권한으로 설정 파일 세 개(`policy.json`, `ai_focus.json`, `planner.json`), 엄격 모드인지, 예약된 업데이트와 지난 결과 기록, 화면에 필요한 읽기 전용 파일(`planner_state.json`, 사용자별 허용·차단·사용량 파일)을 읽어서 돌려줍니다. 엄격 모드여도 돌려줍니다.
 2. 설정 탭은 받은 설정 파일 세 개로 화면에서 고칠 사본을 메모리에 만듭니다. 이때 각 파일에 그 파일의 예약된 업데이트(출처 `settings`)의 변경을 더하고, 임시 저장 파일에 남은 고친 내용을 그 위에 얹습니다. 설정 탭은 사용자 계정의 폴더에 설정 파일을 쓰지 않고, 고친 내용만 임시 저장 파일에 씁니다.
 3. 사용자가 화면에서 설정을 고치면, 설정 탭은 처음 받은 사본과 지금의 사본을 비교해서(`setting_edits::diff`) 고친 내용을 묶음마다 그 막대에 보여 줍니다. 엄격 모드이면, 설정 탭은 agent와 같은 함수(`setting_edits::direction`)로 각 변경이 "적용하면 바로"인지 "적용하면 예약"인지 정해서 보여 줍니다. 고친 뒤 1초가 지나면 설정 탭은 고친 내용(API 키는 빼고)을 임시 저장 파일에 씁니다.
@@ -564,7 +564,7 @@ API 키(`api_key`), 모델(`model`), 생활 규칙(`life_rules`), 약속 규칙(
 8. **이 업데이트 거두기**를 누르면, Focus 앱은 `settings_withdraw`를 보내고, agent는 그 업데이트를 지우고 "거둠"으로 기록합니다. 업데이트에 답하거나 업데이트를 거두면, Focus 앱은 지금 맞는 내용으로 화면을 다시 만듭니다.
 9. 할 일 변경은 이 길을 거치지 않습니다. 할 일 탭은 `todo_change`를 보내고, AI가 승인하면 agent가 그 변경을 바로 적용합니다(`apply_now`). 사용자가 AI 없이 하기로 하면(`todo_change_schedule`), agent는 그 변경을 두 시간 간격의 예약된 업데이트로 만듭니다(`schedule`). 자세한 내용은 [`task_planner.md`](task_planner.md) 4.6절에 있습니다.
 
-**테스트** (`crates/machine/src/settings.rs`, `crates/machine/src/setting_edits.rs`):
+**테스트** (`crates/machine/src/settings.rs`, `crates/setting_edits/src/lib.rs`):
 
 | 테스트 이름 | 이 테스트가 확인하는 것 |
 |---|---|

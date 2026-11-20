@@ -1,13 +1,14 @@
 //! Responsibility: Describe a change to a settings file as separate edits, apply edits to a
-//! file, and tell for each edit whether it makes the rules stricter or looser.
+//! file, and let each rule say whether an edit of its file makes the rules stricter or looser.
 //!
 //! Once the settings are protected, a stricter edit takes effect at once and a looser one is
-//! scheduled (see `crate::settings`). Edits are field by field, so a scheduled edit applies
+//! scheduled (see `machine::settings`). Edits are field by field, so a scheduled edit applies
 //! to whatever the file holds when it takes effect, and edits made meanwhile are kept.
 //!
-//! Which way an edit goes (`direction`) is decided per setting below. An edit whose direction
-//! cannot be told (an API key, a model, the life rules, the AI's instructions, a browser list)
-//! counts as looser: it is never applied at once.
+//! Each rule describes its own settings file with a [`SettingsFile`] (name, file name, how to
+//! read it, and which way each edit goes); `machine::settings` only lists the rules. An edit
+//! whose direction a rule cannot tell (an API key, a model, the life rules, the AI's
+//! instructions, a browser list) counts as looser: it is never applied at once.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -319,93 +320,101 @@ fn array_at<'a>(fields: &'a mut Map<String, Value>, key: &str) -> &'a mut Vec<Va
     slot.as_array_mut().expect("just made an array")
 }
 
-/// Which way `edit` of the settings file `name` moves the rules, given the file in force.
-pub fn direction(name: &str, edit: &Edit, in_force: &Value) -> Direction {
-    use Direction::{Looser, Neutral, Stricter};
+/// Responsibility: Describe one rule's settings file to the settings code.
+pub struct SettingsFile {
+    /// The name edits and scheduled updates use ("policy", "ai_focus", "planner").
+    pub name: &'static str,
+    /// The file in the data folder.
+    pub file_name: &'static str,
+    /// The file as the rule's program reads it: parsed and written back, so missing fields get
+    /// their defaults and unknown ones are dropped; an error when it does not parse.
+    pub normalize: fn(&Value) -> Result<Value, String>,
+    /// Which way an edit of `path` (object keys from the file's root) goes, given the file in
+    /// force. Fields the rule does not name count as [`Direction::Looser`].
+    pub direction: fn(path: &[&str], edit: &Edit, in_force: &Value) -> Direction,
+}
+
+/// [`SettingsFile::normalize`] for a settings type `T`.
+pub fn round_trip<T: serde::de::DeserializeOwned + Serialize>(
+    content: &Value,
+) -> Result<Value, String> {
+    let typed: T = serde_json::from_value(content.clone()).map_err(|error| error.to_string())?;
+    serde_json::to_value(typed).map_err(|error| error.to_string())
+}
+
+/// Which way `edit` of `file` moves the rules, given the file in force. The time stamp a
+/// program writes (`updated_at`) moves nothing.
+pub fn direction(file: &SettingsFile, edit: &Edit, in_force: &Value) -> Direction {
     let path: Vec<&str> = edit.path().iter().map(String::as_str).collect();
-    let old = lookup(in_force, edit.path());
-    let number = |value: &Value| value.as_f64();
-    let new_number = match edit {
-        Edit::Set { value, .. } => number(value),
+    if path.as_slice() == ["updated_at"] {
+        return Direction::Neutral;
+    }
+    (file.direction)(&path, edit, in_force)
+}
+
+/// The number the edit sets, if it sets one.
+pub fn new_number(edit: &Edit) -> Option<f64> {
+    match edit {
+        Edit::Set { value, .. } => value.as_f64(),
         _ => None,
-    };
-    let old_number = number(&old);
-    let smaller_is_stricter = || match (old_number, new_number) {
-        (Some(old_value), Some(new_value)) if new_value <= old_value => Stricter,
-        _ => Looser,
-    };
-    let true_is_stricter = || match edit {
-        Edit::Set { value, .. } if value.as_bool() == Some(true) => Stricter,
-        _ => Looser,
-    };
-    let removing_is_stricter = || match edit {
-        Edit::RemoveItems { .. } => Stricter,
-        _ => Looser,
-    };
-    let adding_is_stricter = || match edit {
-        Edit::AddItems { .. } => Stricter,
-        _ => Looser,
-    };
-    match (name, path.as_slice()) {
-        (_, ["updated_at"]) => Neutral,
-        ("policy", ["blacklist"]) => adding_is_stricter(),
-        ("ai_focus", ["strikes_to_block"] | ["max_grant_minutes"]) => smaller_is_stricter(),
-        ("ai_focus", ["check_interval_secs"]) => smaller_is_stricter(),
-        ("ai_focus", ["recheck_minutes"]) => {
-            // 0 means "as often as unsure windows" (seconds): the strictest choice.
-            let seconds = |minutes: Option<f64>| {
-                minutes.map(|minutes| {
-                    if minutes == 0.0 {
-                        number(&lookup(in_force, &["check_interval_secs".to_string()]))
-                            .unwrap_or(60.0)
-                    } else {
-                        minutes * 60.0
-                    }
-                })
-            };
-            match (seconds(old_number), seconds(new_number)) {
-                (Some(old_value), Some(new_value)) if new_value <= old_value => Stricter,
-                _ => Looser,
-            }
-        }
-        ("ai_focus", ["send_screenshot"]) => true_is_stricter(),
-        ("ai_focus", ["allow_permanent_grants"]) => match edit {
-            Edit::Set { value, .. } if value.as_bool() == Some(false) => Stricter,
-            _ => Looser,
-        },
-        ("ai_focus", ["daily_budget_usd"]) => {
-            // 0 means no limit: the strictest, since focus checks never stop.
-            let limit = |value: Option<f64>| match value {
-                Some(amount) if amount <= 0.0 => f64::INFINITY,
-                Some(amount) => amount,
-                None => f64::INFINITY,
-            };
-            match new_number {
-                Some(_) if limit(new_number) >= limit(old_number) => Stricter,
-                _ => Looser,
-            }
-        }
-        ("ai_focus", ["always_allow"] | ["private_apps"]) => removing_is_stricter(),
-        // Only measures: the extra questions decide nothing.
-        ("ai_focus", ["comparison_percent"]) => Neutral,
-        // Takes effect at once both ways (the owner: "프로그램 업데이트 리스트를 추가는 엄격모드에서
-        // 금지 하지 않도록 해줄래? 어차피 사용은 AI가 감시하니까"): an installed program is
-        // still judged by the window checks.
-        ("ai_focus", ["updatable_programs"]) => Neutral,
-        ("ai_focus", ["revoked_grants"] | ["always_blocked_sites"]) => adding_is_stricter(),
-        // An id no longer blocked is dropped from the list: that lifts nothing.
-        ("ai_focus", ["unblocked"]) => removing_is_stricter(),
-        ("planner", ["enabled"]) => true_is_stricter(),
-        // More answers, and more time between the questions, make a looser edit harder.
-        ("planner", ["confirmations", _]) => match (old_number, new_number) {
-            (Some(old_value), Some(new_value)) if new_value >= old_value => Stricter,
-            _ => Looser,
-        },
-        _ => Looser,
     }
 }
 
-fn lookup(file: &Value, path: &[String]) -> Value {
+/// The number the edited field holds now, if it holds one.
+pub fn old_number(edit: &Edit, in_force: &Value) -> Option<f64> {
+    lookup(in_force, edit.path()).as_f64()
+}
+
+/// A smaller number is stricter (fewer strikes, shorter grants).
+pub fn smaller_is_stricter(edit: &Edit, in_force: &Value) -> Direction {
+    match (old_number(edit, in_force), new_number(edit)) {
+        (Some(old_value), Some(new_value)) if new_value <= old_value => Direction::Stricter,
+        _ => Direction::Looser,
+    }
+}
+
+/// A larger number is stricter (more confirmations, more time between them).
+pub fn larger_is_stricter(edit: &Edit, in_force: &Value) -> Direction {
+    match (old_number(edit, in_force), new_number(edit)) {
+        (Some(old_value), Some(new_value)) if new_value >= old_value => Direction::Stricter,
+        _ => Direction::Looser,
+    }
+}
+
+/// Turning the switch on is stricter.
+pub fn true_is_stricter(edit: &Edit) -> Direction {
+    match edit {
+        Edit::Set { value, .. } if value.as_bool() == Some(true) => Direction::Stricter,
+        _ => Direction::Looser,
+    }
+}
+
+/// Turning the switch off is stricter.
+pub fn false_is_stricter(edit: &Edit) -> Direction {
+    match edit {
+        Edit::Set { value, .. } if value.as_bool() == Some(false) => Direction::Stricter,
+        _ => Direction::Looser,
+    }
+}
+
+/// Taking items out of the list is stricter (an allow list).
+pub fn removing_is_stricter(edit: &Edit) -> Direction {
+    match edit {
+        Edit::RemoveItems { .. } => Direction::Stricter,
+        _ => Direction::Looser,
+    }
+}
+
+/// Putting items into the list is stricter (a block list).
+pub fn adding_is_stricter(edit: &Edit) -> Direction {
+    match edit {
+        Edit::AddItems { .. } => Direction::Stricter,
+        _ => Direction::Looser,
+    }
+}
+
+/// The value at `path` in `file`, or `null`.
+pub fn lookup(file: &Value, path: &[String]) -> Value {
     let mut current = file;
     for key in path {
         match current.get(key) {
@@ -454,203 +463,6 @@ mod tests {
             .collect();
         assert_eq!(titles, ["two!", "three"]);
         assert!(diff(&after, &after).is_empty());
-    }
-
-    /// Every row of the stricter/looser table, pinned before the table moved into the rule
-    /// crates (rc.81): the same edits must keep the same direction wherever the table lives.
-    #[test]
-    fn the_whole_direction_table_is_pinned() {
-        use Direction::{Looser, Neutral, Stricter};
-        let ai_focus = json!({
-            "always_allow": ["a.exe"], "private_apps": ["p.exe"], "strikes_to_block": 2,
-            "max_grant_minutes": 120, "check_interval_secs": 60, "recheck_minutes": 15,
-            "send_screenshot": false, "allow_permanent_grants": true, "daily_budget_usd": 1.0,
-            "comparison_percent": 1, "updatable_programs": ["Kakao.KakaoTalk"],
-            "revoked_grants": ["g1"], "always_blocked_sites": ["reddit"], "unblocked": ["b1"],
-            "model": "m", "api_key": "k", "browsers": ["chrome.exe"], "updated_at": "t",
-        });
-        let policy = json!({
-            "mode": "blacklist", "blacklist": ["steam.exe"], "whitelist": ["code.exe"],
-            "updated_at": "t",
-        });
-        let planner = json!({
-            "enabled": false, "life_rules": "a", "appointment_rules": "",
-            "confirmations": { "settings_times": 3, "settings_interval_hours": 48 },
-            "instructions": { "pick": "" },
-        });
-        // (file, field, new value, expected); `+x`/`-x` add or remove the list item `x`.
-        let rows: Vec<(&str, &str, Value, Direction)> = vec![
-            ("policy", "blacklist", json!("+dota.exe"), Stricter),
-            ("policy", "blacklist", json!("-steam.exe"), Looser),
-            ("policy", "whitelist", json!("+game.exe"), Looser),
-            ("policy", "whitelist", json!("-code.exe"), Looser),
-            ("policy", "mode", json!("whitelist"), Looser),
-            ("policy", "updated_at", json!("u"), Neutral),
-            ("ai_focus", "strikes_to_block", json!(1), Stricter),
-            ("ai_focus", "strikes_to_block", json!(3), Looser),
-            ("ai_focus", "max_grant_minutes", json!(60), Stricter),
-            ("ai_focus", "max_grant_minutes", json!(180), Looser),
-            ("ai_focus", "check_interval_secs", json!(30), Stricter),
-            ("ai_focus", "check_interval_secs", json!(120), Looser),
-            ("ai_focus", "recheck_minutes", json!(10), Stricter),
-            ("ai_focus", "recheck_minutes", json!(20), Looser),
-            ("ai_focus", "recheck_minutes", json!(0), Stricter),
-            ("ai_focus", "send_screenshot", json!(true), Stricter),
-            ("ai_focus", "allow_permanent_grants", json!(false), Stricter),
-            ("ai_focus", "daily_budget_usd", json!(2.0), Stricter),
-            ("ai_focus", "daily_budget_usd", json!(0.0), Stricter),
-            ("ai_focus", "daily_budget_usd", json!(0.5), Looser),
-            ("ai_focus", "always_allow", json!("+b.exe"), Looser),
-            ("ai_focus", "always_allow", json!("-a.exe"), Stricter),
-            ("ai_focus", "private_apps", json!("+q.exe"), Looser),
-            ("ai_focus", "private_apps", json!("-p.exe"), Stricter),
-            ("ai_focus", "comparison_percent", json!(10), Neutral),
-            (
-                "ai_focus",
-                "updatable_programs",
-                json!("+Zoom.Zoom"),
-                Neutral,
-            ),
-            (
-                "ai_focus",
-                "updatable_programs",
-                json!("-Kakao.KakaoTalk"),
-                Neutral,
-            ),
-            ("ai_focus", "revoked_grants", json!("+g2"), Stricter),
-            ("ai_focus", "revoked_grants", json!("-g1"), Looser),
-            (
-                "ai_focus",
-                "always_blocked_sites",
-                json!("+youtube"),
-                Stricter,
-            ),
-            ("ai_focus", "always_blocked_sites", json!("-reddit"), Looser),
-            ("ai_focus", "unblocked", json!("+b2"), Looser),
-            ("ai_focus", "unblocked", json!("-b1"), Stricter),
-            ("ai_focus", "model", json!("cheap"), Looser),
-            ("ai_focus", "api_key", json!("other"), Looser),
-            ("ai_focus", "browsers", json!("+x.exe"), Looser),
-            ("ai_focus", "updated_at", json!("u"), Neutral),
-            ("planner", "enabled", json!(true), Stricter),
-            ("planner", "life_rules", json!("b"), Looser),
-            ("planner", "appointment_rules", json!("no games"), Looser),
-            (
-                "planner",
-                "confirmations.settings_times",
-                json!(4),
-                Stricter,
-            ),
-            ("planner", "confirmations.settings_times", json!(2), Looser),
-            (
-                "planner",
-                "confirmations.settings_interval_hours",
-                json!(72),
-                Stricter,
-            ),
-            (
-                "planner",
-                "confirmations.settings_interval_hours",
-                json!(24),
-                Looser,
-            ),
-            ("planner", "instructions.pick", json!("mine"), Looser),
-        ];
-        for (file, field, new_value, expected) in rows {
-            let before = match file {
-                "policy" => policy.clone(),
-                "ai_focus" => ai_focus.clone(),
-                _ => planner.clone(),
-            };
-            let mut after = before.clone();
-            let keys: Vec<&str> = field.split('.').collect();
-            let mut slot = &mut after;
-            for key in &keys {
-                slot = slot.get_mut(*key).expect("the field is in the fixture");
-            }
-            match new_value.as_str() {
-                Some(item) if item.starts_with('+') => {
-                    slot.as_array_mut().unwrap().push(json!(&item[1..]))
-                }
-                Some(item) if item.starts_with('-') => slot
-                    .as_array_mut()
-                    .unwrap()
-                    .retain(|value| value != &json!(&item[1..])),
-                _ => *slot = new_value.clone(),
-            }
-            let edits = diff(&before, &after);
-            assert_eq!(edits.len(), 1, "{file} {field}: {edits:?}");
-            let found = direction(file, &edits[0], &before);
-            assert_eq!(found, expected, "{file} {field} -> {new_value}");
-        }
-    }
-
-    #[test]
-    fn stricter_and_looser_edits_are_told_apart() {
-        let in_force = json!({
-            "always_allow": ["a.exe"], "strikes_to_block": 2, "send_screenshot": false,
-            "daily_budget_usd": 1.0, "recheck_minutes": 15, "check_interval_secs": 60,
-            "revoked_grants": [], "unblocked": [], "model": "m",
-            "updatable_programs": ["Kakao.KakaoTalk"],
-        });
-        let direction_of = |after: Value| {
-            let edits = diff(&in_force, &after);
-            assert_eq!(edits.len(), 1, "{edits:?}");
-            direction("ai_focus", &edits[0], &in_force)
-        };
-        let with = |key: &str, value: Value| {
-            let mut changed = in_force.clone();
-            changed[key] = value;
-            changed
-        };
-        use Direction::{Looser, Neutral, Stricter};
-        // The program update list takes effect at once both ways.
-        assert_eq!(
-            direction_of(with(
-                "updatable_programs",
-                json!(["Kakao.KakaoTalk", "Slack.Slack"])
-            )),
-            Neutral
-        );
-        assert_eq!(direction_of(with("updatable_programs", json!([]))), Neutral);
-        assert_eq!(direction_of(with("always_allow", json!([]))), Stricter);
-        assert_eq!(
-            direction_of(with("always_allow", json!(["a.exe", "b.exe"]))),
-            Looser
-        );
-        assert_eq!(direction_of(with("strikes_to_block", json!(1))), Stricter);
-        assert_eq!(direction_of(with("strikes_to_block", json!(3))), Looser);
-        assert_eq!(direction_of(with("send_screenshot", json!(true))), Stricter);
-        assert_eq!(direction_of(with("daily_budget_usd", json!(2.0))), Stricter);
-        assert_eq!(direction_of(with("daily_budget_usd", json!(0.0))), Stricter);
-        assert_eq!(direction_of(with("daily_budget_usd", json!(0.5))), Looser);
-        assert_eq!(direction_of(with("recheck_minutes", json!(0))), Stricter);
-        assert_eq!(direction_of(with("recheck_minutes", json!(30))), Looser);
-        assert_eq!(
-            direction_of(with("revoked_grants", json!(["g1"]))),
-            Stricter
-        );
-        assert_eq!(direction_of(with("unblocked", json!(["b1"]))), Looser);
-        assert_eq!(direction_of(with("model", json!("other"))), Looser);
-
-        let policy = json!({ "blacklist": ["game.exe"] });
-        let blacklist = |after: Value| direction("policy", &diff(&policy, &after)[0], &policy);
-        assert_eq!(
-            blacklist(json!({ "blacklist": ["game.exe", "x.exe"] })),
-            Stricter
-        );
-        assert_eq!(blacklist(json!({ "blacklist": [] })), Looser);
-        let planner = json!({ "enabled": false, "life_rules": "a" });
-        let planner_direction =
-            |after: Value| direction("planner", &diff(&planner, &after)[0], &planner);
-        assert_eq!(
-            planner_direction(json!({ "enabled": true, "life_rules": "a" })),
-            Stricter
-        );
-        assert_eq!(
-            planner_direction(json!({ "enabled": false, "life_rules": "b" })),
-            Looser
-        );
     }
 
     #[test]

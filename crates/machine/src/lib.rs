@@ -29,7 +29,7 @@ pub mod model_catalog;
 pub mod password;
 pub mod self_update;
 pub mod session;
-pub mod setting_edits;
+pub use setting_edits;
 pub mod settings;
 pub mod system_care;
 pub mod user_api;

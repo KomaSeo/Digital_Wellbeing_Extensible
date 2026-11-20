@@ -18,6 +18,7 @@ mod deadline;
 mod focus_link;
 mod model;
 mod planner;
+mod settings_file;
 
 pub use advisor::{
     change_summary, claude_advisor_provider, Advisor, AdvisorProvider, AppointmentRequest,
@@ -41,3 +42,5 @@ pub use planner::{PlannerError, TaskPlanner};
 
 #[cfg(test)]
 mod tests;
+
+pub use settings_file::SETTINGS_FILE;

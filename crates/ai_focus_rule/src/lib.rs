@@ -17,6 +17,7 @@ mod judge;
 mod monitor;
 pub mod platform;
 mod rule;
+mod settings_file;
 
 // The Claude client and the JSON file store live in their own crates (`ai_client`,
 // `json_store`); these names keep the paths inside this crate short.
@@ -33,3 +34,5 @@ pub use monitor::{
     JudgeProvider, MonitorState, NewBlock, SavedBlocks, VerdictLogEntry,
 };
 pub use rule::{AiFocusRule, AiFocusRuleHandle};
+
+pub use settings_file::SETTINGS_FILE;

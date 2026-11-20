@@ -62,6 +62,8 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 | `crates/ai_client` | Claude API 호출, AI 연결 상태, 토큰 사용량과 비용, 모델 비교. 어느 규칙도 모릅니다 |
 | `crates/json_store` | JSON 파일 하나를 메모리에 들고 원자적으로 쓰는 저장소(`JsonStore`) |
 | `crates/app_identity` | 이 앱의 실행 파일 이름 |
+| `crates/setting_edits` | 설정 파일의 변경을 설정 하나하나로 나누고 적용하는 코드, 규칙이 자기 설정 파일을 설명하는 틀(`SettingsFile`) |
+| `crates/browser_pages` | 브라우저 이름, 탭 제목에서 페이지·사이트 읽기, YouTube 채널, 검색어 |
 | `crates/sync` | 여러 기기 동기화의 서버와 클라이언트, 암호화, 병합, 로그인 목록 |
 | `installer/` | Inno Setup 설치 스크립트, 릴리스 버전과 릴리스 노트 |
 | `.github/workflows/` | `ci.yml`(리눅스와 Windows의 테스트, 실제 설치 시험), `release.yml`(배포) |
