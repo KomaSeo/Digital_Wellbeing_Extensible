@@ -341,6 +341,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unknown_efforts_fall_back_to_the_defaults() {
+        let config = AiFocusConfig {
+            check_effort: "a lot".into(),
+            decision_effort: "max".into(),
+            ..Default::default()
+        };
+        assert_eq!(config.check_effort(), "low");
+        assert_eq!(config.decision_effort(), "max");
+    }
+
+    #[test]
     fn task_manager_is_always_allowed() {
         let config = AiFocusConfig::default();
         assert!(config.is_always_allowed("Taskmgr.exe"));

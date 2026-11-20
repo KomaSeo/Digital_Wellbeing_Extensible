@@ -23,7 +23,7 @@
 //! is closed, and every program when the Focus app does not run.
 //! Walkthrough (Korean): `docs/ai_focus_rule.md` 5.13.
 
-use ai_focus_rule::connection::{Connection, KeyProblem};
+use ai_client::connection::{Connection, KeyProblem};
 use ai_focus_rule::AiFocusStore;
 use enforcer::{normalize_process_name, BlockEvent, BlockRule, ProcessSnapshot};
 use parking_lot::Mutex;

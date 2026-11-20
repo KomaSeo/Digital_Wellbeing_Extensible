@@ -511,7 +511,7 @@ fn end_to_end(real_key: Option<String>) {
         assert_eq!(
             locked.cause,
             LockdownCause::Connection {
-                problem: ai_focus_rule::connection::KeyProblem::Rejected
+                problem: ai_client::connection::KeyProblem::Rejected
             }
         );
         assert!(locked.browsers_allowed);

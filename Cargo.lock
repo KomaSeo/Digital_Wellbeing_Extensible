@@ -149,22 +149,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai_client"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "json_store",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tracing",
+ "ureq",
+ "web_client",
+]
+
+[[package]]
 name = "ai_focus_rule"
 version = "0.1.0"
 dependencies = [
+ "ai_client",
  "app_identity",
- "base64",
  "chrono",
  "enforcer",
  "image",
+ "json_store",
  "parking_lot",
  "serde",
  "serde_json",
  "sysinfo",
  "thiserror 2.0.19",
  "tracing",
- "ureq",
- "web_client",
  "windows-sys 0.59.0",
  "x11rb",
  "xcap",
@@ -1058,6 +1073,7 @@ dependencies = [
 name = "digital-wellbeing-focus"
 version = "0.1.0"
 dependencies = [
+ "ai_client",
  "ai_focus_rule",
  "app_identity",
  "chrono",
@@ -1086,6 +1102,7 @@ dependencies = [
 name = "digital-wellbeing-service"
 version = "0.1.0"
 dependencies = [
+ "ai_client",
  "ai_focus_rule",
  "anyhow",
  "app_identity",
@@ -2300,6 +2317,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "json_store"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2468,6 +2495,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 name = "machine"
 version = "0.1.0"
 dependencies = [
+ "ai_client",
  "ai_focus_rule",
  "app_identity",
  "base64",
@@ -4354,8 +4382,9 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 name = "task_planner"
 version = "0.1.0"
 dependencies = [
- "ai_focus_rule",
+ "ai_client",
  "chrono",
+ "json_store",
  "parking_lot",
  "serde",
  "serde_json",

@@ -358,7 +358,7 @@ pub struct SettingsSnapshot {
     pub planner_state: Value,
     pub grants: BTreeMap<String, Value>,
     pub blocks: BTreeMap<String, Value>,
-    /// Every user's token usage file (see `ai_focus_rule::usage`).
+    /// Every user's token usage file (see `ai_client::usage`).
     pub usage: BTreeMap<String, Value>,
     /// The models the key can use, for the model choice.
     #[serde(default)]

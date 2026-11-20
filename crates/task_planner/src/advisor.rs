@@ -13,8 +13,8 @@ use crate::model::{
     occurrence_day, series_id, Appointment, AppointmentInput, Assignment, ChangeKind, ChangeRecord,
     DoneRecord, TaskNotes, TodoChange, TodoChangeRecord, TodoItem, WhenTimeIsUp,
 };
-use ai_focus_rule::claude::{jpeg_block, text_block, ClaudeClient};
-use ai_focus_rule::{AiFocusConfig, JudgeError};
+use ai_client::claude::{jpeg_block, text_block, ClaudeClient};
+use ai_client::{AiSettings, JudgeError};
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -559,15 +559,15 @@ pub trait Advisor: Send + Sync {
 }
 
 pub type AdvisorProvider =
-    Arc<dyn Fn(&AiFocusConfig) -> Result<Arc<dyn Advisor>, JudgeError> + Send + Sync>;
+    Arc<dyn Fn(&AiSettings) -> Result<Arc<dyn Advisor>, JudgeError> + Send + Sync>;
 
-/// Claude advisor using the API key and model from the AI focus settings.
+/// Claude advisor using the key, model and effort of `settings`.
 pub fn claude_advisor_provider() -> AdvisorProvider {
-    Arc::new(|config: &AiFocusConfig| {
-        let key = config.resolve_api_key().ok_or(JudgeError::NoApiKey)?;
+    Arc::new(|settings: &AiSettings| {
+        let key = settings.api_key.clone().ok_or(JudgeError::NoApiKey)?;
         Ok(Arc::new(ClaudeAdvisor {
-            client: ClaudeClient::new(key, config.model.clone()),
-            effort: config.decision_effort().to_string(),
+            client: ClaudeClient::new(key, settings.model.clone()),
+            effort: settings.effort.clone(),
         }) as Arc<dyn Advisor>)
     })
 }

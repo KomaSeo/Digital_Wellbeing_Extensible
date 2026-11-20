@@ -1370,3 +1370,11 @@
   - 이 앱의 실행 파일 이름(서비스, Focus 앱, MCP 서버, 예전 창)을 새 크레이트 `app_identity` 한 곳에 둡니다. 예전에는 Enforcer, 서비스, 업데이트 지킴이, 잠금 규칙, Focus 앱 다섯 곳에 같은 이름이 따로 적혀 있었습니다. rc.77에서 고친 버그(일시 정지 때 앱이 모두 꺼짐)도 이 이름 목록이 Enforcer 안에 섞여 있어서 생겼습니다.
   - 가장 아래층인 Enforcer는 이제 이 앱의 이름을 모릅니다. Enforcer를 만들 때 보호할 프로그램을 넘겨받습니다(`Enforcer::new(&app_identity::OWN_PROGRAMS)`). 생성자 인자로 받게 해서, 넘기는 것을 잊으면 컴파일되지 않습니다.
   - 잠금 규칙, AI 검사 모니터, 항상 막을 프로그램 목록은 `app_identity::is_own_program`으로 이 앱의 프로그램을 알아봅니다. 동작은 예전과 같습니다.
+
+### 8.132 Claude 호출과 JSON 저장소를 공용 크레이트로 빼고, 플래너를 AI 검사에서 떼어 낸다
+- **소유자 요청:** (AI가 decoupling 3·4·5단계를 설명한 뒤) "3,4,5단계도 해봐"
+- **소유자가 말한 이유:** (말하지 않음)
+- **AI가 정한 세부:**
+  - Claude 호출(`claude.rs`), AI 연결 상태(`connection.rs`), 토큰 사용량(`usage.rs`), 모델 비교(`comparison.rs`)와 오류 타입(`JudgeError`)을 새 크레이트 `ai_client`로, JSON 파일 저장소(`JsonStore`)를 새 크레이트 `json_store`로 옮겼습니다. 코드는 거의 그대로이고 동작은 같습니다. 하루 예산 확인(`over_budget`)은 AI 검사 설정 전체 대신 예산 금액만 받습니다.
+  - 할 일 플래너는 이제 `ai_focus_rule`에 의존하지 않습니다. 플래너가 AI 검사에게 바라던 네 가지(키·모델·노력 정도, 최근 활동 기록, 지금 보는 할 일, AI 검사 켜고 끄기)를 `task_planner::FocusLink` trait으로 정의하고, agent가 이 trait을 AI 검사 모니터로 구현합니다(`machine::focus_link::MonitorLink`). 소유자가 "플래너가 할일 추가 할 때 심사하기 위해서 rule 쓰지 않나?"라고 물어 이 연결을 확인했습니다. 할 일 심사는 지금처럼 AI 검사 설정의 키와 모델, 생활 규칙, 최근 활동 기록을 그대로 씁니다.
+  - 플래너의 테스트는 진짜 모니터 대신 가짜 `FocusLink`를 씁니다.

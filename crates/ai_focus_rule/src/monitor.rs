@@ -1490,7 +1490,7 @@ impl FocusMonitor {
         if let Some((spent, limit)) = self
             .usage
             .as_ref()
-            .and_then(|usage| usage.over_budget(config))
+            .and_then(|usage| usage.over_budget(config.daily_budget_usd))
         {
             return Err(JudgeError::BudgetReached { spent, limit });
         }

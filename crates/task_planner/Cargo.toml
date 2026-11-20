@@ -10,4 +10,5 @@ parking_lot = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-ai_focus_rule = { workspace = true }
+ai_client = { workspace = true }
+json_store = { workspace = true }

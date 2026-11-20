@@ -6,8 +6,8 @@
 //! the checks). The agent asks the Models API (free) for the list once a week; an edit that
 //! changes the model is applied only after the Models API knows the new name.
 
-use ai_focus_rule::claude::{ClaudeClient, ModelInfo};
-use ai_focus_rule::JudgeError;
+use ai_client::claude::{ClaudeClient, ModelInfo};
+use ai_client::JudgeError;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;

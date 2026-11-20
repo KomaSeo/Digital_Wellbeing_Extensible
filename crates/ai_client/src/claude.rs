@@ -1,7 +1,7 @@
 //! Responsibility: Send structured-output requests to the Claude Messages API and parse the
 //! replies, for every module that asks Claude something.
 
-use crate::judge::JudgeError;
+use crate::JudgeError;
 use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -318,14 +318,6 @@ mod tests {
         assert_eq!(low["output_config"]["effort"], "low");
         assert_eq!(max["output_config"]["effort"], "max");
         assert!(max["max_tokens"].as_u64() > low["max_tokens"].as_u64());
-        // The settings' values fall back to the defaults when unknown.
-        let config = crate::AiFocusConfig {
-            check_effort: "a lot".into(),
-            decision_effort: "max".into(),
-            ..Default::default()
-        };
-        assert_eq!(config.check_effort(), "low");
-        assert_eq!(config.decision_effort(), "max");
     }
     use serde_json::json;
 

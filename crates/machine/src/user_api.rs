@@ -357,7 +357,7 @@ fn status(api: &AgentApi) -> Status {
 pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lockdown> {
     crate::lockdown::lockdown(
         crate::settings::is_protected(&crate::data_dir()),
-        &ai_focus_rule::connection::current().0,
+        &ai_client::connection::current().0,
         planner.and_then(|planner| {
             if planner.stopped() {
                 Some(crate::lockdown::TaskLock::Stopped)
@@ -1107,7 +1107,8 @@ pub fn call_value(session: u32, method: &str, params: Value) -> Result<Value, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ai_focus_rule::{platform, AiFocusConfig, AiFocusStore, JudgeError};
+    use ai_client::JudgeError;
+    use ai_focus_rule::{platform, AiFocusConfig, AiFocusStore};
 
     #[test]
     fn start_status_stop_over_tcp() {
@@ -1189,8 +1190,8 @@ mod tests {
                 ..Default::default()
             }),
             JsonStore::in_memory(PlannerState::default()),
-            Arc::clone(&monitor),
-            Arc::new(|_: &AiFocusConfig| Err(JudgeError::NoApiKey)),
+            Arc::new(crate::focus_link::MonitorLink(Arc::clone(&monitor))),
+            Arc::new(|_: &ai_client::AiSettings| Err(JudgeError::NoApiKey)),
         ));
         let api = AgentApi {
             enforcer: None,

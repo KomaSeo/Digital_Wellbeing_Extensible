@@ -16,11 +16,11 @@
 //! `grants\<user>.json` (this user's access grants) and `blocks\<user>.json`
 //! (blocks in force, so logging out and back in does not lift them).
 
-use ai_focus_rule::claude::ClaudeClient;
-use ai_focus_rule::connection::{self, Connection, KeyProblem};
+use ai_client::claude::ClaudeClient;
+use ai_client::connection::{self, Connection, KeyProblem};
+use ai_client::usage::UsageRecorder;
+use ai_client::JudgeError;
 use ai_focus_rule::grants::GrantState;
-use ai_focus_rule::usage::UsageRecorder;
-use ai_focus_rule::JudgeError;
 use ai_focus_rule::{
     claude_judge_provider, platform, AiFocusRuleHandle, AiFocusStore, FocusMonitor, SavedBlocks,
 };
@@ -90,7 +90,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         JsonStore::open(machine::usage_path_for(&profile), true)?,
         Some(machine::usage_dir()),
     ));
-    ai_focus_rule::usage::install(Arc::clone(&usage));
+    ai_client::usage::install(Arc::clone(&usage));
     // The planner is made after the monitor (it drives it); the lockdown asks it whether a
     // task is assigned.
     let planner_cell: Arc<OnceLock<Arc<TaskPlanner>>> = Arc::new(OnceLock::new());
@@ -151,7 +151,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     let planner = Arc::new(TaskPlanner::new(
         planner_config.clone(),
         planner_state,
-        Arc::clone(&monitor),
+        Arc::new(machine::focus_link::MonitorLink(Arc::clone(&monitor))),
         claude_advisor_provider(),
     ));
 
@@ -297,7 +297,7 @@ fn reload_loop(
         thread::sleep(RELOAD_INTERVAL);
         // The share of questions compared across model sizes (planner, assistant and window
         // checks alike).
-        ai_focus_rule::comparison::set_percent(ai_store.get().comparison_percent);
+        ai_client::comparison::set_percent(ai_store.get().comparison_percent);
         // The protection was turned off (here, in another session, or by an administrator):
         // without it a block means nothing, so every block of this session is lifted.
         let protected = machine::settings::is_protected(&data_directory);

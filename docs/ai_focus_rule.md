@@ -52,18 +52,18 @@
 
 ```
 crates/ai_focus_rule/src/
-├── lib.rs           다른 모듈이 쓸 타입을 밖으로 내보내고, native_monitor() 함수로 모니터를 조립한다
-├── config.rs        설정(AiFocusConfig)과, 설정을 JSON 파일에 저장하는 저장소(AiFocusStore)를 정의한다. 탭 제목이 항상 막을 웹사이트와 맞는지도 정한다
+├── lib.rs           다른 모듈이 쓸 타입을 밖으로 내보낸다
+├── config.rs        설정(AiFocusConfig)과, 설정 파일을 읽어 들이는 저장소(AiFocusStore)를 정의한다. 탭 제목이 항상 막을 웹사이트와 맞는지도 정한다
 ├── judge.rs         "이 창이 할 일에 필요한가?"를 판단하는 Judge 트레이트와 Claude 구현(ClaudeJudge)을 정의한다
-├── claude.rs        Claude API를 호출하는 공용 코드다. 할 일 플래너(task_planner)도 이 코드를 쓴다
 ├── monitor.rs       핵심 로직: 3초마다 도는 반복, 판정 기록과 다시 검사할 시각, 경고와 차단의 상태 관리, 화면 캡처 압축
 ├── youtube.rs       YouTube 특별 취급: 탭 제목에서 페이지 이름을 뽑고, 채널과 페이지의 차단 키를 만든다
-├── usage.rs         Claude 호출마다 토큰 수와 예상 비용을 날짜·용도별로 세고, 하루 예산을 넘었는지 알려 준다
 ├── rule.rs          Enforcer에 등록하는 차단 규칙(BlockRule)을 구현한다
 └── platform/
     ├── mod.rs       운영체제 기능을 감싸는 Desktop 트레이트를 정의한다. Windows가 아닌 OS용 빈 구현도 여기 있다
     └── windows.rs   Windows 구현: 맨 앞 창 조회, 화면 캡처, Ctrl+W 보내기
 ```
+
+Claude API 호출(`claude.rs`), AI 연결 상태(`connection.rs`), 토큰 사용량(`usage.rs`), 모델 비교(`comparison.rs`)는 rc.80부터 `crates/ai_client`에, JSON 파일 저장소(`JsonStore`)는 `crates/json_store`에 있습니다. 할 일 플래너도 이 둘을 쓰고, 이 크레이트(`ai_focus_rule`)에는 의존하지 않습니다.
 
 각 파일이 다른 파일을 쓰는 관계는 다음과 같습니다. 화살표는 "왼쪽이 오른쪽을 쓴다"는 뜻입니다.
 
@@ -71,7 +71,7 @@ crates/ai_focus_rule/src/
 apps/service (agent.rs)
    │  FocusMonitor::new(...) → AiFocusRuleHandle
    ▼
-rule.rs ──────► monitor.rs ──────► judge.rs ──► claude.rs   (HTTP로 Claude API 호출)
+rule.rs ──────► monitor.rs ──────► judge.rs ──► ai_client::claude   (HTTP로 Claude API 호출)
    │               │  └──────────► platform/                (Win32 API, xcap)
    │               └─────────────► config.rs
    └──► enforcer (BlockRule 트레이트)
@@ -433,7 +433,7 @@ YouTube는 강의를 볼 때도 쓰고 딴짓을 할 때도 씁니다. 그래서
 이 방식은 허용 취소(`revoked_grants`)와 같습니다. 각 차단 파일을 쓰는 프로그램이 그 사용자의 agent 하나뿐이므로, 두 프로그램이 같은 파일을 동시에 고쳐서 내용이 사라지는 일이 생기지 않습니다.
 예전 버전이 저장한 차단에는 ID가 없습니다. agent는 그 파일을 읽을 때 각 차단에 ID를 붙이고 파일을 다시 저장합니다. 그 전까지 설정 탭은 그 차단에 **차단 풀기** 버튼을 보여 주지 않습니다.
 
-### 5.10 토큰 사용량과 하루 예산 (`usage.rs`)
+### 5.10 토큰 사용량과 하루 예산 (`ai_client::usage`)
 
 Claude API는 응답마다 그 호출에 쓴 토큰 수(`usage`)를 돌려줍니다. 입력 토큰, 출력 토큰(생각 토큰 포함), 캐시 읽기 토큰, 캐시 쓰기 토큰이 들어 있습니다.
 이 프로그램은 이 값을 모두 세어 둡니다.
@@ -528,13 +528,13 @@ Other open windows (title only; judge each in `others`):
 
 ---
 
-### 5.13 AI 연결이 끊겼을 때 모든 앱 잠그기 (`machine::lockdown`, `connection.rs`)
+### 5.13 AI 연결이 끊겼을 때 모든 앱 잠그기 (`machine::lockdown`, `ai_client::connection`)
 
 이 절에서 **AI 연결**은 설정의 API 키와 모델로 Claude API를 부를 수 있는 상태를 말합니다. **잠금(lockdown)**은 AI 연결이 끊긴 동안 agent가 거의 모든 앱과 웹사이트를 막는 상태를 말합니다.
 
 **왜 필요한가.** AI가 없으면 AI 검사는 아무것도 막지 못합니다. 그래서 검사를 피하고 싶은 사용자는 키를 망가뜨릴 수 있습니다. 예를 들어 사용자는 Anthropic 웹사이트에서 키를 취소하거나, 계정의 크레딧을 비우거나, 사용 한도를 0으로 낮출 수 있습니다. 엄격 모드를 켠 뒤에 이렇게 하면 AI 검사가 꺼지는 대신 거의 모든 앱이 잠기므로, 키를 망가뜨려서 얻는 것이 없습니다.
 
-**AI 연결의 상태(`ai_focus_rule::connection`).** agent는 Claude를 부를 때마다 결과를 기록합니다.
+**AI 연결의 상태(`ai_client::connection`).** agent는 Claude를 부를 때마다 결과를 기록합니다.
 - 키가 없으면(`NoKey`), API가 키를 거부하면(401·403, `Rejected`), 계정의 크레딧이나 한도가 없으면(400 "credit balance" 등, `Billing`), API가 설정의 모델을 모르면(404, `UnknownModel`) 연결이 **끊긴** 것으로 기록합니다.
 - 네트워크 오류, 과부하(429·529) 같은 오류는 키에 대해 알려 주는 것이 없으므로 상태를 바꾸지 않습니다. 그래서 인터넷이 끊겨도 잠기지 않습니다.
 - 메시지 호출이 한 번이라도 성공하면 연결이 **동작하는** 것으로 기록합니다.
@@ -654,7 +654,7 @@ Other open windows (title only; judge each in `others`):
 
 ---
 
-### 5.19 모델 비교 (`comparison.rs`)
+### 5.19 모델 비교 (`ai_client::comparison`)
 
 이 절에서 **모델 비교**는 실제 질문 가운데 일부를 세 크기의 모델(Opus 5.5, Sonnet 5.5, Haiku 5.5)에게 한 번씩 똑같이 물어, 세 모델이 서로 얼마나 같은 답을 하는지 세는 것을 말합니다.
 
@@ -683,7 +683,7 @@ Other open windows (title only; judge each in `others`):
 
 **비용(추정):** 오늘(2026-11-05) 같은 날이면 하루 약 $1~1.5가 더 듭니다. Sonnet은 Opus의 절반, Haiku는 Opus의 약 40분의 1 값이기 때문입니다. 세 모델에게 모두 묻게 된 뒤로는, 뽑힌 질문마다 설정에서 고른 모델에게도 한 번 더 묻습니다. 그래서 고른 모델이 Opus이면 뽑힌 질문마다 Opus 한 번 값이, Sonnet이면 Sonnet 한 번 값이 예전보다 더 듭니다.
 
-## 6. Claude 호출 (`judge.rs`, `claude.rs`)
+## 6. Claude 호출 (`judge.rs`, `ai_client::claude`)
 
 ### 6.1 `Judge` 트레이트
 
@@ -698,7 +698,7 @@ trait Judge: Send + Sync {
 
 ### 6.2 실제로 보내는 요청
 
-HTTP 호출, 요청 내용 조립, 응답 해석은 `claude.rs`의 `ClaudeClient`가 맡습니다. `ClaudeJudge`는 지시문, 응답 형식,
+HTTP 호출, 요청 내용 조립, 응답 해석은 `ai_client` 크레이트(`crates/ai_client/src/claude.rs`)의 `ClaudeClient`가 맡습니다. `ClaudeJudge`는 지시문, 응답 형식,
 보낼 내용(이미지와 글)만 정하고 `client.structured(...)`를 부릅니다. 할 일 플래너도 같은 `ClaudeClient`를 씁니다.
 
 ```jsonc
@@ -846,7 +846,7 @@ Anthropic은 공식 Rust SDK를 제공하지 않으므로, 코드는 REST API를
 | `site_of_strips_browser_noise` | 탭 제목에서 브라우저 이름과 알림 숫자를 떼고 사이트를 뽑는다. |
 | `always_blocked_websites_are_closed_without_the_ai_and_without_daily_wellbeing` | 데일리 웰빙이 꺼져 있어도, 항상 막을 웹사이트(`youtube`, 정규식 `reddit\|twitter`)와 맞는 맨 앞 탭이 판정기를 부르지 않고 닫히고, 맞는 뒤쪽 브라우저 창은 최소화된다. 판정 기록에 "tab closed"와 맞은 항목이 남는다. 브라우저 이름은 비교에서 빠지므로 `google`은 "Rust docs - Google Chrome"을 닫지 않는다. 브라우저가 아닌 프로그램(`code.exe`의 "youtube.rs - …")은 닫히지 않는다. |
 
-`usage.rs`의 테스트는 단가표대로 비용을 계산하는지(모르는 모델은 가장 비싼 단가), 응답에서 토큰 수를 읽는지, 날짜·용도별 합계와 하루 예산이 맞는지, 62일보다 오래된 날을 지우는지 확인합니다.
+`ai_client`의 `usage.rs` 테스트는 단가표대로 비용을 계산하는지(모르는 모델은 가장 비싼 단가), 응답에서 토큰 수를 읽는지, 날짜·용도별 합계와 하루 예산이 맞는지, 62일보다 오래된 날을 지우는지 확인합니다.
 `youtube.rs`의 테스트는 YouTube 탭을 알아보는지(YouTube Music은 제외), 페이지 이름에서 잡음을 떼는지, 채널 이름을 비교하기 쉽게 바꾸는지 확인합니다.
 
 `judge.rs`의 테스트는 다음을 확인합니다. 코드가 생각 블록을 건너뛰고 구조화 출력을 해석하는가(한국어 이유 포함), 거절 응답을 오류로 처리하는가,

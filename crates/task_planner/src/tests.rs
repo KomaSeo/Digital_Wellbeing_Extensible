@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::model::series_id;
-use ai_focus_rule::{platform, AiFocusConfig, AiFocusStore, FocusMonitor, JudgeError};
+use ai_client::{AiSettings, JudgeError};
 use chrono::Utc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -187,10 +187,57 @@ impl Advisor for FakeAdvisor {
     }
 }
 
-/// Responsibility: Bundle a planner under test with its focus monitor and fake advisor.
+/// Responsibility: Stand in for the AI focus check: remember what it was told to watch.
+#[derive(Default)]
+struct FakeFocus {
+    watched: parking_lot::Mutex<Option<crate::WatchedTask>>,
+}
+
+/// Responsibility: Show a test what the fake focus check watches, as the real one's settings
+/// would.
+struct FakeFocusState {
+    session_active: bool,
+    task: String,
+    task_scope: String,
+}
+
+impl FakeFocus {
+    fn state(&self) -> FakeFocusState {
+        let watched = self.watched.lock().clone();
+        FakeFocusState {
+            session_active: watched.is_some(),
+            task: watched
+                .as_ref()
+                .map(|watched| watched.task.clone())
+                .unwrap_or_default(),
+            task_scope: watched.map(|watched| watched.scope).unwrap_or_default(),
+        }
+    }
+}
+
+impl crate::FocusLink for FakeFocus {
+    fn ai_settings(&self) -> AiSettings {
+        AiSettings::default()
+    }
+
+    fn recent_activity(&self) -> String {
+        String::new()
+    }
+
+    fn watched(&self) -> Option<crate::WatchedTask> {
+        self.watched.lock().clone()
+    }
+
+    fn watch(&self, task: Option<crate::WatchedTask>) -> Result<(), String> {
+        *self.watched.lock() = task;
+        Ok(())
+    }
+}
+
+/// Responsibility: Bundle a planner under test with its fake focus check and fake advisor.
 struct Harness {
     planner: TaskPlanner,
-    focus: Arc<FocusMonitor>,
+    focus: Arc<FakeFocus>,
     advisor: Arc<FakeAdvisor>,
 }
 
@@ -206,11 +253,7 @@ fn harness(enabled: bool, ids: &[&str]) -> Harness {
 }
 
 fn harness_with_state(enabled: bool, ids: &[&str], state: JsonStore<PlannerState>) -> Harness {
-    let focus = Arc::new(FocusMonitor::new(
-        AiFocusStore::in_memory(AiFocusConfig::default()),
-        platform::native(),
-        Arc::new(|_: &AiFocusConfig| Err(JudgeError::NoApiKey)),
-    ));
+    let focus = Arc::new(FakeFocus::default());
     let advisor = Arc::new(FakeAdvisor {
         approve: AtomicBool::new(true),
         fail: AtomicBool::new(false),
@@ -239,7 +282,7 @@ fn harness_with_state(enabled: bool, ids: &[&str], state: JsonStore<PlannerState
             ..Default::default()
         }),
         state,
-        Arc::clone(&focus),
+        Arc::clone(&focus) as Arc<dyn crate::FocusLink>,
         Arc::new(move |_| Ok(Arc::clone(&provided) as Arc<dyn Advisor>)),
     );
     Harness {
@@ -267,9 +310,9 @@ fn the_focus_follows_an_assignment_another_device_made() {
     );
 
     laptop.planner.assign(Utc::now()).unwrap();
-    assert!(!desktop.focus.store().get().session_active);
+    assert!(!desktop.focus.state().session_active);
     desktop.planner.resume(Utc::now()).unwrap();
-    let focus = desktop.focus.store().get();
+    let focus = desktop.focus.state();
     assert!(focus.session_active);
     assert_eq!(focus.task, "work on a");
     assert_eq!(focus.task_scope, "a");
@@ -279,7 +322,7 @@ fn the_focus_follows_an_assignment_another_device_made() {
     laptop.planner.stop_use(Utc::now()).unwrap();
     desktop.planner.resume(Utc::now()).unwrap();
     assert!(desktop.planner.stopped());
-    assert!(!desktop.focus.store().get().session_active);
+    assert!(!desktop.focus.state().session_active);
     let _ = std::fs::remove_dir_all(&folder);
 }
 
@@ -302,19 +345,15 @@ fn assign_starts_focus_session_and_resumes_without_asking_again() {
     assert_eq!(assignment.todo_id.as_deref(), Some("a"));
     // Only https websites are kept for the Focus app to open.
     assert_eq!(assignment.open, ["https://mail.google.com"]);
-    let focus = fixture.focus.store().get();
+    let focus = fixture.focus.state();
     assert!(focus.session_active);
     assert_eq!(focus.task, "work on a");
 
     // e.g. after logging on again
-    fixture
-        .focus
-        .store()
-        .update(|config| config.session_active = false)
-        .unwrap();
+    *fixture.focus.watched.lock() = None;
     fixture.planner.assign(Utc::now()).unwrap();
     assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 1);
-    assert!(fixture.focus.store().get().session_active);
+    assert!(fixture.focus.state().session_active);
 }
 
 #[test]
@@ -349,7 +388,7 @@ fn bogus_pick_is_refused() {
         fixture.planner.assign(Utc::now()),
         Err(PlannerError::BadPick(_))
     ));
-    assert!(!fixture.focus.store().get().session_active);
+    assert!(!fixture.focus.state().session_active);
 }
 
 #[test]
@@ -381,7 +420,7 @@ fn rejected_request_is_logged_and_changes_nothing() {
         )
         .unwrap();
     assert!(!record.approved);
-    assert_eq!(fixture.focus.store().get().task, "work on a");
+    assert_eq!(fixture.focus.state().task, "work on a");
     let status = fixture.planner.status();
     assert_eq!(status.recent_requests.len(), 1);
     assert_eq!(status.recent_requests[0].reason, "그냥 지루해서");
@@ -407,13 +446,13 @@ fn approved_done_waits_for_the_next_request_and_routines_stay() {
         .unwrap();
     // Nothing is assigned until the user asks; no pick happened.
     assert!(fixture.planner.status().assignment.is_none());
-    assert!(!fixture.focus.store().get().session_active);
+    assert!(!fixture.focus.state().session_active);
     assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.planner.status().open_todos.len(), 1);
 
     // The routine "b" is done but stays on the list.
     fixture.planner.assign(Utc::now()).unwrap();
-    assert_eq!(fixture.focus.store().get().task, "work on b");
+    assert_eq!(fixture.focus.state().task, "work on b");
     fixture
         .planner
         .request_change(
@@ -447,7 +486,7 @@ fn approved_switches_set_the_task() {
             Evidence::default(),
         )
         .unwrap();
-    assert_eq!(fixture.focus.store().get().task, "title b");
+    assert_eq!(fixture.focus.state().task, "title b");
 
     fixture
         .planner
@@ -462,7 +501,7 @@ fn approved_switches_set_the_task() {
         .unwrap();
     let status = fixture.planner.status();
     assert_eq!(status.assignment.unwrap().todo_id, None);
-    assert_eq!(fixture.focus.store().get().task, "은행 업무");
+    assert_eq!(fixture.focus.state().task, "은행 업무");
 }
 
 #[test]
@@ -1021,7 +1060,7 @@ fn when_the_time_is_up_the_task_stays_until_the_user_reports() {
     let status = fixture.planner.status();
     assert!(status.assignment.is_none());
     assert_eq!(status.open_todos.len(), 2);
-    assert!(!fixture.focus.store().get().session_active);
+    assert!(!fixture.focus.state().session_active);
     assert!(matches!(
         report(at_end, ChangeKind::Done),
         Err(PlannerError::NothingAssigned)
@@ -1712,7 +1751,7 @@ fn an_appointment_is_fixed_at_its_time_and_ends_by_itself() {
     assert!(current.appointment_id.is_some());
     // It locks nothing; the window checks judge what has to do with it.
     assert!(!current.away_from_computer);
-    let checked_task = fixture.focus.store().get().task;
+    let checked_task = fixture.focus.state().task;
     assert!(
         checked_task.starts_with("meeting") && checked_task.contains("약속과 관계된 일"),
         "{checked_task}"
@@ -2147,7 +2186,7 @@ fn stopping_ends_the_task_and_holds_everything_until_resumed() {
     fixture.planner.stop_use(now).unwrap();
     assert!(fixture.planner.stopped());
     assert!(fixture.planner.status().assignment.is_none());
-    assert!(!fixture.focus.store().get().session_active);
+    assert!(!fixture.focus.state().session_active);
     assert_eq!(fixture.planner.open_todos().len(), 1, "the to-do stays");
     // Nothing starts and nothing calls the AI while stopped.
     fixture

@@ -15,6 +15,7 @@
 
 mod advisor;
 mod deadline;
+mod focus_link;
 mod model;
 mod planner;
 
@@ -25,8 +26,9 @@ pub use advisor::{
     WeekPlanAnswerTodo, WeekPlanRequest, APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT,
     PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
 };
-pub use ai_focus_rule::store::JsonStore;
 pub use deadline::parse_deadline;
+pub use focus_link::{FocusLink, WatchedTask};
+pub use json_store::JsonStore;
 pub use model::{
     occurrence_day, series_id, weekdays_korean, Appointment, AppointmentInput, Assignment,
     AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, Confirmations, DoneRecord,

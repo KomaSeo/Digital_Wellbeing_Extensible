@@ -8,6 +8,7 @@ name = "digital-wellbeing-focus"
 path = "src/main.rs"
 
 [dependencies]
+ai_client = { workspace = true }
 app_identity = { workspace = true }
 machine = { workspace = true }
 task_planner = { workspace = true }

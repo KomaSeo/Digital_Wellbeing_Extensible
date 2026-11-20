@@ -22,6 +22,7 @@
 //! ```
 
 pub mod assistant_tools;
+pub mod focus_link;
 pub mod lockdown;
 pub mod login;
 pub mod model_catalog;
@@ -106,7 +107,7 @@ pub fn usage_dir() -> PathBuf {
     data_dir().join("usage")
 }
 
-/// Token usage of `user`'s Claude calls (see `ai_focus_rule::usage`).
+/// Token usage of `user`'s Claude calls (see `ai_client::usage`).
 pub fn usage_path_for(user: &str) -> PathBuf {
     let file = grants_path_for(user);
     usage_dir().join(file.file_name().unwrap_or_default())

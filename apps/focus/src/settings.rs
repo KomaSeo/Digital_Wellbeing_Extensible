@@ -14,8 +14,8 @@
 //! withdrawn (`settings_withdraw`). The to-do list itself is edited in the To-do tab.
 //! Rules: `machine::settings`, `machine::setting_edits`; guide: `docs/multi_account.md` 6.4.
 
+use ai_client::usage::{Totals, UsageLog};
 use ai_focus_rule::grants::GrantState;
-use ai_focus_rule::usage::{Totals, UsageLog};
 use ai_focus_rule::{AiFocusConfig, SavedBlocks};
 use chrono::{DateTime, Datelike, Local, Utc};
 use list_based_rule::ListConfig;
@@ -1076,13 +1076,13 @@ impl SettingsTab {
                     );
                     *result.lock() = "확인하는 중…".into();
                     thread::spawn(move || {
-                        let answer =
-                            match ai_focus_rule::claude::ClaudeClient::new(key, model).check() {
-                                Ok(()) => "✔ 키가 동작합니다(모델 목록만 읽었으므로 비용이 들지 \
+                        let answer = match ai_client::claude::ClaudeClient::new(key, model).check()
+                        {
+                            Ok(()) => "✔ 키가 동작합니다(모델 목록만 읽었으므로 비용이 들지 \
                                            않았습니다)."
-                                    .into(),
-                                Err(error) => format!("키가 받아들여지지 않았습니다: {error}"),
-                            };
+                                .into(),
+                            Err(error) => format!("키가 받아들여지지 않았습니다: {error}"),
+                        };
                         *result.lock() = answer;
                     });
                 }
@@ -2667,10 +2667,10 @@ fn purpose_label(purpose: &str) -> (&str, &str) {
 }
 
 /// How often Opus, Sonnet and Haiku answered as each other did, per feature, from every
-/// user's sampled questions (`ai_focus_rule::comparison`), with the latest questions they
+/// user's sampled questions (`ai_client::comparison`), with the latest questions they
 /// answered differently.
 pub(crate) fn comparison_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
-    use ai_focus_rule::comparison::{disagrees, summarize, ComparisonRecord, COMPARED_MODELS};
+    use ai_client::comparison::{disagrees, summarize, ComparisonRecord, COMPARED_MODELS};
     let mut records: Vec<ComparisonRecord> = snapshot
         .usage
         .values()
@@ -2781,10 +2781,10 @@ pub(crate) fn comparison_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
                         ui.small(&record.asked);
                     }
                     // Opus, Sonnet, Haiku, then any other model.
-                    let mut answers: Vec<(&String, &ai_focus_rule::comparison::ComparedAnswer)> =
+                    let mut answers: Vec<(&String, &ai_client::comparison::ComparedAnswer)> =
                         record.answers.iter().collect();
                     answers.sort_by_key(|(model, _)| {
-                        ai_focus_rule::comparison::COMPARED_MODELS
+                        ai_client::comparison::COMPARED_MODELS
                             .iter()
                             .position(|compared| compared == model)
                             .unwrap_or(usize::MAX)
@@ -2921,7 +2921,7 @@ impl UsageColumns {
         let days: Vec<chrono::NaiveDate> = (0..7)
             .map(|back| today - chrono::Duration::days(back))
             .collect();
-        let this_hour = ai_focus_rule::usage::start_of_hour(Utc::now());
+        let this_hour = ai_client::usage::start_of_hour(Utc::now());
         let hours: Vec<DateTime<Utc>> = (0..24)
             .map(|back| this_hour - chrono::Duration::hours(back))
             .collect();

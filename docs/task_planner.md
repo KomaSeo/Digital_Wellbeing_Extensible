@@ -104,7 +104,7 @@ AI 집중 규칙은 사용자가 적은 "현재 할 일"을 기준으로 창을 
 crates/task_planner/src/
 ├── lib.rs        다른 모듈이 쓸 타입과 함수를 밖으로 내보낸다
 ├── model.rs      데이터 타입을 정의한다 (할 일, 할당, 변경 요청, 할 일 변경, 메모와 단계, 기록)
-├── store.rs      JSON 파일을 읽고 쓰는 JsonStore를 정의한다
+├── focus_link.rs 플래너가 AI 검사에게 바라는 것(FocusLink trait)을 정의한다
 ├── advisor.rs    AI에게 보내는 네 가지 질문(할 일 고르기, 변경 요청 심사, 할 일 변경 심사, 앞으로 7일 계획)을 정의한다
 ├── planner.rs    TaskPlanner: 할당, 변경 요청, 할 일 변경, 메모와 단계를 처리한다
 └── tests.rs      가짜 AI로 전체 동작을 시험한다
@@ -114,13 +114,15 @@ crates/task_planner/src/
 
 | 위치 | 바뀐 내용 |
 |---|---|
-| `crates/ai_focus_rule/src/claude.rs` | 개발자가 Claude API를 호출하는 코드를 판정 모듈에서 떼어 내 이 파일로 옮겼습니다. 이제 판정 모듈과 플래너가 이 코드를 함께 씁니다. |
+| `crates/ai_client/src/claude.rs` | Claude API를 호출하는 코드입니다. 판정 모듈과 플래너가 함께 씁니다(rc.80부터 `ai_client` 크레이트). JSON 파일 저장소 `JsonStore`는 `crates/json_store`에 있습니다. |
 | `crates/machine/src/user_api.rs` | Focus 앱이 agent에게 보낼 수 있는 요청에 `assign`(할당 받기), `request_change`(변경 요청), `todo_change`(할 일 변경), `todo_change_schedule`(AI 없이 하기로 한 할 일 변경), `task_notes_put`(메모와 단계 저장)을 추가했습니다. 남은 할 일이 있으면 agent가 직접 입력한 할 일과 그냥 멈추기를 거부합니다(6장). |
 | `crates/machine/src/settings.rs` | AI가 승인한 할 일 변경을 바로 적용하는 `apply_now`와, AI 없이 하기로 한 할 일 변경을 두 시간 간격의 예약된 업데이트로 만드는 `schedule`이 있습니다. |
 | `apps/service/src/agent.rs` | agent가 TaskPlanner를 만들고, `planner.json`이 바뀌면 다시 읽습니다. |
 | `apps/focus/src/todo.rs` | Focus 앱의 일하기 탭과 할 일 탭입니다(7.1절). 통계 탭이 쓰는 "오늘", "끝낸 일", "요청과 AI의 답" 화면도 이 파일에 있습니다. |
 | `apps/focus/src/statistics.rs` | Focus 앱의 통계 탭입니다(7.3절). |
 | `apps/focus/src/settings.rs` | Focus 앱의 설정 탭입니다. 이 탭의 **AI 규칙** 영역이 플래너 설정을 보여 줍니다(7.2절). |
+
+**AI 검사와의 연결(`FocusLink`, rc.80부터).** 플래너는 AI 검사 모듈(`ai_focus_rule`)을 직접 알지 않습니다. 플래너는 `FocusLink` trait으로 네 가지만 부탁합니다: AI 질문에 쓸 키·모델·노력 정도(`ai_settings`), 심사에 증거로 보낼 최근 활동 기록(`recent_activity`), AI 검사가 지금 보는 할 일(`watched`), 그리고 할 일을 정하거나 끝낼 때 AI 검사를 켜고 끄기(`watch`)입니다. agent는 이 trait을 AI 검사 모니터로 구현해서(`machine::focus_link::MonitorLink`) 플래너에 넘기고, 플래너의 테스트는 가짜 구현을 씁니다.
 
 ### 3.2 데이터 파일
 
@@ -183,7 +185,7 @@ crates/task_planner/src/
 `planner_state.json`은 플래너만 씁니다. 이렇게 하면 각 파일의 내용을 만드는 쪽이 하나뿐이므로, 두 쪽이 같은 파일을 동시에 고쳐서 서로의 내용을 지우는 일이 생기지 않습니다.
 사용자가 끝난 할 일을 다시 하고 싶다면, 사용자는 할 일 탭에서 같은 할 일을 새로 추가하면 됩니다. 새로 추가된 할 일은 새 `id`를 받으므로 "끝나지 않은 할 일"이 됩니다.
 
-### 3.3 `JsonStore` (`store.rs`)
+### 3.3 `JsonStore` (`crates/json_store`)
 
 `JsonStore<T>`는 JSON 파일 하나의 내용을 메모리에 들고 있는 상자입니다.
 

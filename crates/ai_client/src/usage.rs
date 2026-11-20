@@ -9,9 +9,8 @@
 //!
 //! Each user's agent writes `usage\<user>.json`; the Statistics tab reads them all.
 
-use crate::config::AiFocusConfig;
-use crate::store::JsonStore;
 use chrono::{DateTime, DurationRound, Local, NaiveDate, Utc};
+use json_store::JsonStore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -259,9 +258,9 @@ impl UsageRecorder {
         own + others
     }
 
-    /// `Some((spent, limit))` once today's cost reached the admin's daily budget.
-    pub fn over_budget(&self, config: &AiFocusConfig) -> Option<(f64, f64)> {
-        let limit = config.daily_budget_usd;
+    /// `Some((spent, limit))` once today's cost reached the daily budget `limit` (US
+    /// dollars; `0` or less means none).
+    pub fn over_budget(&self, limit: f64) -> Option<(f64, f64)> {
         if limit <= 0.0 {
             return None;
         }
@@ -357,15 +356,9 @@ mod tests {
         assert_eq!(day.by_purpose["focus check"].input_tokens, 1_000_000);
         assert!((recorder.log().month(today).cost_usd - 8.0).abs() < 1e-9);
 
-        let mut config = AiFocusConfig::default();
-        assert!(recorder.over_budget(&config).is_none(), "no budget set");
-        config.daily_budget_usd = 10.0;
-        assert!(recorder.over_budget(&config).is_none());
-        config.daily_budget_usd = 8.0;
-        assert_eq!(
-            recorder.over_budget(&config).map(|(_, limit)| limit),
-            Some(8.0)
-        );
+        assert!(recorder.over_budget(0.0).is_none(), "no budget set");
+        assert!(recorder.over_budget(10.0).is_none());
+        assert_eq!(recorder.over_budget(8.0).map(|(_, limit)| limit), Some(8.0));
     }
 
     #[test]

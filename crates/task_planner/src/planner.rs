@@ -19,6 +19,7 @@ use crate::advisor::{
     AdvisorProvider, AppointmentRequest, PickRequest, Review, ReviewRequest, ReviewedTodo,
     TodoChangeRequest, WeekPlanAnswer, WeekPlanRequest,
 };
+use crate::focus_link::{FocusLink, WatchedTask};
 use crate::model::{
     occurrence_day, series_id, Appointment, AppointmentInput, Assignment, AssignmentSource,
     AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, Evidence, ExtensionOffer, IdleSpan,
@@ -26,9 +27,9 @@ use crate::model::{
     TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite,
     WaitingItem, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
-use ai_focus_rule::store::JsonStore;
-use ai_focus_rule::{FocusMonitor, JudgeError};
+use ai_client::JudgeError;
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
+use json_store::JsonStore;
 use parking_lot::Mutex;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -127,7 +128,7 @@ pub enum PlannerError {
 pub struct TaskPlanner {
     config: JsonStore<PlannerConfig>,
     state: JsonStore<PlannerState>,
-    focus: Arc<FocusMonitor>,
+    focus: Arc<dyn FocusLink>,
     advisor: AdvisorProvider,
     /// Held for a whole assign/review, so two clicks cannot race. The AI call
     /// happens under it, but no data lock is held during the call.
@@ -138,7 +139,7 @@ impl TaskPlanner {
     pub fn new(
         config: JsonStore<PlannerConfig>,
         state: JsonStore<PlannerState>,
-        focus: Arc<FocusMonitor>,
+        focus: Arc<dyn FocusLink>,
         advisor: AdvisorProvider,
     ) -> Self {
         Self {
@@ -665,7 +666,7 @@ impl TaskPlanner {
             .collect();
         let recently_done: Vec<DoneRecord> = state.done.iter().rev().take(10).cloned().collect();
         let now_local = local_now_text();
-        let advisor = (self.advisor)(&self.focus.store().get())?;
+        let advisor = (self.advisor)(&self.focus.ai_settings())?;
         let answer = advisor.plan_week(&WeekPlanRequest {
             instructions: config.instructions.week_plan_or_default(),
             now_local: &now_local,
@@ -819,7 +820,7 @@ impl TaskPlanner {
         };
 
         let recent: Vec<TodoChangeRecord> = state.todo_changes.iter().rev().cloned().collect();
-        let history = self.focus.state().history_text();
+        let history = self.focus.recent_activity();
         let now_local = local_now_text();
         let config = self.config.get();
         if matches!(
@@ -856,7 +857,7 @@ impl TaskPlanner {
             self.log_todo_change(&record)?;
             return Ok(record);
         }
-        let review = (self.advisor)(&self.focus.store().get()).and_then(|advisor| {
+        let review = (self.advisor)(&self.focus.ai_settings()).and_then(|advisor| {
             advisor.review_todo_change(&TodoChangeRequest {
                 instructions: config.instructions.proposal_review_or_default(),
                 now_local: &now_local,
@@ -963,7 +964,7 @@ impl TaskPlanner {
                                 .is_none_or(|replaced| replaced.id != series_id(&existing.id))
                         })
                         .collect();
-                    let review = (self.advisor)(&self.focus.store().get()).and_then(|advisor| {
+                    let review = (self.advisor)(&self.focus.ai_settings()).and_then(|advisor| {
                         advisor.review_appointment(&AppointmentRequest {
                             instructions: config.instructions.appointment_review_or_default(),
                             now_local: &now_local,
@@ -1271,21 +1272,20 @@ impl TaskPlanner {
     /// Make the focus check watch the current assignment: after logon, and when another
     /// device (through sync) assigned, ended or stopped a task.
     fn follow_assignment(&self) -> Result<(), PlannerError> {
-        let focus = self.focus.store().get();
+        let watched = self.focus.watched();
         match self.state.get().assignment {
             Some(current) => {
                 let scope = current.todo_id.as_deref().unwrap_or("free");
-                if !focus.session_active || focus.task != current.task || focus.task_scope != scope
-                {
+                let same = watched
+                    .as_ref()
+                    .is_some_and(|watched| watched.task == current.task && watched.scope == scope);
+                if !same {
                     self.start_focus(&current)?;
                 }
             }
             // Without the planner a session is started by hand: leave it alone.
-            None if focus.session_active && self.is_active() => {
-                self.focus
-                    .store()
-                    .update(|config| config.session_active = false)
-                    .map_err(|error| PlannerError::Io(std::io::Error::other(error.to_string())))?;
+            None if watched.is_some() && self.is_active() => {
+                self.focus.watch(None).map_err(focus_error)?;
             }
             None => {}
         }
@@ -1451,9 +1451,9 @@ impl TaskPlanner {
 
         let state = self.state.get();
         let recent: Vec<ChangeRecord> = state.requests.iter().rev().cloned().collect();
-        let history = self.focus.state().history_text();
+        let history = self.focus.recent_activity();
         let now_local = local_now_text();
-        let advisor = (self.advisor)(&self.focus.store().get())?;
+        let advisor = (self.advisor)(&self.focus.ai_settings())?;
         let config = self.config.get();
         let current_todo = state
             .assignment
@@ -2058,9 +2058,9 @@ impl TaskPlanner {
         let open = self.open_todos();
         let state = self.state.get();
         let recently_done: Vec<DoneRecord> = state.done.iter().rev().take(10).cloned().collect();
-        let history = self.focus.state().history_text();
+        let history = self.focus.recent_activity();
         let now_local = local_now_text();
-        let advisor = (self.advisor)(&self.focus.store().get())?;
+        let advisor = (self.advisor)(&self.focus.ai_settings())?;
         let config = self.config.get();
         let pick = advisor.pick(&PickRequest {
             instructions: config.instructions.pick_or_default(),
@@ -2152,13 +2152,8 @@ impl TaskPlanner {
             .clone()
             .unwrap_or_else(|| "free".to_string());
         self.focus
-            .store()
-            .update(|config| {
-                config.task = task;
-                config.task_scope = scope;
-                config.session_active = true;
-            })
-            .map_err(|error| PlannerError::Io(std::io::Error::other(error.to_string())))?;
+            .watch(Some(WatchedTask { task, scope }))
+            .map_err(focus_error)?;
         Ok(())
     }
 
@@ -2167,12 +2162,14 @@ impl TaskPlanner {
             close_span(planner_state, now);
             planner_state.assignment = None;
         })?;
-        self.focus
-            .store()
-            .update(|config| config.session_active = false)
-            .map_err(|error| PlannerError::Io(std::io::Error::other(error.to_string())))?;
+        self.focus.watch(None).map_err(focus_error)?;
         Ok(())
     }
+}
+
+/// A failure to start or stop the focus check, as a planner error.
+fn focus_error(error: String) -> PlannerError {
+    PlannerError::Io(std::io::Error::other(error))
 }
 
 /// When `appointment` stops: its planned end plus the grace time, or the end of an approved

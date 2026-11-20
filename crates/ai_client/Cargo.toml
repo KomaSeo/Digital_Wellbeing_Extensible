@@ -1,0 +1,18 @@
+[package]
+name = "ai_client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+json_store = { workspace = true }
+web_client = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+ureq = { version = "2", features = ["json", "native-certs"] }
+base64 = "0.22"

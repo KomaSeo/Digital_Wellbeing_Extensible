@@ -1,5 +1,4 @@
-//! Responsibility: Expose the AI focus rule's public API, and assemble a monitor wired to the
-//! real desktop and Claude.
+//! Responsibility: Expose the AI focus rule's public API.
 //!
 //! AI-judged focus rule.
 //!
@@ -12,19 +11,19 @@
 //! Walkthrough of every module (Korean): `docs/ai_focus_rule.md`.
 
 pub mod access_review;
-pub mod claude;
-pub mod comparison;
 mod config;
-pub mod connection;
 pub mod grants;
 mod judge;
 mod monitor;
 pub mod platform;
 mod rule;
-pub mod search;
-pub mod store;
-pub mod usage;
+mod search;
 mod youtube;
+
+// The Claude client and the JSON file store live in their own crates (`ai_client`,
+// `json_store`); these names keep the paths inside this crate short.
+pub(crate) use ai_client::{claude, comparison, connection, usage};
+pub(crate) use json_store as store;
 
 pub use config::{
     lockdown_allows_page, AiFocusConfig, AiFocusStore, ConfigError, BUILT_IN_ALWAYS_ALLOW,

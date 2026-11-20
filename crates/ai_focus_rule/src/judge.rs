@@ -2,9 +2,9 @@
 //! with Claude.
 
 use crate::claude::{jpeg_block, text_block, ClaudeClient};
+pub use ai_client::JudgeError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use thiserror::Error;
 
 const SYSTEM_PROMPT: &str = "\
 You are the focus checker inside a personal digital-wellbeing app. The user has \
@@ -126,27 +126,6 @@ pub struct JudgeRequest<'a> {
     /// Asked of a larger model after a smaller one did not find every window on task
     /// (counted apart in the usage, per model: [`escalation_purpose`]).
     pub escalated: bool,
-}
-
-/// Responsibility: Report why a Claude call failed (shared by every Claude-backed module).
-#[derive(Debug, Error)]
-pub enum JudgeError {
-    #[error("API 키가 없습니다. 설정 탭의 AI 연결에서 키를 넣고 적용하세요")]
-    NoApiKey,
-    #[error("API error {status}: {body}")]
-    Api { status: u16, body: String },
-    #[error("network error: {0}")]
-    Transport(String),
-    #[error("model declined to judge this screen")]
-    Refused,
-    #[error("the answer was cut off (max_tokens); try a lower effort or a larger limit")]
-    Truncated,
-    #[error("unexpected response: {0}")]
-    BadResponse(String),
-    #[error(
-        "오늘의 AI 예산을 다 썼습니다(${spent:.2} / ${limit:.2}). AI 검사는 내일 다시 시작합니다"
-    )]
-    BudgetReached { spent: f64, limit: f64 },
 }
 
 /// Responsibility: Judge one window against the task (Claude in production, fakes in tests).

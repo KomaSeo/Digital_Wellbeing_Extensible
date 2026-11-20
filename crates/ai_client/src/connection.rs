@@ -8,7 +8,7 @@
 //! the connection is broken (`machine::lockdown`), so breaking the key cannot switch the
 //! checks off.
 
-use crate::judge::JudgeError;
+use crate::JudgeError;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};

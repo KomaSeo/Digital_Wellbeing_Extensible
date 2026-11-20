@@ -56,9 +56,12 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 | `apps/mcp` | `digital-wellbeing-mcp.exe`. Claude Desktop이 쓰는 MCP 서버 |
 | `crates/enforcer` | 프로세스를 살펴보고, 규칙이 막으라는 프로그램과 그 도우미를 끕니다 |
 | `crates/list_based_rule` | 항상 막을 프로그램(블랙리스트와 화이트리스트) |
-| `crates/ai_focus_rule` | AI 검사, 차단, 접근 허용, Claude API 호출, 사용량 기록 |
-| `crates/task_planner` | 할 일 목록과 지금 할 일, 변경 요청과 그 AI 심사 |
-| `crates/machine` | 데이터 폴더, 엄격 모드, 모든 앱 잠금, 로그인, agent의 사용자 API |
+| `crates/ai_focus_rule` | AI 검사, 차단, 접근 허용 |
+| `crates/task_planner` | 할 일 목록과 지금 할 일, 변경 요청과 그 AI 심사. AI 검사와는 `FocusLink` trait으로만 이어집니다 |
+| `crates/machine` | 데이터 폴더, 엄격 모드, 모든 앱 잠금, 로그인, agent의 사용자 API, 플래너와 AI 검사를 잇는 `MonitorLink` |
+| `crates/ai_client` | Claude API 호출, AI 연결 상태, 토큰 사용량과 비용, 모델 비교. 어느 규칙도 모릅니다 |
+| `crates/json_store` | JSON 파일 하나를 메모리에 들고 원자적으로 쓰는 저장소(`JsonStore`) |
+| `crates/app_identity` | 이 앱의 실행 파일 이름 |
 | `crates/sync` | 여러 기기 동기화의 서버와 클라이언트, 암호화, 병합, 로그인 목록 |
 | `installer/` | Inno Setup 설치 스크립트, 릴리스 버전과 릴리스 노트 |
 | `.github/workflows/` | `ci.yml`(리눅스와 Windows의 테스트, 실제 설치 시험), `release.yml`(배포) |
