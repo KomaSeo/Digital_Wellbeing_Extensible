@@ -174,7 +174,7 @@ pub fn lockdown(
 /// Programs every lockdown leaves running besides the enforcer's own never-terminate list:
 /// the Windows settings (network), the web view the Start menu and widgets use, and security
 /// helpers. A broken connection also leaves browsers, whose tabs the monitor closes except
-/// Claude and Anthropic pages (`ai_focus_rule::lockdown_allows_page`). Claude Desktop is
+/// Claude and Anthropic pages (`browser_pages::lockdown_allows_page`). Claude Desktop is
 /// closed: it can browse the web, so it would be a way around the lock, and fixing the key
 /// needs only the Claude Console in a browser (the owner's request).
 pub const LOCKDOWN_KEEPS: [&str; 7] = [

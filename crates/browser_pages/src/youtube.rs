@@ -1,12 +1,12 @@
 //! Responsibility: Treat YouTube specially: name the channel (or, without one, the page) a
 //! YouTube tab shows, so that a block on YouTube hits one channel instead of the whole site.
 //!
-//! Other sites are blocked as a whole (see [`crate::monitor::tab_key`]). YouTube serves
+//! Other sites are blocked as a whole (see [`crate::tab_key`]). YouTube serves
 //! lectures and entertainment alike, so blocking it whole would also take the lectures away.
 //! The window title only names the video, not its channel; the judge reads the channel name
 //! from the screenshot and the monitor remembers it per page (see `MonitorState::channels`).
 
-use crate::monitor::{site_of, strip_browser_noise};
+use crate::{site_of, strip_browser_noise};
 use enforcer::normalize_process_name;
 
 /// What [`site_of`] returns for a YouTube tab.

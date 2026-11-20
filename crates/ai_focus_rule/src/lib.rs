@@ -17,8 +17,6 @@ mod judge;
 mod monitor;
 pub mod platform;
 mod rule;
-mod search;
-mod youtube;
 
 // The Claude client and the JSON file store live in their own crates (`ai_client`,
 // `json_store`); these names keep the paths inside this crate short.
@@ -26,12 +24,12 @@ pub(crate) use ai_client::{claude, comparison, connection, usage};
 pub(crate) use json_store as store;
 
 pub use config::{
-    lockdown_allows_page, AiFocusConfig, AiFocusStore, ConfigError, BUILT_IN_ALWAYS_ALLOW,
-    DEFAULT_MODEL, DEFAULT_RECHECK_MODEL, EFFORT_LEVELS,
+    AiFocusConfig, AiFocusStore, ConfigError, BUILT_IN_ALWAYS_ALLOW, DEFAULT_MODEL,
+    DEFAULT_RECHECK_MODEL, EFFORT_LEVELS,
 };
 pub use judge::{ClaudeJudge, Judge, JudgeError, JudgeRequest, Judgement, Verdict};
 pub use monitor::{
-    claude_judge_provider, strip_browser_noise, AccessError, ActivityEntry, BlockSet, BlockedEntry,
-    FocusMonitor, JudgeProvider, MonitorState, NewBlock, SavedBlocks, VerdictLogEntry,
+    claude_judge_provider, AccessError, ActivityEntry, BlockSet, BlockedEntry, FocusMonitor,
+    JudgeProvider, MonitorState, NewBlock, SavedBlocks, VerdictLogEntry,
 };
 pub use rule::{AiFocusRule, AiFocusRuleHandle};

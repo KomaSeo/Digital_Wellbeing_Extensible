@@ -128,21 +128,7 @@ impl Default for AiFocusConfig {
             recheck_minutes: 15,
             always_allow: BTreeSet::new(),
             private_apps: set(&["keepass.exe", "1password.exe", "bitwarden.exe"]),
-            browsers: set(&[
-                "chrome.exe",
-                "msedge.exe",
-                "firefox.exe",
-                "whale.exe",
-                "brave.exe",
-                "opera.exe",
-                // Linux process names (normalized like every name here)
-                "chromium.exe",
-                "chromium-browser.exe",
-                "firefox-bin.exe",
-                "firefox-esr.exe",
-                "microsoft-edge.exe",
-                "vivaldi-bin.exe",
-            ]),
+            browsers: set(&browser_pages::DEFAULT_BROWSER_PROCESSES),
             allow_permanent_grants: true,
             max_grant_minutes: 120,
             daily_budget_usd: 0.0,
@@ -155,52 +141,6 @@ impl Default for AiFocusConfig {
             time_zone: String::new(),
         }
     }
-}
-
-/// `title` without a trailing " - Google Chrome", " — Mozilla Firefox" and the like.
-fn without_browser_name(title: &str) -> &str {
-    const BROWSER_NAMES: [&str; 10] = [
-        "google chrome",
-        "chromium",
-        "microsoft edge",
-        "microsoft\u{200b} edge",
-        "mozilla firefox",
-        "firefox",
-        "whale",
-        "brave",
-        "opera",
-        "vivaldi",
-    ];
-    for separator in [" - ", " — ", " – "] {
-        if let Some((page, last)) = title.rsplit_once(separator) {
-            let last = last.trim().to_lowercase();
-            if BROWSER_NAMES.iter().any(|name| last.contains(name)) {
-                return page;
-            }
-        }
-    }
-    title
-}
-
-/// Pages a browser may keep open while a broken AI connection locks every app: Claude and
-/// Anthropic pages (to get or fix a key), an empty new tab (to type their address), and the
-/// Google sign-in page (to log in to Claude). Judged by the tab title, like every website.
-pub fn lockdown_allows_page(title: &str) -> bool {
-    let page = without_browser_name(title).trim().to_lowercase();
-    page.is_empty()
-        || ["claude", "anthropic", "google accounts", "google 계정"]
-            .iter()
-            .any(|allowed| page.contains(allowed))
-        || [
-            "new tab",
-            "새 탭",
-            "새 탭 페이지",
-            "about:blank",
-            "untitled",
-            "start page",
-        ]
-        .iter()
-        .any(|empty| page == *empty || page.starts_with(&format!("{empty} - ")))
 }
 
 impl AiFocusConfig {
@@ -222,7 +162,7 @@ impl AiFocusConfig {
     /// own name at the end of the title ("… - Google Chrome") is left out, so a pattern such
     /// as "google" does not match every tab.
     pub fn always_blocked_site(&self, title: &str) -> Option<&str> {
-        let page = without_browser_name(title);
+        let page = browser_pages::without_browser_name(title);
         self.always_blocked_sites
             .iter()
             .find(|pattern| enforcer::pattern::matches_part(pattern, page))
@@ -357,19 +297,6 @@ mod tests {
         assert!(config.is_always_allowed("Taskmgr.exe"));
         assert!(config.is_always_allowed("taskmgr"));
         assert!(!config.is_always_allowed("steam.exe"));
-    }
-
-    #[test]
-    fn a_lockdown_keeps_only_claude_pages_and_new_tabs() {
-        assert!(lockdown_allows_page("Claude - Google Chrome"));
-        assert!(lockdown_allows_page(
-            "API keys - Claude Console - Microsoft\u{200b} Edge"
-        ));
-        assert!(lockdown_allows_page("Anthropic"));
-        assert!(lockdown_allows_page("새 탭 - Chrome"));
-        assert!(lockdown_allows_page("New Tab"));
-        assert!(!lockdown_allows_page("YouTube - Google Chrome"));
-        assert!(!lockdown_allows_page("Gmail - Mozilla Firefox"));
     }
 
     #[test]

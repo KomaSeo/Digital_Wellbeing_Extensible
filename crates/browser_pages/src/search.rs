@@ -1,13 +1,13 @@
 //! Responsibility: Treat search sites specially: a block on a search results page hits the
 //! search terms (a pattern), not the whole site.
 //!
-//! Other sites are blocked as a whole (see [`crate::monitor::tab_key`]). Blocking Google or
+//! Other sites are blocked as a whole (see [`crate::tab_key`]). Blocking Google or
 //! Naver whole would take away every search the work needs, so an off-task search blocks only
 //! searches like it: the judge writes a pattern (a word or a regular expression) for the
 //! off-task topic, and the monitor closes search pages whose query the pattern matches.
 //! Search sites are recognized by their tab titles (`funny cats - Google 검색`).
 
-use crate::monitor::strip_browser_noise;
+use crate::strip_browser_noise;
 use enforcer::normalize_process_name;
 use enforcer::pattern::matches_part;
 

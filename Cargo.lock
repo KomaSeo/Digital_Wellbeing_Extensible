@@ -170,6 +170,7 @@ version = "0.1.0"
 dependencies = [
  "ai_client",
  "app_identity",
+ "browser_pages",
  "chrono",
  "enforcer",
  "image",
@@ -628,6 +629,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser_pages"
+version = "0.1.0"
+dependencies = [
+ "enforcer",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1076,6 +1084,7 @@ dependencies = [
  "ai_client",
  "ai_focus_rule",
  "app_identity",
+ "browser_pages",
  "chrono",
  "directories",
  "eframe",

@@ -56,14 +56,13 @@ crates/ai_focus_rule/src/
 ├── config.rs        설정(AiFocusConfig)과, 설정 파일을 읽어 들이는 저장소(AiFocusStore)를 정의한다. 탭 제목이 항상 막을 웹사이트와 맞는지도 정한다
 ├── judge.rs         "이 창이 할 일에 필요한가?"를 판단하는 Judge 트레이트와 Claude 구현(ClaudeJudge)을 정의한다
 ├── monitor.rs       핵심 로직: 3초마다 도는 반복, 판정 기록과 다시 검사할 시각, 경고와 차단의 상태 관리, 화면 캡처 압축
-├── youtube.rs       YouTube 특별 취급: 탭 제목에서 페이지 이름을 뽑고, 채널과 페이지의 차단 키를 만든다
 ├── rule.rs          Enforcer에 등록하는 차단 규칙(BlockRule)을 구현한다
 └── platform/
     ├── mod.rs       운영체제 기능을 감싸는 Desktop 트레이트를 정의한다. Windows가 아닌 OS용 빈 구현도 여기 있다
     └── windows.rs   Windows 구현: 맨 앞 창 조회, 화면 캡처, Ctrl+W 보내기
 ```
 
-Claude API 호출(`claude.rs`), AI 연결 상태(`connection.rs`), 토큰 사용량(`usage.rs`), 모델 비교(`comparison.rs`)는 rc.80부터 `crates/ai_client`에, JSON 파일 저장소(`JsonStore`)는 `crates/json_store`에 있습니다. 할 일 플래너도 이 둘을 쓰고, 이 크레이트(`ai_focus_rule`)에는 의존하지 않습니다.
+Claude API 호출(`claude.rs`), AI 연결 상태(`connection.rs`), 토큰 사용량(`usage.rs`), 모델 비교(`comparison.rs`)는 rc.80부터 `crates/ai_client`에, JSON 파일 저장소(`JsonStore`)는 `crates/json_store`에 있습니다. 브라우저에 관한 지식(브라우저 프로그램 이름과 제목 속 이름의 목록, 탭 제목에서 페이지·사이트 읽기, YouTube 채널, 검색어, 잠금 중 남길 페이지)은 `crates/browser_pages`에 있습니다. 모니터는 탭을 어떻게 다룰지(닫을지, 막을지)만 정하고, 제목은 직접 해석하지 않습니다. 할 일 플래너도 이 둘을 쓰고, 이 크레이트(`ai_focus_rule`)에는 의존하지 않습니다.
 
 각 파일이 다른 파일을 쓰는 관계는 다음과 같습니다. 화살표는 "왼쪽이 오른쪽을 쓴다"는 뜻입니다.
 
@@ -250,8 +249,8 @@ fn close_active_tab(&self, foreground: &Foreground) -> bool;         // 그 창�
 
 `apply_judgement()`는 먼저 **차단 대상 키**를 정합니다. 이 키는 `MonitorState::target_key()`가 정하고, "무엇을 막을지"를 나타냅니다.
 - 일반 앱이면, 키는 `steam.exe` 같은 **프로그램 이름**입니다.
-- 브라우저면, 키는 `chrome.exe|naver` 같은 **프로그램 이름과 사이트**입니다(`tab_key()`). `site_of()` 함수가 탭 제목에서 사이트를 뽑습니다.
-  이 함수는 먼저 `strip_browser_noise()`로 브라우저 이름(" - Google Chrome" 등)과 알림 숫자("(3) ")를 떼고, 마지막 구분자(" - ", " | " 등) 뒤의 글을 사이트로 봅니다. 예: `(3) 웃긴 고양이 - YouTube - Google Chrome` → `youtube`.
+- 브라우저면, 키는 `chrome.exe|naver` 같은 **프로그램 이름과 사이트**입니다(`browser_pages::tab_key()`). `browser_pages::site_of()` 함수가 탭 제목에서 사이트를 뽑습니다.
+  이 함수는 먼저 `browser_pages::strip_browser_noise()`로 브라우저 이름(" - Google Chrome" 등)과 알림 숫자("(3) ")를 떼고, 마지막 구분자(" - ", " | " 등) 뒤의 글을 사이트로 봅니다. 예: `(3) 웃긴 고양이 - YouTube - Google Chrome` → `youtube`.
   예전에는 키가 탭 제목 전체였습니다. 그러면 사용자가 다음 영상이나 글로 넘어갈 때마다 키가 바뀌어서, 차단을 쉽게 피할 수 있었습니다.
 - YouTube 탭이면, 키는 그 영상의 **채널**입니다(`chrome.exe|youtube channel: 고양이 tv`). 모니터가 채널을 아직 모르면, 키는 **페이지**입니다(`chrome.exe|youtube page: 웃긴 고양이`). 자세한 내용은 5.7절에 있습니다.
 
@@ -346,7 +345,7 @@ fn close_active_tab(&self, foreground: &Foreground) -> bool;         // 그 창�
 - 상태 조회(`status`)는 최근 30개를 `recent_kills`로 돌려주고, Focus 앱의 차단 탭 아래의 **최근에 끈 프로그램**이 시각, 프로그램, 까닭을 보여 줍니다. 끄지 못한 것은 빨간 글과 "(끄지 못함)"으로 나옵니다. 창이 없는 백그라운드 프로그램도 들어갑니다.
 - 알아 둘 점: Enforcer는 사용자의 로그인 세션에서 도는 프로그램만 봅니다. Windows 서비스처럼 세션 0에서 도는 프로그램은 끄지 않고 기록도 하지 않습니다. 막은 프로그램의 도우미 프로그램은 함께 끕니다(5.18절).
 
-### 5.7 YouTube 채널 단위 차단 (`youtube.rs`)
+### 5.7 YouTube 채널 단위 차단 (`browser_pages::youtube`)
 
 YouTube는 강의를 볼 때도 쓰고 딴짓을 할 때도 씁니다. 그래서 모니터가 YouTube 전체를 막으면, 사용자는 공부에 필요한 강의까지 볼 수 없습니다.
 이 문제를 피하려고, 모니터는 YouTube를 다른 사이트와 다르게 다룹니다. 모니터는 YouTube에서 **채널**을 차단 단위로 씁니다.
@@ -506,7 +505,7 @@ Other open windows (title only; judge each in `others`):
 사용자는 어떤 경우에도 열지 않을 웹사이트(예: 유튜브)를 설정의 **항상 막을 웹사이트** 목록에 적어 둘 수 있습니다. 이 목록은 AI 판정과 따로 동작합니다. 이 목록에 걸린 탭은 AI가 무엇이라고 판정할지와 상관없이 닫힙니다.
 
 **탭 제목과 맞춰 보는 방법** (`AiFocusConfig::always_blocked_site`, `enforcer::pattern::matches_part`):
-1. 모니터는 먼저 탭 제목 끝의 브라우저 이름을 뗍니다(`without_browser_name`). 제목의 마지막 " - ", " — ", " – " 뒤에 브라우저 이름(Google Chrome, Chromium, Microsoft Edge, Mozilla Firefox, Firefox, Whale, Brave, Opera, Vivaldi)이 있으면 그 부분을 뺍니다. 그래서 `google` 같은 항목이 모든 Chrome 탭에 맞는 일이 없습니다.
+1. 모니터는 먼저 탭 제목 끝의 브라우저 이름을 뗍니다(`browser_pages::without_browser_name`). 제목의 마지막 " - ", " — ", " – " 뒤에 브라우저 이름(Google Chrome, Chromium, Microsoft Edge, Mozilla Firefox, Firefox, Whale, Brave, Opera, Vivaldi)이 있으면 그 부분을 뺍니다. 그래서 `google` 같은 항목이 모든 Chrome 탭에 맞는 일이 없습니다.
 2. 항목에 `* + ? ( ) [ ] { } | ^ $ \` 중 하나라도 들어 있으면, 그 항목은 정규식입니다. 점(`.`)만 있는 항목은 정규식이 아닙니다. 이 규칙은 블랙리스트와 같습니다(`enforcer::pattern::is_regex`, [`multi_account.md`](multi_account.md) 6.2절).
 3. 정규식이 아닌 항목은 대소문자를 무시하고, 탭 제목에 그 말이 **들어 있으면** 맞습니다. 공백뿐인 항목은 아무것에도 맞지 않습니다.
 4. 정규식인 항목은 대소문자를 무시하고, 탭 제목의 **일부**와 맞으면 됩니다. 예: `reddit|twitter`는 "Home / Twitter"에 맞고, `^funny`는 "Funny cats - YouTube"에 맞지만 `^cats`는 맞지 않습니다. 블랙리스트의 정규식은 프로그램 이름 전체와 맞아야 하지만, 이 목록의 정규식은 제목의 일부와 맞으면 됩니다.
@@ -637,7 +636,7 @@ Other open windows (title only; judge each in `others`):
 
 **한계.** 다른 폴더에 설치된 도우미는 끄지 않습니다. 같은 폴더에 있는 다른 프로그램이 함께 꺼지는 문제가 생기면, 소유자의 말대로 그때 예외를 더합니다.
 
-### 5.17 검색 사이트는 검색어로 막기 (`search.rs`)
+### 5.17 검색 사이트는 검색어로 막기 (`browser_pages::search`)
 
 이 절에서 **검색 사이트**는 Google, 네이버, Daum, Bing, DuckDuckGo처럼 검색 결과를 보여 주는 사이트를 말하고, **검색 패턴**은 막을 검색어를 나타내는 말이나 정규식을 말합니다.
 
@@ -843,11 +842,10 @@ Anthropic은 공식 Rust SDK를 제공하지 않으므로, 코드는 REST API를
 | `background_apps_collect_strikes_even_while_the_front_is_trusted` | 맨 앞 창의 판정이 유효해도, 뒤쪽 앱은 다시 판정할 때가 되면 판정받고, 경고가 쌓이면 차단한다. 판정할 것이 없으면 Claude를 부르지 않는다. |
 | `focus_checks_stop_when_the_daily_budget_is_spent` | 다음 확인에서 곧바로 다시 시도하지 않는다. 오늘 쓴 비용이 하루 예산을 넘으면, 모니터가 판정기를 부르지 않고 차단도 하지 않으며 `last_error`에 예산 오류를 적는다. |
 | `absurd_check_interval_does_not_panic` | 터무니없이 큰 검사 간격이 들어와도 모니터가 멈추지 않는다. |
-| `site_of_strips_browser_noise` | 탭 제목에서 브라우저 이름과 알림 숫자를 떼고 사이트를 뽑는다. |
 | `always_blocked_websites_are_closed_without_the_ai_and_without_daily_wellbeing` | 데일리 웰빙이 꺼져 있어도, 항상 막을 웹사이트(`youtube`, 정규식 `reddit\|twitter`)와 맞는 맨 앞 탭이 판정기를 부르지 않고 닫히고, 맞는 뒤쪽 브라우저 창은 최소화된다. 판정 기록에 "tab closed"와 맞은 항목이 남는다. 브라우저 이름은 비교에서 빠지므로 `google`은 "Rust docs - Google Chrome"을 닫지 않는다. 브라우저가 아닌 프로그램(`code.exe`의 "youtube.rs - …")은 닫히지 않는다. |
 
 `ai_client`의 `usage.rs` 테스트는 단가표대로 비용을 계산하는지(모르는 모델은 가장 비싼 단가), 응답에서 토큰 수를 읽는지, 날짜·용도별 합계와 하루 예산이 맞는지, 62일보다 오래된 날을 지우는지 확인합니다.
-`youtube.rs`의 테스트는 YouTube 탭을 알아보는지(YouTube Music은 제외), 페이지 이름에서 잡음을 떼는지, 채널 이름을 비교하기 쉽게 바꾸는지 확인합니다.
+`browser_pages` 크레이트의 테스트는 탭 제목에서 브라우저 이름과 알림 숫자를 떼고 사이트를 뽑는지, 이름 목록의 모든 브라우저 이름을 떼는지, 잠금 중에 Claude 페이지와 빈 탭만 남기는지 확인합니다. 그 안의 `youtube.rs` 테스트는 YouTube 탭을 알아보는지(YouTube Music은 제외), 페이지 이름에서 잡음을 떼는지, 채널 이름을 비교하기 쉽게 바꾸는지 확인합니다.
 
 `judge.rs`의 테스트는 다음을 확인합니다. 코드가 생각 블록을 건너뛰고 구조화 출력을 해석하는가(한국어 이유 포함), 거절 응답을 오류로 처리하는가,
 요청 내용에 이미지와 `fallbacks`가 들어가는가, haiku 모델에는 `fallbacks`가 빠지는가,
@@ -865,7 +863,7 @@ YouTube 탭의 질문에 채널 안내가 들어가고 응답 형식에 `channel
 1. **모니터는 사이트를 탭 제목으로 짐작합니다.** 모니터가 주소(URL)를 알려면 브라우저 확장 프로그램이 있어야 합니다. 그래서 다음 문제가 있습니다.
    - 제목에 사이트 이름이 없는 페이지는 제목 전체가 키가 됩니다. 이런 페이지가 차단되어도, 같은 사이트의 다른 페이지는 막히지 않습니다.
    - 반대로 서로 다른 사이트가 끝에 같은 이름을 쓰면, 모니터는 두 사이트를 같은 것으로 봅니다.
-   - TODO 2번(Chrome 확장 프로그램)을 만들면, 키를 도메인으로 바꾸는 것이 자연스럽습니다. 개발자는 `tab_key()` 함수 한 곳만 고치면 됩니다.
+   - TODO 2번(Chrome 확장 프로그램)을 만들면, 키를 도메인으로 바꾸는 것이 자연스럽습니다. 개발자는 `browser_pages::tab_key()` 함수 한 곳만 고치면 됩니다.
 2. **브라우저 창의 뒤쪽 탭은 판정하지 않습니다.** 모니터는 맨 앞 창과 함께 다른 열린 창도 제목으로 판정합니다(5.11절). 하지만 Windows는 브라우저 창마다 지금 선택된 탭의 제목만 알려 줍니다. 같은 창의 뒤쪽 탭은 앞으로 나와야 판정받습니다. 뒤쪽 탭까지 보려면 브라우저 확장 프로그램이나 UI Automation이 필요합니다.
    창이 없는 프로그램(트레이에만 있는 프로그램, 백그라운드 프로그램)도 목록에 들어가지 않습니다.
 3. **차단 상태는 사용자별 파일에 남습니다.** agent가 차단 목록을 사용자별 파일(`blocks\<사용자>.json`)에 저장하고, 다시 시작할 때 이어서 적용합니다. 그래서 로그아웃했다가 다시 로그인해도 차단이 풀리지 않습니다.
@@ -917,5 +915,5 @@ YouTube 탭의 질문에 채널 안내가 들어가고 응답 형식에 `channel
 |---|---|
 | 다른 AI(예: 내 컴퓨터의 모델)로 판정하기 | `Judge` 트레이트를 구현하고, 그 구현을 `FocusMonitor::new`에 `JudgeProvider`로 넘깁니다. |
 | macOS나 Linux 지원하기 | `platform/`에 그 운영체제용 `Desktop` 구현을 추가하고, `native()` 함수에 분기를 추가합니다. |
-| 브라우저 주소로 판정하기 | 브라우저 확장 프로그램에서 주소를 받고, `Foreground`에 `url` 항목을 추가하고, `tab_key()`와 `user_text()`가 그 주소를 쓰게 합니다. |
+| 브라우저 주소로 판정하기 | 브라우저 확장 프로그램에서 주소를 받고, `Foreground`에 `url` 항목을 추가하고, `browser_pages::tab_key()`와 `user_text()`가 그 주소를 쓰게 합니다. |
 | 판정 기준 바꾸기 | `judge.rs`의 `SYSTEM_PROMPT`를 고칩니다. |

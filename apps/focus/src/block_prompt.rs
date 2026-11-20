@@ -58,7 +58,7 @@ impl BlockPrompt {
 /// the program name.
 fn what_it_is(block: &NewBlock) -> String {
     if block.is_tab {
-        ai_focus_rule::strip_browser_noise(&block.title)
+        browser_pages::strip_browser_noise(&block.title)
             .trim()
             .to_string()
     } else {

@@ -12,7 +12,7 @@ use crate::judge::{
 use crate::platform::{Desktop, Foreground, OpenWindow, Screenshot};
 use crate::store::JsonStore;
 use crate::usage::UsageRecorder;
-use crate::{search, youtube};
+use browser_pages::{search, strip_browser_noise, youtube};
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use enforcer::{is_never_terminate, normalize_process_name};
 use parking_lot::Mutex;
@@ -219,7 +219,7 @@ pub struct MonitorState {
     pub other_scopes: HashMap<String, BlockSet>,
     /// Normalized process name -> block.
     pub blocked_processes: HashMap<String, BlockedEntry>,
-    /// Browser "process|site" -> block (see [`tab_key`]); on YouTube
+    /// Browser "process|site" -> block (see [`browser_pages::tab_key`]); on YouTube
     /// "process|youtube channel: …" or "process|youtube page: …" (see `youtube.rs`).
     pub blocked_tabs: HashMap<String, BlockedEntry>,
     /// YouTube page name -> channel, as the judge read it from a screenshot.
@@ -419,7 +419,7 @@ impl MonitorState {
             if let Some(query) = search::query_of(&foreground.title) {
                 return search::key(&foreground.process_name, &query);
             }
-            return tab_key(foreground);
+            return browser_pages::tab_key(&foreground.process_name, &foreground.title);
         }
         match self.channels.get(&youtube::page_name(&foreground.title)) {
             Some(channel) => youtube::channel_key(&foreground.process_name, channel),
@@ -683,75 +683,6 @@ impl MonitorState {
         self.blocked_tabs.retain(|key, block| !covered(key, block));
         self.strikes.retain(|key, _| !target.matches_block_key(key));
     }
-}
-
-/// Block key of a browser window: `process|site`. A block per exact title
-/// would let the user dodge it by moving to the next video or post; a block
-/// per site does not. (YouTube is blocked per channel instead: `youtube.rs`.)
-pub fn tab_key(foreground: &Foreground) -> String {
-    format!(
-        "{}|{}",
-        normalize_process_name(&foreground.process_name),
-        site_of(&foreground.title)
-    )
-}
-
-/// Best guess at the site from a browser window title, lower case:
-/// `(3) Funny cats - YouTube - Google Chrome` -> `youtube`. Without a
-/// separator the whole title is used.
-pub fn site_of(title: &str) -> String {
-    let stripped = strip_browser_noise(title);
-    let site = [" - ", " | ", " — ", " · "]
-        .iter()
-        .filter_map(|separator| {
-            stripped
-                .rfind(separator)
-                .map(|index| &stripped[index + separator.len()..])
-        })
-        .min_by_key(|candidate| candidate.len())
-        .unwrap_or(stripped);
-    truncate(site.trim(), 60).to_lowercase()
-}
-
-/// A browser title without the browser's name, Edge's "and 3 more pages" and
-/// unread counters such as "(3) ", which change constantly:
-/// `(3) Funny cats - YouTube - Google Chrome` -> `Funny cats - YouTube`.
-pub fn strip_browser_noise(title: &str) -> &str {
-    const BROWSER_SUFFIXES: &[&str] = &[
-        " - Google Chrome",
-        " - Microsoft\u{200b} Edge",
-        " - Microsoft Edge",
-        " — Mozilla Firefox",
-        " - Mozilla Firefox",
-        " - Whale",
-        " - Brave",
-        " - Opera",
-    ];
-    let mut trimmed = title.trim();
-    for suffix in BROWSER_SUFFIXES {
-        if let Some(rest) = trimmed.strip_suffix(suffix) {
-            trimmed = rest;
-            break;
-        }
-    }
-    // Edge: "Title and 3 more pages"
-    if let Some(index) = trimmed
-        .rfind(" and ")
-        .filter(|_| trimmed.ends_with(" more pages"))
-    {
-        trimmed = &trimmed[..index];
-    }
-    if let Some(rest) = trimmed.strip_prefix('(') {
-        if let Some((count, after)) = rest.split_once(") ") {
-            if count
-                .chars()
-                .all(|character| character.is_ascii_digit() || character == '+')
-            {
-                trimmed = after;
-            }
-        }
-    }
-    trimmed.trim()
 }
 
 /// How long a verdict stands before the window is judged again.
@@ -1204,7 +1135,7 @@ impl FocusMonitor {
             if let Some(pattern) = config.always_blocked_site(title) {
                 return Some(format!("항상 막을 웹사이트(\"{pattern}\")"));
             }
-            (locked && !crate::config::lockdown_allows_page(title))
+            (locked && !browser_pages::lockdown_allows_page(title))
                 .then(|| "AI 연결이 끊겨 Claude와 Anthropic 사이트만 열 수 있습니다".to_string())
         };
         let foreground = self.desktop.foreground();
@@ -2497,20 +2428,6 @@ mod tests {
     }
 
     // --- review fixes ----------------------------------------------------------
-
-    #[test]
-    fn site_of_strips_browser_noise() {
-        assert_eq!(
-            site_of("(3) Funny cats - YouTube - Google Chrome"),
-            "youtube"
-        );
-        assert_eq!(
-            site_of("Inbox (2) - me@x.com - Gmail - Google Chrome"),
-            "gmail"
-        );
-        assert_eq!(site_of("Rust | docs.rs — Mozilla Firefox"), "docs.rs");
-        assert_eq!(site_of("New Tab"), "new tab");
-    }
 
     #[test]
     fn a_channel_is_blocked_at_the_first_off_task_verdict() {
