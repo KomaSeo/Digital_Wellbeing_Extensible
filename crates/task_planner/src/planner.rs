@@ -27,6 +27,7 @@ use crate::model::{
     TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WaitingItem, WeekPlan,
     WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
+use crate::outline::Outline;
 use ai_client::JudgeError;
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use json_store::JsonStore;
@@ -119,6 +120,18 @@ pub enum PlannerError {
     UnknownWaiting(String),
     #[error("제목은 2~{MAX_TITLE_CHARS}글자입니다")]
     BadTitle,
+    #[error("\"{0}\"은(는) 아직 시작할 수 없습니다. 먼저 끝낼 일: {1}")]
+    Waiting(String, String),
+    #[error("\"{0}\"은(는) 묶음입니다. 묶음 안의 할 일을 고르세요")]
+    GroupNotAssignable(String),
+    #[error("없는 묶음입니다('{0}')")]
+    UnknownGroup(String),
+    #[error("묶음 \"{0}\" 안에 할 일이 남아 있습니다. 먼저 안의 할 일을 옮기거나 지우세요")]
+    GroupNotEmpty(String),
+    #[error("\"{0}\"을(를) 자기 안으로 옮길 수 없습니다")]
+    IntoItself(String),
+    #[error("이렇게 하면 서로를 기다려서 아무것도 시작할 수 없게 됩니다: {0}")]
+    WaitingLoop(String),
 }
 
 /// Responsibility: Own the planner's config and state stores, and run assign / request_change
@@ -423,7 +436,7 @@ impl TaskPlanner {
 
     /// The planner is always on; it has nothing to do only when no to-do is open.
     fn is_active_with(&self, open: &[TodoItem]) -> bool {
-        !open.is_empty()
+        open.iter().any(|todo| !todo.group)
     }
 
     pub fn status(&self) -> PlannerStatus {
@@ -718,6 +731,7 @@ impl TaskPlanner {
                 TodoChange::Add { .. }
                     | TodoChange::Edit { .. }
                     | TodoChange::Remove { .. }
+                    | TodoChange::Move { .. }
                     | TodoChange::EditAppointment { .. }
             )
         {
@@ -737,12 +751,23 @@ impl TaskPlanner {
         // rules and instructions (the AI also sees the recent to-do changes).
         let state = self.state.get();
         let change = clean_change(change, now)?;
+        let outline = Outline::new(&open);
+        // A change that alters nothing the AI picks by is put in force without asking it.
+        let review_by =
+            if review_by == TodoChangeReview::ByTheAi && changes_no_pick(&change, &outline) {
+                TodoChangeReview::NotNeeded
+            } else {
+                review_by
+            };
         let target = match &change {
+            // The same title may be in two groups ("자료 조사" for two projects), not twice in one.
             TodoChange::Add { todo } => {
-                if let Some(duplicate) = open
-                    .iter()
-                    .find(|existing| existing.title.trim().eq_ignore_ascii_case(&todo.title))
-                {
+                if let Some(duplicate) = open.iter().find(|existing| {
+                    existing.group == todo.group
+                        && outline.parent(&existing.id).map(|group| group.id.as_str())
+                            == todo.parent.as_deref()
+                        && existing.title.trim().eq_ignore_ascii_case(&todo.title)
+                }) {
                     return Err(PlannerError::Duplicate(duplicate.title.clone()));
                 }
                 None
@@ -804,7 +829,16 @@ impl TaskPlanner {
                         .ok_or_else(|| PlannerError::UnknownTodo(todo_id.clone()))?,
                 )
             }
+            // Moving needs no reason; the AI asks for one when it refuses.
+            TodoChange::Move { todo_id, .. } => Some(
+                open.iter()
+                    .find(|existing| &existing.id == todo_id)
+                    .cloned()
+                    .ok_or_else(|| PlannerError::UnknownTodo(todo_id.clone()))?,
+            ),
         };
+        // Where to-dos sit and what they wait for is checked whoever reviews the change.
+        check_placement(&change, target.as_ref(), &open)?;
 
         let recent: Vec<TodoChangeRecord> = state.todo_changes.iter().rev().cloned().collect();
         let history = self.focus.recent_activity();
@@ -819,11 +853,16 @@ impl TaskPlanner {
             return self
                 .review_appointment_change(now, change, reason, via, &open, &recent, review_by);
         }
-        if review_by == TodoChangeReview::None {
+        if review_by != TodoChangeReview::ByTheAi {
             let after = match &change {
                 // The user's own fields, and the defaults for the empty ones (no AI fills them).
-                TodoChange::Add { todo } => Some(completed_todo(now, todo, None)),
-                TodoChange::Edit { todo, .. } => target.as_ref().map(|before| edited(before, todo)),
+                TodoChange::Add { todo } => Some(completed_todo(now, todo, None, &outline)),
+                TodoChange::Edit { todo, .. } => {
+                    target.as_ref().map(|before| edited(before, todo, &outline))
+                }
+                TodoChange::Move { parent, .. } => target
+                    .as_ref()
+                    .map(|before| moved(before, parent.as_deref())),
                 _ => None,
             };
             let record = TodoChangeRecord {
@@ -833,7 +872,12 @@ impl TaskPlanner {
                 reason,
                 via: via.trim().chars().take(40).collect(),
                 approved: true,
-                reply: "아직 엄격 모드가 아니어서 AI 심사 없이 바로 적용했습니다.".to_string(),
+                reply: if review_by == TodoChangeReview::NotNeeded {
+                    "할 일 고르기에 영향이 없는 변경이라서 AI 심사 없이 바로 적용했습니다."
+                } else {
+                    "아직 엄격 모드가 아니어서 AI 심사 없이 바로 적용했습니다."
+                }
+                .to_string(),
                 ai_failed: false,
                 before: target,
                 after,
@@ -867,9 +911,12 @@ impl TaskPlanner {
             ),
         };
         let after = match &change {
-            TodoChange::Add { todo } => Some(completed_todo(now, todo, filled.as_ref())),
+            TodoChange::Add { todo } => Some(completed_todo(now, todo, filled.as_ref(), &outline)),
+            TodoChange::Move { parent, .. } => target
+                .as_ref()
+                .map(|before| moved(before, parent.as_deref())),
             TodoChange::Edit { todo, .. } => target.as_ref().map(|before| {
-                let mut after = edited(before, todo);
+                let mut after = edited(before, todo, &outline);
                 // A new title or notes may change what matters for picking it: the AI's
                 // constraints replace the old ones, unless the user wrote their own.
                 if todo.constraints.is_empty() && (!todo.title.is_empty() || !todo.notes.is_empty())
@@ -1101,11 +1148,15 @@ impl TaskPlanner {
                     writes.push(TodoListWrite::Dismiss(todo_id.clone()));
                 }
                 let mut changed_fields = edited_fields(todo);
-                // The constraints the review wrote for a new title or notes.
                 if let (Some(before), Some(after)) = (&record.before, &record.after) {
+                    // The constraints the review wrote for a new title or notes.
                     if todo.constraints.is_empty() && before.constraints != after.constraints {
                         changed_fields
                             .insert("constraints".into(), json!(after.constraints.clone()));
+                    }
+                    // Into another group: at the end of it.
+                    if before.rank != after.rank {
+                        changed_fields.insert("rank".into(), json!(after.rank));
                     }
                 }
                 writes.push(TodoListWrite::Merge {
@@ -1118,6 +1169,11 @@ impl TaskPlanner {
             TodoChange::Remove { todo_id } if in_settings(todo_id) => {
                 vec![TodoListWrite::Remove(todo_id.clone())]
             }
+            TodoChange::Move { before, .. } => record
+                .after
+                .as_ref()
+                .map(|moved| self.placement_writes(moved, before.as_deref()))
+                .unwrap_or_default(),
             // Kept outside the file, unless an edit has put it there by the time this applies.
             TodoChange::Remove { todo_id } => vec![
                 TodoListWrite::Dismiss(todo_id.clone()),
@@ -1156,6 +1212,53 @@ impl TaskPlanner {
                 vec![TodoListWrite::RemoveAppointment(appointment_id.clone())]
             }
         }
+    }
+
+    /// The writes that put `moved` into its group (`moved.parent`) just before the to-do
+    /// `before` (`None`: at the end): it and the others there are numbered 1, 2, 3, … in
+    /// their new order, and only the ranks that change are written.
+    fn placement_writes(&self, moved: &TodoItem, before: Option<&str>) -> Vec<TodoListWrite> {
+        let config_ids: Vec<String> = self
+            .config
+            .get()
+            .todos
+            .into_iter()
+            .map(|todo| todo.id)
+            .collect();
+        let open = self.open_todos();
+        let outline = Outline::new(&open);
+        let mut order: Vec<&TodoItem> = outline
+            .children(moved.parent.as_deref())
+            .into_iter()
+            .filter(|todo| todo.id != moved.id)
+            .collect();
+        let position = before
+            .and_then(|before_id| order.iter().position(|todo| todo.id == before_id))
+            .unwrap_or(order.len());
+        order.insert(position, moved);
+        let mut writes = Vec::new();
+        for (index, todo) in order.into_iter().enumerate() {
+            let rank = (index + 1) as f64;
+            let mut changed_fields = Map::new();
+            if todo.id == moved.id {
+                changed_fields.insert("parent".into(), json!(moved.parent));
+                changed_fields.insert("rank".into(), json!(rank));
+            } else if todo.rank != rank {
+                changed_fields.insert("rank".into(), json!(rank));
+            } else {
+                continue;
+            }
+            let outside_the_file = !config_ids.contains(&todo.id);
+            if outside_the_file {
+                writes.push(TodoListWrite::Dismiss(todo.id.clone()));
+            }
+            writes.push(TodoListWrite::Merge {
+                todo_id: todo.id.clone(),
+                changed_fields,
+                base: outside_the_file.then(|| todo.clone()),
+            });
+        }
+        writes
     }
 
     /// After an edited appointment is written to the list: it runs on its new times, so an
@@ -1632,9 +1735,7 @@ impl TaskPlanner {
             _ => {}
         }
         match request {
-            ChangeKind::SwitchTodo { todo_id } if !open.iter().any(|todo| &todo.id == todo_id) => {
-                Err(PlannerError::UnknownTodo(todo_id.clone()))
-            }
+            ChangeKind::SwitchTodo { todo_id } => check_ready(&open, todo_id),
             ChangeKind::SwitchFree { task } if task.trim().is_empty() => {
                 Err(PlannerError::EmptyTask)
             }
@@ -1727,8 +1828,16 @@ impl TaskPlanner {
             .map(|todo| todo.id.clone())
             .collect();
         let (mut writes, mut summary, mut notes_updates) = (Vec::new(), Vec::new(), Vec::new());
+        let current = state
+            .assignment
+            .as_ref()
+            .and_then(|assignment| assignment.todo_id.as_deref())
+            .and_then(|todo_id| open.iter().find(|todo| todo.id == todo_id));
         for (index, change) in changes.iter().take(MAX_LIST_CHANGES).enumerate() {
-            let target = open.iter().find(|todo| todo.id == change.todo_id);
+            // Groups are not on the AI's list: it cannot change them.
+            let target = open
+                .iter()
+                .find(|todo| todo.id == change.todo_id && !todo.group);
             let deadline = change.deadline.trim().parse::<NaiveDate>().ok();
             match (change.action.as_str(), target) {
                 ("add", _) => {
@@ -1752,6 +1861,9 @@ impl TaskPlanner {
                         estimate_minutes: (change.estimate_minutes > 0)
                             .then(|| change.estimate_minutes.min(6000)),
                         proposed: true,
+                        // Right after the to-do the report is about, in the order given.
+                        parent: current.and_then(|todo| todo.parent.clone()),
+                        rank: current.map_or(0.0, |todo| todo.rank) + 0.5 + index as f64 / 100.0,
                         ..TodoItem::new(title.clone())
                     };
                     summary.push(format!("추가: {title}"));
@@ -2021,6 +2133,7 @@ impl TaskPlanner {
         if !open.iter().any(|todo| todo.id == pick.todo_id) {
             return Err(PlannerError::BadPick(pick.todo_id));
         }
+        check_ready(&open, &pick.todo_id)?;
         let assignment = Assignment {
             // Nothing is done "away from the computer" any more (the owner: "그래 할 일에서도
             // 없애자"): no lock; the window checks judge what has to do with the task.
@@ -2181,7 +2294,10 @@ fn checked_week_plan(
         let todos = answer_day
             .todos
             .into_iter()
-            .filter(|planned| open.iter().any(|todo| todo.id == planned.todo_id))
+            .filter(|planned| {
+                open.iter()
+                    .any(|todo| todo.id == planned.todo_id && !todo.group)
+            })
             .map(|planned| WeekPlanTodo {
                 todo_id: planned.todo_id,
                 minutes: planned.minutes.clamp(0, MINUTES_PER_DAY) as u32,
@@ -2233,6 +2349,163 @@ enum TodoChangeReview {
     ByTheAi,
     /// The settings are not protected yet: edits and removals take effect without review.
     None,
+    /// The change alters nothing the AI picks by ([`changes_no_pick`]): in force at once,
+    /// in strict mode too.
+    NotNeeded,
+}
+
+/// `change` alters nothing the AI picks by: adding a group (it is empty), removing a group
+/// (only an empty one may go), or moving a to-do within its own group (the order there is
+/// only for showing).
+fn changes_no_pick(change: &TodoChange, outline: &Outline) -> bool {
+    match change {
+        TodoChange::Add { todo } => todo.group,
+        TodoChange::Remove { todo_id } => outline.get(todo_id).is_some_and(|todo| todo.group),
+        TodoChange::Move {
+            todo_id, parent, ..
+        } => outline.parent(todo_id).map(|group| group.id.as_str()) == parent.as_deref(),
+        _ => false,
+    }
+}
+
+/// `todo_id` can be assigned now: a to-do on the list (not a group) that waits for nothing
+/// unfinished.
+fn check_ready(open: &[TodoItem], todo_id: &str) -> Result<(), PlannerError> {
+    let outline = Outline::new(open);
+    let todo = outline
+        .get(todo_id)
+        .ok_or_else(|| PlannerError::UnknownTodo(todo_id.to_string()))?;
+    if todo.group {
+        return Err(PlannerError::GroupNotAssignable(todo.title.clone()));
+    }
+    let blockers = outline.blockers(todo_id);
+    if !blockers.is_empty() {
+        return Err(PlannerError::Waiting(
+            todo.title.clone(),
+            blockers
+                .iter()
+                .map(|blocker| blocker.title.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a change that puts a to-do into something that is not a group or into itself,
+/// names to-dos that are not open, removes a group that still holds to-dos, or makes to-dos
+/// wait for each other so that none of them could ever start.
+fn check_placement(
+    change: &TodoChange,
+    target: Option<&TodoItem>,
+    open: &[TodoItem],
+) -> Result<(), PlannerError> {
+    let outline = Outline::new(open);
+    let check_group = |parent: Option<&str>, moving: Option<&TodoItem>| {
+        let Some(parent_id) = parent else {
+            return Ok(());
+        };
+        if !outline.get(parent_id).is_some_and(|todo| todo.group) {
+            return Err(PlannerError::UnknownGroup(parent_id.to_string()));
+        }
+        match moving {
+            Some(moving) if outline.is_inside(parent_id, &moving.id) => {
+                Err(PlannerError::IntoItself(moving.title.clone()))
+            }
+            _ => Ok(()),
+        }
+    };
+    let check_after = |after: &[String], own_id: Option<&str>| match after
+        .iter()
+        .find(|waited_id| Some(waited_id.as_str()) == own_id || outline.get(waited_id).is_none())
+    {
+        Some(unknown) => Err(PlannerError::UnknownTodo(unknown.clone())),
+        None => Ok(()),
+    };
+    let mut changed: Vec<TodoItem> = open.to_vec();
+    match (change, target) {
+        (TodoChange::Add { todo }, _) => {
+            check_group(todo.parent.as_deref(), None)?;
+            check_after(todo.after.as_deref().unwrap_or_default(), None)?;
+            changed.push(TodoItem {
+                id: "\u{0}new".into(),
+                group: todo.group,
+                parent: todo.parent.clone(),
+                after: todo.after.clone().unwrap_or_default(),
+                ..TodoItem::new(todo.title.clone())
+            });
+        }
+        (TodoChange::Edit { todo_id, todo }, Some(before)) => {
+            if let Some(parent) = &todo.parent {
+                check_group(
+                    Some(parent)
+                        .filter(|parent| !parent.is_empty())
+                        .map(String::as_str),
+                    Some(before),
+                )?;
+            }
+            if let Some(after) = &todo.after {
+                check_after(after, Some(todo_id))?;
+            }
+            if let Some(entry) = changed.iter_mut().find(|entry| &entry.id == todo_id) {
+                *entry = edited(before, todo, &outline);
+            }
+        }
+        (
+            TodoChange::Move {
+                todo_id,
+                parent,
+                before: next,
+            },
+            Some(before),
+        ) => {
+            check_group(parent.as_deref(), Some(before))?;
+            if let Some(next_id) = next {
+                let in_place = outline
+                    .children(parent.as_deref())
+                    .iter()
+                    .any(|sibling| &sibling.id == next_id && sibling.id != *todo_id);
+                if !in_place {
+                    return Err(PlannerError::UnknownTodo(next_id.clone()));
+                }
+            }
+            if let Some(entry) = changed.iter_mut().find(|entry| &entry.id == todo_id) {
+                entry.parent = parent.clone();
+            }
+        }
+        (TodoChange::Remove { todo_id }, Some(before)) if before.group => {
+            if !outline.children(Some(todo_id)).is_empty() {
+                return Err(PlannerError::GroupNotEmpty(before.title.clone()));
+            }
+            return Ok(());
+        }
+        _ => return Ok(()),
+    }
+    // A list that already had a loop (edited by hand) does not block every change.
+    match Outline::new(&changed).waiting_loop() {
+        Some(titles) if outline.waiting_loop().is_none() => {
+            Err(PlannerError::WaitingLoop(titles.join(" → ")))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The rank that puts a new to-do at the end of the group `parent` (`None`: the top).
+fn next_rank(outline: &Outline, parent: Option<&str>) -> f64 {
+    outline
+        .children(parent)
+        .iter()
+        .map(|todo| todo.rank)
+        .fold(0.0, f64::max)
+        + 1.0
+}
+
+/// `before` put into the group `parent` (`None`: the top); its rank comes with the writes.
+fn moved(before: &TodoItem, parent: Option<&str>) -> TodoItem {
+    TodoItem {
+        parent: parent.map(str::to_string),
+        ..before.clone()
+    }
 }
 
 fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, PlannerError> {
@@ -2240,6 +2513,12 @@ fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, Pl
         todo.title = todo.title.split_whitespace().collect::<Vec<_>>().join(" ");
         todo.notes = todo.notes.trim().to_string();
         todo.constraints = todo.constraints.trim().to_string();
+        todo.parent = todo.parent.map(|parent| parent.trim().to_string());
+        if let Some(after) = &mut todo.after {
+            let mut seen = std::collections::BTreeSet::new();
+            after
+                .retain(|waited_id| !waited_id.trim().is_empty() && seen.insert(waited_id.clone()));
+        }
         todo
     };
     let fits = |todo: &ProposalInput| {
@@ -2248,10 +2527,24 @@ fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, Pl
             && todo.constraints.chars().count() <= MAX_CONSTRAINTS_CHARS
     };
     let change = match change {
-        TodoChange::Add { todo } => TodoChange::Add { todo: clean(todo) },
+        TodoChange::Add { todo } => {
+            let mut todo = clean(todo);
+            // "" is the top, as when editing.
+            todo.parent = todo.parent.filter(|parent| !parent.is_empty());
+            TodoChange::Add { todo }
+        }
         TodoChange::Edit { todo_id, todo } => TodoChange::Edit {
             todo_id,
             todo: clean(todo),
+        },
+        TodoChange::Move {
+            todo_id,
+            parent,
+            before,
+        } => TodoChange::Move {
+            todo_id,
+            parent: parent.filter(|parent| !parent.is_empty()),
+            before: before.filter(|before| !before.is_empty()),
         },
         TodoChange::AddAppointment { mut appointment } => {
             appointment.title = appointment
@@ -2292,7 +2585,10 @@ fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, Pl
         other @ (TodoChange::Remove { .. } | TodoChange::RemoveAppointment { .. }) => other,
     };
     match &change {
-        TodoChange::Add { todo } if todo.title.chars().count() < 2 || !fits(todo) => {
+        // A group may be one word of one letter ("집", "몸").
+        TodoChange::Add { todo }
+            if todo.title.chars().count() < if todo.group { 1 } else { 2 } || !fits(todo) =>
+        {
             Err(PlannerError::BadProposal)
         }
         TodoChange::Edit { todo, .. } if !fits(todo) => Err(PlannerError::BadProposal),
@@ -2306,6 +2602,7 @@ fn completed_todo(
     now: DateTime<Utc>,
     draft: &ProposalInput,
     filled: Option<&ReviewedTodo>,
+    outline: &Outline,
 ) -> TodoItem {
     let filled = filled.cloned().unwrap_or_default();
     let deadline = draft
@@ -2341,16 +2638,24 @@ fn completed_todo(
         proposed: true,
         repeat: draft.repeat.unwrap_or(false),
         away_from_computer: None,
+        group: draft.group,
+        parent: draft.parent.clone(),
+        rank: next_rank(outline, draft.parent.as_deref()),
+        after: draft.after.clone().unwrap_or_default(),
     }
 }
 
-/// `before` with the fields the user set in `draft`.
-fn edited(before: &TodoItem, draft: &ProposalInput) -> TodoItem {
+/// `before` with the fields the user set in `draft`; moved into another group, at its end.
+fn edited(before: &TodoItem, draft: &ProposalInput, outline: &Outline) -> TodoItem {
     let mut item = serde_json::to_value(before).unwrap_or(Value::Null);
     if let Value::Object(item_fields) = &mut item {
         item_fields.extend(edited_fields(draft));
     }
-    serde_json::from_value(item).unwrap_or_else(|_| before.clone())
+    let mut after: TodoItem = serde_json::from_value(item).unwrap_or_else(|_| before.clone());
+    if after.parent != before.parent {
+        after.rank = next_rank(outline, after.parent.as_deref());
+    }
+    after
 }
 
 /// The fields of a to-do that `draft` sets, as `planner.json` stores them: an empty title or
@@ -2380,6 +2685,15 @@ fn edited_fields(draft: &ProposalInput) -> Map<String, Value> {
     }
     if let Some(repeat) = draft.repeat {
         changed_fields.insert("repeat".into(), json!(repeat));
+    }
+    if let Some(parent) = &draft.parent {
+        changed_fields.insert(
+            "parent".into(),
+            json!(Some(parent).filter(|parent| !parent.is_empty())),
+        );
+    }
+    if let Some(after) = &draft.after {
+        changed_fields.insert("after".into(), json!(after));
     }
     changed_fields
 }

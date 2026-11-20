@@ -695,7 +695,9 @@ impl eframe::App for FocusApp {
             });
         });
         egui::CentralPanel::default().show(context, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            // Rows of the to-do list are dragged to move them: a drag that misses a handle
+            // must not scroll the page instead (the wheel and the scroll bar still do).
+            egui::ScrollArea::vertical().drag_to_scroll(false).show(ui, |ui| {
                 let status = match status {
                     Some(Ok(status)) => status,
                     Some(Err(error)) => {

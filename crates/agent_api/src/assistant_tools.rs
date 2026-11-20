@@ -563,9 +563,19 @@ pub fn summary(status: &Status) -> Value {
         "report_due": planner.is_some_and(|planner| planner.report_due),
         "stopped_using": planner.is_some_and(|planner| planner.stopped_at.is_some()),
         "all_apps_locked": status.lockdown.as_ref().map(|lockdown| &lockdown.reason),
-        "open_todos": planner.map(|planner| planner.open_todos.iter().map(|todo| json!({
+        "open_todos": planner.map(|planner| {
+            let outline = task_planner::outline::Outline::new(&planner.open_todos);
+            planner.open_todos.iter().map(|todo| json!({
             "id": todo.id,
             "title": todo.title,
+            // A group holds to-dos and is never assigned; "in" is the groups it sits in.
+            "is_group": todo.group,
+            "in": outline.path_text(&todo.id),
+            "waits_for": outline
+                .blockers(&todo.id)
+                .iter()
+                .map(|blocker| blocker.title.clone())
+                .collect::<Vec<_>>(),
             "notes": todo.notes,
             "deadline": todo.deadline,
             "priority": todo.priority,
@@ -573,7 +583,8 @@ pub fn summary(status: &Status) -> Value {
             "minutes_spent": planner.minutes_this_round.get(&todo.id),
             "routine": todo.repeat,
             "proposed_by_user": todo.proposed,
-        })).collect::<Vec<_>>()),
+        })).collect::<Vec<_>>()
+        }),
         "recent_todo_changes": planner.map(|planner| planner.recent_todo_changes.iter().map(|record| json!({
             "change": task_planner::change_summary(&record.change, record.before.as_ref()),
             "approved": record.approved,

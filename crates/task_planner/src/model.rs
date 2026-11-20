@@ -44,6 +44,22 @@ pub struct TodoItem {
     /// before this existed): the AI judges it when it assigns the to-do.
     #[serde(default)]
     pub away_from_computer: Option<bool>,
+    /// A group ("묶음": a value, project, objective or area) that holds other to-dos and
+    /// groups. A group is never assigned itself; its deadline and `after` apply to everything
+    /// inside it. Set when it is added; it never changes.
+    #[serde(default)]
+    pub group: bool,
+    /// The group this to-do sits in; `None`, or a group that is not on the list: at the top.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// Where it shows among the to-dos of its group, smallest first. Only for showing: the AI
+    /// does not choose by it.
+    #[serde(default)]
+    pub rank: f64,
+    /// To-dos and groups that must be finished before this one can start ("먼저 끝낼 일");
+    /// a group waits for all of its to-dos. Ids that are no longer open count as finished.
+    #[serde(default)]
+    pub after: Vec<String>,
 }
 
 fn default_priority() -> u8 {
@@ -63,6 +79,10 @@ impl TodoItem {
             proposed: false,
             repeat: false,
             away_from_computer: None,
+            group: false,
+            parent: None,
+            rank: 0.0,
+            after: Vec::new(),
         }
     }
 }
@@ -559,8 +579,17 @@ pub enum TodoChange {
         todo_id: String,
         todo: ProposalInput,
     },
-    /// Take an open to-do off the list.
+    /// Take an open to-do off the list. A group must be empty first.
     Remove { todo_id: String },
+    /// Put a to-do or group into another group (`parent`; `None`: at the top), just before
+    /// the to-do `before` there (`None`: at the end). What the user drags in the to-do tab.
+    Move {
+        todo_id: String,
+        #[serde(default)]
+        parent: Option<String>,
+        #[serde(default)]
+        before: Option<String>,
+    },
     /// Add an appointment; the AI decides whether to accept it (owner's appointment rules).
     AddAppointment { appointment: AppointmentInput },
     /// Change an appointment on the list (keeps its id). In strict mode the AI decides by the
@@ -647,6 +676,13 @@ pub struct ProposalInput {
     pub repeat: Option<bool>,
     /// Done away from the computer; left out, the AI fills it in.
     pub away_from_computer: Option<bool>,
+    /// Adding: a group ([`TodoItem::group`]) rather than a to-do. Ignored when editing.
+    pub group: bool,
+    /// Adding: the group to put it in (`None`: at the top). Editing: the group to move it
+    /// into, `""` for the top, `None` to leave it where it is.
+    pub parent: Option<String>,
+    /// [`TodoItem::after`]; `None` leaves it as it is when editing.
+    pub after: Option<Vec<String>>,
 }
 
 /// Responsibility: Record one proposed to-do and the AI's decision.

@@ -13,6 +13,7 @@ use crate::model::{
     occurrence_day, series_id, Appointment, AppointmentInput, Assignment, ChangeKind, ChangeRecord,
     DoneRecord, TaskNotes, TodoChange, TodoChangeRecord, TodoItem, WhenTimeIsUp,
 };
+use crate::outline::Outline;
 use ai_client::claude::{jpeg_block, text_block, ClaudeClient};
 use ai_client::{AiSettings, JudgeError};
 use chrono::{DateTime, Local, NaiveDate, Utc};
@@ -822,11 +823,15 @@ pub(crate) fn week_plan_text(request: &WeekPlanRequest) -> String {
         .map(|date| date.format("%Y-%m-%d %A").to_string())
         .collect();
     // One line per to-do, as in the other questions, with the time spent and still needed.
-    let todos: Vec<String> = request
-        .open
-        .iter()
-        .map(|(todo, spent)| {
-            let mut line = todos_text(std::slice::from_ref(todo));
+    let listed: Vec<TodoItem> = request.open.iter().map(|(todo, _)| todo.clone()).collect();
+    let todos: Vec<String> = todo_lines(&listed)
+        .into_iter()
+        .map(|(todo, mut line)| {
+            let spent = request
+                .open
+                .iter()
+                .find(|(entry, _)| entry.id == todo.id)
+                .map_or(0, |(_, spent)| *spent);
             line.push_str(&format!(" | spent {spent} min"));
             if let Some(estimate) = todo.estimate_minutes {
                 line.push_str(&format!(
@@ -1008,15 +1013,45 @@ fn assignment_text(assignment: &Assignment, now: DateTime<Utc>) -> String {
 /// they are most of a long list and say how to do the work, which picking does not need
 /// (the owner: "AI에게는 제약 … 만 보여주게"); a question about one to-do shows its notes.
 fn todos_text(todos: &[TodoItem]) -> String {
-    if todos.is_empty() {
-        return "(none)".to_string();
+    let lines: Vec<String> = todo_lines(todos)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+    if lines.is_empty() {
+        "(none)".to_string()
+    } else {
+        lines.join("\n")
     }
-    todos
-        .iter()
+}
+
+/// One line per to-do ([`TODOS_FORMAT`]), in the order of the outline. Groups get no line of
+/// their own: they show in "in", and their deadlines and waiting in the lines of the to-dos
+/// inside them.
+fn todo_lines(todos: &[TodoItem]) -> Vec<(&TodoItem, String)> {
+    let outline = Outline::new(todos);
+    outline
+        .rows()
+        .into_iter()
+        .map(|row| row.todo)
+        .filter(|todo| !todo.group)
         .map(|todo| {
             let mut line = format!("[{}] {}", todo.id, one_line(&todo.title));
-            if let Some(deadline) = todo.deadline {
-                line.push_str(&format!(" | due {deadline}"));
+            let path = outline.path(&todo.id);
+            if !path.is_empty() {
+                let titles: Vec<String> = path.iter().map(|group| one_line(&group.title)).collect();
+                line.push_str(&format!(" | in: {}", titles.join(" > ")));
+            }
+            if let Some(due) = outline.due(&todo.id) {
+                line.push_str(&format!(" | due {}", due.date));
+                match due.from {
+                    Some(source) if path.iter().any(|group| group.id == source.id) => {
+                        line.push_str(&format!(" (group \"{}\")", one_line(&source.title)));
+                    }
+                    Some(source) => {
+                        line.push_str(&format!(" (\"{}\" waits for it)", one_line(&source.title)))
+                    }
+                    None => {}
+                }
             }
             line.push_str(&format!(" | priority {}", todo.priority));
             if let Some(minutes) = todo.estimate_minutes {
@@ -1024,6 +1059,10 @@ fn todos_text(todos: &[TodoItem]) -> String {
             }
             if todo.repeat {
                 line.push_str(" | routine");
+            }
+            let blockers = outline.blockers(&todo.id);
+            if !blockers.is_empty() {
+                line.push_str(&format!(" | waits for: {}", quoted_titles(&blockers)));
             }
             let mut constraints = one_line(&todo.constraints);
             if constraints.is_empty() {
@@ -1033,10 +1072,21 @@ fn todos_text(todos: &[TodoItem]) -> String {
             if !constraints.is_empty() {
                 line.push_str(&format!(" | constraints: {constraints}"));
             }
-            line
+            (todo, line)
         })
+        .collect()
+}
+
+/// `"A", "B"`; "nothing" when empty.
+fn quoted_titles(todos: &[&TodoItem]) -> String {
+    if todos.is_empty() {
+        return "nothing".to_string();
+    }
+    todos
+        .iter()
+        .map(|todo| format!("\"{}\"", one_line(&todo.title)))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(", ")
 }
 
 /// "Not before YYYY-MM-DD" when `notes` say so (any case), for the to-do list.
@@ -1059,10 +1109,13 @@ fn one_line(text: &str) -> String {
 }
 
 /// What the to-do lines say, before the first list of a question.
-const TODOS_FORMAT: &str = "One to-do per line: [id] title | due date | priority (1 low to 5 \
-urgent) | estimate | routine (stays on the list when done) | constraints (when, where and \
-with what it can be done). Fields not shown are not set. The to-dos' notes (how to do the \
-work) are not listed.";
+const TODOS_FORMAT: &str = "One to-do per line: [id] title | in (the groups it belongs to, \
+outermost first: a value, project or area) | due date (the date it must be finished by: its \
+own, its group's, or that of a to-do waiting for it, as noted) | priority (1 low to 5 urgent) \
+| estimate | routine (stays on the list when done) | waits for (unfinished to-dos that must be \
+finished first: until then it cannot be assigned, and a plan puts it after them) | \
+constraints (when, where and with what it can be done). Fields not shown are not set. The \
+to-dos' notes (how to do the work) are not listed.";
 
 /// A planner question: first what stays the same from one call to the next while the list
 /// does not change (the owner's life rules and the open to-dos), then `text`, the part that
@@ -1338,31 +1391,33 @@ pub(crate) fn todo_change_text(request: &TodoChangeRequest) -> String {
             )
         })
         .collect();
-    let draft =
-        |todo: &crate::model::ProposalInput| serde_json::to_string_pretty(todo).unwrap_or_default();
+    // Where a to-do sits and what it waits for are told in words below, not as ids.
+    let draft = |todo: &crate::model::ProposalInput| {
+        without_placement(serde_json::to_value(todo).unwrap_or_default())
+    };
+    let target = || {
+        request
+            .target
+            .map(|target| without_placement(serde_json::to_value(target).unwrap_or_default()))
+            .unwrap_or_default()
+    };
+    let placement = placement_text(request);
     let asked = match request.change {
         TodoChange::Add { todo } => format!(
-            "Add this to-do (empty fields are for you to fill in):\n{}",
+            "Add this to-do (empty fields are for you to fill in):\n{}\n{placement}",
             draft(todo)
         ),
         TodoChange::Edit { todo, .. } => format!(
-            "Edit this to-do:\n{}\nSet these fields (empty ones stay as they are):\n{}",
-            request
-                .target
-                .map(|target| serde_json::to_string_pretty(target).unwrap_or_default())
-                .unwrap_or_default(),
+            "Edit this to-do:\n{}\nSet these fields (empty ones stay as they are):\n{}\n\
+             {placement}",
+            target(),
             draft(todo)
         ),
+        TodoChange::Move { .. } => format!("{placement}\n{}", target()),
         TodoChange::AddAppointment { .. }
         | TodoChange::EditAppointment { .. }
         | TodoChange::RemoveAppointment { .. } => String::new(),
-        TodoChange::Remove { .. } => format!(
-            "Remove this to-do:\n{}",
-            request
-                .target
-                .map(|target| serde_json::to_string_pretty(target).unwrap_or_default())
-                .unwrap_or_default()
-        ),
+        TodoChange::Remove { .. } => format!("Remove this to-do:\n{}\n{placement}", target()),
     };
     format!(
         "Now: {now}\n\n{asked}\nTheir reason: \"{reason}\"\n\n\
@@ -1373,6 +1428,147 @@ pub(crate) fn todo_change_text(request: &TodoChangeRequest) -> String {
         past = or_none(&past.join("\n")),
         history = or_none(request.history),
     )
+}
+
+/// `value` (a to-do as JSON) without the fields that place it among the others, which are
+/// ids; pretty-printed.
+fn without_placement(mut value: Value) -> String {
+    if let Some(fields) = value.as_object_mut() {
+        for key in ["parent", "rank", "after"] {
+            fields.remove(key);
+        }
+        if fields.get("group") == Some(&json!(false)) {
+            fields.remove("group");
+        }
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_default()
+}
+
+/// Where the to-do of a change sits and what it waits for, before and after the change, in
+/// words; with what that means for the review. Empty when the change does not touch that.
+fn placement_text(request: &TodoChangeRequest) -> String {
+    let outline = Outline::new(request.open);
+    let place = |outline: &Outline, todo_id: &str| {
+        let path = outline.path(todo_id);
+        if path.is_empty() {
+            "the top of the list (no group)".to_string()
+        } else {
+            format!(
+                "the group {}",
+                path.iter()
+                    .map(|group| format!("\"{}\"", one_line(&group.title)))
+                    .collect::<Vec<_>>()
+                    .join(" > ")
+            )
+        }
+    };
+    let titles_of = |ids: &[String]| {
+        let todos: Vec<&TodoItem> = ids.iter().filter_map(|id| outline.get(id)).collect();
+        quoted_titles(&todos)
+    };
+    let due_text = |outline: &Outline, todo_id: &str| {
+        outline
+            .due(todo_id)
+            .map_or("no deadline".to_string(), |due| format!("due {}", due.date))
+    };
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(target) = request.target.filter(|target| target.group) {
+        lines.push(format!(
+            "This is a group: it is never assigned itself, and its deadline and what it waits \
+             for apply to every to-do inside it. Inside it: {}.",
+            quoted_titles(&outline.leaves_under(&target.id))
+        ));
+    }
+    match request.change {
+        TodoChange::Add { todo } => {
+            if let Some(parent) = &todo.parent {
+                let group = outline
+                    .get(parent)
+                    .map(|group| one_line(&group.title))
+                    .unwrap_or_default();
+                let mut path = outline.path_text(parent);
+                if path.is_empty() {
+                    path = group;
+                } else {
+                    path = format!("{path} › {group}");
+                }
+                lines.push(format!("It goes into the group \"{path}\"."));
+            }
+            if let Some(after) = todo.after.as_ref().filter(|after| !after.is_empty()) {
+                lines.push(format!(
+                    "It waits for {}: it cannot be assigned before they are finished.",
+                    titles_of(after)
+                ));
+            }
+        }
+        TodoChange::Edit { todo_id, todo } => {
+            if let Some(parent) = &todo.parent {
+                let mut moved: Vec<TodoItem> = request.open.to_vec();
+                if let Some(entry) = moved.iter_mut().find(|entry| &entry.id == todo_id) {
+                    entry.parent = Some(parent.clone()).filter(|parent| !parent.is_empty());
+                }
+                lines.push(format!(
+                    "It moves from {} to {}.",
+                    place(&outline, todo_id),
+                    place(&Outline::new(&moved), todo_id)
+                ));
+            }
+            if let Some(after) = &todo.after {
+                let now_waits: Vec<String> = request
+                    .target
+                    .map(|target| target.after.clone())
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "It is to wait for {} (until now: {}); a to-do cannot be assigned before \
+                     the ones it waits for are finished.",
+                    titles_of(after),
+                    titles_of(&now_waits)
+                ));
+            }
+        }
+        TodoChange::Move {
+            todo_id, parent, ..
+        } => {
+            let mut moved: Vec<TodoItem> = request.open.to_vec();
+            if let Some(entry) = moved.iter_mut().find(|entry| &entry.id == todo_id) {
+                entry.parent = parent.clone();
+            }
+            let moved_outline = Outline::new(&moved);
+            let kind = if request.target.is_some_and(|target| target.group) {
+                "group"
+            } else {
+                "to-do"
+            };
+            lines.push(format!(
+                "Move this {kind} from {} to {}.",
+                place(&outline, todo_id),
+                place(&moved_outline, todo_id)
+            ));
+            lines.push(format!(
+                "Before: {}, waits for {}. After: {}, waits for {}.",
+                due_text(&outline, todo_id),
+                quoted_titles(&outline.blockers(todo_id)),
+                due_text(&moved_outline, todo_id),
+                quoted_titles(&moved_outline.blockers(todo_id)),
+            ));
+            lines.push(
+                "Groups organise the work (a value, project or area); a to-do takes its group's \
+                 deadline and waits for what the group waits for. Approve moves that reflect how \
+                 the work is organised. Reject a move that only serves to dodge work, such as \
+                 taking an urgent to-do out of a group to lose the group's deadline, or putting \
+                 it into a group that waits for something far off. The user dragged it in the \
+                 to-do tab and gives a reason only after a refusal; when you refuse, say what \
+                 reason would make it acceptable."
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
 }
 
 /// e.g. `add "Buy groceries"`, `remove "Write report"`.
@@ -1386,6 +1582,12 @@ pub fn change_summary(change: &TodoChange, before: Option<&TodoItem>) -> String 
         TodoChange::Add { todo } => format!("add \"{}\"", todo.title),
         TodoChange::Edit { todo_id, .. } => format!("edit \"{}\"", title(todo_id)),
         TodoChange::Remove { todo_id } => format!("remove \"{}\"", title(todo_id)),
+        TodoChange::Move {
+            todo_id, parent, ..
+        } => match parent {
+            Some(parent) => format!("move \"{}\" into the group {parent}", title(todo_id)),
+            None => format!("move \"{}\" to the top", title(todo_id)),
+        },
         TodoChange::AddAppointment { appointment } => format!(
             "add the appointment \"{}\" ({})",
             appointment.title,

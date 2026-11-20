@@ -2555,3 +2555,362 @@ fn a_task_whose_time_is_up_waits_for_a_report() {
         .planner
         .report_due(until + chrono::Duration::hours(5)));
 }
+
+// --- groups and order --------------------------------------------------
+
+/// A harness whose list holds the group "shopping" with "brushes" and "milk", and "draw",
+/// which waits for "brushes".
+fn shopping_harness() -> Harness {
+    let fixture = harness(true, &[]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| {
+            let mut shopping = todo("shopping");
+            shopping.group = true;
+            let mut draw = todo("draw");
+            draw.after = vec!["brushes".into()];
+            let mut brushes = todo("brushes");
+            brushes.parent = Some("shopping".into());
+            brushes.rank = 1.0;
+            let mut milk = todo("milk");
+            milk.parent = Some("shopping".into());
+            milk.rank = 2.0;
+            config.todos = vec![draw, shopping, brushes, milk];
+        })
+        .unwrap();
+    fixture
+}
+
+#[test]
+fn a_to_do_that_waits_is_never_assigned() {
+    let fixture = shopping_harness();
+    // The fake AI picks the first to-do on the list, "draw", which waits for the brushes.
+    let refused = fixture.planner.assign(Utc::now());
+    assert!(
+        matches!(&refused, Err(PlannerError::Waiting(title, blockers))
+            if title == "title draw" && blockers == "title brushes"),
+        "{refused:?}"
+    );
+    // Nor can the user switch to it ("brushes" is assigned first).
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.todos.rotate_left(2))
+        .unwrap();
+    fixture.planner.assign(Utc::now()).unwrap();
+    let switch = fixture.planner.check_change(
+        Utc::now(),
+        &ChangeKind::SwitchTodo {
+            todo_id: "draw".into(),
+        },
+        "the paint is here",
+    );
+    assert!(
+        matches!(switch, Err(PlannerError::Waiting(..))),
+        "{switch:?}"
+    );
+    let group = fixture.planner.check_change(
+        Utc::now(),
+        &ChangeKind::SwitchTodo {
+            todo_id: "shopping".into(),
+        },
+        "time to shop",
+    );
+    assert!(
+        matches!(group, Err(PlannerError::GroupNotAssignable(..))),
+        "{group:?}"
+    );
+}
+
+#[test]
+fn the_ai_sees_groups_waiting_and_deadlines_in_the_list() {
+    let fixture = shopping_harness();
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.todos[0].deadline = "2026-12-24".parse().ok())
+        .unwrap();
+    let text = crate::advisor::question("", &fixture.planner.open_todos(), String::new())[0]
+        ["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.contains(
+            "[draw] title draw | due 2026-12-24 | priority 3 | waits for: \"title brushes\""
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "[brushes] title brushes | in: title shopping | due 2026-12-24 (\"title draw\" waits \
+             for it)"
+        ),
+        "{text}"
+    );
+    // The group has no line of its own.
+    assert!(!text.contains("[shopping]"), "{text}");
+}
+
+#[test]
+fn adding_or_removing_an_empty_group_needs_no_ai() {
+    let fixture = shopping_harness();
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            TodoChange::Add {
+                todo: ProposalInput {
+                    group: true,
+                    ..proposal("Hobbies")
+                },
+            },
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(record.approved, "{}", record.reply);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+    let hobbies = record.after.clone().unwrap();
+    assert!(hobbies.group);
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+
+    // A group with to-dos inside cannot go.
+    let refused = fixture.planner.review_todo_change(
+        Utc::now(),
+        TodoChange::Remove {
+            todo_id: "shopping".into(),
+        },
+        "",
+        "to-do tab",
+    );
+    assert!(
+        matches!(refused, Err(PlannerError::GroupNotEmpty(..))),
+        "{refused:?}"
+    );
+    // An empty one goes at once, without a reason.
+    let removed = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            TodoChange::Remove {
+                todo_id: hobbies.id.clone(),
+            },
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(removed.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn moving_within_a_group_needs_no_ai_and_renumbers_it() {
+    let fixture = shopping_harness();
+    // "milk" before "brushes".
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            TodoChange::Move {
+                todo_id: "milk".into(),
+                parent: Some("shopping".into()),
+                before: Some("brushes".into()),
+            },
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    let open = fixture.planner.open_todos();
+    let outline = crate::outline::Outline::new(&open);
+    let order: Vec<String> = outline
+        .children(Some("shopping"))
+        .iter()
+        .map(|todo| todo.id.clone())
+        .collect();
+    assert_eq!(order, ["milk", "brushes"]);
+}
+
+#[test]
+fn moving_into_another_group_goes_to_the_ai_without_a_reason() {
+    let fixture = shopping_harness();
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let refused = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            TodoChange::Move {
+                todo_id: "draw".into(),
+                parent: Some("shopping".into()),
+                before: None,
+            },
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(!refused.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 1);
+    // With a reason the second time, approved: it goes to the end of the group.
+    fixture.advisor.approve.store(true, Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            TodoChange::Move {
+                todo_id: "draw".into(),
+                parent: Some("shopping".into()),
+                before: None,
+            },
+            "the art shop is next to the market",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(record.approved);
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    let open = fixture.planner.open_todos();
+    let outline = crate::outline::Outline::new(&open);
+    assert_eq!(outline.path_text("draw"), "title shopping");
+    let order: Vec<String> = outline
+        .children(Some("shopping"))
+        .iter()
+        .map(|todo| todo.id.clone())
+        .collect();
+    assert_eq!(order, ["brushes", "milk", "draw"]);
+}
+
+#[test]
+fn waiting_in_a_loop_or_moving_into_itself_is_refused() {
+    let fixture = shopping_harness();
+    // "brushes" waiting for "draw", which waits for "brushes".
+    let looped = fixture.planner.review_todo_change(
+        Utc::now(),
+        TodoChange::Edit {
+            todo_id: "brushes".into(),
+            todo: ProposalInput {
+                after: Some(vec!["draw".into()]),
+                ..Default::default()
+            },
+        },
+        "the shop needs to see the drawing",
+        "to-do tab",
+    );
+    assert!(
+        matches!(looped, Err(PlannerError::WaitingLoop(..))),
+        "{looped:?}"
+    );
+    // A group inside a group inside itself.
+    fixture
+        .planner
+        .config_store()
+        .update(|config| {
+            let mut inner = todo("inner");
+            inner.group = true;
+            inner.parent = Some("shopping".into());
+            config.todos.push(inner);
+        })
+        .unwrap();
+    let into_itself = fixture.planner.review_todo_change(
+        Utc::now(),
+        TodoChange::Move {
+            todo_id: "shopping".into(),
+            parent: Some("inner".into()),
+            before: None,
+        },
+        "",
+        "to-do tab",
+    );
+    assert!(
+        matches!(into_itself, Err(PlannerError::IntoItself(..))),
+        "{into_itself:?}"
+    );
+    // Only a group can hold to-dos.
+    let into_a_to_do = fixture.planner.review_todo_change(
+        Utc::now(),
+        TodoChange::Move {
+            todo_id: "milk".into(),
+            parent: Some("draw".into()),
+            before: None,
+        },
+        "",
+        "to-do tab",
+    );
+    assert!(
+        matches!(into_a_to_do, Err(PlannerError::UnknownGroup(..))),
+        "{into_a_to_do:?}"
+    );
+}
+
+#[test]
+fn an_edit_sets_what_a_to_do_waits_for_and_its_group() {
+    let fixture = shopping_harness();
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            TodoChange::Edit {
+                todo_id: "milk".into(),
+                todo: ProposalInput {
+                    parent: Some(String::new()),
+                    after: Some(vec!["brushes".into()]),
+                    ..Default::default()
+                },
+            },
+            "buy it on the way back",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(record.approved);
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    let open = fixture.planner.open_todos();
+    let outline = crate::outline::Outline::new(&open);
+    assert!(outline.parent("milk").is_none());
+    assert_eq!(
+        outline
+            .blockers("milk")
+            .iter()
+            .map(|todo| todo.id.as_str())
+            .collect::<Vec<_>>(),
+        ["brushes"]
+    );
+}
+
+#[test]
+fn a_to_do_the_ai_adds_from_a_report_joins_the_group_of_the_current_one() {
+    let fixture = shopping_harness();
+    // "brushes" first: the fake AI picks the first to-do.
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.todos.rotate_left(2))
+        .unwrap();
+    let assignment = fixture.planner.assign(Utc::now()).unwrap();
+    assert_eq!(assignment.todo_id.as_deref(), Some("brushes"));
+    *fixture.advisor.list_changes.lock() = vec![ListChange {
+        action: "add".into(),
+        title: "Return the wrong brush".into(),
+        ..Default::default()
+    }];
+    let record = fixture
+        .planner
+        .request_change(
+            Utc::now(),
+            ChangeKind::Done,
+            "bought them, but one is the wrong size",
+            Evidence::default(),
+        )
+        .unwrap();
+    assert!(record.approved);
+    let added = record
+        .list_writes
+        .iter()
+        .find_map(|write| match write {
+            TodoListWrite::Put(todo) => Some(todo.clone()),
+            _ => None,
+        })
+        .expect("the AI's to-do is added");
+    assert_eq!(added.parent.as_deref(), Some("shopping"));
+}

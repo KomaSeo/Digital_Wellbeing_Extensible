@@ -10,13 +10,18 @@
 //! two hours apart). Notes and steps
 //! change nothing the rules depend on and are saved at once (`task_notes_put`).
 
+mod graph;
+mod outline_list;
+
 use crate::{ChangeChoice, FocusApp, Tab, GREEN, RED};
 use agent_api::user_api::{call, Status};
 use chrono::{DateTime, Local, NaiveDate, NaiveTime, Utc};
 use eframe::egui;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use std::thread;
+use task_planner::outline::Outline;
 use task_planner::{
     AppointmentInput, ChangeKind, PlannerStatus, TaskNotes, TaskStep, TodoChange, TodoChangeRecord,
     TodoItem, WhenTimeIsUp,
@@ -39,6 +44,18 @@ pub struct TodoUiState {
     situation: Option<String>,
     /// The to-do whose details are open in the list.
     expanded: Option<String>,
+    /// Groups folded shut in the list.
+    collapsed: BTreeSet<String>,
+    /// Show only the to-dos that can start now (and the groups holding them).
+    ready_only: bool,
+    /// The list as a graph (boxes and arrows) instead of an outline.
+    graph_view: bool,
+    /// The form was just opened from a group's "+ 할 일": scroll to it once.
+    scroll_to_form: bool,
+    /// What the user writes after the AI refused a move.
+    move_reason: String,
+    /// The refused move whose window the user closed.
+    move_dismissed: Option<String>,
     /// Add (when `editing` is `None`) or edit form.
     form: TodoForm,
     form_open: bool,
@@ -174,6 +191,14 @@ struct TodoForm {
     /// A routine: it stays on the list when finished.
     repeat: bool,
     reason: String,
+    /// A group ("묶음") rather than a to-do; set when it is added.
+    group: bool,
+    /// The group it goes in (`None`: at the top) and what it waits for.
+    parent: Option<String>,
+    after: Vec<String>,
+    /// Editing: where it was and what it waited for, so only a change of them is sent.
+    original_parent: Option<String>,
+    original_after: Vec<String>,
 }
 
 impl TodoForm {
@@ -182,8 +207,10 @@ impl TodoForm {
         task_planner::parse_deadline(&self.deadline, Local::now().date_naive())
     }
 
-    fn draft(&self) -> serde_json::Value {
-        json!({
+    /// The to-do as the planner's `ProposalInput`. Editing sends the group and what it waits
+    /// for only when they changed (`""`: to the top).
+    fn draft(&self, editing: bool) -> serde_json::Value {
+        let mut draft = json!({
             "title": self.title.trim(),
             "notes": self.notes.trim(),
             "constraints": self.constraints.trim(),
@@ -191,7 +218,20 @@ impl TodoForm {
             "priority": (self.priority > 0).then_some(self.priority),
             "estimate_minutes": (self.estimate_minutes > 0).then_some(self.estimate_minutes),
             "repeat": self.repeat,
-        })
+            "group": self.group,
+        });
+        if !editing {
+            draft["parent"] = json!(self.parent);
+            draft["after"] = json!(self.after);
+        } else {
+            if self.parent != self.original_parent {
+                draft["parent"] = json!(self.parent.clone().unwrap_or_default());
+            }
+            if self.after != self.original_after {
+                draft["after"] = json!(self.after);
+            }
+        }
+        draft
     }
 }
 
@@ -434,6 +474,13 @@ impl FocusApp {
 
         ui.group(|ui| {
             ui.set_width(ui.available_width());
+            if let Some(todo_id) = assignment.todo_id.as_deref() {
+                let outline = Outline::new(&planner.open_todos);
+                let path = outline.path_text(todo_id);
+                if !path.is_empty() {
+                    ui.colored_label(outline_list::BLUE, path);
+                }
+            }
             ui.strong(&assignment.task);
             ui.small(format!(
                 "{} — {}부터",
@@ -464,6 +511,15 @@ impl FocusApp {
                                 .map_or("없음".into(), |minutes| minutes_text(minutes as i64)),
                         ));
                     });
+            }
+            if let Some(todo_id) = assignment.todo_id.as_deref() {
+                let unlocked = unlocked_by(&planner.open_todos, todo_id);
+                if !unlocked.is_empty() {
+                    ui.small(format!(
+                        "이 일이 끝나면 {}을(를) 받을 수 있게 됩니다.",
+                        unlocked.join(", ")
+                    ));
+                }
             }
             if let Some(until) = assignment.until {
                 // A paused task's time stands still.
@@ -764,9 +820,26 @@ impl FocusApp {
             estimate_minutes: todo.estimate_minutes.unwrap_or(0),
             repeat: todo.repeat,
             reason: String::new(),
+            group: todo.group,
+            parent: todo.parent.clone(),
+            after: todo.after.clone(),
+            original_parent: todo.parent.clone(),
+            original_after: todo.after.clone(),
         };
         self.todo_ui.editing = Some(todo.id.clone());
         self.todo_ui.form_open = true;
+    }
+
+    /// Open the form to add a to-do (or, `group`, a group) into the group `parent`.
+    fn open_add_form_in(&mut self, parent: Option<String>, group: bool) {
+        self.todo_ui.form = TodoForm {
+            group,
+            parent,
+            ..Default::default()
+        };
+        self.todo_ui.editing = None;
+        self.todo_ui.form_open = true;
+        self.todo_ui.scroll_to_form = true;
     }
 
     /// Asking the AI to change what the planner assigned. `current_todo`: the to-do from the
@@ -1001,75 +1074,29 @@ impl FocusApp {
             });
     }
 
-    /// The to-do list: soonest deadline first, each with details and change buttons, and the
-    /// form to add one.
+    /// The to-do list: an outline of groups and to-dos (or a graph of them), each with details
+    /// and change buttons, and the form to add one.
     fn list_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
-        crate::style::section(ui, format!("할 일 목록 ({})", planner.open_todos.len()));
-        let today = Local::now().date_naive();
-        let mut todos = planner.open_todos.clone();
-        todos.sort_by_key(|todo| {
-            (
-                todo.deadline.unwrap_or(NaiveDate::MAX),
-                std::cmp::Reverse(todo.priority),
-            )
-        });
-        let current = planner
-            .assignment
-            .as_ref()
-            .and_then(|assignment| assignment.todo_id.clone());
-        for todo in &todos {
-            let expanded = self.todo_ui.expanded.as_deref() == Some(todo.id.as_str());
-            let due = todo.deadline.map(|deadline| (deadline - today).num_days());
-            let due_text = match due {
-                Some(days) if days < 0 => format!("{}일 지남", -days),
-                Some(0) => "오늘 마감".into(),
-                Some(1) => "내일 마감".into(),
-                Some(days) => format!("D-{days}"),
-                None => String::new(),
+        let count = planner.open_todos.iter().filter(|todo| !todo.group).count();
+        crate::style::section_with(ui, format!("할 일 목록 ({count})"), |ui| {
+            let (label, hint) = if self.todo_ui.graph_view {
+                ("목록으로 보기", "묶음과 할 일을 줄로 보고, 끌어서 옮깁니다")
+            } else {
+                (
+                    "그래프로 보기",
+                    "묶음은 구역, 순서는 화살표로 봅니다(보기만 함)",
+                )
             };
-            ui.horizontal_wrapped(|ui| {
-                let marker = if expanded { "▼" } else { "▶" };
-                if ui.small_button(marker).clicked() {
-                    self.todo_ui.expanded = (!expanded).then(|| todo.id.clone());
-                }
-                if current.as_deref() == Some(todo.id.as_str()) {
-                    ui.colored_label(GREEN, "지금");
-                }
-                match due {
-                    Some(days) if days <= 0 => {
-                        ui.colored_label(RED, &due_text);
-                    }
-                    Some(_) => {
-                        ui.colored_label(YELLOW, &due_text);
-                    }
-                    None => {}
-                }
-                ui.label(format!("P{}", todo.priority));
-                // Time spent (since the last finish, for a routine) against the estimate.
-                let spent = planner
-                    .minutes_this_round
-                    .get(&todo.id)
-                    .copied()
-                    .unwrap_or(0);
-                ui.small(match todo.estimate_minutes {
-                    Some(minutes) => {
-                        format!("{} / {}", minutes_text(spent), minutes_text(minutes as i64))
-                    }
-                    None => format!("{} / 예상 없음", minutes_text(spent)),
-                });
-                ui.strong(&todo.title);
-                if todo.repeat {
-                    ui.small("(반복)");
-                }
-                if todo.proposed {
-                    ui.small("(내가 추가)");
-                }
-            });
-            if expanded {
-                self.todo_details_ui(ui, todo, planner);
+            if ui.button(label).on_hover_text(hint).clicked() {
+                self.todo_ui.graph_view = !self.todo_ui.graph_view;
             }
+        });
+        if self.todo_ui.graph_view {
+            self.graph_ui(ui, planner);
+        } else {
+            self.outline_ui(ui, planner);
         }
-        if todos.is_empty() {
+        if planner.open_todos.is_empty() {
             ui.label("목록이 비어 있습니다.");
         }
         if self.todo_ui.form_open && self.todo_ui.editing.is_some() {
@@ -1088,10 +1115,7 @@ impl FocusApp {
                 self.todo_ui.form_open = false;
                 self.todo_ui.editing = None;
             }
-            if ui.button("+ 할 일 추가").clicked() {
-                self.todo_ui.form = TodoForm::default();
-                self.todo_ui.editing = None;
-            }
+            self.add_buttons_ui(ui);
         } else {
             self.form_ui(ui, planner);
         }
@@ -1182,6 +1206,11 @@ impl FocusApp {
             estimate_minutes: draft.estimate_minutes.unwrap_or(0),
             repeat: draft.repeat.unwrap_or(false),
             reason: record.reason.clone(),
+            group: draft.group,
+            parent: draft.parent.clone().filter(|parent| !parent.is_empty()),
+            after: draft.after.clone().unwrap_or_default(),
+            original_parent: None,
+            original_after: Vec::new(),
         };
         match &record.change {
             TodoChange::Add { todo } => {
@@ -1193,6 +1222,15 @@ impl FocusApp {
                 // The fields left empty stay as they are; show the to-do as it is for them.
                 let mut form = from_draft(todo);
                 if let Some(before) = &record.before {
+                    form.group = before.group;
+                    form.original_parent = before.parent.clone();
+                    form.original_after = before.after.clone();
+                    if todo.parent.is_none() {
+                        form.parent = before.parent.clone();
+                    }
+                    if todo.after.is_none() {
+                        form.after = before.after.clone();
+                    }
                     if form.title.is_empty() {
                         form.title = before.title.clone();
                     }
@@ -1222,7 +1260,9 @@ impl FocusApp {
                 self.todo_ui.appointment_editing = Some(appointment_id.clone());
                 self.todo_ui.appointment_form_open = true;
             }
-            TodoChange::Remove { .. } | TodoChange::RemoveAppointment { .. } => {}
+            TodoChange::Remove { .. }
+            | TodoChange::Move { .. }
+            | TodoChange::RemoveAppointment { .. } => {}
         }
     }
 
@@ -1236,19 +1276,37 @@ impl FocusApp {
         self.todo_ui.form_open = true;
     }
 
+    /// "+ 할 일 추가" and "+ 묶음 추가", at the top level.
+    fn add_buttons_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("+ 할 일 추가").clicked() {
+                self.open_add_form_in(None, false);
+                self.todo_ui.scroll_to_form = false;
+            }
+            if ui
+                .button("+ 묶음 추가")
+                .on_hover_text(
+                    "묶음은 가치, 프로젝트, 목표, 영역처럼 할 일을 담는 그릇입니다. AI는 묶음을 \
+                     할 일로 고르지 않고, 묶음 안의 할 일을 고릅니다.",
+                )
+                .clicked()
+            {
+                self.open_add_form_in(None, true);
+                self.todo_ui.scroll_to_form = false;
+            }
+        });
+    }
+
     /// Adding a to-do (empty fields are filled in by the AI) or editing one (empty fields
     /// stay as they are). The AI reviews both.
     fn form_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
         let idle = !self.pending.load(Ordering::SeqCst);
         if !self.todo_ui.form_open {
-            if ui.button("+ 할 일 추가").clicked() {
-                self.todo_ui.form = TodoForm::default();
-                self.todo_ui.editing = None;
-                self.todo_ui.form_open = true;
-            }
+            self.add_buttons_ui(ui);
             return;
         }
         let editing = self.todo_ui.editing.clone();
+        let group = self.todo_ui.form.group;
         // What 0 means in the number fields: an edit leaves the field as it is; an addition
         // lets the AI decide, or, outside strict mode (no AI), takes the default.
         let (priority_zero, estimate_zero) = match (&editing, self.todo_ui.without_review) {
@@ -1271,6 +1329,9 @@ impl FocusApp {
                         ui.strong(format!("\"{title}\" 고치기 — AI가 심사합니다"));
                     }
                 }
+                None if group => {
+                    ui.strong("묶음 추가 — 빈 묶음은 할 일 고르기에 영향이 없어서 바로 추가됩니다");
+                }
                 None => {
                     ui.strong(if self.todo_ui.without_review {
                         "할 일 추가 — 엄격 모드가 아니라서 바로 추가됩니다(비워 둔 칸은 기본값)"
@@ -1279,67 +1340,51 @@ impl FocusApp {
                     });
                 }
             }
+            if std::mem::take(&mut self.todo_ui.scroll_to_form) {
+                ui.scroll_to_cursor(Some(egui::Align::Center));
+            }
+            let outline = Outline::new(&planner.open_todos);
+            let without_review = self.todo_ui.without_review;
             let form = &mut self.todo_ui.form;
             egui::Grid::new("todo_form").num_columns(2).show(ui, |ui| {
                 ui.label("제목");
                 ui.add(egui::TextEdit::singleline(&mut form.title).desired_width(320.0));
                 ui.end_row();
-                ui.label("메모");
+                ui.label(if group { "설명" } else { "메모" });
                 ui.add(
                     egui::TextEdit::multiline(&mut form.notes)
                         .desired_rows(2)
                         .desired_width(320.0)
-                        .hint_text("무엇을 하면 끝인지, 무엇이 필요한지"),
+                        .hint_text(if group {
+                            "이 묶음이 무엇인지(가치, 프로젝트, 목표, 영역)"
+                        } else {
+                            "무엇을 하면 끝인지, 무엇이 필요한지"
+                        }),
                 );
                 ui.end_row();
-                ui.label("조건");
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.constraints)
-                        .desired_width(320.0)
-                        .hint_text("언제, 어디서, 무엇이 있어야 할 수 있는지 (비우면 AI가 적음)"),
-                )
-                .on_hover_text(
-                    "AI가 할 일을 고를 때는 메모 대신 이 칸을 봅니다. 12월 1일 이후, 집에서만, \
-                     컴퓨터 필요, 취미처럼 언제 할지 정하는 데 필요한 것만 적습니다. 생활 규칙에 \
-                     있는 시간과 요일은 적지 않습니다.",
-                );
-                ui.end_row();
-                ui.label("마감");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut form.deadline)
-                            .desired_width(160.0)
-                            .hint_text("이틀 뒤, 금요일, 11/5 …"),
-                    );
-                    // The date the words were read as, so a misreading shows at once.
-                    if let Some(deadline) = form.deadline_date() {
-                        ui.label(format!("→ {}", deadline.format("%Y-%m-%d (%a)")));
-                    }
-                });
-                ui.end_row();
-                ui.label("중요도");
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut form.priority).range(0..=5));
-                    ui.small(priority_zero);
-                });
-                ui.end_row();
-                ui.label("예상 시간(분)");
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut form.estimate_minutes).range(0..=6000));
-                    ui.small(estimate_zero);
-                });
-                ui.end_row();
-                ui.label("반복");
-                ui.checkbox(
-                    &mut form.repeat,
-                    "반복하는 할 일(잠자기, 출근 준비, 운동처럼 끝내도 목록에 남음)",
-                );
-                ui.end_row();
+                place_rows_ui(ui, form, &outline, editing.as_deref());
+                if group {
+                    ui.label("마감");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.deadline)
+                                .desired_width(160.0)
+                                .hint_text("비우면 없음"),
+                        );
+                        if let Some(deadline) = form.deadline_date() {
+                            ui.label(format!("→ {}", deadline.format("%Y-%m-%d (%a)")));
+                        }
+                        ui.small("안의 할 일의 마감이 됩니다");
+                    });
+                    ui.end_row();
+                } else {
+                    todo_only_rows_ui(ui, form, priority_zero, estimate_zero);
+                }
                 ui.label("이유");
                 ui.add(
                     egui::TextEdit::singleline(&mut form.reason)
                         .desired_width(320.0)
-                        .hint_text(match (&editing, self.todo_ui.without_review) {
+                        .hint_text(match (&editing, without_review) {
                             (Some(_), false) => "왜 고치나요? AI가 정합니다",
                             (Some(_), true) => "선택 — 설정 단계라서 AI 없이 바로 고쳐집니다",
                             (None, _) => "선택",
@@ -1347,6 +1392,7 @@ impl FocusApp {
                 );
                 ui.end_row();
             });
+            let form = &mut self.todo_ui.form;
             let bad_deadline = !form.deadline.trim().is_empty() && form.deadline_date().is_none();
             if bad_deadline {
                 ui.colored_label(
@@ -1358,15 +1404,15 @@ impl FocusApp {
             let ready = idle
                 && !bad_deadline
                 && match &editing {
-                    None => form.title.trim().chars().count() >= 2,
+                    None => form.title.trim().chars().count() >= if group { 1 } else { 2 },
                     Some(_) => {
                         self.todo_ui.without_review || form.reason.trim().chars().count() >= 4
                     }
                 };
             let change = match &editing {
-                None => json!({ "kind": "add", "todo": form.draft() }),
+                None => json!({ "kind": "add", "todo": form.draft(false) }),
                 Some(todo_id) => {
-                    json!({ "kind": "edit", "todo_id": todo_id, "todo": form.draft() })
+                    json!({ "kind": "edit", "todo_id": todo_id, "todo": form.draft(true) })
                 }
             };
             let reason = form.reason.trim().to_string();
@@ -1374,6 +1420,7 @@ impl FocusApp {
             let send_label = match (&editing, self.todo_ui.without_review) {
                 (Some(_), true) => "바로 고치기",
                 (None, true) => "바로 추가하기",
+                (None, false) if group => "묶음 추가하기",
                 _ => "AI에게 보내기",
             };
             ui.horizontal(|ui| {
@@ -1418,6 +1465,10 @@ impl FocusApp {
         if record.approved {
             return;
         }
+        if let TodoChange::Move { .. } = &record.change {
+            self.refused_move_ui(ui, &record);
+            return;
+        }
         // A small mistake: open the form again with what was sent, to fix and resend.
         let can_edit = matches!(
             record.change,
@@ -1458,6 +1509,117 @@ impl FocusApp {
                     self.send("todo_change_schedule", json!({ "id": record.id }));
                 }
             }
+        }
+    }
+
+    /// A move the AI refused (or could not review): a window with its answer, where the user
+    /// writes why and sends it again, puts it in force without the AI after the to-do change
+    /// confirmations, or leaves it (the owner: "변경 내용을 보고, AI가 판단해서 "거부하면" 창이
+    /// 떠서 이유를 서술할 수 있게").
+    fn refused_move_ui(&mut self, ui: &mut egui::Ui, record: &TodoChangeRecord) {
+        if record.scheduled_update.is_some() {
+            ui.small("예약됨: 설정 탭이 정해진 간격으로 정해진 횟수만큼 묻습니다.");
+            return;
+        }
+        if self.todo_ui.move_dismissed.as_deref() == Some(record.id.as_str()) {
+            return;
+        }
+        let TodoChange::Move {
+            todo_id,
+            parent,
+            before,
+        } = &record.change
+        else {
+            return;
+        };
+        let idle = !self.pending.load(Ordering::SeqCst);
+        // The group it was to go into, by its place in the list.
+        let destination = match parent {
+            None => "맨 위 (묶음 없음)".to_string(),
+            Some(group_id) => {
+                let open: Vec<TodoItem> = match &self.shared.lock().status {
+                    Some(Ok(status)) => status
+                        .planner
+                        .as_ref()
+                        .map(|planner| planner.open_todos.clone())
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let outline = Outline::new(&open);
+                outline.get(group_id).map_or(group_id.clone(), |group| {
+                    outline_list::place_name(&outline, group)
+                })
+            }
+        };
+        let numbers = self.settings.numbers_in_force();
+        let schedule_label = format!(
+            "AI 없이 하기({} 간격으로 {}번 확인)",
+            crate::settings::interval_text(numbers.todo_change_interval_seconds()),
+            numbers.todo_change_times()
+        );
+        let mut open = true;
+        let mut close = false;
+        let heading = if record.ai_failed {
+            "AI가 옮기기를 심사하지 못했습니다"
+        } else {
+            "AI가 옮기기를 거절했습니다"
+        };
+        egui::Window::new(heading)
+            .id(egui::Id::new("refused_move_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.strong(change_summary_korean(record));
+                ui.label(format!("옮길 곳: {destination}"));
+                ui.label(format!("AI의 답: {}", record.reply));
+                ui.separator();
+                ui.label("왜 옮기는지 적어 다시 보내면 AI가 다시 판단합니다.");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.todo_ui.move_reason)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("왜 이 자리로 옮기나요?"),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    let ready = idle && self.todo_ui.move_reason.trim().chars().count() >= 4;
+                    if ui
+                        .add_enabled(ready, egui::Button::new("이유를 붙여 다시 보내기"))
+                        .clicked()
+                    {
+                        let reason = std::mem::take(&mut self.todo_ui.move_reason);
+                        self.send(
+                            "todo_change",
+                            json!({
+                                "change": {
+                                    "kind": "move",
+                                    "todo_id": todo_id,
+                                    "parent": parent,
+                                    "before": before,
+                                },
+                                "reason": reason.trim(),
+                            }),
+                        );
+                    }
+                    if ui
+                        .add_enabled(idle, egui::Button::new(schedule_label.as_str()))
+                        .clicked()
+                    {
+                        self.send("todo_change_schedule", json!({ "id": record.id }));
+                    }
+                    if ui.button("옮기지 않기").clicked() {
+                        close = true;
+                    }
+                    if !idle {
+                        ui.spinner();
+                    }
+                });
+            });
+        if !open || close {
+            self.todo_ui.move_dismissed = Some(record.id.clone());
+            self.todo_ui.move_reason.clear();
         }
     }
 
@@ -1901,6 +2063,20 @@ fn change_summary_korean(record: &TodoChangeRecord) -> String {
         TodoChange::Add { todo } => format!("\"{}\" 추가", todo.title),
         TodoChange::Edit { todo_id, .. } => format!("\"{}\" 고치기", title(todo_id)),
         TodoChange::Remove { todo_id } => format!("\"{}\" 지우기", title(todo_id)),
+        TodoChange::Move { todo_id, .. } => {
+            let place = record
+                .after
+                .as_ref()
+                .and_then(|after| after.parent.clone())
+                .map_or("맨 위".to_string(), |_| "다른 묶음".to_string());
+            let same_group = record.before.as_ref().map(|before| &before.parent)
+                == record.after.as_ref().map(|after| &after.parent);
+            if same_group {
+                format!("\"{}\" 순서 바꾸기", title(todo_id))
+            } else {
+                format!("\"{}\"을(를) {place}(으)로 옮기기", title(todo_id))
+            }
+        }
         TodoChange::AddAppointment { appointment } => format!(
             "약속 \"{}\"({}) 추가",
             appointment.title,
@@ -1939,6 +2115,180 @@ fn change_summary_korean(record: &TodoChangeRecord) -> String {
             }
         }
     }
+}
+
+/// The form's rows for what only a to-do (not a group) has: when, where and with what it can
+/// be done, the deadline, priority, estimate and whether it repeats.
+fn todo_only_rows_ui(
+    ui: &mut egui::Ui,
+    form: &mut TodoForm,
+    priority_zero: &str,
+    estimate_zero: &str,
+) {
+    ui.label("조건");
+    ui.add(
+        egui::TextEdit::singleline(&mut form.constraints)
+            .desired_width(320.0)
+            .hint_text("언제, 어디서, 무엇이 있어야 할 수 있는지 (비우면 AI가 적음)"),
+    )
+    .on_hover_text(
+        "AI가 할 일을 고를 때는 메모 대신 이 칸을 봅니다. 12월 1일 이후, 집에서만, \
+         컴퓨터 필요, 취미처럼 언제 할지 정하는 데 필요한 것만 적습니다. 생활 규칙에 \
+         있는 시간과 요일은 적지 않습니다.",
+    );
+    ui.end_row();
+    ui.label("마감");
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut form.deadline)
+                .desired_width(160.0)
+                .hint_text("이틀 뒤, 금요일, 11/5 …"),
+        );
+        // The date the words were read as, so a misreading shows at once.
+        if let Some(deadline) = form.deadline_date() {
+            ui.label(format!("→ {}", deadline.format("%Y-%m-%d (%a)")));
+        }
+    });
+    ui.end_row();
+    ui.label("중요도");
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(&mut form.priority).range(0..=5));
+        ui.small(priority_zero);
+    });
+    ui.end_row();
+    ui.label("예상 시간(분)");
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(&mut form.estimate_minutes).range(0..=6000));
+        ui.small(estimate_zero);
+    });
+    ui.end_row();
+    ui.label("반복");
+    ui.checkbox(
+        &mut form.repeat,
+        "반복하는 할 일(잠자기, 출근 준비, 운동처럼 끝내도 목록에 남음)",
+    );
+    ui.end_row();
+}
+
+/// The form's rows for where it sits: the group it goes in ("위치") and the to-dos and groups
+/// it waits for ("먼저 끝낼 일"). Only places that cannot make a loop are offered: never itself,
+/// what it is inside of, or (for a group) what is inside it.
+fn place_rows_ui(ui: &mut egui::Ui, form: &mut TodoForm, outline: &Outline, editing: Option<&str>) {
+    let name = |todo: &TodoItem| outline_list::place_name(outline, todo);
+    let own_id = editing.unwrap_or_default();
+    let is_self_or_inside = |todo: &TodoItem| {
+        !own_id.is_empty() && (todo.id == own_id || outline.is_inside(&todo.id, own_id))
+    };
+    ui.label("위치");
+    let current = form
+        .parent
+        .as_deref()
+        .and_then(|parent| outline.get(parent))
+        .map_or("맨 위 (묶음 없음)".to_string(), name);
+    egui::ComboBox::from_id_salt("todo_form_parent")
+        .selected_text(current)
+        .width(320.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut form.parent, None, "맨 위 (묶음 없음)");
+            for row in outline.rows() {
+                if row.todo.group && !is_self_or_inside(row.todo) {
+                    ui.selectable_value(
+                        &mut form.parent,
+                        Some(row.todo.id.clone()),
+                        name(row.todo),
+                    );
+                }
+            }
+        });
+    ui.end_row();
+    ui.label("먼저 끝낼 일");
+    ui.vertical(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            let mut removed = None;
+            for (index, waited_id) in form.after.iter().enumerate() {
+                let label = outline.get(waited_id).map_or(waited_id.clone(), name);
+                if ui
+                    .button(format!("{label} ×"))
+                    .on_hover_text("누르면 뺍니다")
+                    .clicked()
+                {
+                    removed = Some(index);
+                }
+            }
+            if let Some(index) = removed {
+                form.after.remove(index);
+            }
+            // What it is inside of cannot come first: it would wait for itself.
+            let inside_of: Vec<String> = form
+                .parent
+                .as_deref()
+                .map(|parent| {
+                    let mut ids: Vec<String> = outline
+                        .path(parent)
+                        .iter()
+                        .map(|group| group.id.clone())
+                        .collect();
+                    ids.push(parent.to_string());
+                    ids
+                })
+                .unwrap_or_default();
+            let mut picked: Option<String> = None;
+            egui::ComboBox::from_id_salt("todo_form_after")
+                .selected_text("+ 고르기")
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for row in outline.rows() {
+                        let todo = row.todo;
+                        if is_self_or_inside(todo)
+                            || form.after.contains(&todo.id)
+                            || inside_of.contains(&todo.id)
+                            || (!own_id.is_empty() && outline.is_inside(own_id, &todo.id))
+                        {
+                            continue;
+                        }
+                        let label = if todo.group {
+                            format!("{} (묶음 전체)", name(todo))
+                        } else {
+                            name(todo)
+                        };
+                        if ui.selectable_label(false, label).clicked() {
+                            picked = Some(todo.id.clone());
+                        }
+                    }
+                });
+            if let Some(todo_id) = picked {
+                form.after.push(todo_id);
+            }
+        });
+        ui.small(if form.group {
+            "고른 일이 모두 끝나야 이 묶음 안의 할 일을 받을 수 있습니다. 다른 묶음의 일도 고를 수 \
+             있고, 묶음을 고르면 그 안의 할 일이 모두 끝나야 합니다."
+        } else {
+            "고른 일이 모두 끝나야 이 일을 받을 수 있습니다. 다른 묶음의 일도 고를 수 있고, \
+             묶음을 고르면 그 안의 할 일이 모두 끝나야 합니다."
+        });
+    });
+    ui.end_row();
+}
+
+/// The to-dos that finishing `todo_id` lets start: those that wait now and would not once it
+/// is off the list, by their place in the outline.
+fn unlocked_by(open: &[TodoItem], todo_id: &str) -> Vec<String> {
+    let outline = Outline::new(open);
+    let without: Vec<TodoItem> = open
+        .iter()
+        .filter(|todo| todo.id != todo_id)
+        .cloned()
+        .collect();
+    let after = Outline::new(&without);
+    outline
+        .rows()
+        .into_iter()
+        .map(|row| row.todo)
+        .filter(|todo| !todo.group && todo.id != todo_id)
+        .filter(|todo| !outline.is_ready(&todo.id) && after.is_ready(&todo.id))
+        .map(|todo| outline_list::place_name(&outline, todo))
+        .collect()
 }
 
 /// "11-05 (수) 14:00–15:00".

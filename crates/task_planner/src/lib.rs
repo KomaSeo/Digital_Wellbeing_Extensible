@@ -17,6 +17,7 @@ mod advisor;
 mod deadline;
 mod focus_link;
 mod model;
+pub mod outline;
 mod planner;
 mod settings_file;
 
@@ -40,6 +41,8 @@ pub use model::{
 };
 pub use planner::{PlannerError, TaskPlanner};
 
+#[cfg(test)]
+mod outline_tests;
 #[cfg(test)]
 mod tests;
 
