@@ -14,6 +14,7 @@
 //! withdrawn (`settings_withdraw`). The to-do list itself is edited in the To-do tab.
 //! Rules: `machine::settings`, `machine::setting_edits`; guide: `docs/multi_account.md` 6.4.
 
+use agent_api::user_api::call_value;
 use ai_client::usage::{Totals, UsageLog};
 use ai_focus_rule::grants::GrantState;
 use ai_focus_rule::{AiFocusConfig, SavedBlocks};
@@ -24,8 +25,6 @@ use machine::setting_edits::{self, Direction, Edit};
 use machine::settings::{
     AnswerOutcome, PutOutcome, Reservation, ReservationOrigin, SettingsSnapshot, EDITABLE,
 };
-use machine::system_care::{CareStatus, UpdateOutcome};
-use machine::user_api::call_value;
 use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -35,6 +34,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use system_care::{CareStatus, UpdateOutcome};
 use task_planner::{
     Confirmations, PlannerConfig, APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT,
     PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
@@ -339,7 +339,7 @@ pub struct SettingsTab {
     /// The text that narrows the list of installed programs.
     installed_filter: String,
     /// The last `self_update_status` answer (this program's own update).
-    self_update: Option<Result<machine::self_update::UpdateStatus, String>>,
+    self_update: Option<Result<system_care::self_update::UpdateStatus, String>>,
     /// What the last "업데이트 확인" / "지금 업데이트" request did.
     self_update_message: String,
     /// "지금 업데이트" was pressed once: the next press installs.
@@ -419,10 +419,10 @@ impl SettingsTab {
         &mut self,
         ui: &mut egui::Ui,
         protected: bool,
-        protection: Option<&machine::user_api::ProtectionView>,
-        scheduled: Option<&machine::user_api::ProtectionView>,
+        protection: Option<&agent_api::user_api::ProtectionView>,
+        scheduled: Option<&agent_api::user_api::ProtectionView>,
         lockdown: Option<&Lockdown>,
-        sync: Option<&machine::user_api::SyncStatus>,
+        sync: Option<&agent_api::user_api::SyncStatus>,
     ) {
         self.fix_now = lockdown
             .map(|lockdown| lockdown.fix_now.clone())
@@ -488,9 +488,9 @@ impl SettingsTab {
         &mut self,
         ui: &mut egui::Ui,
         protected: bool,
-        protection: Option<&machine::user_api::ProtectionView>,
-        scheduled: Option<&machine::user_api::ProtectionView>,
-        sync: Option<&machine::user_api::SyncStatus>,
+        protection: Option<&agent_api::user_api::ProtectionView>,
+        scheduled: Option<&agent_api::user_api::ProtectionView>,
+        sync: Option<&agent_api::user_api::SyncStatus>,
     ) {
         crate::style::section(ui, "엄격 모드");
         if protected {
@@ -512,7 +512,7 @@ impl SettingsTab {
     }
 
     /// A protection set to start later: when, how it will end, and cancelling it.
-    fn scheduled_ui(&mut self, ui: &mut egui::Ui, scheduled: &machine::user_api::ProtectionView) {
+    fn scheduled_ui(&mut self, ui: &mut egui::Ui, scheduled: &agent_api::user_api::ProtectionView) {
         let start = scheduled
             .since
             .map(|since| {
@@ -615,7 +615,7 @@ impl SettingsTab {
     }
 
     /// Setup: changes take effect at once until the user protects the settings.
-    fn protect_ui(&mut self, ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
+    fn protect_ui(&mut self, ui: &mut egui::Ui, sync: Option<&agent_api::user_api::SyncStatus>) {
         crate::style::notice(
             ui,
             crate::style::Tone::Warning,
@@ -846,7 +846,7 @@ impl SettingsTab {
         &mut self,
         ui: &mut egui::Ui,
         listed: &[String],
-        sync: Option<&machine::user_api::SyncStatus>,
+        sync: Option<&agent_api::user_api::SyncStatus>,
     ) {
         for id in listed {
             ui.horizontal(|ui| {
@@ -933,8 +933,8 @@ impl SettingsTab {
     fn unlock_ui(
         &mut self,
         ui: &mut egui::Ui,
-        protection: Option<&machine::user_api::ProtectionView>,
-        sync: Option<&machine::user_api::SyncStatus>,
+        protection: Option<&agent_api::user_api::ProtectionView>,
+        sync: Option<&agent_api::user_api::SyncStatus>,
     ) {
         let Some(protection) = protection else {
             return;
@@ -1600,7 +1600,7 @@ impl SettingsTab {
     /// This program's own update: check, then install through the update guard (every app
     /// stays closed while it installs). Open whether the settings are protected or not.
     fn self_update_ui(&mut self, ui: &mut egui::Ui) {
-        use machine::self_update::RequestKind;
+        use system_care::self_update::RequestKind;
         crate::style::section(ui, "이 프로그램 업데이트");
         let status = match &self.self_update {
             Some(Ok(status)) => status.clone(),
@@ -1922,7 +1922,7 @@ impl SettingsTab {
                 &mut drafts.ai_focus.auto_update_programs,
                 format!(
                     "하루 한 번 저절로 업데이트하기({}시 이후, PC가 켜져 있는 첫 때)",
-                    machine::system_care::AUTO_UPDATE_FROM_HOUR
+                    system_care::AUTO_UPDATE_FROM_HOUR
                 ),
             );
         }
@@ -3114,7 +3114,7 @@ fn local(time: DateTime<Utc>) -> String {
 
 /// Whether this PC syncs with other devices, and how the last sync went (`docs/sync.md`).
 /// Logging in is at the top of this tab ([`crate::login`]).
-fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
+fn sync_ui(ui: &mut egui::Ui, sync: Option<&agent_api::user_api::SyncStatus>) {
     crate::style::section(ui, "기기 동기화");
     let Some(sync) = sync else {
         ui.weak(
@@ -3169,7 +3169,7 @@ fn sync_ui(ui: &mut egui::Ui, sync: Option<&machine::user_api::SyncStatus>) {
 /// a device that has not synced for 30 days leaves it (never one whose administrator may end
 /// the strict mode), and a computer logs in again by itself (the owner: "기기 자동 삭제·추가
 /// 기능을 서버에 추가하고 유저 manual 삭제는 없애기").
-fn devices_ui(ui: &mut egui::Ui, sync: &machine::user_api::SyncStatus) {
+fn devices_ui(ui: &mut egui::Ui, sync: &agent_api::user_api::SyncStatus) {
     if sync.device_details.is_empty() {
         return;
     }
@@ -3181,7 +3181,7 @@ fn devices_ui(ui: &mut egui::Ui, sync: &machine::user_api::SyncStatus) {
                  다시 설치해도 같은 기기로 붙습니다. {}일 동안 동기화하지 않은 기기는 서버가 목록에서 \
                  지웁니다. 다만 엄격 모드를 끌 수 있는 컴퓨터는 지우지 않습니다. 지운 컴퓨터를 다시 \
                  켜서 쓰면 저절로 다시 붙습니다.",
-                machine::user_api::DEVICE_PRUNE_DAYS
+                agent_api::user_api::DEVICE_PRUNE_DAYS
             ));
             egui::Grid::new("sync_device_list")
                 .striped(true)
@@ -3216,7 +3216,7 @@ fn devices_ui(ui: &mut egui::Ui, sync: &machine::user_api::SyncStatus) {
 }
 
 /// A sync device as "name (id)", with "— 이 컴퓨터" for this PC.
-fn device_label(sync: &machine::user_api::SyncStatus, id: &str) -> String {
+fn device_label(sync: &agent_api::user_api::SyncStatus, id: &str) -> String {
     let named = sync
         .devices
         .iter()

@@ -20,8 +20,6 @@ base64 = "0.22"
 getrandom = "0.2"
 pbkdf2 = "0.12"
 sha2 = "0.10"
-ureq = { version = "2", features = ["json", "native-certs"] }
-web_client = { workspace = true }
 parking_lot = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -29,5 +27,4 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
-    "Win32_System_Time",
 ] }

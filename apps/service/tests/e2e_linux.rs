@@ -25,8 +25,8 @@
 
 mod common;
 
+use agent_api::user_api::{call, call_value, Status};
 use common::{fake_claude, wait_for};
-use machine::user_api::{call, call_value, Status};
 use serde_json::{json, Value};
 use std::process::{Child, Command};
 use std::sync::atomic::Ordering;

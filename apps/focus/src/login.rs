@@ -11,9 +11,9 @@
 //! ([`crate::elevate::run_sync_login`]). Logging out is refused while the settings are
 //! protected.
 
+use agent_api::user_api::{call_value, SyncStatus};
 use eframe::egui;
 use machine::login::{LoginRequestFile, LoginStatus};
-use machine::user_api::{call_value, SyncStatus};
 use serde_json::json;
 use std::sync::mpsc;
 

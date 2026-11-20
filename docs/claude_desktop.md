@@ -1,7 +1,7 @@
 # Claude Desktop 연결 설명서
 
 이 문서는 사용자가 PC의 Claude Desktop에서 할 일을 관리할 수 있게 연결하는 방법을 설명합니다.
-MCP 서버의 코드는 `apps/mcp/src/main.rs`이고, 도구는 `crates/machine/src/assistant_tools.rs`에 있습니다.
+MCP 서버의 코드는 `apps/mcp/src/main.rs`이고, 도구는 `crates/agent_api/src/assistant_tools.rs`에 있습니다.
 
 ---
 

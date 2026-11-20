@@ -6,6 +6,8 @@ members = [
     "crates/json_store",
     "crates/browser_pages",
     "crates/setting_edits",
+    "crates/system_care",
+    "crates/agent_api",
     "crates/list_based_rule",
     "crates/enforcer",
     "crates/ai_focus_rule",
@@ -45,6 +47,8 @@ ai_client = { path = "crates/ai_client" }
 json_store = { path = "crates/json_store" }
 browser_pages = { path = "crates/browser_pages" }
 setting_edits = { path = "crates/setting_edits" }
+system_care = { path = "crates/system_care" }
+agent_api = { path = "crates/agent_api" }
 ai_focus_rule = { path = "crates/ai_focus_rule" }
 machine = { path = "crates/machine" }
 task_planner = { path = "crates/task_planner" }

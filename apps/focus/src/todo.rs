@@ -11,9 +11,9 @@
 //! change nothing the rules depend on and are saved at once (`task_notes_put`).
 
 use crate::{ChangeChoice, FocusApp, Tab, GREEN, RED};
+use agent_api::user_api::{call, Status};
 use chrono::{DateTime, Local, NaiveDate, NaiveTime, Utc};
 use eframe::egui;
-use machine::user_api::{call, Status};
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::thread;

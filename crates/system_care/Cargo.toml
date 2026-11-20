@@ -1,0 +1,21 @@
+[package]
+name = "system_care"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+machine = { workspace = true }
+ai_focus_rule = { workspace = true }
+setting_edits = { workspace = true }
+web_client = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+sha2 = "0.10"
+ureq = { version = "2", features = ["json", "native-certs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Time"] }

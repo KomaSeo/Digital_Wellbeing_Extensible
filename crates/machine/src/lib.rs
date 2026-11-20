@@ -21,18 +21,13 @@
 //!     logs\
 //! ```
 
-pub mod assistant_tools;
-pub mod focus_link;
 pub mod lockdown;
 pub mod login;
 pub mod model_catalog;
 pub mod password;
-pub mod self_update;
 pub mod session;
 pub use setting_edits;
 pub mod settings;
-pub mod system_care;
-pub mod user_api;
 
 use serde::{Deserialize, Serialize};
 use std::fs;

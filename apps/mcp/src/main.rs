@@ -3,7 +3,7 @@
 //!
 //! Claude Desktop starts this program in the user's own account and talks to it over
 //! stdin/stdout (MCP stdio transport: one JSON-RPC 2.0 message per line). Every tool is a
-//! call to [`machine::user_api`], the same API the Focus app uses, so the assistant gains no
+//! call to [`agent_api::user_api`], the same API the Focus app uses, so the assistant gains no
 //! power the user does not already have. A proposed to-do joins the list only if the agent's
 //! own AI approves it against the owner's life rules. The assistant may also schedule an
 //! update of the settings (life rules, the planner's AI instructions, any other setting): in
@@ -14,9 +14,9 @@
 //!
 //! Setup and tool reference (Korean): `docs/claude_desktop.md`.
 
-use machine::assistant_tools::{call_tool, tools, Agent, INSTRUCTIONS};
+use agent_api::assistant_tools::{call_tool, tools, Agent, INSTRUCTIONS};
+use agent_api::user_api::call_value;
 use machine::session::current_session_id;
-use machine::user_api::call_value;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -99,7 +99,7 @@ fn error_reply(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use machine::user_api::Status;
+    use agent_api::user_api::Status;
     use std::cell::RefCell;
 
     fn empty_status() -> Status {

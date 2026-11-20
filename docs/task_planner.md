@@ -115,14 +115,14 @@ crates/task_planner/src/
 | 위치 | 바뀐 내용 |
 |---|---|
 | `crates/ai_client/src/claude.rs` | Claude API를 호출하는 코드입니다. 판정 모듈과 플래너가 함께 씁니다(rc.80부터 `ai_client` 크레이트). JSON 파일 저장소 `JsonStore`는 `crates/json_store`에 있습니다. |
-| `crates/machine/src/user_api.rs` | Focus 앱이 agent에게 보낼 수 있는 요청에 `assign`(할당 받기), `request_change`(변경 요청), `todo_change`(할 일 변경), `todo_change_schedule`(AI 없이 하기로 한 할 일 변경), `task_notes_put`(메모와 단계 저장)을 추가했습니다. 남은 할 일이 있으면 agent가 직접 입력한 할 일과 그냥 멈추기를 거부합니다(6장). |
+| `crates/agent_api/src/user_api.rs` | Focus 앱이 agent에게 보낼 수 있는 요청에 `assign`(할당 받기), `request_change`(변경 요청), `todo_change`(할 일 변경), `todo_change_schedule`(AI 없이 하기로 한 할 일 변경), `task_notes_put`(메모와 단계 저장)을 추가했습니다. 남은 할 일이 있으면 agent가 직접 입력한 할 일과 그냥 멈추기를 거부합니다(6장). |
 | `crates/machine/src/settings.rs` | AI가 승인한 할 일 변경을 바로 적용하는 `apply_now`와, AI 없이 하기로 한 할 일 변경을 두 시간 간격의 예약된 업데이트로 만드는 `schedule`이 있습니다. |
 | `apps/service/src/agent.rs` | agent가 TaskPlanner를 만들고, `planner.json`이 바뀌면 다시 읽습니다. |
 | `apps/focus/src/todo.rs` | Focus 앱의 일하기 탭과 할 일 탭입니다(7.1절). 통계 탭이 쓰는 "오늘", "끝낸 일", "요청과 AI의 답" 화면도 이 파일에 있습니다. |
 | `apps/focus/src/statistics.rs` | Focus 앱의 통계 탭입니다(7.3절). |
 | `apps/focus/src/settings.rs` | Focus 앱의 설정 탭입니다. 이 탭의 **AI 규칙** 영역이 플래너 설정을 보여 줍니다(7.2절). |
 
-**AI 검사와의 연결(`FocusLink`, rc.80부터).** 플래너는 AI 검사 모듈(`ai_focus_rule`)을 직접 알지 않습니다. 플래너는 `FocusLink` trait으로 네 가지만 부탁합니다: AI 질문에 쓸 키·모델·노력 정도(`ai_settings`), 심사에 증거로 보낼 최근 활동 기록(`recent_activity`), AI 검사가 지금 보는 할 일(`watched`), 그리고 할 일을 정하거나 끝낼 때 AI 검사를 켜고 끄기(`watch`)입니다. agent는 이 trait을 AI 검사 모니터로 구현해서(`machine::focus_link::MonitorLink`) 플래너에 넘기고, 플래너의 테스트는 가짜 구현을 씁니다.
+**AI 검사와의 연결(`FocusLink`, rc.80부터).** 플래너는 AI 검사 모듈(`ai_focus_rule`)을 직접 알지 않습니다. 플래너는 `FocusLink` trait으로 네 가지만 부탁합니다: AI 질문에 쓸 키·모델·노력 정도(`ai_settings`), 심사에 증거로 보낼 최근 활동 기록(`recent_activity`), AI 검사가 지금 보는 할 일(`watched`), 그리고 할 일을 정하거나 끝낼 때 AI 검사를 켜고 끄기(`watch`)입니다. agent는 이 trait을 AI 검사 모니터로 구현해서(`agent_api::focus_link::MonitorLink`) 플래너에 넘기고, 플래너의 테스트는 가짜 구현을 씁니다.
 
 ### 3.2 데이터 파일
 
@@ -679,7 +679,7 @@ Recent foreground activity (oldest first):
 
 **예전에 고쳐 둔 지시문:** 이 지시문이 비어 있는데 "하는 일을 바꾸는 요청 심사"에 자기 지시문이 있으면, 완료 보고도 그 자기 지시문으로 심사합니다(`PlannerInstructions::completion_review_or_default`). 예전에는 그 지시문이 완료 보고도 심사했기 때문입니다. 설정 탭은 이때 "비어 있어서, … 고쳐 둔 지시문을 씁니다"라고 알려 줍니다.
 
-## 6. agent가 받는 요청 (`machine::user_api`)
+## 6. agent가 받는 요청 (`agent_api::user_api`)
 
 Focus 앱은 agent에게 다음 요청을 보낼 수 있습니다. 남은 할 일이 있는지에 따라 agent의 반응이 다릅니다.
 

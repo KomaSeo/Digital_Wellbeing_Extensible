@@ -3,9 +3,9 @@
 //! that tells what was done when the mouse is over it. A stretch is a task (at the computer or
 //! away from it), an appointment, or "멈춤": the task was paused.
 
+use agent_api::user_api::call_value;
 use chrono::{DateTime, Duration, Local, NaiveDate, Timelike, Utc};
 use eframe::egui;
-use machine::user_api::call_value;
 use serde_json::json;
 use std::collections::BTreeMap;
 use task_planner::{TimetableEntry, TimetableKind};

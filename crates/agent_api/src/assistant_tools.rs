@@ -216,12 +216,12 @@ fn local_time(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 
 /// A scheduled update's edits as lines, leaving out any edit of the API key.
 fn changes_without_key(edits: &Value) -> Vec<String> {
-    let edits: Vec<crate::setting_edits::Edit> =
+    let edits: Vec<machine::setting_edits::Edit> =
         serde_json::from_value(edits.clone()).unwrap_or_default();
     edits
         .iter()
         .filter(|edit| edit.path().first().map(String::as_str) != Some("api_key"))
-        .map(crate::setting_edits::Edit::describe)
+        .map(machine::setting_edits::Edit::describe)
         .collect()
 }
 
@@ -475,9 +475,9 @@ pub fn call_tool(name: &str, arguments: &Value, agent: Agent, via: &str) -> Resu
                 let Some(name) = reservation["name"].as_str() else {
                     continue;
                 };
-                let edits: Vec<crate::setting_edits::Edit> =
+                let edits: Vec<machine::setting_edits::Edit> =
                     serde_json::from_value(reservation["edits"].clone()).unwrap_or_default();
-                crate::setting_edits::apply(&mut with_scheduled[name], &edits);
+                machine::setting_edits::apply(&mut with_scheduled[name], &edits);
             }
             if let Some(ai_focus) = with_scheduled["ai_focus"].as_object_mut() {
                 ai_focus.remove("api_key");

@@ -145,17 +145,17 @@ enum CareJob {
     /// Run requested and daily program updates (each may take minutes).
     Updates,
     /// Check for an update of this program, or install it through the update guard, when the
-    /// owner asked (`machine::self_update`).
+    /// owner asked (`system_care::self_update`).
     SelfUpdate,
 }
 
 /// How often each care job looks again.
 const CARE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Do `job` forever (see `machine::system_care`); the jobs run on their own threads so a long
+/// Do `job` forever (see `system_care`); the jobs run on their own threads so a long
 /// update does not delay putting the time zone back.
 fn care_loop(job: CareJob) {
-    use machine::system_care;
+    use system_care;
     let data_directory = machine::data_dir();
     let started = std::time::Instant::now();
     // The self-update's check after the service starts has been made (or was not due).
@@ -188,7 +188,7 @@ fn care_loop(job: CareJob) {
                 )
             }
             CareJob::SelfUpdate => {
-                use machine::self_update;
+                use system_care::self_update;
                 let since_start = started.elapsed();
                 if self_update::automatic_due(
                     self_update::read_state(&data_directory).last_automatic,

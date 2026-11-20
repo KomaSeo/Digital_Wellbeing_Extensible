@@ -4,7 +4,7 @@
 //! The agent runs as SYSTEM, so the user cannot reach its settings; this API
 //! exposes only what the user is meant to control: their own focus session.
 //! Admin settings (lists, AI settings) are changed through the files in
-//! [`crate::data_dir`], which standard users cannot write.
+//! [`machine::data_dir`], which standard users cannot write.
 //!
 //! Transport: TCP on `127.0.0.1:(BASE_PORT + session id)`, one JSON request
 //! per connection, one JSON line back.
@@ -26,23 +26,23 @@
 //! | `todo_change_schedule` | `{ "id": "…" }` (a change the AI did not approve) | [`Status`], `last_todo_change` set |
 //! | `task_notes_put` | `{ "todo_id": "…", "notes": TaskNotes }` | [`Status`] |
 //! | `plan_week`      | `{}` (one AI call)                       | [`Status`] with `planner.week_plan` |
-//! | `settings_get`   | `{}`                                     | [`crate::settings::SettingsSnapshot`] |
-//! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…}, "via": "…" }` | [`crate::settings::PutOutcome`] (what is in force now, what was scheduled) |
-//! | `settings_answer` | `{ "id": "…", "approve": true\|false }` (once the question is due) | [`crate::settings::AnswerOutcome`] |
+//! | `settings_get`   | `{}`                                     | [`machine::settings::SettingsSnapshot`] |
+//! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…}, "via": "…" }` | [`machine::settings::PutOutcome`] (what is in force now, what was scheduled) |
+//! | `settings_answer` | `{ "id": "…", "approve": true\|false }` (once the question is due) | [`machine::settings::AnswerOutcome`] |
 //! | `settings_withdraw` | `{ "id": "…" }`                        | `{ "ok": true }` |
 //! | `timetable` | `{ "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" }` | [`task_planner::TimetableEntry`] list |
-//! | `settings_protect` | `{ mode?, starts_at? }` ([`crate::settings::ProtectionChoice`]; permanent without; `starts_at`: start later) | [`ProtectionView`] |
+//! | `settings_protect` | `{ mode?, starts_at? }` ([`machine::settings::ProtectionChoice`]; permanent without; `starts_at`: start later) | [`ProtectionView`] |
 //! | `settings_protect_cancel` | `{}` (cancel a protection set to start later) | `{ ok }` |
 //! | `settings_unprotect` | `{ password? }` (time over, or the password) | `{ protected: false }`; every block lifted |
-//! | `program_update` | `{ "program": "Kakao.KakaoTalk" }` (listed in `updatable_programs`) | [`crate::system_care::CareStatus`] |
-//! | `system_care_status` | `{}`                                 | [`crate::system_care::CareStatus`] |
-//! | `installed_programs_refresh` | `{}` (the service lists the programs winget can update) | [`crate::system_care::CareStatus`] |
-//! | `self_update` | `{ "action": "check"\|"install" }` (the service does it; see `crate::self_update`) | [`crate::self_update::UpdateStatus`] |
-//! | `self_update_status` | `{}`                                 | [`crate::self_update::UpdateStatus`] |
+//! | `program_update` | `{ "program": "Kakao.KakaoTalk" }` (listed in `updatable_programs`) | [`system_care::CareStatus`] |
+//! | `system_care_status` | `{}`                                 | [`system_care::CareStatus`] |
+//! | `installed_programs_refresh` | `{}` (the service lists the programs winget can update) | [`system_care::CareStatus`] |
+//! | `self_update` | `{ "action": "check"\|"install" }` (the service does it; see `system_care::self_update`) | [`system_care::self_update::UpdateStatus`] |
+//! | `self_update_status` | `{}`                                 | [`system_care::self_update::UpdateStatus`] |
 //!
 //! The `settings_*` methods let a standard user edit the admin settings: during setup an
 //! edit takes effect at once; once protected it is scheduled and takes effect only after
-//! three "yes" answers two days apart; see [`crate::settings`].
+//! three "yes" answers two days apart; see [`machine::settings`].
 //!
 //!
 //! `propose_todo` asks the AI to add a to-do to the planner's list; it judges
@@ -144,7 +144,7 @@ pub struct Status {
     pub daily_budget_usd: f64,
     /// Every app is locked: the settings are protected and the AI connection is broken.
     #[serde(default)]
-    pub lockdown: Option<crate::lockdown::Lockdown>,
+    pub lockdown: Option<machine::lockdown::Lockdown>,
     /// The block the AI made last: the Focus app asks at once what to do about it.
     #[serde(default)]
     pub last_block: Option<ai_focus_rule::NewBlock>,
@@ -155,9 +155,9 @@ pub struct Status {
     /// Multi-device sync of this PC (`None`: it does not sync). See `docs/sync.md`.
     #[serde(default)]
     pub sync: Option<SyncStatus>,
-    /// The login of this Windows account (sync logins; see `crate::login`).
+    /// The login of this Windows account (sync logins; see `machine::login`).
     #[serde(default)]
-    pub login: crate::login::LoginStatus,
+    pub login: machine::login::LoginStatus,
 }
 
 /// Responsibility: Tell the Focus app how this PC's sync went.
@@ -263,8 +263,8 @@ pub struct ProtectionView {
 }
 
 impl ProtectionView {
-    pub fn of(protection: &crate::settings::Protection) -> Self {
-        use crate::settings::ProtectionMode;
+    pub fn of(protection: &machine::settings::Protection) -> Self {
+        use machine::settings::ProtectionMode;
         let (kind, until) = match &protection.mode {
             ProtectionMode::Permanent => ("permanent", None),
             ProtectionMode::Until { until } => ("until", Some(*until)),
@@ -332,12 +332,13 @@ fn status(api: &AgentApi) -> Status {
         last_access: None,
         last_proposal: None,
         last_todo_change: None,
-        settings_protected: crate::settings::is_protected(&crate::data_dir()),
-        settings_protection: crate::settings::protection(&crate::data_dir())
+        settings_protected: machine::settings::is_protected(&machine::data_dir()),
+        settings_protection: machine::settings::protection(&machine::data_dir())
             .map(|protection| ProtectionView::of(&protection)),
-        settings_protection_scheduled: crate::settings::scheduled_protection(&crate::data_dir())
-            .map(|protection| ProtectionView::of(&protection)),
-        settings_questions_due: crate::settings::questions_due(&crate::data_dir(), Utc::now()),
+        settings_protection_scheduled:
+            machine::settings::scheduled_protection(&machine::data_dir())
+                .map(|protection| ProtectionView::of(&protection)),
+        settings_questions_due: machine::settings::questions_due(&machine::data_dir(), Utc::now()),
         ai_cost_today_usd: monitor.usage().map(|usage| usage.today_cost()),
         daily_budget_usd: config.daily_budget_usd,
         lockdown: lockdown_now(api.planner.as_deref()),
@@ -347,30 +348,30 @@ fn status(api: &AgentApi) -> Status {
             .as_ref()
             .map(|enforcer| enforcer.recent_blocks(30))
             .unwrap_or_default(),
-        sync: sync_status(&crate::data_dir()),
-        login: crate::login::status(&crate::data_dir()),
+        sync: sync_status(&machine::data_dir()),
+        login: machine::login::status(&machine::data_dir()),
     }
 }
 
-/// The lockdown in force now (see [`crate::lockdown`]): a broken AI connection, a sync login
+/// The lockdown in force now (see [`machine::lockdown`]): a broken AI connection, a sync login
 /// not made yet, a paused task, to-dos with none assigned, or a stop ("사용 중지").
-pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<crate::lockdown::Lockdown> {
-    crate::lockdown::lockdown(
-        crate::settings::is_protected(&crate::data_dir()),
+pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<machine::lockdown::Lockdown> {
+    machine::lockdown::lockdown(
+        machine::settings::is_protected(&machine::data_dir()),
         &ai_client::connection::current().0,
         planner.and_then(|planner| {
             if planner.stopped() {
-                Some(crate::lockdown::TaskLock::Stopped)
-            } else if crate::login::required(&crate::data_dir()) {
-                Some(crate::lockdown::TaskLock::LoginRequired)
+                Some(machine::lockdown::TaskLock::Stopped)
+            } else if machine::login::required(&machine::data_dir()) {
+                Some(machine::lockdown::TaskLock::LoginRequired)
             } else if planner.paused() {
-                Some(crate::lockdown::TaskLock::Paused)
+                Some(machine::lockdown::TaskLock::Paused)
             } else if planner.report_due(chrono::Utc::now()) {
-                Some(crate::lockdown::TaskLock::ReportDue)
+                Some(machine::lockdown::TaskLock::ReportDue)
             } else {
                 planner
                     .waiting_for_task()
-                    .then_some(crate::lockdown::TaskLock::WaitingForTask)
+                    .then_some(machine::lockdown::TaskLock::WaitingForTask)
             }
         }),
     )
@@ -387,7 +388,7 @@ fn apply_list_writes(
     if writes.is_empty() {
         return Ok(());
     }
-    crate::settings::apply_now(
+    machine::settings::apply_now(
         data_directory,
         task_planner::SETTINGS_FILE.name,
         &todo_list_edits(writes),
@@ -398,8 +399,8 @@ fn apply_list_writes(
         .map_err(|error| error.to_string())
 }
 
-fn todo_list_edits(writes: &[TodoListWrite]) -> Vec<crate::setting_edits::Edit> {
-    use crate::setting_edits::Edit;
+fn todo_list_edits(writes: &[TodoListWrite]) -> Vec<machine::setting_edits::Edit> {
+    use machine::setting_edits::Edit;
     writes
         .iter()
         .map(|write| match write {
@@ -451,10 +452,10 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
     let mut last_access = None;
     let mut last_proposal = None;
     let mut last_todo_change = None;
-    let data_directory = crate::data_dir();
+    let data_directory = machine::data_dir();
     match method {
         "settings_get" => {
-            let snapshot = crate::settings::snapshot(&data_directory)?;
+            let snapshot = machine::settings::snapshot(&data_directory)?;
             return serde_json::to_value(snapshot).map_err(|error| error.to_string());
         }
         "settings_put" => {
@@ -474,17 +475,17 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                     .or_else(|| in_force.resolve_api_key());
                 if let Some(model) = params["content"]["model"].as_str() {
                     if model.trim() != in_force.model {
-                        crate::model_catalog::check(key.clone(), model)?;
+                        machine::model_catalog::check(key.clone(), model)?;
                     }
                 }
                 // The recheck model may be empty (rechecks off).
                 if let Some(model) = params["content"]["recheck_model"].as_str() {
                     if model.trim() != in_force.recheck_model && !model.trim().is_empty() {
-                        crate::model_catalog::check(key, model)?;
+                        machine::model_catalog::check(key, model)?;
                     }
                 }
             }
-            let outcome = crate::settings::put(
+            let outcome = machine::settings::put(
                 &data_directory,
                 Utc::now(),
                 name,
@@ -513,13 +514,13 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let approve = params["approve"]
                 .as_bool()
                 .ok_or("params.approve (true or false) required")?;
-            let outcome = crate::settings::answer(&data_directory, Utc::now(), id, approve)?;
+            let outcome = machine::settings::answer(&data_directory, Utc::now(), id, approve)?;
             tracing::info!("settings update {id}: answered {approve}: {outcome:?}");
             return serde_json::to_value(outcome).map_err(|error| error.to_string());
         }
         "settings_withdraw" => {
             let id = params["id"].as_str().ok_or("params.id required")?;
-            crate::settings::withdraw(&data_directory, Utc::now(), id)?;
+            machine::settings::withdraw(&data_directory, Utc::now(), id)?;
             tracing::info!("settings update {id} withdrawn");
             return Ok(json!({ "ok": true }));
         }
@@ -528,53 +529,48 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .as_str()
                 .ok_or("params.program required")?;
             let config = api.monitor.store().get();
-            let user = crate::session::session_user(crate::session::current_session_id())
+            let user = machine::session::session_user(machine::session::current_session_id())
                 .unwrap_or_default();
-            let request = crate::system_care::request_update(
-                &data_directory,
-                &config,
-                program,
-                &user,
-                Utc::now(),
-            )?;
+            let request =
+                system_care::request_update(&data_directory, &config, program, &user, Utc::now())?;
             tracing::info!("update of {} requested by {user}", request.program);
-            return serde_json::to_value(crate::system_care::status(&data_directory, &config))
+            return serde_json::to_value(system_care::status(&data_directory, &config))
                 .map_err(|error| error.to_string());
         }
         "self_update" => {
             let kind = match params["action"].as_str() {
-                Some("check") => crate::self_update::RequestKind::Check,
-                Some("install") => crate::self_update::RequestKind::Install,
+                Some("check") => system_care::self_update::RequestKind::Check,
+                Some("install") => system_care::self_update::RequestKind::Install,
                 _ => return Err("params.action is \"check\" or \"install\"".into()),
             };
-            let user = crate::session::session_user(crate::session::current_session_id())
+            let user = machine::session::session_user(machine::session::current_session_id())
                 .unwrap_or_default();
-            crate::self_update::request(&data_directory, kind, &user, Utc::now())?;
+            system_care::self_update::request(&data_directory, kind, &user, Utc::now())?;
             tracing::info!("self-update {kind:?} requested by {user}");
-            return serde_json::to_value(crate::self_update::status(&data_directory))
+            return serde_json::to_value(system_care::self_update::status(&data_directory))
                 .map_err(|error| error.to_string());
         }
         "self_update_status" => {
-            return serde_json::to_value(crate::self_update::status(&data_directory))
+            return serde_json::to_value(system_care::self_update::status(&data_directory))
                 .map_err(|error| error.to_string());
         }
         "installed_programs_refresh" => {
-            crate::system_care::request_installed_list(&data_directory)?;
+            system_care::request_installed_list(&data_directory)?;
             let config = api.monitor.store().get();
-            return serde_json::to_value(crate::system_care::status(&data_directory, &config))
+            return serde_json::to_value(system_care::status(&data_directory, &config))
                 .map_err(|error| error.to_string());
         }
         "system_care_status" => {
             let config = api.monitor.store().get();
-            return serde_json::to_value(crate::system_care::status(&data_directory, &config))
+            return serde_json::to_value(system_care::status(&data_directory, &config))
                 .map_err(|error| error.to_string());
         }
         "settings_protect" => {
             // Without a choice (older callers, tests): permanent.
-            let choice: crate::settings::ProtectionChoice = match params.get("mode") {
+            let choice: machine::settings::ProtectionChoice = match params.get("mode") {
                 Some(mode) => serde_json::from_value(mode.clone())
                     .map_err(|error| format!("params.mode: {error}"))?,
-                None => crate::settings::ProtectionChoice::Permanent,
+                None => machine::settings::ProtectionChoice::Permanent,
             };
             let starts_at = match params.get("starts_at") {
                 Some(Value::Null) | None => None,
@@ -584,7 +580,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 ),
             };
             let protection =
-                crate::settings::protect_from(&data_directory, Utc::now(), choice, starts_at)?;
+                machine::settings::protect_from(&data_directory, Utc::now(), choice, starts_at)?;
             tracing::info!(
                 "settings protected from {:?} ({:?})",
                 protection.protected_since,
@@ -595,7 +591,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
         }
         // A protection set to start later is cancelled before its time (setup stage).
         "settings_protect_cancel" => {
-            crate::settings::cancel_scheduled_protection(&data_directory, Utc::now())?;
+            machine::settings::cancel_scheduled_protection(&data_directory, Utc::now())?;
             tracing::info!("the strict mode set to start later was cancelled");
             return Ok(json!({ "ok": true }));
         }
@@ -603,13 +599,13 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
         // An administrator protection ends only through `settings-unlock` run as administrator.
         "protection_admin_remove" => {
             let device = params["device"].as_str().ok_or("params.device required")?;
-            crate::settings::remove_administrator_device(&data_directory, device)?;
+            machine::settings::remove_administrator_device(&data_directory, device)?;
             tracing::info!("strict mode: {device} may no longer end it");
             return Ok(json!({ "ok": true }));
         }
         "protection_admin_add" => {
             let device = params["device"].as_str().ok_or("params.device required")?;
-            let scheduled = crate::settings::schedule_administrator_device(
+            let scheduled = machine::settings::schedule_administrator_device(
                 &data_directory,
                 Utc::now(),
                 device,
@@ -620,10 +616,10 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
         }
         "settings_unprotect" => {
             let unlock = match params["password"].as_str() {
-                Some(password) => crate::settings::Unlock::Password(password),
-                None => crate::settings::Unlock::Press,
+                Some(password) => machine::settings::Unlock::Password(password),
+                None => machine::settings::Unlock::Press,
             };
-            if let Err(error) = crate::settings::unprotect(&data_directory, Utc::now(), unlock) {
+            if let Err(error) = machine::settings::unprotect(&data_directory, Utc::now(), unlock) {
                 // Slows down guessing a password.
                 std::thread::sleep(Duration::from_secs(1));
                 return Err(error);
@@ -736,10 +732,10 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             apply_list_writes(&data_directory, planner, &writes)?;
         }
         "logout" => {
-            let user = crate::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;
-            crate::login::log_out(&crate::data_dir(), &user)?;
+            let user = machine::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;
+            machine::login::log_out(&machine::data_dir(), &user)?;
             tracing::info!("{user} logged out");
-            crate::login::changed();
+            machine::login::changed();
         }
         "stop_use" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
@@ -773,7 +769,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             // Outside strict mode a done report needs no AI (the owner's request), so no
             // reason and no proof either.
             if matches!(request, ChangeKind::Done | ChangeKind::AlreadyDone)
-                && !crate::settings::is_protected(&data_directory)
+                && !machine::settings::is_protected(&data_directory)
             {
                 let evidence = Evidence {
                     text: params["evidence"].as_str().unwrap_or_default().to_string(),
@@ -812,7 +808,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             // The list changes the AI made with an approved request: in force at once, like
             // an approved to-do change.
             if record.approved && !record.list_writes.is_empty() {
-                crate::settings::apply_now(
+                machine::settings::apply_now(
                     &data_directory,
                     task_planner::SETTINGS_FILE.name,
                     &todo_list_edits(&record.list_writes),
@@ -857,7 +853,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             // In the setup stage anyone may change anything at once, so editing and removing
             // a to-do needs no AI there (the owner's request); additions still go to the AI,
             // which also fills in the new to-do.
-            let record = if crate::settings::is_protected(&data_directory) {
+            let record = if machine::settings::is_protected(&data_directory) {
                 planner.review_todo_change(Utc::now(), change, reason, via)
             } else {
                 planner.todo_change_without_review(Utc::now(), change, reason, via)
@@ -868,7 +864,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 // Skipping one day of a repeating appointment writes nothing to the list.
                 let writes = planner.writes_for(&record);
                 if !writes.is_empty() {
-                    crate::settings::apply_now(
+                    machine::settings::apply_now(
                         &data_directory,
                         task_planner::SETTINGS_FILE.name,
                         &todo_list_edits(&writes),
@@ -942,7 +938,7 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 record.reason,
                 record.reply
             );
-            let scheduled = crate::settings::schedule(
+            let scheduled = machine::settings::schedule(
                 &data_directory,
                 Utc::now(),
                 task_planner::SETTINGS_FILE.name,

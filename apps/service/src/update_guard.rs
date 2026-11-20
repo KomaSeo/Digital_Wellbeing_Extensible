@@ -18,7 +18,7 @@
 //! 3. starts the service if the setup left it stopped, waits until the new agents run, and
 //!    only then stops closing apps and records the outcome (`self_update.json`).
 //!
-//! See `machine::self_update` for the request and the check.
+//! See `system_care::self_update` for the request and the check.
 
 use anyhow::Context;
 use enforcer::{BlockEvent, BlockRule, Enforcer, ProcessSnapshot};
@@ -40,7 +40,7 @@ const AGENTS_START_TIME: Duration = Duration::from_secs(20);
 
 /// The service's side: copy this program into the data folder and start it as the guard.
 pub fn start(setup: &Path) -> Result<(), String> {
-    let folder = machine::data_dir().join(machine::self_update::WORK_FOLDER);
+    let folder = machine::data_dir().join(system_care::self_update::WORK_FOLDER);
     std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
     let guard = folder.join("update-guard.exe");
     let this_program = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -100,7 +100,7 @@ pub fn run(arguments: &[String]) -> anyhow::Result<()> {
             .context("usage: self-update-guard <setup>")?,
     );
     let data_directory = machine::data_dir();
-    let from = machine::self_update::this_version().to_string();
+    let from = system_care::self_update::this_version().to_string();
     let started_at = chrono::Utc::now();
     let settings: ai_focus_rule::AiFocusConfig = std::fs::read_to_string(machine::ai_focus_path())
         .ok()
@@ -130,12 +130,12 @@ pub fn run(arguments: &[String]) -> anyhow::Result<()> {
         Err(error) => (false, format!("업데이트하지 못했습니다: {error:#}")),
     };
     info!("update guard: {message}");
-    machine::self_update::change_state(&data_directory, |state| {
+    system_care::self_update::change_state(&data_directory, |state| {
         state.installing_since = None;
         if succeeded {
             state.available = None;
         }
-        state.last_install = Some(machine::self_update::InstallRun {
+        state.last_install = Some(system_care::self_update::InstallRun {
             started_at,
             finished_at: chrono::Utc::now(),
             from: from.clone(),

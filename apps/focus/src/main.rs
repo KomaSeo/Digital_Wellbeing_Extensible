@@ -6,7 +6,7 @@
 //!
 //! It starts at logon (HKLM Run key written by the installer), runs with the
 //! user's own rights, and talks to the agent of the user's session through
-//! [`machine::user_api`]. Closing it changes nothing: the agent keeps enforcing.
+//! [`agent_api::user_api`]. Closing it changes nothing: the agent keeps enforcing.
 //!
 //! Three tabs: **To-do** (`todo.rs`: what to do now, the list, today), **Blocking** (what the
 //! AI checks and blocks, asking for access) and **Settings** (`settings.rs`). The app runs all
@@ -34,11 +34,11 @@ mod timetable;
 mod todo;
 mod tray;
 
+use agent_api::user_api::grants::{GrantEvent, GrantLogEntry};
+use agent_api::user_api::{call, Status};
 use chrono::{Local, Utc};
 use eframe::egui;
 use machine::session::current_session_id;
-use machine::user_api::grants::{GrantEvent, GrantLogEntry};
-use machine::user_api::{call, Status};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -225,7 +225,7 @@ impl FocusApp {
         let block_poll = Arc::clone(&shared);
         let block_context = context.clone();
         thread::spawn(move || loop {
-            if let Ok(value) = machine::user_api::call_value(session, "last_block", json!({})) {
+            if let Ok(value) = agent_api::user_api::call_value(session, "last_block", json!({})) {
                 let newest: Option<ai_focus_rule::NewBlock> =
                     serde_json::from_value(value).ok().flatten();
                 let mut state = block_poll.lock();

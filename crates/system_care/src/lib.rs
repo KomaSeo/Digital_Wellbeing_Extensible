@@ -18,6 +18,8 @@
 //! service) and `system_care.json` (written by the service only).
 //! Walkthrough (Korean): `docs/multi_account.md` 6.5.
 
+pub mod self_update;
+
 use ai_focus_rule::AiFocusConfig;
 use chrono::{DateTime, Local, Timelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -522,11 +524,11 @@ pub fn guard_time_zone(
     let action = match current {
         Err(error) => TimeZoneAction::Failed(format!("시간대를 읽지 못했습니다: {error}")),
         Ok(current) if config.time_zone.trim().is_empty() => {
-            let edit = crate::setting_edits::Edit::Set {
+            let edit = machine::setting_edits::Edit::Set {
                 path: vec!["time_zone".into()],
                 value: serde_json::Value::String(current.clone()),
             };
-            match crate::settings::apply_now(
+            match machine::settings::apply_now(
                 data_directory,
                 ai_focus_rule::SETTINGS_FILE.name,
                 &[edit],

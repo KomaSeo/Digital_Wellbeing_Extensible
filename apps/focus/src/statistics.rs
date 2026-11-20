@@ -4,9 +4,9 @@
 //! the AI's cost (usage per feature, window-check steps, model comparison).
 
 use crate::{FocusApp, GREEN, RED};
+use agent_api::user_api::{Status, Verdict};
 use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use eframe::egui;
-use machine::user_api::{Status, Verdict};
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use task_planner::{PlannerStatus, WeekPlan};

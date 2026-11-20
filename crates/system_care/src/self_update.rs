@@ -135,7 +135,7 @@ pub struct UpdateState {
 }
 
 /// The local hour from which the daily automatic update runs (the program updates' hour).
-pub const AUTOMATIC_FROM_HOUR: u32 = crate::system_care::AUTO_UPDATE_FROM_HOUR;
+pub const AUTOMATIC_FROM_HOUR: u32 = crate::AUTO_UPDATE_FROM_HOUR;
 /// How long after the service starts it checks on its own (the network comes up meanwhile).
 pub const AFTER_START: std::time::Duration = std::time::Duration::from_secs(90);
 /// No automatic try within this long of the last one.

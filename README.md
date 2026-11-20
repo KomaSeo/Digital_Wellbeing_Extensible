@@ -58,7 +58,9 @@ Digital Wellbeing은 한 사람이 정한 할 일에 집중하도록 돕는 Wind
 | `crates/list_based_rule` | 항상 막을 프로그램(블랙리스트와 화이트리스트) |
 | `crates/ai_focus_rule` | AI 검사, 차단, 접근 허용 |
 | `crates/task_planner` | 할 일 목록과 지금 할 일, 변경 요청과 그 AI 심사. AI 검사와는 `FocusLink` trait으로만 이어집니다 |
-| `crates/machine` | 데이터 폴더, 엄격 모드, 모든 앱 잠금, 로그인, agent의 사용자 API, 플래너와 AI 검사를 잇는 `MonitorLink` |
+| `crates/machine` | 데이터 폴더와 경로, 설정과 엄격 모드(`settings`), 모든 앱 잠금(`lockdown`), 로그인, 세션 |
+| `crates/system_care` | 관리자 권한이 필요한 일: winget 프로그램 업데이트, 시간대 지키기, 이 프로그램 업데이트(`self_update`) |
+| `crates/agent_api` | agent의 사용자 API(`user_api`), Claude Desktop용 도구(`assistant_tools`), 플래너와 AI 검사를 잇는 `MonitorLink`(`focus_link`) |
 | `crates/ai_client` | Claude API 호출, AI 연결 상태, 토큰 사용량과 비용, 모델 비교. 어느 규칙도 모릅니다 |
 | `crates/json_store` | JSON 파일 하나를 메모리에 들고 원자적으로 쓰는 저장소(`JsonStore`) |
 | `crates/app_identity` | 이 앱의 실행 파일 이름 |

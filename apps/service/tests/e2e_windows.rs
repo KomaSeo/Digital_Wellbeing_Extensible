@@ -21,8 +21,8 @@
 
 mod common;
 
+use agent_api::user_api::{call, call_value, Status};
 use common::fake_claude;
-use machine::user_api::{call, call_value, Status};
 use serde_json::json;
 use std::ptr::null;
 use std::sync::atomic::Ordering;
@@ -55,7 +55,7 @@ fn installed_agent_end_to_end() {
     });
     let (_, claude_calls) = fake_claude(&address);
     let session = machine::session::current_session_id();
-    let port = machine::user_api::port_for_session(session);
+    let port = agent_api::user_api::port_for_session(session);
 
     // 1. The agent the service started for this session.
     let mut desktop = Desktop::default();
@@ -181,7 +181,7 @@ fn installed_agent_end_to_end() {
     assert!(changed.success(), "tzutil /s {other}");
     let care = desktop
         .wait(Duration::from_secs(40), || {
-            let care: machine::system_care::CareStatus =
+            let care: system_care::CareStatus =
                 serde_json::from_value(call_value(session, "system_care_status", json!({})).ok()?)
                     .ok()?;
             (!care.state.time_zone_resets.is_empty() && care.time_zone_now == recorded)
@@ -205,7 +205,7 @@ fn installed_agent_end_to_end() {
     .unwrap();
     let run = desktop
         .wait(Duration::from_secs(200), || {
-            let care: machine::system_care::CareStatus =
+            let care: system_care::CareStatus =
                 serde_json::from_value(call_value(session, "system_care_status", json!({})).ok()?)
                     .ok()?;
             care.state

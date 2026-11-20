@@ -1,0 +1,20 @@
+[package]
+name = "agent_api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+machine = { workspace = true }
+system_care = { workspace = true }
+setting_edits = { workspace = true }
+ai_client = { workspace = true }
+ai_focus_rule = { workspace = true }
+task_planner = { workspace = true }
+enforcer = { workspace = true }
+sync = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }

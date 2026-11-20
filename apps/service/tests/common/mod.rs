@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 /// effect, that its question cannot be answered before it is due, and that it can be
 /// withdrawn. Works with the default two-day interval.
 pub fn check_protected_edits_are_scheduled(session: u32) {
-    use machine::user_api::{call, call_value};
+    use agent_api::user_api::{call, call_value};
     call_value(session, "settings_protect", json!({})).unwrap();
     assert!(
         call(session, "status", json!({}))

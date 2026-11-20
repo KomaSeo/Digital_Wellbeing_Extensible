@@ -16,6 +16,7 @@
 //! `grants\<user>.json` (this user's access grants) and `blocks\<user>.json`
 //! (blocks in force, so logging out and back in does not lift them).
 
+use agent_api::user_api::AgentApi;
 use ai_client::claude::ClaudeClient;
 use ai_client::connection::{self, Connection, KeyProblem};
 use ai_client::usage::UsageRecorder;
@@ -28,7 +29,6 @@ use enforcer::Enforcer;
 use list_based_rule::{FileListPersistence, ListBasedRuleHandle, ListStore};
 use machine::lockdown::LockdownRule;
 use machine::session::{current_session_id, process_session_id};
-use machine::user_api::AgentApi;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -50,7 +50,7 @@ pub fn run() -> anyhow::Result<()> {
     info!(
         "agent starting in session {session} (version {}, user API port {})",
         env!("CARGO_PKG_VERSION"),
-        machine::user_api::port_for_session(session)
+        agent_api::user_api::port_for_session(session)
     );
     // Nobody sees the agent's stderr: put a panic or a start-up error in its log.
     std::panic::set_hook(Box::new(|panic| {
@@ -97,7 +97,9 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     let lockdown_planner = Arc::clone(&planner_cell);
     let lockdown_now: Arc<dyn Fn() -> Option<machine::lockdown::Lockdown> + Send + Sync> =
         Arc::new(move || {
-            machine::user_api::lockdown_now(lockdown_planner.get().map(|planner| planner.as_ref()))
+            agent_api::user_api::lockdown_now(
+                lockdown_planner.get().map(|planner| planner.as_ref()),
+            )
         });
     let monitor = Arc::new(
         FocusMonitor::new(
@@ -151,7 +153,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
     let planner = Arc::new(TaskPlanner::new(
         planner_config.clone(),
         planner_state,
-        Arc::new(machine::focus_link::MonitorLink(Arc::clone(&monitor))),
+        Arc::new(agent_api::focus_link::MonitorLink(Arc::clone(&monitor))),
         claude_advisor_provider(),
     ));
 
@@ -165,7 +167,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         planner: Some(planner),
     });
     thread::spawn(move || {
-        if let Err(error) = machine::user_api::serve(api, session) {
+        if let Err(error) = agent_api::user_api::serve(api, session) {
             warn!("user api failed: {error}");
         }
     });

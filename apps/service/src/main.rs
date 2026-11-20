@@ -75,18 +75,19 @@ fn main() -> anyhow::Result<()> {
             update_guard::run(&arguments[1..])
         }
         Some("self-update-check") => {
-            let releases = machine::self_update::fetch_releases().map_err(anyhow::Error::msg)?;
-            match machine::self_update::newest_available(&releases) {
+            let releases =
+                system_care::self_update::fetch_releases().map_err(anyhow::Error::msg)?;
+            match system_care::self_update::newest_available(&releases) {
                 Some(release) => println!("newer: {} ({})", release.version, release.setup_url),
                 None => println!(
                     "up to date ({})",
-                    machine::self_update::this_version_and_build()
+                    system_care::self_update::this_version_and_build()
                 ),
             }
             Ok(())
         }
         Some("version") => {
-            println!("{}", machine::self_update::this_version_and_build());
+            println!("{}", system_care::self_update::this_version_and_build());
             Ok(())
         }
         _ => {
