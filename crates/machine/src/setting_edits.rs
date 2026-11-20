@@ -456,6 +456,135 @@ mod tests {
         assert!(diff(&after, &after).is_empty());
     }
 
+    /// Every row of the stricter/looser table, pinned before the table moved into the rule
+    /// crates (rc.81): the same edits must keep the same direction wherever the table lives.
+    #[test]
+    fn the_whole_direction_table_is_pinned() {
+        use Direction::{Looser, Neutral, Stricter};
+        let ai_focus = json!({
+            "always_allow": ["a.exe"], "private_apps": ["p.exe"], "strikes_to_block": 2,
+            "max_grant_minutes": 120, "check_interval_secs": 60, "recheck_minutes": 15,
+            "send_screenshot": false, "allow_permanent_grants": true, "daily_budget_usd": 1.0,
+            "comparison_percent": 1, "updatable_programs": ["Kakao.KakaoTalk"],
+            "revoked_grants": ["g1"], "always_blocked_sites": ["reddit"], "unblocked": ["b1"],
+            "model": "m", "api_key": "k", "browsers": ["chrome.exe"], "updated_at": "t",
+        });
+        let policy = json!({
+            "mode": "blacklist", "blacklist": ["steam.exe"], "whitelist": ["code.exe"],
+            "updated_at": "t",
+        });
+        let planner = json!({
+            "enabled": false, "life_rules": "a", "appointment_rules": "",
+            "confirmations": { "settings_times": 3, "settings_interval_hours": 48 },
+            "instructions": { "pick": "" },
+        });
+        // (file, field, new value, expected); `+x`/`-x` add or remove the list item `x`.
+        let rows: Vec<(&str, &str, Value, Direction)> = vec![
+            ("policy", "blacklist", json!("+dota.exe"), Stricter),
+            ("policy", "blacklist", json!("-steam.exe"), Looser),
+            ("policy", "whitelist", json!("+game.exe"), Looser),
+            ("policy", "whitelist", json!("-code.exe"), Looser),
+            ("policy", "mode", json!("whitelist"), Looser),
+            ("policy", "updated_at", json!("u"), Neutral),
+            ("ai_focus", "strikes_to_block", json!(1), Stricter),
+            ("ai_focus", "strikes_to_block", json!(3), Looser),
+            ("ai_focus", "max_grant_minutes", json!(60), Stricter),
+            ("ai_focus", "max_grant_minutes", json!(180), Looser),
+            ("ai_focus", "check_interval_secs", json!(30), Stricter),
+            ("ai_focus", "check_interval_secs", json!(120), Looser),
+            ("ai_focus", "recheck_minutes", json!(10), Stricter),
+            ("ai_focus", "recheck_minutes", json!(20), Looser),
+            ("ai_focus", "recheck_minutes", json!(0), Stricter),
+            ("ai_focus", "send_screenshot", json!(true), Stricter),
+            ("ai_focus", "allow_permanent_grants", json!(false), Stricter),
+            ("ai_focus", "daily_budget_usd", json!(2.0), Stricter),
+            ("ai_focus", "daily_budget_usd", json!(0.0), Stricter),
+            ("ai_focus", "daily_budget_usd", json!(0.5), Looser),
+            ("ai_focus", "always_allow", json!("+b.exe"), Looser),
+            ("ai_focus", "always_allow", json!("-a.exe"), Stricter),
+            ("ai_focus", "private_apps", json!("+q.exe"), Looser),
+            ("ai_focus", "private_apps", json!("-p.exe"), Stricter),
+            ("ai_focus", "comparison_percent", json!(10), Neutral),
+            (
+                "ai_focus",
+                "updatable_programs",
+                json!("+Zoom.Zoom"),
+                Neutral,
+            ),
+            (
+                "ai_focus",
+                "updatable_programs",
+                json!("-Kakao.KakaoTalk"),
+                Neutral,
+            ),
+            ("ai_focus", "revoked_grants", json!("+g2"), Stricter),
+            ("ai_focus", "revoked_grants", json!("-g1"), Looser),
+            (
+                "ai_focus",
+                "always_blocked_sites",
+                json!("+youtube"),
+                Stricter,
+            ),
+            ("ai_focus", "always_blocked_sites", json!("-reddit"), Looser),
+            ("ai_focus", "unblocked", json!("+b2"), Looser),
+            ("ai_focus", "unblocked", json!("-b1"), Stricter),
+            ("ai_focus", "model", json!("cheap"), Looser),
+            ("ai_focus", "api_key", json!("other"), Looser),
+            ("ai_focus", "browsers", json!("+x.exe"), Looser),
+            ("ai_focus", "updated_at", json!("u"), Neutral),
+            ("planner", "enabled", json!(true), Stricter),
+            ("planner", "life_rules", json!("b"), Looser),
+            ("planner", "appointment_rules", json!("no games"), Looser),
+            (
+                "planner",
+                "confirmations.settings_times",
+                json!(4),
+                Stricter,
+            ),
+            ("planner", "confirmations.settings_times", json!(2), Looser),
+            (
+                "planner",
+                "confirmations.settings_interval_hours",
+                json!(72),
+                Stricter,
+            ),
+            (
+                "planner",
+                "confirmations.settings_interval_hours",
+                json!(24),
+                Looser,
+            ),
+            ("planner", "instructions.pick", json!("mine"), Looser),
+        ];
+        for (file, field, new_value, expected) in rows {
+            let before = match file {
+                "policy" => policy.clone(),
+                "ai_focus" => ai_focus.clone(),
+                _ => planner.clone(),
+            };
+            let mut after = before.clone();
+            let keys: Vec<&str> = field.split('.').collect();
+            let mut slot = &mut after;
+            for key in &keys {
+                slot = slot.get_mut(*key).expect("the field is in the fixture");
+            }
+            match new_value.as_str() {
+                Some(item) if item.starts_with('+') => {
+                    slot.as_array_mut().unwrap().push(json!(&item[1..]))
+                }
+                Some(item) if item.starts_with('-') => slot
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|value| value != &json!(&item[1..])),
+                _ => *slot = new_value.clone(),
+            }
+            let edits = diff(&before, &after);
+            assert_eq!(edits.len(), 1, "{file} {field}: {edits:?}");
+            let found = direction(file, &edits[0], &before);
+            assert_eq!(found, expected, "{file} {field} -> {new_value}");
+        }
+    }
+
     #[test]
     fn stricter_and_looser_edits_are_told_apart() {
         let in_force = json!({
