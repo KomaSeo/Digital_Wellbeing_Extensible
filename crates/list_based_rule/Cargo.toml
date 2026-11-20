@@ -9,6 +9,5 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 chrono = { workspace = true }
-directories = { workspace = true }
 tracing = { workspace = true }
 enforcer = { workspace = true }

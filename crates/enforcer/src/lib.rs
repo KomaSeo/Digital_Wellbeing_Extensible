@@ -5,10 +5,10 @@ mod helpers;
 pub mod pattern;
 mod rule;
 
-pub use rule::{BlockEvent, BlockRule, ProcessSnapshot, RuleInfo};
+pub use rule::{BlockEvent, BlockRule, ProcessSnapshot};
 
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -125,14 +125,6 @@ pub fn is_never_terminate(name: &str) -> bool {
         .any(|protected| *protected == normalized)
 }
 
-/// Responsibility: Describe a running process for UIs and the API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProcessInfo {
-    pub pid: u32,
-    pub name: String,
-    pub exe: Option<String>,
-}
-
 /// Decides which pids the enforcer may see and terminate (e.g. "only my session").
 pub type ProcessFilter = Arc<dyn Fn(u32) -> bool + Send + Sync>;
 
@@ -162,7 +154,7 @@ impl Enforcer {
         }
     }
 
-    /// Restrict enforcement (and [`Self::list_processes`]) to pids the filter accepts.
+    /// Restrict enforcement to pids the filter accepts.
     /// Without a filter every process on the machine is in scope.
     pub fn set_process_filter(&self, filter: ProcessFilter) {
         *self.filter.lock() = Some(filter);
@@ -188,23 +180,10 @@ impl Enforcer {
         }
     }
 
-    pub fn unregister_rule(&self, id: &str) -> bool {
-        let mut rules = self.rules.lock();
-        let before = rules.len();
-        rules.retain(|rule| rule.id() != id);
-        before != rules.len()
-    }
-
-    pub fn list_rules(&self) -> Vec<RuleInfo> {
-        self.rules
-            .lock()
-            .iter()
-            .map(|rule| RuleInfo {
-                id: rule.id().to_string(),
-                name: rule.name().to_string(),
-                description: rule.description().to_string(),
-            })
-            .collect()
+    /// How many rules are registered (tests).
+    #[cfg(test)]
+    fn rule_count(&self) -> usize {
+        self.rules.lock().len()
     }
 
     /// Start the loop. Starting again replaces the previous loop.
@@ -230,30 +209,6 @@ impl Enforcer {
 
     pub fn recent_blocks(&self, limit: usize) -> Vec<BlockEvent> {
         self.logs.lock().iter().rev().take(limit).cloned().collect()
-    }
-
-    pub fn list_processes(&self) -> Vec<ProcessInfo> {
-        let mut system = System::new();
-        system.refresh_processes(ProcessesToUpdate::All, true);
-        let mut list: Vec<ProcessInfo> = system
-            .processes()
-            .iter()
-            .filter(|(process_id, _)| self.in_scope(process_id.as_u32()))
-            .map(|(process_id, process)| ProcessInfo {
-                pid: process_id.as_u32(),
-                name: process.name().to_string_lossy().to_string(),
-                exe: process
-                    .exe()
-                    .map(|exe_path| exe_path.to_string_lossy().to_string()),
-            })
-            .collect();
-        list.sort_by(|left, right| {
-            left.name
-                .to_lowercase()
-                .cmp(&right.name.to_lowercase())
-                .then(left.pid.cmp(&right.pid))
-        });
-        list
     }
 
     /// Terminate every running process that any registered rule decides to block.
@@ -605,7 +560,7 @@ mod tests {
     #[test]
     fn works_with_zero_rules() {
         let enforcer = Enforcer::new();
-        assert!(enforcer.list_rules().is_empty());
+        assert_eq!(enforcer.rule_count(), 0);
         let snapshots = [ProcessSnapshot {
             pid: 1,
             name: "evil.exe".into(),
@@ -649,6 +604,6 @@ mod tests {
             id: "flag",
             block: Arc::new(AtomicBool::new(true)),
         }));
-        assert_eq!(enforcer.list_rules().len(), 1);
+        assert_eq!(enforcer.rule_count(), 1);
     }
 }

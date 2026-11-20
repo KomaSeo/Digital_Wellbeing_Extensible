@@ -1,18 +1,13 @@
-//! Responsibility: Load and save ListConfig, keeping file I/O out of ListStore.
+//! Responsibility: Load ListConfig, keeping file I/O out of ListStore.
 
 use crate::{ListConfig, ListError};
-use directories::ProjectDirs;
-use parking_lot::RwLock;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// Responsibility: Load and save a ListConfig somewhere.
-///
-/// Loads and saves list configs. Keeps filesystem (or other I/O) out of [`crate::ListStore`].
+/// Responsibility: Load a ListConfig from somewhere (a file, or memory in tests).
 pub trait ListPersistence: Send + Sync {
     fn load(&self) -> Result<ListConfig, ListError>;
-    fn save(&self, config: &ListConfig) -> Result<(), ListError>;
 }
 
 /// Responsibility: Keep ListConfig in a JSON file, written atomically.
@@ -26,22 +21,6 @@ pub struct FileListPersistence {
 impl FileListPersistence {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
-    }
-
-    /// App config directory + `policy.json` (legacy filename kept for existing installs).
-    pub fn default_config_path() -> Result<PathBuf, ListError> {
-        let project_directories = ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
-            .ok_or(ListError::NoAppData)?;
-        Ok(project_directories.config_dir().join("policy.json"))
-    }
-
-    /// File persistence at [`Self::default_config_path`].
-    pub fn default() -> Result<Self, ListError> {
-        Ok(Self::new(Self::default_config_path()?))
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 
@@ -72,7 +51,10 @@ impl ListPersistence for FileListPersistence {
             Ok(config)
         }
     }
+}
 
+impl FileListPersistence {
+    /// Write `config` atomically (a missing or damaged file is replaced by the defaults).
     fn save(&self, config: &ListConfig) -> Result<(), ListError> {
         let raw = serde_json::to_string_pretty(config)?;
         if let Some(parent) = self.path.parent() {
@@ -86,39 +68,6 @@ impl ListPersistence for FileListPersistence {
             file.sync_all()?;
         }
         fs::rename(&temp_path, &self.path)?;
-        Ok(())
-    }
-}
-
-/// Responsibility: Keep ListConfig in memory, for tests.
-#[derive(Debug, Default)]
-pub struct MemoryListPersistence {
-    data: RwLock<ListConfig>,
-}
-
-impl MemoryListPersistence {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_config(config: ListConfig) -> Self {
-        Self {
-            data: RwLock::new(config),
-        }
-    }
-
-    pub fn snapshot(&self) -> ListConfig {
-        self.data.read().clone()
-    }
-}
-
-impl ListPersistence for MemoryListPersistence {
-    fn load(&self) -> Result<ListConfig, ListError> {
-        Ok(self.data.read().clone())
-    }
-
-    fn save(&self, config: &ListConfig) -> Result<(), ListError> {
-        *self.data.write() = config.clone();
         Ok(())
     }
 }

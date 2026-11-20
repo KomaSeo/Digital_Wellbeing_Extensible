@@ -64,26 +64,20 @@ impl BlockRule for AiFocusRule {
     }
 }
 
-/// Responsibility: Hand out a shared AiFocusRule as a block rule, plus its monitor.
+/// Responsibility: Hand out a shared AiFocusRule as a block rule.
 #[derive(Clone)]
 pub struct AiFocusRuleHandle {
     inner: Arc<AiFocusRule>,
-    monitor: Arc<FocusMonitor>,
 }
 
 impl AiFocusRuleHandle {
     pub fn new(monitor: Arc<FocusMonitor>) -> Self {
         Self {
-            inner: Arc::new(AiFocusRule::new(Arc::clone(&monitor))),
-            monitor,
+            inner: Arc::new(AiFocusRule::new(monitor)),
         }
     }
 
     pub fn rule(&self) -> Arc<dyn BlockRule> {
         Arc::clone(&self.inner) as Arc<dyn BlockRule>
-    }
-
-    pub fn monitor(&self) -> &Arc<FocusMonitor> {
-        &self.monitor
     }
 }

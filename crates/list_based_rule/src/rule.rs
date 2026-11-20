@@ -15,10 +15,6 @@ impl ListBasedRule {
     pub fn new(store: ListStore) -> Self {
         Self { store }
     }
-
-    pub fn store(&self) -> &ListStore {
-        &self.store
-    }
 }
 
 impl BlockRule for ListBasedRule {
@@ -54,7 +50,7 @@ impl BlockRule for ListBasedRule {
     }
 }
 
-/// Responsibility: Hand out a shared ListBasedRule as a block rule, with its store.
+/// Responsibility: Hand out a shared ListBasedRule as a block rule.
 #[derive(Clone)]
 pub struct ListBasedRuleHandle {
     inner: Arc<ListBasedRule>,
@@ -69,9 +65,5 @@ impl ListBasedRuleHandle {
 
     pub fn rule(&self) -> Arc<dyn BlockRule> {
         Arc::clone(&self.inner) as Arc<dyn BlockRule>
-    }
-
-    pub fn store(&self) -> &ListStore {
-        self.inner.store()
     }
 }

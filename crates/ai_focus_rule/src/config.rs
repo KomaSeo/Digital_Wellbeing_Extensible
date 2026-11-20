@@ -1,7 +1,6 @@
 //! Responsibility: Define the AI focus settings, and load, save and reload them from
 //! ai_focus.json.
 
-use directories::ProjectDirs;
 use enforcer::normalize_process_name;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -21,8 +20,6 @@ pub const DEFAULT_RECHECK_MODEL: &str = "claude-haiku-5-5";
 /// Responsibility: Report why the settings could not be loaded or saved.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("could not resolve app data directory")]
-    NoAppData,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
@@ -251,45 +248,20 @@ impl AiFocusConfig {
     }
 }
 
-/// Responsibility: Share one AiFocusConfig between threads and keep it in sync with its file
-/// (read-only for agents).
+/// Responsibility: Share one AiFocusConfig between threads and keep it in sync with its file.
+/// The store never writes the file: the agent's settings code (`machine::settings`) does, and
+/// the session and task the planner sets stay in memory only.
 #[derive(Clone)]
 pub struct AiFocusStore {
     path: Option<PathBuf>,
-    /// `false` for the per-session agent: the file is the shared settings, and
-    /// session/task changes from the user stay in memory only.
-    writable: bool,
     inner: Arc<RwLock<AiFocusConfig>>,
 }
 
 impl AiFocusStore {
-    /// `ai_focus.json` in the app config directory (next to `policy.json`).
-    pub fn default() -> Result<Self, ConfigError> {
-        let project_directories = ProjectDirs::from("com", "DigitalWellbeing", "DigitalWellbeing")
-            .ok_or(ConfigError::NoAppData)?;
-        Self::open(project_directories.config_dir().join("ai_focus.json"))
-    }
-
-    pub fn open(path: PathBuf) -> Result<Self, ConfigError> {
-        let config = if path.exists() {
-            serde_json::from_str(&fs::read_to_string(&path)?)?
-        } else {
-            AiFocusConfig::default()
-        };
-        let store = Self {
-            path: Some(path),
-            writable: true,
-            inner: Arc::new(RwLock::new(config)),
-        };
-        store.save(&store.get())?;
-        Ok(store)
-    }
-
     /// Reads `path` (defaults if missing) and never writes it.
     pub fn open_read_only(path: PathBuf) -> Result<Self, ConfigError> {
         let store = Self {
             path: Some(path),
-            writable: false,
             inner: Arc::new(RwLock::new(AiFocusConfig::default())),
         };
         // A damaged file must not stop the agent: run on defaults (which
@@ -319,20 +291,6 @@ impl AiFocusStore {
         Ok(())
     }
 
-    /// `grants.json` next to the settings file (standalone install).
-    pub fn grants_path(&self) -> Option<PathBuf> {
-        self.path
-            .as_ref()
-            .map(|settings_path| settings_path.with_file_name("grants.json"))
-    }
-
-    /// Standalone mode: `usage.json` next to the settings (token usage, see `usage.rs`).
-    pub fn usage_path(&self) -> Option<PathBuf> {
-        self.path
-            .as_ref()
-            .map(|settings_path| settings_path.with_file_name("usage.json"))
-    }
-
     /// Path of the backing file, if any.
     pub fn path(&self) -> Option<&std::path::Path> {
         self.path.as_deref()
@@ -342,7 +300,6 @@ impl AiFocusStore {
     pub fn in_memory(config: AiFocusConfig) -> Self {
         Self {
             path: None,
-            writable: true,
             inner: Arc::new(RwLock::new(config)),
         }
     }
@@ -351,7 +308,7 @@ impl AiFocusStore {
         self.inner.read().clone()
     }
 
-    /// Apply `change` to the config and persist the result.
+    /// Apply `change` to the config in memory.
     pub fn update(
         &self,
         change: impl FnOnce(&mut AiFocusConfig),
@@ -361,21 +318,7 @@ impl AiFocusStore {
             change(&mut config);
             config.clone()
         };
-        self.save(&snapshot)?;
         Ok(snapshot)
-    }
-
-    fn save(&self, config: &AiFocusConfig) -> Result<(), ConfigError> {
-        let Some(path) = self.path.as_ref().filter(|_| self.writable) else {
-            return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let temporary_path = path.with_extension("json.tmp");
-        fs::write(&temporary_path, serde_json::to_string_pretty(config)?)?;
-        fs::rename(&temporary_path, path)?;
-        Ok(())
     }
 }
 
@@ -435,10 +378,14 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("dw_ai_cfg_{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("ai_focus.json");
-        let admin = AiFocusStore::open(path.clone()).unwrap();
-        admin
-            .update(|config| config.check_interval_secs = 120)
-            .unwrap();
+        let write_interval = |seconds: u64| {
+            let config = AiFocusConfig {
+                check_interval_secs: seconds,
+                ..AiFocusConfig::default()
+            };
+            fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+        };
+        write_interval(120);
 
         let agent = AiFocusStore::open_read_only(path.clone()).unwrap();
         assert_eq!(agent.get().check_interval_secs, 120);
@@ -452,9 +399,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert!(!on_disk.session_active);
 
-        admin
-            .update(|config| config.check_interval_secs = 300)
-            .unwrap();
+        write_interval(300);
         agent.reload_keeping_session().unwrap();
         let reloaded = agent.get();
         assert_eq!(reloaded.check_interval_secs, 300);

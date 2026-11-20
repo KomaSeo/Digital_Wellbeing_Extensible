@@ -75,12 +75,6 @@ pub trait Desktop: Send + Sync {
     fn minimize(&self, _window: isize) -> bool {
         false
     }
-
-    /// Seconds since the user last pressed a key or moved the mouse in this session
-    /// (`None`: unknown).
-    fn idle_seconds(&self) -> Option<u64> {
-        None
-    }
 }
 
 /// Desktop access for the current OS: Win32 on Windows, X11 on Linux when `DISPLAY` is set.

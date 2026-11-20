@@ -1,107 +1,43 @@
-//! Responsibility: Test ListStore with in-memory persistence.
+//! Responsibility: Test ListStore loading and reloading its file.
 
 #![cfg(test)]
 
 use super::*;
+use parking_lot::RwLock;
 use std::sync::Arc;
 
-fn memory_store() -> ListStore {
-    ListStore::with_persistence(Arc::new(MemoryListPersistence::new()))
-        .expect("memory persistence load cannot fail")
+/// Responsibility: Hand ListStore a config from memory.
+#[derive(Default)]
+struct MemoryListPersistence {
+    data: RwLock<ListConfig>,
 }
 
-#[test]
-fn set_lists_replace_entirely() {
-    let store = memory_store();
-
-    store
-        .set_blacklist(&["Steam".into(), "discord.EXE".into(), "explorer.exe".into()])
-        .unwrap();
-    let config = store.get();
-    assert!(config.blacklist.contains("steam.exe"));
-    assert!(config.blacklist.contains("discord.exe"));
-    assert!(!config.blacklist.contains("explorer.exe"));
-
-    store
-        .set_whitelist(&["code.exe".into(), "notepad.exe".into()])
-        .unwrap();
-    let config = store.get();
-    assert!(config.whitelist.contains("code.exe"));
-    assert!(config.whitelist.contains("notepad.exe"));
-    assert!(config.whitelist.contains("csrss.exe"));
-}
-
-#[test]
-fn mutations_roundtrip_through_memory_persistence() {
-    let persistence = Arc::new(MemoryListPersistence::new());
-    let store =
-        ListStore::with_persistence(Arc::clone(&persistence) as Arc<dyn ListPersistence>).unwrap();
-
-    store.add_blacklist("steam.exe").unwrap();
-    store.set_mode(ListMode::Whitelist).unwrap();
-
-    let reloaded = ListStore::with_persistence(persistence).unwrap();
-    let config = reloaded.get();
-    assert!(config.blacklist.contains("steam.exe"));
-    assert_eq!(config.mode, ListMode::Whitelist);
-}
-
-#[test]
-fn protected_names_rejected_on_add_blacklist() {
-    let store = memory_store();
-    let error = store.add_blacklist("explorer.exe").unwrap_err();
-    assert!(matches!(error, ListError::Protected(_)));
-}
-
-#[test]
-fn replace_config_and_loaded_files_are_normalized() {
-    let store = memory_store();
-    let mut config = ListConfig {
-        mode: ListMode::Whitelist,
-        ..ListConfig::default()
-    };
-    config.whitelist.insert("Code.exe".into());
-    config.blacklist.insert("steam".into());
-    config.blacklist.insert("System".into());
-    config.blacklist.insert("   ".into());
-    let saved = store.replace_config(config).unwrap();
-    assert!(saved.whitelist.contains("code.exe"));
-    assert!(!saved.should_block("Code.exe"));
-    assert!(saved.blacklist.contains("steam.exe"));
-    assert!(!saved.blacklist.contains("system.exe"));
-    assert!(!saved.blacklist.contains(""));
-    // The UI's remove button (which normalizes) now works.
-    let after = store.remove_whitelist("Code.exe").unwrap();
-    assert!(!after.whitelist.contains("code.exe"));
-}
-
-#[test]
-fn empty_strategy_name_is_rejected() {
-    let store = memory_store();
-    assert!(matches!(
-        store.save_strategy("   "),
-        Err(ListError::EmptyStrategyName)
-    ));
-}
-
-/// Fails every save, to check that memory is left unchanged.
-struct BrokenDisk(MemoryListPersistence);
-
-impl ListPersistence for BrokenDisk {
+impl ListPersistence for MemoryListPersistence {
     fn load(&self) -> Result<ListConfig, ListError> {
-        self.0.load()
-    }
-    fn save(&self, _config: &ListConfig) -> Result<(), ListError> {
-        Err(ListError::Io(std::io::Error::other("disk full")))
+        Ok(self.data.read().clone())
     }
 }
 
 #[test]
-fn failed_save_leaves_memory_unchanged() {
-    let store =
-        ListStore::with_persistence(Arc::new(BrokenDisk(MemoryListPersistence::new()))).unwrap();
-    assert!(store.add_blacklist("steam.exe").is_err());
-    assert!(!store.get().blacklist.contains("steam.exe"));
+fn loaded_and_reloaded_files_are_normalized() {
+    let persistence = Arc::new(MemoryListPersistence::default());
+    let store = ListStore::with_persistence(persistence.clone()).unwrap();
+    assert_eq!(store.get().mode, ListMode::Blacklist);
+    {
+        let mut config = persistence.data.write();
+        config.mode = ListMode::Whitelist;
+        config.whitelist.insert("Code.exe".into());
+        config.blacklist.insert("steam".into());
+        config.blacklist.insert("System".into());
+        config.blacklist.insert("   ".into());
+    }
+    store.reload().unwrap();
+    let loaded = store.get();
+    assert!(loaded.whitelist.contains("code.exe"));
+    assert!(!loaded.should_block("Code.exe"));
+    assert!(loaded.blacklist.contains("steam.exe"));
+    assert!(!loaded.blacklist.contains("system.exe"));
+    assert!(!loaded.blacklist.contains(""));
 }
 
 #[test]

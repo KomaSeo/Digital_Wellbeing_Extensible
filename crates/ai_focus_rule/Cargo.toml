@@ -9,7 +9,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 chrono = { workspace = true }
-directories = { workspace = true }
 tracing = { workspace = true }
 sysinfo = { workspace = true }
 enforcer = { workspace = true }
@@ -19,7 +18,7 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["xtest", "screensaver"] }
+x11rb = { version = "0.13", features = ["xtest"] }
 
 [target.'cfg(windows)'.dependencies]
 xcap = "0.7"
@@ -28,5 +27,4 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Dwm",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_System_SystemInformation",
 ] }

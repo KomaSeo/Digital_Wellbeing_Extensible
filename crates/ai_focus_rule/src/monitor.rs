@@ -66,8 +66,7 @@ pub struct VerdictLogEntry {
 /// Blocks do not expire: a block that lifted itself after a while would only
 /// make the monitor judge (and pay for) the same app or site again. A block
 /// ends when the user is granted access (see `request_access`), when an
-/// administrator lifts it (`AiFocusConfig::unblocked`), or when it is
-/// unblocked by hand in standalone mode.
+/// administrator lifts it (`AiFocusConfig::unblocked`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockedEntry {
     /// Unique id, so the Settings tab can name this block in the config file
@@ -674,11 +673,6 @@ impl MonitorState {
         action
     }
 
-    pub fn unblock(&mut self, key: &str) {
-        self.blocked_processes.remove(key);
-        self.blocked_tabs.remove(key);
-    }
-
     /// Lift every block and strike a new grant covers.
     pub fn unblock_matching(&mut self, target: &GrantTarget) {
         let covered = |key: &str, entry: &BlockedEntry| {
@@ -919,10 +913,6 @@ impl FocusMonitor {
         self.desktop.foreground()
     }
 
-    pub fn idle_seconds(&self) -> Option<u64> {
-        self.desktop.idle_seconds()
-    }
-
     /// Lift every block (the settings protection was turned off: without it a block means
     /// nothing) and save that.
     pub fn lift_all_blocks(&self) {
@@ -1025,10 +1015,6 @@ impl FocusMonitor {
             }
             info!("ai focus monitor stopped");
         })
-    }
-
-    pub fn stop(&self) {
-        self.running.store(false, Ordering::SeqCst);
     }
 
     /// One sample; asks the judge too when a check is due.

@@ -7,7 +7,7 @@
 //! [`crate::data_dir`], which standard users cannot write.
 //!
 //! Transport: TCP on `127.0.0.1:(BASE_PORT + session id)`, one JSON request
-//! per connection, one JSON line back — same framing as `tool-api`.
+//! per connection, one JSON line back.
 //!
 //! | method           | params                                   | result     |
 //! |------------------|------------------------------------------|------------|

@@ -12,7 +12,7 @@ use thiserror::Error;
 mod persistence;
 mod rule;
 
-pub use persistence::{FileListPersistence, ListPersistence, MemoryListPersistence};
+pub use persistence::{FileListPersistence, ListPersistence};
 pub use rule::{ListBasedRule, ListBasedRuleHandle};
 
 /// Processes that must never be terminated (OS stability + self-protection).
@@ -152,24 +152,17 @@ impl ListConfig {
     }
 }
 
-/// Responsibility: Report why a list change failed.
+/// Responsibility: Report why the list file could not be read.
 #[derive(Debug, Error)]
 pub enum ListError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("cannot modify protected process: {0}")]
-    Protected(String),
-    #[error("strategy not found: {0}")]
-    StrategyNotFound(String),
-    #[error("strategy name is empty")]
-    EmptyStrategyName,
-    #[error("app data directory unavailable")]
-    NoAppData,
 }
 
-/// Responsibility: Share the ListConfig between threads, apply changes to it, and persist them.
+/// Responsibility: Share the ListConfig between threads and re-read it when its file changes.
+/// The agent's settings code (`machine::settings`) writes the file; this store only reads it.
 #[derive(Clone)]
 pub struct ListStore {
     inner: Arc<RwLock<ListConfig>>,
@@ -177,11 +170,6 @@ pub struct ListStore {
 }
 
 impl ListStore {
-    /// Default store backed by [`FileListPersistence::default`].
-    pub fn default() -> Result<Self, ListError> {
-        Self::with_persistence(Arc::new(FileListPersistence::default()?))
-    }
-
     /// Inject a custom [`ListPersistence`] (e.g. memory backend in tests).
     pub fn with_persistence(persistence: Arc<dyn ListPersistence>) -> Result<Self, ListError> {
         let mut config = persistence.load()?;
@@ -203,152 +191,6 @@ impl ListStore {
         config.sanitize();
         *self.inner.write() = config;
         Ok(())
-    }
-
-    fn mutate<F, T>(&self, change: F) -> Result<T, ListError>
-    where
-        F: FnOnce(&mut ListConfig) -> Result<T, ListError>,
-    {
-        // Change a copy and save it first: if saving fails, memory keeps
-        // matching the file (and what the agent enforces).
-        let mut guard = self.inner.write();
-        let mut next = guard.clone();
-        let result = change(&mut next)?;
-        next.updated_at = Utc::now();
-        self.persistence.save(&next)?;
-        *guard = next;
-        Ok(result)
-    }
-
-    pub fn set_mode(&self, mode: ListMode) -> Result<ListConfig, ListError> {
-        self.mutate(|config| {
-            config.mode = mode;
-            Ok(config.clone())
-        })
-    }
-
-    pub fn add_blacklist(&self, name: &str) -> Result<ListConfig, ListError> {
-        let name = ListConfig::normalize_name(name);
-        if ListConfig::is_protected(&name) {
-            return Err(ListError::Protected(name));
-        }
-        self.mutate(|config| {
-            config.blacklist.insert(name);
-            Ok(config.clone())
-        })
-    }
-
-    pub fn remove_blacklist(&self, name: &str) -> Result<ListConfig, ListError> {
-        let name = ListConfig::normalize_name(name);
-        self.mutate(|config| {
-            config.blacklist.remove(&name);
-            Ok(config.clone())
-        })
-    }
-
-    pub fn add_whitelist(&self, name: &str) -> Result<ListConfig, ListError> {
-        let name = ListConfig::normalize_name(name);
-        self.mutate(|config| {
-            config.whitelist.insert(name);
-            Ok(config.clone())
-        })
-    }
-
-    pub fn remove_whitelist(&self, name: &str) -> Result<ListConfig, ListError> {
-        let name = ListConfig::normalize_name(name);
-        if ListConfig::is_protected(&name) {
-            return Err(ListError::Protected(name));
-        }
-        self.mutate(|config| {
-            config.whitelist.remove(&name);
-            Ok(config.clone())
-        })
-    }
-
-    /// Replace the entire blacklist in one shot. Protected system names are skipped.
-    pub fn set_blacklist(&self, names: &[String]) -> Result<ListConfig, ListError> {
-        let mut next = BTreeSet::new();
-        for raw in names {
-            let name = ListConfig::normalize_name(raw);
-            if name.is_empty() || ListConfig::is_protected(&name) {
-                continue;
-            }
-            next.insert(name);
-        }
-        self.mutate(|config| {
-            config.blacklist = next;
-            Ok(config.clone())
-        })
-    }
-
-    /// Replace the entire whitelist in one shot. Protected system names are always kept.
-    pub fn set_whitelist(&self, names: &[String]) -> Result<ListConfig, ListError> {
-        let mut next = BTreeSet::new();
-        for raw in names {
-            let name = ListConfig::normalize_name(raw);
-            if !name.is_empty() {
-                next.insert(name);
-            }
-        }
-        for protected in always_protected() {
-            next.insert((*protected).to_string());
-        }
-        self.mutate(|config| {
-            config.whitelist = next;
-            Ok(config.clone())
-        })
-    }
-
-    pub fn save_strategy(&self, name: &str) -> Result<ListConfig, ListError> {
-        let name = name.trim().to_string();
-        if name.is_empty() {
-            return Err(ListError::EmptyStrategyName);
-        }
-        self.mutate(|config| {
-            let strategy = Strategy {
-                name: name.clone(),
-                mode: config.mode,
-                blacklist: config.blacklist.clone(),
-                whitelist: config.whitelist.clone(),
-            };
-            if let Some(existing) = config
-                .strategies
-                .iter_mut()
-                .find(|candidate| candidate.name == name)
-            {
-                *existing = strategy;
-            } else {
-                config.strategies.push(strategy);
-            }
-            Ok(config.clone())
-        })
-    }
-
-    pub fn apply_strategy(&self, name: &str) -> Result<ListConfig, ListError> {
-        let name = name.trim().to_string();
-        self.mutate(|config| {
-            let strategy = config
-                .strategies
-                .iter()
-                .find(|candidate| candidate.name == name)
-                .cloned()
-                .ok_or_else(|| ListError::StrategyNotFound(name.clone()))?;
-            config.mode = strategy.mode;
-            config.blacklist = strategy.blacklist;
-            config.whitelist = strategy.whitelist;
-            for protected in always_protected() {
-                config.whitelist.insert((*protected).to_string());
-            }
-            Ok(config.clone())
-        })
-    }
-
-    pub fn replace_config(&self, mut new_config: ListConfig) -> Result<ListConfig, ListError> {
-        new_config.sanitize();
-        self.mutate(|config| {
-            *config = new_config;
-            Ok(config.clone())
-        })
     }
 }
 

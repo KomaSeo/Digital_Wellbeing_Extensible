@@ -66,11 +66,3 @@ pub trait BlockRule: Send + Sync {
         false
     }
 }
-
-/// Responsibility: Describe a registered rule for listings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleInfo {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-}

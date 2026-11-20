@@ -1352,6 +1352,8 @@
   - 그래서 `list_based_rule`, `ai_focus_rule`, `task_planner`는 이제 화면 라이브러리(egui)에 의존하지 않습니다. Focus 앱이 `rule_ui`에서 빌리던 한글 글꼴 설정(`install_system_fonts`)은 Focus 앱 안(`apps/focus/src/fonts.rs`)으로 옮겼습니다.
   - 예전 버전이 Program Files에 남긴 `digital-wellbeing.exe`를 설치할 때 지우는 코드는 남겼습니다. 업데이트하는 PC에 남아 있을 수 있기 때문입니다.
   - 문서에서 단독 실행 모드를 설명하던 부분(설정 화면, 8765 API, 메모리에만 있는 차단 등)은 지우거나 "rc.79에서 지웠다"고 고쳤습니다.
+  - 그 창만 쓰던 크레이트 안의 코드도 지웠습니다. AI 검사 설정 파일을 직접 쓰던 코드(`AiFocusStore::open`, `default`, 단독 실행용 `grants.json`과 `usage.json` 경로), 항상 막을 프로그램 목록을 고치던 함수와 전략 저장(`ListStore::set_mode`, `add_blacklist`, `save_strategy` 등), Enforcer의 규칙 목록과 프로세스 목록 API, 손으로 차단을 푸는 `MonitorState::unblock`, 쓰이지 않던 유휴 시간 측정(`idle_seconds`, rc.55에서 자동 멈춤을 없앤 뒤로 쓰이지 않음)입니다. 이제 agent의 저장소는 설정 파일을 읽기만 하고, 쓰는 것은 설정 코드(`machine::settings`) 하나뿐입니다.
+  - 예전 파일을 읽기 위한 호환 코드(`enabled`, `proposed`, 예전 잠금 파일 등)는 지우지 않았습니다. 지우면 지금 쓰는 파일을 못 읽을 수 있기 때문입니다.
 
 ### 8.130 Focus 앱의 AI 비서 탭을 없앤다
 - **소유자 요청:** "아 그리고 생각보다 AI 비서 기능 안 쓰더라 없애도 될 듯"

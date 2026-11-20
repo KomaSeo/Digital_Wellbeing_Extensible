@@ -23,8 +23,8 @@
 mod block_prompt;
 mod cover;
 mod elevate;
-mod help;
 mod fonts;
+mod help;
 mod login;
 mod reopen;
 mod settings;
