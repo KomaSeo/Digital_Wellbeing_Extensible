@@ -147,6 +147,11 @@ pub struct Status {
     /// Every app is locked: the settings are protected and the AI connection is broken.
     #[serde(default)]
     pub lockdown: Option<machine::lockdown::Lockdown>,
+    /// The Claude API has given no answer since then (no network): every app closes once
+    /// that lasts `machine::lockdown::offline_grace` in strict mode; the Focus app warns
+    /// meanwhile.
+    #[serde(default)]
+    pub offline_since: Option<DateTime<Utc>>,
     /// The block the AI made last: the Focus app asks at once what to do about it.
     #[serde(default)]
     pub last_block: Option<ai_focus_rule::NewBlock>,
@@ -344,6 +349,7 @@ fn status(api: &AgentApi) -> Status {
         ai_cost_today_usd: monitor.usage().map(|usage| usage.today_cost()),
         daily_budget_usd: config.daily_budget_usd,
         lockdown: lockdown_now(api.planner.as_deref()),
+        offline_since: ai_client::connection::unreachable().map(|unreachable| unreachable.since),
         last_block: state.last_block.clone(),
         recent_kills: api
             .enforcer
@@ -355,12 +361,17 @@ fn status(api: &AgentApi) -> Status {
     }
 }
 
-/// The lockdown in force now (see [`machine::lockdown`]): a broken AI connection, a sync login
-/// not made yet, a paused task, to-dos with none assigned, or a stop ("사용 중지").
+/// The lockdown in force now (see [`machine::lockdown`]): a broken AI connection, no network
+/// for a few minutes, a sync login not made yet, a paused task, to-dos with none assigned, or a
+/// stop ("사용 중지").
 pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<machine::lockdown::Lockdown> {
+    let unreachable = ai_client::connection::unreachable();
     machine::lockdown::lockdown(
         machine::settings::is_protected(&machine::data_dir()),
         &ai_client::connection::current().0,
+        unreachable
+            .as_ref()
+            .map(|unreachable| (Utc::now() - unreachable.since, unreachable.detail.as_str())),
         planner.and_then(|planner| {
             if planner.stopped() {
                 Some(machine::lockdown::TaskLock::Stopped)

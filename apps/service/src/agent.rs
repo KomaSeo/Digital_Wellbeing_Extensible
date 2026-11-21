@@ -205,7 +205,7 @@ fn planner_loop(planner: Arc<TaskPlanner>) {
 
 /// Keep [`connection`] current even when no AI call happens: check the key and the model
 /// (the Models API, free) every few minutes, at once when either changes, and every 30
-/// seconds while the connection is broken. An account without credit is checked with the
+/// seconds while the connection is broken or the API is out of reach (no network). An account without credit is checked with the
 /// smallest message, since the Models API answers without credit.
 /// While `stopped` ("사용 중지") nothing is checked: only the blocking runs.
 fn connection_probe_loop(ai_store: AiFocusStore, stopped: impl Fn() -> bool) {
@@ -258,7 +258,9 @@ fn connection_probe_loop(ai_store: AiFocusStore, stopped: impl Fn() -> bool) {
                     }
                 }
             }
-            let broken = matches!(connection::current().0, Connection::Broken { .. });
+            // Out of reach is checked as often as broken: the lock ends soon after it answers.
+            let broken = matches!(connection::current().0, Connection::Broken { .. })
+                || connection::unreachable().is_some();
             // Tests check every few seconds (DW_CONNECTION_CHECK_SECONDS); on Windows only an
             // administrator can set the service's environment.
             let test_interval = std::env::var("DW_CONNECTION_CHECK_SECONDS")

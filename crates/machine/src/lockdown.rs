@@ -9,7 +9,13 @@
 //! the key is the way out, so while locked an edit of the API key (and of the model, when the
 //! model is the problem) takes effect at once instead of being scheduled.
 //!
-//! Network errors do not lock: they say nothing about the key.
+//! Network errors say nothing about the key, but while there is no network the AI checks
+//! nothing either, so cutting the network would switch the checks off. So when the Claude API
+//! has given no answer at all for [`OFFLINE_GRACE_SECONDS`] (the owner: "잠그자. 그리고 네트워크
+//! 설정은 꼭 가능하게 하자"), every program closes the same way, until it answers again. The
+//! grace keeps a short drop from closing anything, and lets the user save their work first
+//! (the Focus app warns meanwhile). Windows' own programs stay, the Settings app and the
+//! network panels among them, so the network can always be fixed.
 //!
 //! The same lock holds while there are to-dos but none is assigned (after a report, or
 //! before the first task of the day): the user starts the next task by asking for it, so
@@ -37,6 +43,8 @@ use std::time::{Duration, Instant};
 pub enum LockdownCause {
     /// The AI connection is broken.
     Connection { problem: KeyProblem },
+    /// The Claude API has given no answer for [`OFFLINE_GRACE_SECONDS`] (no network).
+    Offline,
     /// There are to-dos but none is assigned: the user asks for their task ("할 일 받기").
     NoTask,
     /// The user pressed "사용 중지".
@@ -94,11 +102,28 @@ pub struct Lockdown {
     pub covers_screen: bool,
 }
 
+/// How long the Claude API may give no answer before every program closes.
+pub const OFFLINE_GRACE_SECONDS: i64 = 180;
+
+/// [`OFFLINE_GRACE_SECONDS`], or `DW_OFFLINE_GRACE_SECONDS` for the tests (on Windows only an
+/// administrator can set the service's environment).
+pub fn offline_grace() -> chrono::Duration {
+    chrono::Duration::seconds(
+        std::env::var("DW_OFFLINE_GRACE_SECONDS")
+            .ok()
+            .and_then(|seconds| seconds.parse().ok())
+            .unwrap_or(OFFLINE_GRACE_SECONDS),
+    )
+}
+
 /// The lockdown in force, if any. Only once the settings are protected: during setup
-/// nothing locks. A broken connection comes first, since fixing it needs the browser.
+/// nothing locks. A broken connection comes first, since fixing it needs the browser; then no
+/// network for longer than [`offline_grace`] (`offline`: for how long, and the last network
+/// error), since fixing it needs the Windows settings, which a covering Focus app would hide.
 pub fn lockdown(
     protected: bool,
     connection: &Connection,
+    offline: Option<(chrono::Duration, &str)>,
     task_lock: Option<TaskLock>,
 ) -> Option<Lockdown> {
     if protected && task_lock == Some(TaskLock::Stopped) {
@@ -136,6 +161,24 @@ pub fn lockdown(
                 format!("{what} ({detail})")
             },
             fix_now,
+            browsers_allowed: true,
+            covers_screen: false,
+        });
+    }
+    if let Some((for_how_long, _)) =
+        offline.filter(|(for_how_long, _)| *for_how_long >= offline_grace())
+    {
+        return Some(Lockdown {
+            cause: LockdownCause::Offline,
+            reason: format!(
+                "인터넷에 연결되지 않아 AI가 검사할 수 없습니다({}분째). Windows 설정에서 \
+                 네트워크를 고치면 몇 초 안에 풀립니다",
+                for_how_long.num_minutes().max(1)
+            ),
+            fix_now: Vec::new(),
+            // Claude and Anthropic pages only, as for a broken connection: nothing else loads
+            // without a network anyway, and a network that reaches every site but the API
+            // gains nothing.
             browsers_allowed: true,
             covers_screen: false,
         });
@@ -309,8 +352,10 @@ impl BlockRule for LockdownRule {
     }
 
     fn description(&self) -> &str {
-        "While the settings are protected and the AI key does not work, every app but the browsers \
-         (Claude pages only) is closed, Claude Desktop included. In the other locks (no task, \
+        "While the settings are protected and the AI key does not work, or the Claude API has given \
+         no answer for a few minutes (no network), every app but the browsers (Claude pages only) \
+         and Windows' own programs (the Settings app among them) is closed, Claude Desktop \
+         included. In the other locks (no task, \
          stopped, login) the Focus app covers the screen and only a program kept in front of it \
          is closed (every program, when the Focus app is not running)."
     }
@@ -374,12 +419,12 @@ mod tests {
             detail: "401".into(),
         };
         assert!(
-            lockdown(false, &broken, Some(TaskLock::WaitingForTask)).is_none(),
+            lockdown(false, &broken, None, Some(TaskLock::WaitingForTask)).is_none(),
             "setup never locks"
         );
-        assert!(lockdown(true, &Connection::Working, None).is_none());
-        assert!(lockdown(true, &Connection::Unknown, None).is_none());
-        let locked = lockdown(true, &broken, Some(TaskLock::WaitingForTask)).unwrap();
+        assert!(lockdown(true, &Connection::Working, None, None).is_none());
+        assert!(lockdown(true, &Connection::Unknown, None, None).is_none());
+        let locked = lockdown(true, &broken, None, Some(TaskLock::WaitingForTask)).unwrap();
         assert_eq!(locked.fix_now, vec![vec!["api_key".to_string()]]);
         assert!(locked.browsers_allowed, "the connection comes first");
         let model = lockdown(
@@ -389,30 +434,89 @@ mod tests {
                 detail: "404".into(),
             },
             None,
+            None,
         )
         .unwrap();
         assert_eq!(model.fix_now.len(), 3, "the key and both models");
-        let waiting = lockdown(true, &Connection::Working, Some(TaskLock::WaitingForTask)).unwrap();
+        let waiting = lockdown(
+            true,
+            &Connection::Working,
+            None,
+            Some(TaskLock::WaitingForTask),
+        )
+        .unwrap();
         assert_eq!(waiting.cause, LockdownCause::NoTask);
         assert!(!waiting.browsers_allowed);
-        let login = lockdown(true, &Connection::Working, Some(TaskLock::LoginRequired)).unwrap();
+        let login = lockdown(
+            true,
+            &Connection::Working,
+            None,
+            Some(TaskLock::LoginRequired),
+        )
+        .unwrap();
         assert_eq!(login.cause, LockdownCause::LoginRequired);
         assert!(!login.browsers_allowed);
-        assert!(lockdown(false, &Connection::Working, Some(TaskLock::LoginRequired)).is_none());
+        assert!(lockdown(
+            false,
+            &Connection::Working,
+            None,
+            Some(TaskLock::LoginRequired)
+        )
+        .is_none());
         // Stopping locks in strict mode, before a broken connection; outside it, nothing.
-        let stopped = lockdown(true, &broken, Some(TaskLock::Stopped)).unwrap();
+        let stopped = lockdown(true, &broken, None, Some(TaskLock::Stopped)).unwrap();
         assert_eq!(stopped.cause, LockdownCause::Stopped);
         assert!(!stopped.browsers_allowed);
-        assert!(lockdown(false, &broken, Some(TaskLock::Stopped)).is_none());
+        assert!(lockdown(false, &broken, None, Some(TaskLock::Stopped)).is_none());
         // A paused task covers the screen in strict mode, like waiting for a task.
-        let paused = lockdown(true, &Connection::Working, Some(TaskLock::Paused)).unwrap();
+        let paused = lockdown(true, &Connection::Working, None, Some(TaskLock::Paused)).unwrap();
         assert_eq!(paused.cause, LockdownCause::Paused);
         assert!(paused.covers_screen && !paused.browsers_allowed);
-        assert!(lockdown(false, &Connection::Working, Some(TaskLock::Paused)).is_none());
+        assert!(lockdown(false, &Connection::Working, None, Some(TaskLock::Paused)).is_none());
         // A task whose time is up covers the screen until it is reported on.
-        let due = lockdown(true, &Connection::Working, Some(TaskLock::ReportDue)).unwrap();
+        let due = lockdown(true, &Connection::Working, None, Some(TaskLock::ReportDue)).unwrap();
         assert_eq!(due.cause, LockdownCause::ReportDue);
         assert!(due.covers_screen && !due.browsers_allowed);
+    }
+
+    #[test]
+    fn no_network_for_a_few_minutes_closes_every_program_but_keeps_the_settings() {
+        let grace = offline_grace();
+        let short = Some((grace - chrono::Duration::seconds(1), "dns error"));
+        let long = Some((grace, "dns error"));
+        // A short drop locks nothing; during setup nothing locks at all.
+        assert!(lockdown(true, &Connection::Working, short, None).is_none());
+        assert!(lockdown(false, &Connection::Working, long, None).is_none());
+        let offline = lockdown(true, &Connection::Working, long, None).unwrap();
+        assert_eq!(offline.cause, LockdownCause::Offline);
+        // Programs close instead of the Focus app covering the screen, so the Windows settings
+        // (the network) stay usable.
+        assert!(!offline.covers_screen && offline.browsers_allowed);
+        assert!(offline.fix_now.is_empty());
+        // It comes before the locks that cover the screen, after a broken key and a stop.
+        let waiting = lockdown(
+            true,
+            &Connection::Working,
+            long,
+            Some(TaskLock::WaitingForTask),
+        );
+        assert_eq!(waiting.unwrap().cause, LockdownCause::Offline);
+        let broken = Connection::Broken {
+            problem: KeyProblem::Rejected,
+            detail: String::new(),
+        };
+        assert!(matches!(
+            lockdown(true, &broken, long, None).unwrap().cause,
+            LockdownCause::Connection { .. }
+        ));
+        assert_eq!(
+            lockdown(true, &Connection::Working, long, Some(TaskLock::Stopped))
+                .unwrap()
+                .cause,
+            LockdownCause::Stopped
+        );
+        // Windows' own programs stay: the Settings app among them.
+        assert!(LOCKDOWN_KEEPS.contains(&"systemsettings.exe"));
     }
 
     #[test]
@@ -425,6 +529,7 @@ mod tests {
                 problem: KeyProblem::NoKey,
                 detail: String::new(),
             },
+            None,
             None,
         );
         let rule = LockdownRule::new(
@@ -473,7 +578,12 @@ mod tests {
 
         // Waiting for a task while the Focus app does not run (nothing covers the screen):
         // everything closes as before, browsers too.
-        let waiting = lockdown(true, &Connection::Working, Some(TaskLock::WaitingForTask));
+        let waiting = lockdown(
+            true,
+            &Connection::Working,
+            None,
+            Some(TaskLock::WaitingForTask),
+        );
         let rule = LockdownRule::new(
             Arc::new(move || waiting.clone()),
             AiFocusStore::in_memory(AiFocusConfig::default()),
@@ -507,7 +617,12 @@ mod tests {
 
     #[test]
     fn while_the_focus_app_covers_the_screen_only_a_program_held_in_front_is_closed() {
-        let waiting = lockdown(true, &Connection::Working, Some(TaskLock::WaitingForTask));
+        let waiting = lockdown(
+            true,
+            &Connection::Working,
+            None,
+            Some(TaskLock::WaitingForTask),
+        );
         assert!(waiting.as_ref().is_some_and(|locked| locked.covers_screen));
         let broken = lockdown(
             true,
@@ -515,6 +630,7 @@ mod tests {
                 problem: KeyProblem::NoKey,
                 detail: String::new(),
             },
+            None,
             None,
         );
         assert!(broken.is_some_and(|locked| !locked.covers_screen));

@@ -740,6 +740,46 @@ impl eframe::App for FocusApp {
                             self.tab = Tab::Settings;
                         }
                     }
+                    if lockdown.cause == machine::lockdown::LockdownCause::Offline {
+                        ui.label(
+                            "인터넷이 끊기면 AI가 아무것도 검사하지 못하므로, 엄격 모드에서는 몇 분 뒤 \
+                             Windows의 프로그램과 이 앱 말고는 모든 앱을 닫습니다. Windows 설정은 \
+                             닫지 않으니 아래 단추로 열어 네트워크를 고치세요. 연결되면 몇 초 안에 \
+                             풀립니다.",
+                        );
+                        network_buttons_ui(ui);
+                    }
+                    ui.separator();
+                }
+                // No network, not locked for it yet: say when it will be, so work can be saved
+                // first (also under the locks that cover the screen, which it then replaces).
+                let locked_for_network = status.lockdown.as_ref().is_some_and(|lockdown| {
+                    matches!(
+                        lockdown.cause,
+                        machine::lockdown::LockdownCause::Offline
+                            | machine::lockdown::LockdownCause::Connection { .. }
+                    )
+                });
+                if let Some(since) = status
+                    .offline_since
+                    .filter(|_| status.settings_protected && !locked_for_network)
+                {
+                    let left = machine::lockdown::offline_grace() - (chrono::Utc::now() - since);
+                    let seconds = left.num_seconds().max(0);
+                    style::notice(
+                        ui,
+                        style::Tone::Warning,
+                        format!(
+                            "인터넷에 연결되지 않았습니다({}부터). {}분 {}초 안에 다시 연결되지 \
+                             않으면 Windows의 프로그램과 이 앱 말고는 모든 앱이 닫힙니다. 지금 하던 \
+                             작업을 저장하세요.",
+                            since.with_timezone(&chrono::Local).format("%H:%M:%S"),
+                            seconds / 60,
+                            seconds % 60
+                        ),
+                    );
+                    network_buttons_ui(ui);
+                    ui.ctx().request_repaint_after(Duration::from_secs(1));
                     ui.separator();
                 }
                 if self.login.welcome_ui(ui, status.sync.as_ref()) {
@@ -783,3 +823,45 @@ impl eframe::App for FocusApp {
         });
     }
 }
+
+/// The buttons that open the Windows network settings: the Settings app's network page and
+/// the network adapters ("네트워크 연결"). Both stay open while everything else is locked.
+fn network_buttons_ui(ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("네트워크 설정 열기")
+            .on_hover_text("Windows 설정 → 네트워크 및 인터넷")
+            .clicked()
+        {
+            open_network_settings("ms-settings:network");
+        }
+        if ui
+            .button("Wi-Fi 목록 열기")
+            .on_hover_text("Windows 설정 → 네트워크 및 인터넷 → Wi-Fi")
+            .clicked()
+        {
+            open_network_settings("ms-settings:network-wifi");
+        }
+        if ui
+            .button("네트워크 어댑터 열기")
+            .on_hover_text("제어판의 네트워크 연결(ncpa.cpl)")
+            .clicked()
+        {
+            open_network_settings("ncpa.cpl");
+        }
+    });
+}
+
+/// Open a page of the Windows settings (`ms-settings:…`) or a control panel item (`….cpl`).
+#[cfg(windows)]
+fn open_network_settings(page: &str) {
+    // Nothing to tell the user when it fails: the buttons stay to press again.
+    let _ = if page.ends_with(".cpl") {
+        std::process::Command::new("control.exe").arg(page).spawn()
+    } else {
+        std::process::Command::new("explorer.exe").arg(page).spawn()
+    };
+}
+
+#[cfg(not(windows))]
+fn open_network_settings(_page: &str) {}

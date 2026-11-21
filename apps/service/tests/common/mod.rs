@@ -79,6 +79,10 @@ pub fn wait_for<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> Opt
 /// The stand-in refuses every key (401) while this is set, as the API does for a revoked key.
 pub static REJECT_EVERY_KEY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+/// The stand-in closes every connection without an answer while this is set, as when there is
+/// no network.
+pub static DROP_EVERY_CALL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub fn fake_claude(address: &str) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind(address).unwrap();
@@ -87,6 +91,10 @@ pub fn fake_claude(address: &str) -> (String, Arc<AtomicUsize>) {
     let counter = Arc::clone(&calls);
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            if DROP_EVERY_CALL.load(Ordering::SeqCst) {
+                drop(stream);
+                continue;
+            }
             counter.fetch_add(1, Ordering::SeqCst);
             let mut reader = BufReader::new(stream);
             let mut length = 0usize;

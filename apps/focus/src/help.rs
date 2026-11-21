@@ -34,7 +34,7 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
     egui::CollapsingHeader::new("Claude Desktop으로 이 프로그램 쓰기")
         .default_open(false)
         .show(ui, claude_desktop_guide);
-    egui::CollapsingHeader::new("모든 앱이 잠겼을 때 (AI 연결이 끊겼을 때)")
+    egui::CollapsingHeader::new("모든 앱이 잠겼을 때 (AI 연결이나 인터넷이 끊겼을 때)")
         .default_open(false)
         .show(ui, lockdown_guide);
     egui::CollapsingHeader::new("여러 기기 동기화 (서버 설치, 회원가입과 로그인)")
@@ -305,7 +305,15 @@ fn lockdown_guide(ui: &mut egui::Ui) {
         ui,
         "엄격 모드를 켠 뒤에 AI 연결이 끊기면(키가 없거나, 취소되었거나, 크레딧이 없을 때), 이 \
          프로그램은 연결될 때까지 거의 모든 앱과 웹사이트를 막습니다. 키를 망가뜨려 AI 검사를 끄는 \
-         길을 막기 위해서입니다. 인터넷이 끊긴 것만으로는 잠기지 않습니다.",
+         길을 막기 위해서입니다.",
+    );
+    paragraph(
+        ui,
+        "인터넷이 끊겨도 AI가 검사할 수 없으므로, 엄격 모드에서 3분 넘게 끊기면 같은 방식으로 잠깁니다. \
+         끊긴 동안 맨 위에 남은 시간이 나오니 그동안 작업을 저장하세요. Windows 설정은 닫히지 않으므로, \
+         맨 위의 \"네트워크 설정 열기\", \"Wi-Fi 목록 열기\", \"네트워크 어댑터 열기\" 단추로 네트워크를 \
+         고치면 30초 안에 풀립니다. 화면에 로그인해야 하는 와이파이(카페, 호텔)에는 이때 연결할 수 \
+         없습니다.",
     );
     for line in [
         "열어 둘 수 있는 것: 브라우저의 Claude·Anthropic 페이지와 빈 새 탭과 Google \

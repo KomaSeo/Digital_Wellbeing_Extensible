@@ -162,7 +162,11 @@ impl ClaudeClient {
                 crate::connection::report_error(&error);
                 Err(error)
             }
-            Err(error) => Err(JudgeError::Transport(error.to_string())),
+            Err(error) => {
+                let error = JudgeError::Transport(error.to_string());
+                crate::connection::report_error(&error);
+                Err(error)
+            }
         }
     }
 
@@ -241,7 +245,11 @@ impl ClaudeClient {
                 crate::connection::report_error(&error);
                 return Err(error);
             }
-            Err(error) => return Err(JudgeError::Transport(error.to_string())),
+            Err(error) => {
+                let error = JudgeError::Transport(error.to_string());
+                crate::connection::report_error(&error);
+                return Err(error);
+            }
         };
         crate::connection::report_message_ok();
         // Before parsing: a refused or cut-off reply is billed too.

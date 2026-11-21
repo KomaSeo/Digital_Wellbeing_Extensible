@@ -124,6 +124,8 @@ fn end_to_end(real_key: Option<String>) {
             .env("DW_PORT_BASE", port_base.to_string())
             .env("DW_SETTINGS_CONFIRM_INTERVAL_SECONDS", "2")
             .env("DW_CONNECTION_CHECK_SECONDS", "2")
+            // A network that stays down this long locks (minutes outside the tests).
+            .env("DW_OFFLINE_GRACE_SECONDS", if real { "600" } else { "6" })
             .env("DISPLAY", &display)
             .env("RUST_LOG", "debug,ureq=info,rustls=info")
             .spawn()
@@ -539,6 +541,34 @@ fn end_to_end(real_key: Option<String>) {
             .then_some(())
         })
         .expect("a working key ends the lockdown");
+
+        // 7b. No network: the stand-in drops every call, so the API gives no answer at all.
+        // First the Focus app is warned (offline_since), then every app is locked once the
+        // grace is over, without covering the screen (the Windows settings stay usable), and
+        // the lock ends soon after the API answers again.
+        common::DROP_EVERY_CALL.store(true, Ordering::SeqCst);
+        wait_for(Duration::from_secs(10), || {
+            call(session, "status", json!({})).ok()?.offline_since
+        })
+        .expect("a dropped call is seen as no network");
+        let offline = wait_for(Duration::from_secs(20), || {
+            call(session, "status", json!({}))
+                .ok()?
+                .lockdown
+                .filter(|lockdown| lockdown.cause == LockdownCause::Offline)
+        })
+        .expect("no network for the grace locks every app");
+        assert!(!offline.covers_screen && offline.browsers_allowed);
+        common::DROP_EVERY_CALL.store(false, Ordering::SeqCst);
+        wait_for(Duration::from_secs(20), || {
+            let status = call(session, "status", json!({})).ok()?;
+            (status.offline_since.is_none()
+                && !status
+                    .lockdown
+                    .is_some_and(|lockdown| lockdown.cause == LockdownCause::Offline))
+            .then_some(())
+        })
+        .expect("an answer from the API ends the lock");
 
         // 8. Nothing assigned: after a report every app is locked (browsers too) until the
         // user asks for the next task.

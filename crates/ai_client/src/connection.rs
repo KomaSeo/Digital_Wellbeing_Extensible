@@ -7,6 +7,11 @@
 //! key and changes nothing. The agent locks every app while the settings are protected and
 //! the connection is broken (`machine::lockdown`), so breaking the key cannot switch the
 //! checks off.
+//!
+//! Apart from that, it remembers since when the API has been out of reach ([`unreachable`]):
+//! only network errors (no answer at all) start it, and any answer from the server ends it.
+//! The agent locks every app when that lasts a few minutes (the owner: "잠그자"), so cutting
+//! the network cannot switch the checks off either.
 
 use crate::JudgeError;
 use chrono::{DateTime, Utc};
@@ -43,6 +48,44 @@ pub enum Connection {
 static STATE: RwLock<(Connection, Option<DateTime<Utc>>)> =
     RwLock::new((Connection::Unknown, None));
 
+/// Responsibility: Say since when the Claude API has given no answer at all (network errors).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unreachable {
+    pub since: DateTime<Utc>,
+    /// The last network error, shortened.
+    pub detail: String,
+}
+
+static UNREACHABLE: RwLock<Option<Unreachable>> = RwLock::new(None);
+
+/// Since when the API has been out of reach; `None` while it answers.
+pub fn unreachable() -> Option<Unreachable> {
+    UNREACHABLE.read().clone()
+}
+
+/// A call got no answer (a network error): out of reach from now, unless it already was.
+pub fn report_unreachable(detail: &str) {
+    let detail: String = detail.chars().take(200).collect();
+    let mut slot = UNREACHABLE.write();
+    match slot.as_mut() {
+        Some(unreachable) => unreachable.detail = detail,
+        None => {
+            tracing::warn!("Claude API out of reach: {detail}");
+            *slot = Some(Unreachable {
+                since: Utc::now(),
+                detail,
+            });
+        }
+    }
+}
+
+/// The server answered (with a result or an error): within reach.
+pub fn report_reached() {
+    if UNREACHABLE.write().take().is_some() {
+        tracing::info!("Claude API within reach again");
+    }
+}
+
 /// The connection as last seen, and since when.
 pub fn current() -> (Connection, Option<DateTime<Utc>>) {
     STATE.read().clone()
@@ -62,12 +105,14 @@ fn set(connection: Connection) {
 
 /// A Messages API call succeeded: key, model and credit are fine.
 pub fn report_message_ok() {
+    report_reached();
     set(Connection::Working);
 }
 
 /// The Models API knew the model with this key. That proves the key and the model, not the
 /// credit, so a billing problem stays until a message goes through.
 pub fn report_models_ok() {
+    report_reached();
     let billing = matches!(
         STATE.read().0,
         Connection::Broken {
@@ -80,8 +125,17 @@ pub fn report_models_ok() {
     }
 }
 
-/// A call failed: remember it when it says something about the key, the credit or the model.
+/// A call failed: remember it when it says something about the key, the credit or the model,
+/// and whether the server answered at all.
 pub fn report_error(error: &JudgeError) {
+    match error {
+        JudgeError::Transport(detail) => report_unreachable(detail),
+        JudgeError::Api { .. }
+        | JudgeError::Refused
+        | JudgeError::Truncated
+        | JudgeError::BadResponse(_) => report_reached(),
+        JudgeError::NoApiKey | JudgeError::BudgetReached { .. } => {}
+    }
     if let Some(problem) = problem_of(error) {
         set(Connection::Broken {
             problem,
@@ -129,11 +183,15 @@ pub fn problem_of(error: &JudgeError) -> Option<KeyProblem> {
 /// Forget everything (tests).
 pub fn reset() {
     *STATE.write() = (Connection::Unknown, None);
+    *UNREACHABLE.write() = None;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The state is one for the whole process: the tests that change it run one at a time.
+    static SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     #[test]
     fn only_lasting_problems_count() {
@@ -164,6 +222,7 @@ mod tests {
 
     #[test]
     fn a_models_check_does_not_clear_a_billing_problem() {
+        let _serial = SERIAL.lock();
         reset();
         report_error(&JudgeError::Api {
             status: 400,
@@ -181,6 +240,35 @@ mod tests {
         assert_eq!(current().0, Connection::Working);
         report_error(&JudgeError::Transport("offline".into()));
         assert_eq!(current().0, Connection::Working);
+        reset();
+    }
+
+    #[test]
+    fn only_network_errors_put_the_api_out_of_reach() {
+        let _serial = SERIAL.lock();
+        reset();
+        report_error(&JudgeError::Transport("dns error".into()));
+        let first = unreachable().expect("out of reach");
+        assert_eq!(first.detail, "dns error");
+        // Still out of reach: the time it started stays.
+        report_error(&JudgeError::Transport("connection refused".into()));
+        let second = unreachable().unwrap();
+        assert_eq!(
+            (second.since, second.detail.as_str()),
+            (first.since, "connection refused")
+        );
+        // Any answer from the server, an error included, ends it.
+        report_error(&JudgeError::Api {
+            status: 529,
+            body: "overloaded".into(),
+        });
+        assert!(unreachable().is_none());
+        report_error(&JudgeError::Transport("timed out".into()));
+        report_models_ok();
+        assert!(unreachable().is_none());
+        // No key: no call was made, so nothing is known about the network.
+        report_error(&JudgeError::NoApiKey);
+        assert!(unreachable().is_none());
         reset();
     }
 }
