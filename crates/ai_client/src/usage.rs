@@ -3,7 +3,9 @@
 //!
 //! Every Messages API reply carries `usage` (input, output and cache tokens; thinking counts as
 //! output). [`ClaudeClient`](crate::claude::ClaudeClient) hands each reply to [`record`], which
-//! adds it to the installed [`UsageRecorder`]. The cost is an estimate from the price table
+//! adds it to the installed [`UsageRecorder`]. A reply a server-side fallback answered lists
+//! every model that ran in `usage.iterations`; the top-level counts cover only the last one, so
+//! the cost is the sum of the attempts ([`billed_attempts`]). The cost is an estimate from the price table
 //! below (US dollars per million tokens); the bill in the Claude Console is the real figure.
 //! The API has no endpoint for the remaining credit balance, so the app cannot show it.
 //!
@@ -32,16 +34,18 @@ pub fn start_of_hour(time: DateTime<Utc>) -> DateTime<Utc> {
 const COMPARISONS_KEPT: usize = 400;
 
 /// (input, output, cache read) in US dollars per million tokens. Cache writes cost 1.25×
-/// input (kept five minutes) or 2× (kept an hour). Prices as of October 2026; check the Claude pricing page when they change.
+/// input (kept five minutes) or 2× (kept an hour). Prices as of November 2026; check the Claude pricing page when they change.
 fn prices(model: &str) -> (f64, f64, f64) {
     match model {
-        "claude-fable-5-1" => (10.0, 50.0, 0.25),
+        "claude-fable-5-2" | "claude-mythos-5-2" => (8.0, 40.0, 0.20),
+        "claude-fable-5-1" | "claude-mythos-5-1" => (10.0, 50.0, 0.25),
         "claude-fable-5" => (10.0, 50.0, 1.0),
         "claude-opus-5-5" => (4.0, 20.0, 0.20),
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => {
             (5.0, 25.0, 0.50)
         }
-        "claude-sonnet-5-5" | "claude-sonnet-5" => (2.0, 10.0, 0.20),
+        "claude-sonnet-5-5" => (2.0, 10.0, 0.10),
+        "claude-sonnet-5" => (2.0, 10.0, 0.20),
         "claude-sonnet-4-6" => (3.0, 15.0, 0.30),
         "claude-haiku-5-5" => (0.10, 0.50, 0.01),
         "claude-haiku-4-5" => (1.0, 5.0, 0.10),
@@ -65,9 +69,13 @@ pub struct TokenUsage {
 impl TokenUsage {
     /// `response["usage"]`; `None` when the reply has none.
     pub fn from_response(response: &Value) -> Option<Self> {
-        let usage = response.get("usage")?;
+        response.get("usage").map(Self::from_usage)
+    }
+
+    /// One `usage` object, or one entry of its `iterations`.
+    fn from_usage(usage: &Value) -> Self {
         let token_count = |key: &str| usage[key].as_u64().unwrap_or(0);
-        Some(Self {
+        Self {
             input: token_count("input_tokens"),
             output: token_count("output_tokens"),
             cache_read: token_count("cache_read_input_tokens"),
@@ -75,7 +83,15 @@ impl TokenUsage {
             cache_write_long: usage["cache_creation"]["ephemeral_1h_input_tokens"]
                 .as_u64()
                 .unwrap_or(0),
-        })
+        }
+    }
+
+    fn add(&mut self, other: &TokenUsage) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.cache_write_long += other.cache_write_long;
     }
 
     pub fn cost_usd(&self, model: &str) -> f64 {
@@ -87,6 +103,76 @@ impl TokenUsage {
             + self.cache_write_long as f64 * input * 2.0)
             / 1_000_000.0
     }
+}
+
+/// Refusal categories billed even when the model declined before writing anything; a
+/// refusal of any other category (or of none) before any output costs nothing. From the
+/// Claude docs ("How refusals are billed", September 2026); Anthropic may change the list.
+const BILLED_REFUSAL_CATEGORIES: [&str; 3] = ["bio", "frontier_llm", "reasoning_extraction"];
+
+/// The attempts of one reply that are billed, each with the model that ran it.
+///
+/// Without `usage.iterations` the reply is one attempt by its own model (`requested_model`
+/// when it names none). With them, every model that ran is an attempt: those that declined
+/// come first, each followed by a `fallback` block in `content` naming why, and the last one
+/// produced the reply. A declined attempt that wrote nothing is billed only for the
+/// [`BILLED_REFUSAL_CATEGORIES`]; one that declined partway through is billed in full. When
+/// the reason cannot be found, the attempt is counted, so the estimate errs on the high side.
+pub fn billed_attempts(requested_model: &str, response: &Value) -> Vec<(String, TokenUsage)> {
+    let Some(usage) = response.get("usage") else {
+        return Vec::new();
+    };
+    let reply_model = response["model"].as_str().unwrap_or(requested_model);
+    let single = [(reply_model.to_string(), usage)];
+    let iterations: Vec<(String, &Value)> = match usage["iterations"].as_array() {
+        Some(entries) if !entries.is_empty() => entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry["model"].as_str().unwrap_or(reply_model).to_string(),
+                    entry,
+                )
+            })
+            .collect(),
+        _ => single.to_vec(),
+    };
+    // Why each declined attempt declined: the fallback blocks, in order, then the reply's
+    // own refusal when the last model declined too.
+    let mut declined_categories: Vec<Option<Value>> = response["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == "fallback")
+        .map(|block| Some(block["trigger"]["category"].clone()))
+        .collect();
+    let last = iterations.len() - 1;
+    let refused = response["stop_reason"] == "refusal";
+    iterations
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (model, entry))| {
+            let tokens = TokenUsage::from_usage(entry);
+            let declined = index < last || refused;
+            if declined && tokens.output == 0 {
+                let category = if index < last {
+                    declined_categories.get_mut(index).and_then(Option::take)
+                } else {
+                    Some(response["stop_details"]["category"].clone())
+                };
+                let billed = match category {
+                    // A refusal that names no category (`null`) is not billed.
+                    Some(category) => category
+                        .as_str()
+                        .is_some_and(|name| BILLED_REFUSAL_CATEGORIES.contains(&name)),
+                    None => true,
+                };
+                if !billed {
+                    return None;
+                }
+            }
+            Some((model, tokens))
+        })
+        .collect()
 }
 
 /// Responsibility: Add up calls, tokens and estimated cost.
@@ -204,7 +290,11 @@ impl UsageRecorder {
     }
 
     pub fn record(&self, purpose: &str, model: &str, usage: &TokenUsage) {
-        let cost = usage.cost_usd(model);
+        self.record_priced(purpose, usage, usage.cost_usd(model));
+    }
+
+    /// One call whose tokens may come from several models, already priced.
+    pub fn record_priced(&self, purpose: &str, usage: &TokenUsage, cost: f64) {
         let now = Utc::now();
         let today = now.with_timezone(&Local).date_naive();
         let hour = start_of_hour(now);
@@ -278,15 +368,21 @@ pub fn install(recorder: Arc<UsageRecorder>) {
     }
 }
 
-/// Add one reply to the installed recorder (if any). `model` is the requested model; the
-/// reply's own `model` field wins, since a server-side fallback may have answered.
+/// Add one reply to the installed recorder (if any) as one call: the tokens and the cost of
+/// every billed attempt ([`billed_attempts`]), each at its own model's price. `model` is the
+/// requested model.
 pub fn record(purpose: &str, model: &str, response: &Value) {
-    let Some(usage) = TokenUsage::from_response(response) else {
+    if response.get("usage").is_none() {
         return;
-    };
-    let model = response["model"].as_str().unwrap_or(model);
+    }
+    let mut tokens = TokenUsage::default();
+    let mut cost = 0.0;
+    for (attempt_model, attempt_tokens) in billed_attempts(model, response) {
+        tokens.add(&attempt_tokens);
+        cost += attempt_tokens.cost_usd(&attempt_model);
+    }
     if let Some(recorder) = RECORDER.read().ok().and_then(|slot| slot.clone()) {
-        recorder.record(purpose, model, &usage);
+        recorder.record_priced(purpose, &tokens, cost);
     }
 }
 
@@ -339,6 +435,68 @@ mod tests {
             (1500, 80, 10)
         );
         assert!(TokenUsage::from_response(&json!({})).is_none());
+    }
+
+    /// The docs' example: Fable 5 declined (cyber, before any output), Opus 4.8 answered.
+    fn fallback_reply(category: &str, declined_output: u64) -> Value {
+        json!({
+            "model": "claude-opus-4-8",
+            "stop_reason": "end_turn",
+            "content": [
+                { "type": "fallback", "from": { "model": "claude-fable-5" },
+                  "to": { "model": "claude-opus-4-8" },
+                  "trigger": { "type": "refusal", "category": category } },
+                { "type": "text", "text": "{}" }
+            ],
+            "usage": {
+                "input_tokens": 412, "output_tokens": 264,
+                "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                "iterations": [
+                    { "type": "message", "model": "claude-fable-5",
+                      "input_tokens": 535, "output_tokens": declined_output,
+                      "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0 },
+                    { "type": "fallback_message", "model": "claude-opus-4-8",
+                      "input_tokens": 412, "output_tokens": 264,
+                      "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0 }
+                ]
+            }
+        })
+    }
+
+    fn models(attempts: &[(String, TokenUsage)]) -> Vec<&str> {
+        attempts.iter().map(|(model, _)| model.as_str()).collect()
+    }
+
+    #[test]
+    fn a_fallback_reply_counts_every_billed_attempt_at_its_own_price() {
+        // A cyber refusal before any output is free: only the fallback model is paid.
+        let free = billed_attempts("claude-fable-5", &fallback_reply("cyber", 0));
+        assert_eq!(models(&free), ["claude-opus-4-8"]);
+        // A billed category, or a model that declined partway through, is paid too.
+        for (category, output) in [("frontier_llm", 0), ("cyber", 40)] {
+            let paid = billed_attempts("claude-fable-5", &fallback_reply(category, output));
+            assert_eq!(models(&paid), ["claude-fable-5", "claude-opus-4-8"]);
+            assert_eq!(paid[0].1.input, 535);
+        }
+        // A reply without iterations is one attempt by the model that answered.
+        let plain = json!({ "model": "claude-haiku-5-5", "stop_reason": "end_turn",
+            "usage": { "input_tokens": 10, "output_tokens": 5 } });
+        assert_eq!(
+            models(&billed_attempts("claude-opus-5-5", &plain)),
+            ["claude-haiku-5-5"]
+        );
+        // A refusal with no fallback: free unless its category is billed.
+        let refused = |category: Value| {
+            json!({ "model": "claude-haiku-5-5", "stop_reason": "refusal",
+                "stop_details": { "type": "refusal", "category": category },
+                "content": [], "usage": { "input_tokens": 900, "output_tokens": 0 } })
+        };
+        assert!(billed_attempts("claude-haiku-5-5", &refused(json!(null))).is_empty());
+        assert!(billed_attempts("claude-haiku-5-5", &refused(json!("general_harms"))).is_empty());
+        assert_eq!(
+            billed_attempts("claude-haiku-5-5", &refused(json!("bio"))).len(),
+            1
+        );
     }
 
     #[test]
