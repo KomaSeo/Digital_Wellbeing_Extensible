@@ -14,8 +14,8 @@
 //! | `status`         | `{}`                                     | [`Status`] |
 //! | `start_session`  | `{ "task": "..." }` (planner inactive)   | [`Status`] |
 //! | `stop_session`   | `{}` (planner inactive)                  | [`Status`] |
-//! | `stop_use`       | `{}` ("사용 중지": end the task, lock every app, stop all but blocking) | [`Status`] |
-//! | `resume_use`     | `{}` ("다시 사용하기")                    | [`Status`] |
+//! | `stop_use`       | `{}` ("사용 중지": pause the task, lock every app, stop all but blocking) | [`Status`] |
+//! | `resume_use`     | `{}` ("다시 사용하기": go on with the task the stop held) | [`Status`] |
 //! | `assign`         | `{ situation? }` (planner active)        | [`Status`] |
 //! | `install_program` | `{ path, kind }` (a signed installer, run by the service) | `system_care::CareStatus` |
 //! | `uninstall_program` | `{ program }` (a winget id from the service's list, uninstalled by the service) | `system_care::CareStatus` |
@@ -809,7 +809,9 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
         }
         "resume_use" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
-            planner.resume_use().map_err(|error| error.to_string())?;
+            planner
+                .resume_use(Utc::now())
+                .map_err(|error| error.to_string())?;
         }
         // The user pauses the current task and goes on with it (no AI: the window checks go
         // on during a pause, so it frees nothing).

@@ -874,6 +874,10 @@ pub struct PlannerState {
     /// nothing runs but the blocking, until they press "다시 사용하기".
     #[serde(default)]
     pub stopped_at: Option<DateTime<Utc>>,
+    /// The stop paused the current task (it was running): "다시 사용하기" goes on with it,
+    /// and the time stopped is added to its end. A task the user had paused stays paused.
+    #[serde(default)]
+    pub stop_paused_task: bool,
     /// Approved extensions of appointments: the new end, by appointment id.
     #[serde(default)]
     pub appointment_extensions: BTreeMap<String, DateTime<Utc>>,

@@ -1947,28 +1947,29 @@ fn an_appointment_left_early_does_not_start_again() {
 }
 
 #[test]
-fn stopping_ends_the_task_and_holds_everything_until_resumed() {
-    let fixture = harness(true, &["a"]);
+fn stopping_holds_everything_and_the_task_goes_on_when_resumed() {
+    let fixture = harness(true, &["a", "b"]);
     let now = Utc::now();
-    fixture.planner.assign(now).unwrap();
-    // An appointment soon after.
-    add_appointment(
-        &fixture,
-        now,
-        appointment_change("call", now + chrono::Duration::minutes(5), 30, Some(false)),
-    )
-    .unwrap();
+    let assigned = fixture.planner.assign(now).unwrap();
+    let planned_end = assigned.until.unwrap();
     fixture.planner.stop_use(now).unwrap();
     assert!(fixture.planner.stopped());
-    assert!(fixture.planner.status().assignment.is_none());
+    // The task is held, paused, and nothing watches it.
+    let held = fixture
+        .planner
+        .status()
+        .assignment
+        .expect("the task is held");
+    assert_eq!(held.todo_id, assigned.todo_id);
+    assert_eq!(held.paused_since, Some(now));
     assert!(!fixture.focus.state().session_active);
-    assert_eq!(fixture.planner.open_todos().len(), 1, "the to-do stays");
-    // Nothing starts and nothing calls the AI while stopped.
+    // Nothing starts and nothing calls the AI while stopped, and the agent's loop does not
+    // watch the held task.
     fixture
         .planner
         .resume(now + chrono::Duration::minutes(10))
         .unwrap();
-    assert!(fixture.planner.status().assignment.is_none());
+    assert!(!fixture.focus.state().session_active);
     assert!(matches!(
         fixture
             .planner
@@ -1979,18 +1980,85 @@ fn stopping_ends_the_task_and_holds_everything_until_resumed() {
         fixture.planner.plan_week(now),
         Err(PlannerError::Stopped)
     ));
-    // "다시 사용하기": the appointment that runs now starts again with the agent's loop.
-    fixture.planner.resume_use().unwrap();
+    // "다시 사용하기" an hour later: the same task goes on, an hour later to its end, and is
+    // watched again; no new pick.
+    let later = now + chrono::Duration::hours(1);
+    fixture.planner.resume_use(later).unwrap();
     assert!(!fixture.planner.stopped());
+    let back = fixture
+        .planner
+        .status()
+        .assignment
+        .expect("the task is back");
+    assert_eq!(back.todo_id, assigned.todo_id);
+    assert!(back.paused_since.is_none());
+    assert_eq!(back.until, Some(planned_end + chrono::Duration::hours(1)));
+    assert!(fixture.focus.state().session_active);
+    assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_stop_keeps_the_users_own_pause_and_ends_an_appointment() {
+    let fixture = harness(true, &["a"]);
+    let now = Utc::now();
+    fixture.planner.assign(now).unwrap();
+    // Paused by the user before the stop: still paused after it.
+    fixture.planner.pause(now).unwrap();
     fixture
         .planner
-        .resume(now + chrono::Duration::minutes(10))
+        .stop_use(now + chrono::Duration::minutes(5))
+        .unwrap();
+    fixture
+        .planner
+        .resume_use(now + chrono::Duration::minutes(30))
+        .unwrap();
+    let held = fixture.planner.status().assignment.unwrap();
+    assert_eq!(held.paused_since, Some(now), "the user's own pause stays");
+    // "할 일 받기" ends a stop the same way.
+    fixture
+        .planner
+        .unpause(now + chrono::Duration::minutes(31))
+        .unwrap();
+    fixture
+        .planner
+        .stop_use(now + chrono::Duration::minutes(32))
+        .unwrap();
+    let again = fixture
+        .planner
+        .assign(now + chrono::Duration::minutes(40))
+        .unwrap();
+    assert!(again.paused_since.is_none());
+    assert!(!fixture.planner.stopped());
+    // An appointment that runs ends with a stop and does not come back.
+    add_appointment(
+        &fixture,
+        now,
+        appointment_change("call", now + chrono::Duration::minutes(41), 30, Some(false)),
+    )
+    .unwrap();
+    fixture
+        .planner
+        .resume(now + chrono::Duration::minutes(45))
         .unwrap();
     assert!(fixture
         .planner
         .status()
         .assignment
         .is_some_and(|assignment| assignment.appointment_id.is_some()));
+    fixture
+        .planner
+        .stop_use(now + chrono::Duration::minutes(46))
+        .unwrap();
+    assert!(fixture.planner.status().assignment.is_none());
+    fixture
+        .planner
+        .resume_use(now + chrono::Duration::minutes(47))
+        .unwrap();
+    fixture
+        .planner
+        .resume(now + chrono::Duration::minutes(48))
+        .unwrap();
+    assert!(fixture.planner.status().assignment.is_none());
 }
 
 #[test]
