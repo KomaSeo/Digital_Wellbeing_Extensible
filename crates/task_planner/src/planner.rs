@@ -799,13 +799,13 @@ impl TaskPlanner {
         let state = self.state.get();
         let change = clean_change(change, now)?;
         let outline = Outline::new(&open);
-        // A change that alters nothing the AI picks by is put in force without asking it.
-        let review_by =
-            if review_by == TodoChangeReview::ByTheAi && changes_no_pick(&change, &outline) {
-                TodoChangeReview::NotNeeded
-            } else {
-                review_by
-            };
+        // Groups, moves and the order are put in force without asking the AI.
+        let review_by = if review_by == TodoChangeReview::ByTheAi && needs_no_review(&change, &open)
+        {
+            TodoChangeReview::NotNeeded
+        } else {
+            review_by
+        };
         let target = match &change {
             // The same title may be in two groups ("자료 조사" for two projects), not twice in one.
             TodoChange::Add { todo } => {
@@ -876,7 +876,7 @@ impl TaskPlanner {
                         .ok_or_else(|| PlannerError::UnknownTodo(todo_id.clone()))?,
                 )
             }
-            // Moving and drawing the order need no reason; the AI asks for one when it refuses.
+            // Moving and drawing the order need no reason: no AI reviews them.
             TodoChange::Move { todo_id, .. } | TodoChange::SetAfter { todo_id, .. } => Some(
                 open.iter()
                     .find(|existing| &existing.id == todo_id)
@@ -923,7 +923,7 @@ impl TaskPlanner {
                 via: via.trim().chars().take(40).collect(),
                 approved: true,
                 reply: if review_by == TodoChangeReview::NotNeeded {
-                    "할 일 고르기에 영향이 없는 변경이라서 AI 심사 없이 바로 적용했습니다."
+                    "묶음, 위치, 먼저 끝낼 일의 변경이라서 AI 심사 없이 바로 적용했습니다."
                 } else {
                     "아직 엄격 모드가 아니어서 AI 심사 없이 바로 적용했습니다."
                 }
@@ -2425,21 +2425,28 @@ enum TodoChangeReview {
     ByTheAi,
     /// The settings are not protected yet: edits and removals take effect without review.
     None,
-    /// The change alters nothing the AI picks by ([`changes_no_pick`]): in force at once,
-    /// in strict mode too.
+    /// The change needs no review ([`needs_no_review`]): in force at once, in strict mode too.
     NotNeeded,
 }
 
-/// `change` alters nothing the AI picks by: adding a group (it is empty), removing a group
-/// (only an empty one may go), or moving a to-do within its own group (the order there is
-/// only for showing).
-fn changes_no_pick(change: &TodoChange, outline: &Outline) -> bool {
+/// `change` is put in force without the AI's review, in strict mode too: adding a group (it
+/// is empty), removing a group (only an empty one may go), moving a to-do or a group
+/// anywhere, making it wait for other to-dos or no longer wait (the owner: "그룹 옮기는 거랑
+/// 선행/후행 연결/연결 해제하는 건 AI 심사 하고 있으면 하지 않는 걸로 바꾸자"), and an edit
+/// that changes only those two (the form's 위치 and 먼저 끝낼 일). `open` is the open list.
+pub fn needs_no_review(change: &TodoChange, open: &[TodoItem]) -> bool {
+    let outline = Outline::new(open);
     match change {
         TodoChange::Add { todo } => todo.group,
         TodoChange::Remove { todo_id } => outline.get(todo_id).is_some_and(|todo| todo.group),
-        TodoChange::Move {
-            todo_id, parent, ..
-        } => outline.parent(todo_id).map(|group| group.id.as_str()) == parent.as_deref(),
+        TodoChange::Move { .. } | TodoChange::SetAfter { .. } => true,
+        TodoChange::Edit { todo_id, todo } => outline.get(todo_id).is_some_and(|before| {
+            let mut after = edited(before, todo, &outline);
+            after.parent = before.parent.clone();
+            after.after = before.after.clone();
+            after.rank = before.rank;
+            &after == before
+        }),
         _ => false,
     }
 }

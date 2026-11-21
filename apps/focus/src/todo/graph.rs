@@ -438,9 +438,6 @@ impl FocusApp {
                     place_name(outline, waiter),
                     place_name(outline, waited)
                 ));
-                if !self.todo_ui.without_review {
-                    ui.small("엄격 모드라서 AI가 심사합니다. 거절하면 이유를 적어 다시 보낼 수 있습니다.");
-                }
                 ui.horizontal(|ui| {
                     if ui.add_enabled(idle, egui::Button::new("지우기")).clicked() {
                         let after: Vec<String> = waiter

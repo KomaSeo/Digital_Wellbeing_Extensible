@@ -1413,10 +1413,10 @@ pub(crate) fn todo_change_text(request: &TodoChangeRequest) -> String {
             target(),
             draft(todo)
         ),
-        TodoChange::Move { .. } | TodoChange::SetAfter { .. } => {
-            format!("{placement}\n{}", target())
-        }
-        TodoChange::AddAppointment { .. }
+        // Never reviewed: moves and the order are put in force at once.
+        TodoChange::Move { .. }
+        | TodoChange::SetAfter { .. }
+        | TodoChange::AddAppointment { .. }
         | TodoChange::EditAppointment { .. }
         | TodoChange::RemoveAppointment { .. } => String::new(),
         TodoChange::Remove { .. } => format!("Remove this to-do:\n{}\n{placement}", target()),
@@ -1467,11 +1467,6 @@ fn placement_text(request: &TodoChangeRequest) -> String {
     let titles_of = |ids: &[String]| {
         let todos: Vec<&TodoItem> = ids.iter().filter_map(|id| outline.get(id)).collect();
         quoted_titles(&todos)
-    };
-    let due_text = |outline: &Outline, todo_id: &str| {
-        outline
-            .due(todo_id)
-            .map_or("no deadline".to_string(), |due| format!("due {}", due.date))
     };
     let mut lines: Vec<String> = Vec::new();
     if let Some(target) = request.target.filter(|target| target.group) {
@@ -1527,81 +1522,6 @@ fn placement_text(request: &TodoChangeRequest) -> String {
                     titles_of(&now_waits)
                 ));
             }
-        }
-        TodoChange::Move {
-            todo_id, parent, ..
-        } => {
-            let mut moved: Vec<TodoItem> = request.open.to_vec();
-            if let Some(entry) = moved.iter_mut().find(|entry| &entry.id == todo_id) {
-                entry.parent = parent.clone();
-            }
-            let moved_outline = Outline::new(&moved);
-            let kind = if request.target.is_some_and(|target| target.group) {
-                "group"
-            } else {
-                "to-do"
-            };
-            lines.push(format!(
-                "Move this {kind} from {} to {}.",
-                place(&outline, todo_id),
-                place(&moved_outline, todo_id)
-            ));
-            lines.push(format!(
-                "Before: {}, waits for {}. After: {}, waits for {}.",
-                due_text(&outline, todo_id),
-                quoted_titles(&outline.blockers(todo_id)),
-                due_text(&moved_outline, todo_id),
-                quoted_titles(&moved_outline.blockers(todo_id)),
-            ));
-            lines.push(
-                "Groups organise the work (a value, project or area); a to-do takes its group's \
-                 deadline and waits for what the group waits for. Approve moves that reflect how \
-                 the work is organised. Reject a move that only serves to dodge work, such as \
-                 taking an urgent to-do out of a group to lose the group's deadline, or putting \
-                 it into a group that waits for something far off. The user dragged it in the \
-                 to-do tab and gives a reason only after a refusal; when you refuse, say what \
-                 reason would make it acceptable."
-                    .to_string(),
-            );
-        }
-        TodoChange::SetAfter { todo_id, after } => {
-            let mut changed: Vec<TodoItem> = request.open.to_vec();
-            if let Some(entry) = changed.iter_mut().find(|entry| &entry.id == todo_id) {
-                entry.after = after.clone();
-            }
-            let changed_outline = Outline::new(&changed);
-            let kind = if request.target.is_some_and(|target| target.group) {
-                "group"
-            } else {
-                "to-do"
-            };
-            let now_waits: Vec<String> = request
-                .target
-                .map(|target| target.after.clone())
-                .unwrap_or_default();
-            lines.push(format!(
-                "Make this {kind} wait for {} (until now: {}): it cannot be assigned before \
-                 they are finished.",
-                titles_of(after),
-                titles_of(&now_waits)
-            ));
-            lines.push(format!(
-                "Before: {}, waits for {}. After: {}, waits for {}.",
-                due_text(&outline, todo_id),
-                quoted_titles(&outline.blockers(todo_id)),
-                due_text(&changed_outline, todo_id),
-                quoted_titles(&changed_outline.blockers(todo_id)),
-            ));
-            lines.push(
-                "Approve an order that reflects how the work really depends on other work \
-                 (material to buy first, a draft before a review). Reject one that only serves \
-                 to put this off, such as making an urgent or overdue to-do wait for something \
-                 far off or unlikely to be finished. Taking a wait away lets the to-do start \
-                 sooner; approve it unless the order was plainly needed. The user drew it in the \
-                 to-do tab's graph and gives a reason only after a refusal; when you refuse, say \
-                 what reason would make it acceptable."
-                    .to_string(),
-            );
         }
         _ => {}
     }

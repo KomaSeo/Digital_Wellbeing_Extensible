@@ -52,10 +52,6 @@ pub struct TodoUiState {
     graph_view: bool,
     /// The form was just opened from a group's "+ 할 일": scroll to it once.
     scroll_to_form: bool,
-    /// What the user writes after the AI refused a move.
-    move_reason: String,
-    /// The refused move whose window the user closed.
-    move_dismissed: Option<String>,
     /// The arrow the user clicked in the graph, to take away: what waits, and what it waits
     /// for.
     removing_order: Option<(String, String)>,
@@ -1345,6 +1341,17 @@ impl FocusApp {
             (None, true) => ("1 낮음 … 5 급함, 0 = 기본값(3)", "0 = 정하지 않음"),
             (None, false) => ("1 낮음 … 5 급함, 0 = AI가 정함", "0 = AI가 정함"),
         };
+        // An edit of only where it sits and what it waits for needs no AI, in strict mode too.
+        let place_only = editing.as_ref().is_some_and(|todo_id| {
+            let form = &self.todo_ui.form;
+            let place_changed =
+                form.parent != form.original_parent || form.after != form.original_after;
+            place_changed
+                && serde_json::from_value::<TodoChange>(
+                    json!({ "kind": "edit", "todo_id": todo_id, "todo": form.draft(true) }),
+                )
+                .is_ok_and(|change| task_planner::needs_no_review(&change, &planner.open_todos))
+        });
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             match &editing {
@@ -1356,6 +1363,11 @@ impl FocusApp {
                         .map_or(todo_id.as_str(), |todo| todo.title.as_str());
                     if self.todo_ui.without_review {
                         ui.strong(format!("\"{title}\" 고치기 — 설정 단계라서 바로 적용됩니다"));
+                    } else if place_only {
+                        ui.strong(format!(
+                            "\"{title}\" 고치기 — 위치와 먼저 끝낼 일만 바꾸면 AI 심사 없이 바로 \
+                             적용됩니다"
+                        ));
                     } else {
                         ui.strong(format!("\"{title}\" 고치기 — AI가 심사합니다"));
                     }
@@ -1416,6 +1428,9 @@ impl FocusApp {
                     egui::TextEdit::singleline(&mut form.reason)
                         .desired_width(320.0)
                         .hint_text(match (&editing, without_review) {
+                            (Some(_), false) if place_only => {
+                                "선택 — 위치와 먼저 끝낼 일은 AI 없이 바로 바뀝니다"
+                            }
                             (Some(_), false) => "왜 고치나요? AI가 정합니다",
                             (Some(_), true) => "선택 — 설정 단계라서 AI 없이 바로 고쳐집니다",
                             (None, _) => "선택",
@@ -1437,7 +1452,9 @@ impl FocusApp {
                 && match &editing {
                     None => form.title.trim().chars().count() >= if group { 1 } else { 2 },
                     Some(_) => {
-                        self.todo_ui.without_review || form.reason.trim().chars().count() >= 4
+                        self.todo_ui.without_review
+                            || place_only
+                            || form.reason.trim().chars().count() >= 4
                     }
                 };
             let change = match &editing {
@@ -1450,6 +1467,7 @@ impl FocusApp {
             let mut close = false;
             let send_label = match (&editing, self.todo_ui.without_review) {
                 (Some(_), true) => "바로 고치기",
+                (Some(_), false) if place_only => "바로 고치기",
                 (None, true) => "바로 추가하기",
                 (None, false) if group => "묶음 추가하기",
                 _ => "AI에게 보내기",
@@ -1496,10 +1514,6 @@ impl FocusApp {
         if record.approved {
             return;
         }
-        if let TodoChange::Move { .. } | TodoChange::SetAfter { .. } = &record.change {
-            self.refused_drag_ui(ui, &record);
-            return;
-        }
         // A small mistake: open the form again with what was sent, to fix and resend.
         let can_edit = matches!(
             record.change,
@@ -1540,138 +1554,6 @@ impl FocusApp {
                     self.send("todo_change_schedule", json!({ "id": record.id }));
                 }
             }
-        }
-    }
-
-    /// A move or an order drawn in the graph that the AI refused (or could not review): a
-    /// window with its answer, where the user writes why and sends it again, puts it in force
-    /// without the AI after the to-do change confirmations, or leaves it (the owner: "변경 내용을 보고, AI가 판단해서 "거부하면" 창이
-    /// 떠서 이유를 서술할 수 있게").
-    fn refused_drag_ui(&mut self, ui: &mut egui::Ui, record: &TodoChangeRecord) {
-        if record.scheduled_update.is_some() {
-            ui.small("예약됨: 설정 탭이 정해진 간격으로 정해진 횟수만큼 묻습니다.");
-            return;
-        }
-        if self.todo_ui.move_dismissed.as_deref() == Some(record.id.as_str()) {
-            return;
-        }
-        let idle = !self.pending.load(Ordering::SeqCst);
-        let open: Vec<TodoItem> = match &self.shared.lock().status {
-            Some(Ok(status)) => status
-                .planner
-                .as_ref()
-                .map(|planner| planner.open_todos.clone())
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        let outline = Outline::new(&open);
-        let name = |todo_id: &str| {
-            outline.get(todo_id).map_or(todo_id.to_string(), |todo| {
-                outline_list::place_name(&outline, todo)
-            })
-        };
-        // What it was to do, said for the user, and the same change to send again.
-        let (what, place_line, keep_label, change) = match &record.change {
-            TodoChange::Move {
-                todo_id,
-                parent,
-                before,
-            } => (
-                "옮기기",
-                format!(
-                    "옮길 곳: {}",
-                    parent
-                        .as_deref()
-                        .map_or("맨 위 (묶음 없음)".to_string(), name)
-                ),
-                "옮기지 않기",
-                json!({
-                    "kind": "move",
-                    "todo_id": todo_id,
-                    "parent": parent,
-                    "before": before,
-                }),
-            ),
-            TodoChange::SetAfter { todo_id, after } => (
-                "순서 바꾸기",
-                if after.is_empty() {
-                    "먼저 끝낼 일: 없음".to_string()
-                } else {
-                    format!(
-                        "먼저 끝낼 일: {}",
-                        after
-                            .iter()
-                            .map(|waited_id| name(waited_id))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                },
-                "바꾸지 않기",
-                json!({ "kind": "set_after", "todo_id": todo_id, "after": after }),
-            ),
-            _ => return,
-        };
-        let numbers = self.settings.numbers_in_force();
-        let schedule_label = format!(
-            "AI 없이 하기({} 간격으로 {}번 확인)",
-            crate::settings::interval_text(numbers.todo_change_interval_seconds()),
-            numbers.todo_change_times()
-        );
-        let mut open = true;
-        let mut close = false;
-        let heading = if record.ai_failed {
-            format!("AI가 {what}를 심사하지 못했습니다")
-        } else {
-            format!("AI가 {what}를 거절했습니다")
-        };
-        egui::Window::new(heading)
-            .id(egui::Id::new("refused_move_window"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(460.0)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ui.ctx(), |ui| {
-                ui.strong(change_summary_korean(record));
-                ui.label(&place_line);
-                ui.label(format!("AI의 답: {}", record.reply));
-                ui.separator();
-                ui.label("왜 그렇게 하는지 적어 다시 보내면 AI가 다시 판단합니다.");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.todo_ui.move_reason)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("이유"),
-                );
-                ui.horizontal_wrapped(|ui| {
-                    let ready = idle && self.todo_ui.move_reason.trim().chars().count() >= 4;
-                    if ui
-                        .add_enabled(ready, egui::Button::new("이유를 붙여 다시 보내기"))
-                        .clicked()
-                    {
-                        let reason = std::mem::take(&mut self.todo_ui.move_reason);
-                        self.send(
-                            "todo_change",
-                            json!({ "change": change, "reason": reason.trim() }),
-                        );
-                    }
-                    if ui
-                        .add_enabled(idle, egui::Button::new(schedule_label.as_str()))
-                        .clicked()
-                    {
-                        self.send("todo_change_schedule", json!({ "id": record.id }));
-                    }
-                    if ui.button(keep_label).clicked() {
-                        close = true;
-                    }
-                    if !idle {
-                        ui.spinner();
-                    }
-                });
-            });
-        if !open || close {
-            self.todo_ui.move_dismissed = Some(record.id.clone());
-            self.todo_ui.move_reason.clear();
         }
     }
 

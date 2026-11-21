@@ -39,7 +39,7 @@ pub use model::{
     TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WaitingItem, WeekPlan,
     WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
-pub use planner::{PlannerError, TaskPlanner};
+pub use planner::{needs_no_review, PlannerError, TaskPlanner};
 
 #[cfg(test)]
 mod outline_tests;

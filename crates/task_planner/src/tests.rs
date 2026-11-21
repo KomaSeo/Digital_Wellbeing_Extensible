@@ -2804,10 +2804,11 @@ fn moving_within_a_group_needs_no_ai_and_renumbers_it() {
 }
 
 #[test]
-fn moving_into_another_group_goes_to_the_ai_without_a_reason() {
+fn moving_into_another_group_needs_no_ai() {
     let fixture = shopping_harness();
+    // An AI that would refuse is never asked.
     fixture.advisor.approve.store(false, Ordering::SeqCst);
-    let refused = fixture
+    let record = fixture
         .planner
         .review_todo_change(
             Utc::now(),
@@ -2820,24 +2821,9 @@ fn moving_into_another_group_goes_to_the_ai_without_a_reason() {
             "to-do tab",
         )
         .unwrap();
-    assert!(!refused.approved);
-    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 1);
-    // With a reason the second time, approved: it goes to the end of the group.
-    fixture.advisor.approve.store(true, Ordering::SeqCst);
-    let record = fixture
-        .planner
-        .review_todo_change(
-            Utc::now(),
-            TodoChange::Move {
-                todo_id: "draw".into(),
-                parent: Some("shopping".into()),
-                before: None,
-            },
-            "the art shop is next to the market",
-            "to-do tab",
-        )
-        .unwrap();
     assert!(record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+    // It goes to the end of the group.
     apply_writes(&fixture, fixture.planner.writes_for(&record));
     let open = fixture.planner.open_todos();
     let outline = crate::outline::Outline::new(&open);
@@ -2913,8 +2899,9 @@ fn waiting_in_a_loop_or_moving_into_itself_is_refused() {
 }
 
 #[test]
-fn an_edit_sets_what_a_to_do_waits_for_and_its_group() {
+fn an_edit_of_only_the_group_and_the_order_needs_no_ai() {
     let fixture = shopping_harness();
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
     let record = fixture
         .planner
         .review_todo_change(
@@ -2927,11 +2914,12 @@ fn an_edit_sets_what_a_to_do_waits_for_and_its_group() {
                     ..Default::default()
                 },
             },
-            "buy it on the way back",
+            "",
             "to-do tab",
         )
         .unwrap();
     assert!(record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
     apply_writes(&fixture, fixture.planner.writes_for(&record));
     let open = fixture.planner.open_todos();
     let outline = crate::outline::Outline::new(&open);
@@ -2943,6 +2931,44 @@ fn an_edit_sets_what_a_to_do_waits_for_and_its_group() {
             .map(|todo| todo.id.as_str())
             .collect::<Vec<_>>(),
         ["brushes"]
+    );
+    // The form sends every field as it stands; unchanged ones do not make it a review.
+    let mut as_it_stands = open
+        .iter()
+        .find(|todo| todo.id == "brushes")
+        .unwrap()
+        .clone();
+    as_it_stands.priority = 3;
+    let form_edit = |title: &str| TodoChange::Edit {
+        todo_id: "brushes".into(),
+        todo: ProposalInput {
+            title: title.into(),
+            notes: as_it_stands.notes.clone(),
+            priority: Some(as_it_stands.priority),
+            repeat: Some(as_it_stands.repeat),
+            parent: Some(String::new()),
+            ..Default::default()
+        },
+    };
+    let open_now = fixture.planner.open_todos();
+    assert!(crate::needs_no_review(
+        &form_edit(&as_it_stands.title),
+        &open_now
+    ));
+    // A new title with the move goes to the AI, which needs a reason.
+    assert!(!crate::needs_no_review(
+        &form_edit("Buy two brushes"),
+        &open_now
+    ));
+    let without_reason = fixture.planner.review_todo_change(
+        Utc::now(),
+        form_edit("Buy two brushes"),
+        "",
+        "to-do tab",
+    );
+    assert!(
+        matches!(without_reason, Err(PlannerError::ReasonTooShort)),
+        "{without_reason:?}"
     );
 }
 
@@ -2984,8 +3010,9 @@ fn a_to_do_the_ai_adds_from_a_report_joins_the_group_of_the_current_one() {
 }
 
 #[test]
-fn drawing_the_order_goes_to_the_ai_without_a_reason() {
+fn drawing_the_order_needs_no_ai() {
     let fixture = shopping_harness();
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
     // "milk" to wait for "brushes", as dropped on it in the graph.
     let record = fixture
         .planner
@@ -3000,7 +3027,7 @@ fn drawing_the_order_goes_to_the_ai_without_a_reason() {
         )
         .unwrap();
     assert!(record.approved);
-    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
     apply_writes(&fixture, fixture.planner.writes_for(&record));
     let open = fixture.planner.open_todos();
     let outline = crate::outline::Outline::new(&open);
@@ -3028,8 +3055,8 @@ fn drawing_the_order_goes_to_the_ai_without_a_reason() {
     apply_writes(&fixture, fixture.planner.writes_for(&record));
     let open = fixture.planner.open_todos();
     assert!(crate::outline::Outline::new(&open).is_ready("draw"));
-    // A loop or an unknown to-do is refused before the AI is asked.
-    let reviews = fixture.advisor.reviews.load(Ordering::SeqCst);
+    assert!(record.approved);
+    // A loop or an unknown to-do is still refused.
     let looped = fixture.planner.review_todo_change(
         Utc::now(),
         TodoChange::SetAfter {
@@ -3056,35 +3083,5 @@ fn drawing_the_order_goes_to_the_ai_without_a_reason() {
         matches!(unknown, Err(PlannerError::UnknownTodo(..))),
         "{unknown:?}"
     );
-    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), reviews);
-}
-
-#[test]
-fn the_order_review_tells_the_ai_what_changes() {
-    let fixture = shopping_harness();
-    let open = fixture.planner.open_todos();
-    let change = TodoChange::SetAfter {
-        todo_id: "milk".into(),
-        after: vec!["draw".into()],
-    };
-    let target = open.iter().find(|todo| todo.id == "milk").cloned();
-    let text = crate::advisor::todo_change_text(&TodoChangeRequest {
-        instructions: crate::advisor::PROPOSAL_PROMPT,
-        now_local: "14:05",
-        life_rules: "",
-        change: &change,
-        target: target.as_ref(),
-        reason: "",
-        open: &open,
-        recent_changes: &[],
-        history: "",
-    });
-    assert!(
-        text.contains("Make this to-do wait for \"title draw\" (until now: nothing)"),
-        "{text}"
-    );
-    assert!(
-        text.contains("After: no deadline, waits for \"title draw\""),
-        "{text}"
-    );
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
 }
