@@ -1,14 +1,16 @@
-//! Responsibility: Do the two administrator jobs the user may not do themselves, in the
-//! service: update the programs the settings list (on request and once a day), and keep the
-//! time zone of the settings.
+//! Responsibility: Do the administrator jobs the user may not do themselves, in the service:
+//! update the programs the settings list (on request and once a day), uninstall a program winget
+//! knows when the user asks (`uninstall`), install from a signed installer (`installer`), and
+//! keep the time zone of the settings.
 //!
 //! The user's account is a standard account, so they cannot uninstall this app or change the
 //! clock. Some programs (KakaoTalk, for example) need an administrator to update. The user
 //! never gets administrator rights for that: the agent writes a request file, and the service
 //! (SYSTEM, in session 0, where no window can be seen or used) runs
 //! `winget upgrade --id <program> --silent` for programs in `updatable_programs` only. winget
-//! checks the downloaded installer against the hash in its catalogue. Nothing else is run:
-//! no uninstall, no other command.
+//! checks the downloaded installer against the hash in its catalogue. The only other commands
+//! are `winget uninstall` for a program the user picks from the service's list (`uninstall`) and
+//! a signed installer (`installer`).
 //!
 //! A standard user may change the time zone, which would shift the hours of the life rules.
 //! The service puts the time zone of the settings (`time_zone`) back within seconds and
@@ -20,6 +22,7 @@
 
 pub mod installer;
 pub mod self_update;
+pub mod uninstall;
 
 use ai_focus_rule::AiFocusConfig;
 use chrono::{DateTime, Local, Timelike, Utc};
@@ -102,6 +105,10 @@ pub struct CareState {
     pub installs: Vec<installer::InstallRun>,
     /// The installer running now (its file name).
     pub installing: Option<String>,
+    /// Uninstall runs (`uninstall`), newest last.
+    pub uninstalls: Vec<uninstall::UninstallRun>,
+    /// The program being uninstalled now (its name).
+    pub uninstalling: Option<String>,
 }
 
 /// Responsibility: Carry what the Focus app shows about updates and the time zone.
@@ -121,6 +128,8 @@ pub struct CareStatus {
     pub installed_waiting: bool,
     /// Installers waiting for the service, oldest first.
     pub pending_installs: Vec<installer::InstallRequest>,
+    /// Uninstalls waiting for the service, oldest first.
+    pub pending_uninstalls: Vec<uninstall::UninstallRequest>,
 }
 
 /// Responsibility: Describe one program installed on this PC that winget can update.
@@ -263,6 +272,10 @@ pub fn status(data_directory: &Path, config: &AiFocusConfig) -> CareStatus {
         installed: read_installed_list(data_directory),
         installed_waiting: data_directory.join(INSTALLED_REQUEST_FILE).exists(),
         pending_installs: installer::pending_installs(data_directory)
+            .into_iter()
+            .map(|(_, request)| request)
+            .collect(),
+        pending_uninstalls: uninstall::pending_uninstalls(data_directory)
             .into_iter()
             .map(|(_, request)| request)
             .collect(),

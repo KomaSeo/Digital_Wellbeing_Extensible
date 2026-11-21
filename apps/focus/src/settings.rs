@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use system_care::installer::{InstallOutcome, InstallerKind};
+use system_care::uninstall::UninstallOutcome;
 use system_care::{CareStatus, UpdateOutcome};
 use task_planner::{
     Confirmations, PlannerConfig, APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT,
@@ -346,6 +347,10 @@ pub struct SettingsTab {
     downloaded_installers: Vec<PathBuf>,
     /// What the last "설치 요청" did.
     install_message: String,
+    /// The installed program the user pressed "지우기" for (winget id, name): asks once more.
+    uninstall_confirm: Option<(String, String)>,
+    /// What the last "지우기" request did.
+    uninstall_message: String,
     /// The last `self_update_status` answer (this program's own update).
     self_update: Option<Result<system_care::self_update::UpdateStatus, String>>,
     /// What the last "업데이트 확인" / "지금 업데이트" request did.
@@ -420,6 +425,8 @@ impl SettingsTab {
             install_kind: InstallerKind::InstallShield,
             downloaded_installers: Vec::new(),
             install_message: String::new(),
+            uninstall_confirm: None,
+            uninstall_message: String::new(),
             self_update: None,
             self_update_message: String::new(),
             confirming_install: false,
@@ -1771,7 +1778,8 @@ impl SettingsTab {
     }
 
     /// "설치된 프로그램에서 고르기": the programs the service sees through winget, each with a
-    /// button that puts its winget id on the update list (saved with the section's 적용).
+    /// button that puts its winget id on the update list (saved with the section's 적용) and one
+    /// that asks the service to uninstall it (`system_care::uninstall`).
     fn installed_picker_ui(&mut self, ui: &mut egui::Ui, care: &CareStatus) {
         egui::CollapsingHeader::new("설치된 프로그램에서 고르기")
             .id_salt("installed_programs")
@@ -1779,7 +1787,9 @@ impl SettingsTab {
                 ui.small(
                     "서비스가 winget으로 이 PC에 설치된 프로그램 중 winget이 업데이트할 수 있는 것을 \
                      읽어 옵니다. \"넣기\"를 누르면 위 목록에 들어가고, 아래의 \"적용\"을 눌러야 \
-                     저장됩니다. 한 사용자 계정에만 설치된 프로그램과 Microsoft Store에서 받은 앱은 \
+                     저장됩니다. \"지우기\"를 누르면 한 번 더 묻고, 서비스가 관리자 권한으로 그 \
+                     프로그램을 모든 계정에서 지웁니다(엄격 모드에서도 바로 됩니다). 이 프로그램과 \
+                     winget은 지울 수 없습니다. 한 사용자 계정에만 설치된 프로그램과 Microsoft Store에서 받은 앱은 \
                      서비스에게 보이지 않아 여기에 나오지 않습니다. Store 앱은 Store가 저절로 \
                      업데이트합니다.",
                 );
@@ -1833,6 +1843,12 @@ impl SettingsTab {
                     return;
                 };
                 let chosen = &mut drafts.ai_focus.updatable_programs;
+                let waiting: Vec<String> = care
+                    .pending_uninstalls
+                    .iter()
+                    .map(|request| request.program.to_lowercase())
+                    .collect();
+                let uninstall_confirm = &mut self.uninstall_confirm;
                 egui::ScrollArea::vertical()
                     .id_salt("installed_programs_scroll")
                     // Inside the tab's own scroll area the list would shrink to a few rows.
@@ -1841,10 +1857,9 @@ impl SettingsTab {
                     .show(ui, |ui| {
                         egui::Grid::new("installed_programs_grid")
                             .striped(true)
-                            .num_columns(4)
+                            .num_columns(3)
                             .show(ui, |ui| {
-                                ui.strong("이름");
-                                ui.strong("ID");
+                                ui.strong("이름과 ID");
                                 ui.strong("버전");
                                 ui.label("");
                                 ui.end_row();
@@ -1853,8 +1868,18 @@ impl SettingsTab {
                                         || program.name.to_lowercase().contains(&filter)
                                         || program.id.to_lowercase().contains(&filter)
                                 }) {
-                                    ui.label(&program.name);
-                                    ui.monospace(&program.id);
+                                    ui.vertical(|ui| {
+                                        ui.set_min_width(240.0);
+                                        ui.add(egui::Label::new(&program.name).truncate());
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&program.id)
+                                                    .monospace()
+                                                    .small(),
+                                            )
+                                            .truncate(),
+                                        );
+                                    });
                                     if program.available.is_empty() {
                                         ui.label(&program.version);
                                     } else {
@@ -1864,19 +1889,128 @@ impl SettingsTab {
                                         )
                                         .on_hover_text("winget에 새 버전이 있습니다");
                                     }
-                                    let already = chosen
-                                        .iter()
-                                        .any(|listed| listed.eq_ignore_ascii_case(&program.id));
-                                    if already {
-                                        ui.add_enabled(false, egui::Button::new("목록에 있음"));
-                                    } else if ui.button("넣기").clicked() {
-                                        chosen.insert(program.id.clone());
-                                    }
+                                    ui.horizontal(|ui| {
+                                        let already = chosen
+                                            .iter()
+                                            .any(|listed| listed.eq_ignore_ascii_case(&program.id));
+                                        if already {
+                                            ui.add_enabled(
+                                                false,
+                                                egui::Button::new("목록에 있음").small(),
+                                            );
+                                        } else if ui.small_button("넣기").clicked() {
+                                            chosen.insert(program.id.clone());
+                                        }
+                                        let protected =
+                                            system_care::uninstall::is_protected(&program.id);
+                                        let pending = waiting.contains(&program.id.to_lowercase());
+                                        let remove = ui
+                                            .add_enabled(
+                                                !protected && !pending,
+                                                egui::Button::new(if pending {
+                                                    "지우는 중"
+                                                } else {
+                                                    "지우기"
+                                                })
+                                                .small(),
+                                            )
+                                            .on_disabled_hover_text(if protected {
+                                                "이 프로그램과 winget은 지울 수 없습니다"
+                                            } else {
+                                                "삭제를 기다리고 있습니다"
+                                            });
+                                        if remove.clicked() {
+                                            *uninstall_confirm =
+                                                Some((program.id.clone(), program.name.clone()));
+                                        }
+                                    });
                                     ui.end_row();
                                 }
                             });
                     });
+                self.uninstall_ui(ui, care);
             });
+    }
+
+    /// The question before an uninstall ("지우기" on the list of installed programs), and the
+    /// uninstalls waiting, running and done.
+    fn uninstall_ui(&mut self, ui: &mut egui::Ui, care: &CareStatus) {
+        if let Some((program, name)) = self.uninstall_confirm.clone() {
+            ui.group(|ui| {
+                ui.colored_label(
+                    RED,
+                    format!("\"{name}\"({program})을(를) 이 PC에서 지울까요?"),
+                );
+                ui.small(
+                    "서비스가 관리자 권한으로, 화면 없이 지웁니다. 모든 계정에서 지워지고 되돌릴 수 \
+                     없습니다. 업데이트 목록에 있으면 목록에서도 빼서, 하루 한 번 업데이트가 다시 \
+                     설치하지 않게 합니다. 클릭해야 넘어가는 제거 프로그램은 끝나지 않아 30분 뒤에 \
+                     멈춥니다.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("지우기").clicked() {
+                        self.uninstall_message = match call_value(
+                            self.session,
+                            "uninstall_program",
+                            json!({ "program": program }),
+                        ) {
+                            Ok(_) => format!(
+                                "서비스에 \"{name}\" 지우기를 맡겼습니다. 몇 초 뒤에 시작됩니다."
+                            ),
+                            Err(error) => error,
+                        };
+                        // The list shown here follows: no "넣기" left for it.
+                        if let Some(drafts) = &mut self.drafts {
+                            drafts
+                                .ai_focus
+                                .updatable_programs
+                                .retain(|listed| !listed.eq_ignore_ascii_case(&program));
+                        }
+                        self.uninstall_confirm = None;
+                        self.care_fetched_at = None;
+                    }
+                    if ui.button("취소").clicked() {
+                        self.uninstall_confirm = None;
+                    }
+                });
+            });
+        }
+        if let Some(name) = &care.state.uninstalling {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.small(format!("{name} 지우는 중"));
+            });
+        } else if !care.pending_uninstalls.is_empty() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.small("지우기를 기다리는 중");
+            });
+        }
+        if !self.uninstall_message.is_empty() {
+            ui.small(&self.uninstall_message);
+        }
+        if !care.state.uninstalls.is_empty() {
+            ui.small("최근 지우기:");
+        }
+        for run in care.state.uninstalls.iter().rev().take(5) {
+            let (color, outcome) = match run.outcome {
+                UninstallOutcome::Removed => (GREEN, "지움"),
+                UninstallOutcome::NotInstalled => (YELLOW, "설치되어 있지 않음"),
+                UninstallOutcome::Failed => (RED, "실패"),
+                UninstallOutcome::Refused => (RED, "거절"),
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.small(local(run.finished_at));
+                ui.label(&run.name);
+                ui.colored_label(color, outcome);
+                if run.left_update_list {
+                    ui.small("(업데이트 목록에서도 뺌)");
+                }
+                if !run.message.is_empty() {
+                    ui.small(&run.message);
+                }
+            });
+        }
     }
 
     /// "설치 파일로 설치하기": a signed installer the service runs with administrator rights
@@ -2022,9 +2156,9 @@ impl SettingsTab {
         ui.small(
             "카카오톡처럼 업데이트에 관리자 권한이 필요한 프로그램을 여기에 넣습니다. 사용자에게 \
              관리자 권한을 주지 않고, 이 PC의 서비스(SYSTEM)가 화면 없이 winget으로 그 프로그램만 \
-             업데이트합니다. 설치되어 있지 않으면 모든 사용자에게 설치합니다. 지우기나 다른 명령은 \
-             하지 않습니다. 이름은 winget의 이름(id)으로 적습니다. 아래 \"설치된 프로그램에서 \
-             고르기\"에서 고르거나, 명령 프롬프트에서 winget search 카카오톡 처럼 찾으면 \"ID\" 칸에 \
+             업데이트합니다. 설치되어 있지 않으면 모든 사용자에게 설치합니다. 지우기는 아래 \"설치된 \
+             프로그램에서 고르기\"의 지우기 단추로만 합니다. 이름은 winget의 이름(id)으로 적습니다. \
+             아래 \"설치된 프로그램에서 고르기\"에서 고르거나, 명령 프롬프트에서 winget search 카카오톡 처럼 찾으면 \"ID\" 칸에 \
              나옵니다. 예: Kakao.KakaoTalk. 넣기와 빼기는 엄격 모드에서도 바로 적용됩니다.",
         );
         if let Some(drafts) = &mut self.drafts {

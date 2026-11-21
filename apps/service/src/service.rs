@@ -191,6 +191,34 @@ fn care_loop(job: CareJob) {
                     &data_directory,
                     &system_care::installer::check_signature,
                     &system_care::installer::run_installer,
+                );
+                // A program uninstalled comes off the update list too, or the daily update
+                // would install it again for every account.
+                system_care::uninstall::run_uninstalls(
+                    &data_directory,
+                    &|program| {
+                        config
+                            .updatable_programs
+                            .iter()
+                            .any(|listed| listed.eq_ignore_ascii_case(program))
+                    },
+                    &system_care::uninstall::winget_uninstall,
+                    &|program| {
+                        let listed: Vec<serde_json::Value> = config
+                            .updatable_programs
+                            .iter()
+                            .filter(|listed| listed.eq_ignore_ascii_case(program))
+                            .map(|listed| serde_json::Value::String(listed.clone()))
+                            .collect();
+                        machine::settings::apply_now(
+                            &data_directory,
+                            "ai_focus",
+                            &[machine::setting_edits::Edit::RemoveItems {
+                                path: vec!["updatable_programs".into()],
+                                items: listed,
+                            }],
+                        )
+                    },
                 )
             }
             CareJob::SelfUpdate => {

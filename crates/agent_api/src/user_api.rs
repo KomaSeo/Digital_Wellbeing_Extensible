@@ -18,6 +18,7 @@
 //! | `resume_use`     | `{}` ("다시 사용하기")                    | [`Status`] |
 //! | `assign`         | `{ situation? }` (planner active)        | [`Status`] |
 //! | `install_program` | `{ path, kind }` (a signed installer, run by the service) | `system_care::CareStatus` |
+//! | `uninstall_program` | `{ program }` (a winget id from the service's list, uninstalled by the service) | `system_care::CareStatus` |
 //! | `waiting_add` | `{ title, notes?, check_on: "YYYY-MM-DD" }` | [`Status`] |
 //! | `waiting_end` | `{ id, arrived }` (arrived: dealing with it becomes a to-do) | [`Status`] |
 //! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
@@ -563,6 +564,27 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 "install of {} ({}) requested by {user}",
                 request.file_name,
                 request.publisher
+            );
+            let config = api.monitor.store().get();
+            return serde_json::to_value(system_care::status(&data_directory, &config))
+                .map_err(|error| error.to_string());
+        }
+        "uninstall_program" => {
+            let program = params["program"]
+                .as_str()
+                .ok_or("params.program required")?;
+            let user = machine::session::session_user(machine::session::current_session_id())
+                .unwrap_or_default();
+            let request = system_care::uninstall::request_uninstall(
+                &data_directory,
+                program,
+                &user,
+                Utc::now(),
+            )?;
+            tracing::info!(
+                "uninstall of {} ({}) requested by {user}",
+                request.program,
+                request.name
             );
             let config = api.monitor.store().get();
             return serde_json::to_value(system_care::status(&data_directory, &config))
