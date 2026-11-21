@@ -590,6 +590,10 @@ pub enum TodoChange {
         #[serde(default)]
         before: Option<String>,
     },
+    /// Set what a to-do or group waits for ([`TodoItem::after`]), as the user draws it in the
+    /// to-do tab's graph (one box dropped on another, an arrow taken away). Like a move, it
+    /// needs no reason unless the AI refuses.
+    SetAfter { todo_id: String, after: Vec<String> },
     /// Add an appointment; the AI decides whether to accept it (owner's appointment rules).
     AddAppointment { appointment: AppointmentInput },
     /// Change an appointment on the list (keeps its id). In strict mode the AI decides by the

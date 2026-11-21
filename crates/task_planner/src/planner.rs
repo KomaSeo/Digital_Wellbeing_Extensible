@@ -732,6 +732,7 @@ impl TaskPlanner {
                     | TodoChange::Edit { .. }
                     | TodoChange::Remove { .. }
                     | TodoChange::Move { .. }
+                    | TodoChange::SetAfter { .. }
                     | TodoChange::EditAppointment { .. }
             )
         {
@@ -829,8 +830,8 @@ impl TaskPlanner {
                         .ok_or_else(|| PlannerError::UnknownTodo(todo_id.clone()))?,
                 )
             }
-            // Moving needs no reason; the AI asks for one when it refuses.
-            TodoChange::Move { todo_id, .. } => Some(
+            // Moving and drawing the order need no reason; the AI asks for one when it refuses.
+            TodoChange::Move { todo_id, .. } | TodoChange::SetAfter { todo_id, .. } => Some(
                 open.iter()
                     .find(|existing| &existing.id == todo_id)
                     .cloned()
@@ -863,6 +864,9 @@ impl TaskPlanner {
                 TodoChange::Move { parent, .. } => target
                     .as_ref()
                     .map(|before| moved(before, parent.as_deref())),
+                TodoChange::SetAfter { after, .. } => {
+                    target.as_ref().map(|before| waiting_for(before, after))
+                }
                 _ => None,
             };
             let record = TodoChangeRecord {
@@ -915,6 +919,9 @@ impl TaskPlanner {
             TodoChange::Move { parent, .. } => target
                 .as_ref()
                 .map(|before| moved(before, parent.as_deref())),
+            TodoChange::SetAfter { after, .. } => {
+                target.as_ref().map(|before| waiting_for(before, after))
+            }
             TodoChange::Edit { todo, .. } => target.as_ref().map(|before| {
                 let mut after = edited(before, todo, &outline);
                 // A new title or notes may change what matters for picking it: the AI's
@@ -1174,6 +1181,21 @@ impl TaskPlanner {
                 .as_ref()
                 .map(|moved| self.placement_writes(moved, before.as_deref()))
                 .unwrap_or_default(),
+            TodoChange::SetAfter { todo_id, after } => {
+                let outside_the_file = !in_settings(todo_id);
+                let mut writes = Vec::new();
+                if outside_the_file {
+                    writes.push(TodoListWrite::Dismiss(todo_id.clone()));
+                }
+                let mut changed_fields = Map::new();
+                changed_fields.insert("after".into(), json!(after));
+                writes.push(TodoListWrite::Merge {
+                    todo_id: todo_id.clone(),
+                    changed_fields,
+                    base: record.before.clone().filter(|_| outside_the_file),
+                });
+                writes
+            }
             // Kept outside the file, unless an edit has put it there by the time this applies.
             TodoChange::Remove { todo_id } => vec![
                 TodoListWrite::Dismiss(todo_id.clone()),
@@ -2473,6 +2495,12 @@ fn check_placement(
                 entry.parent = parent.clone();
             }
         }
+        (TodoChange::SetAfter { todo_id, after }, Some(_)) => {
+            check_after(after, Some(todo_id))?;
+            if let Some(entry) = changed.iter_mut().find(|entry| &entry.id == todo_id) {
+                entry.after = after.clone();
+            }
+        }
         (TodoChange::Remove { todo_id }, Some(before)) if before.group => {
             if !outline.children(Some(todo_id)).is_empty() {
                 return Err(PlannerError::GroupNotEmpty(before.title.clone()));
@@ -2498,6 +2526,14 @@ fn next_rank(outline: &Outline, parent: Option<&str>) -> f64 {
         .map(|todo| todo.rank)
         .fold(0.0, f64::max)
         + 1.0
+}
+
+/// `before` waiting for `after` instead of what it waited for.
+fn waiting_for(before: &TodoItem, after: &[String]) -> TodoItem {
+    TodoItem {
+        after: after.to_vec(),
+        ..before.clone()
+    }
 }
 
 /// `before` put into the group `parent` (`None`: the top); its rank comes with the writes.
@@ -2546,6 +2582,12 @@ fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, Pl
             parent: parent.filter(|parent| !parent.is_empty()),
             before: before.filter(|before| !before.is_empty()),
         },
+        TodoChange::SetAfter { todo_id, mut after } => {
+            let mut seen = std::collections::BTreeSet::new();
+            after
+                .retain(|waited_id| !waited_id.trim().is_empty() && seen.insert(waited_id.clone()));
+            TodoChange::SetAfter { todo_id, after }
+        }
         TodoChange::AddAppointment { mut appointment } => {
             appointment.title = appointment
                 .title

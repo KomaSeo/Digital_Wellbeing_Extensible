@@ -2914,3 +2914,109 @@ fn a_to_do_the_ai_adds_from_a_report_joins_the_group_of_the_current_one() {
         .expect("the AI's to-do is added");
     assert_eq!(added.parent.as_deref(), Some("shopping"));
 }
+
+#[test]
+fn drawing_the_order_goes_to_the_ai_without_a_reason() {
+    let fixture = shopping_harness();
+    // "milk" to wait for "brushes", as dropped on it in the graph.
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            TodoChange::SetAfter {
+                todo_id: "milk".into(),
+                after: vec!["brushes".into(), "brushes".into()],
+            },
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 1);
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    let open = fixture.planner.open_todos();
+    let outline = crate::outline::Outline::new(&open);
+    assert_eq!(
+        outline
+            .blockers("milk")
+            .iter()
+            .map(|todo| todo.id.as_str())
+            .collect::<Vec<_>>(),
+        ["brushes"]
+    );
+    // An arrow taken away: "draw" no longer waits.
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            TodoChange::SetAfter {
+                todo_id: "draw".into(),
+                after: Vec::new(),
+            },
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    let open = fixture.planner.open_todos();
+    assert!(crate::outline::Outline::new(&open).is_ready("draw"));
+    // A loop or an unknown to-do is refused before the AI is asked.
+    let reviews = fixture.advisor.reviews.load(Ordering::SeqCst);
+    let looped = fixture.planner.review_todo_change(
+        Utc::now(),
+        TodoChange::SetAfter {
+            todo_id: "brushes".into(),
+            after: vec!["milk".into()],
+        },
+        "",
+        "to-do tab",
+    );
+    assert!(
+        matches!(looped, Err(PlannerError::WaitingLoop(..))),
+        "{looped:?}"
+    );
+    let unknown = fixture.planner.review_todo_change(
+        Utc::now(),
+        TodoChange::SetAfter {
+            todo_id: "milk".into(),
+            after: vec!["nowhere".into()],
+        },
+        "",
+        "to-do tab",
+    );
+    assert!(
+        matches!(unknown, Err(PlannerError::UnknownTodo(..))),
+        "{unknown:?}"
+    );
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), reviews);
+}
+
+#[test]
+fn the_order_review_tells_the_ai_what_changes() {
+    let fixture = shopping_harness();
+    let open = fixture.planner.open_todos();
+    let change = TodoChange::SetAfter {
+        todo_id: "milk".into(),
+        after: vec!["draw".into()],
+    };
+    let target = open.iter().find(|todo| todo.id == "milk").cloned();
+    let text = crate::advisor::todo_change_text(&TodoChangeRequest {
+        instructions: crate::advisor::PROPOSAL_PROMPT,
+        now_local: "14:05",
+        life_rules: "",
+        change: &change,
+        target: target.as_ref(),
+        reason: "",
+        open: &open,
+        recent_changes: &[],
+        history: "",
+    });
+    assert!(
+        text.contains("Make this to-do wait for \"title draw\" (until now: nothing)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("After: no deadline, waits for \"title draw\""),
+        "{text}"
+    );
+}

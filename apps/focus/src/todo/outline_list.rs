@@ -16,8 +16,9 @@ pub(super) const GREY: egui::Color32 = egui::Color32::from_gray(140);
 /// How far each level of groups is indented.
 const INDENT: f32 = 22.0;
 
-/// Responsibility: Carry the id of the to-do or group being dragged.
-struct DraggedTodo(String);
+/// Responsibility: Carry the id of the to-do or group being dragged (in the outline or the
+/// graph).
+pub(super) struct DraggedTodo(pub(super) String);
 
 /// Responsibility: Say where a dragged to-do or group would land.
 #[derive(Clone, PartialEq)]
@@ -177,31 +178,7 @@ impl FocusApp {
             }
             // The dragged title follows the pointer.
             if let (Some(pointer), Some(todo)) = (pointer, outline.get(dragged_id)) {
-                let painter = ui.ctx().layer_painter(egui::LayerId::new(
-                    egui::Order::Tooltip,
-                    egui::Id::new("dragged_todo"),
-                ));
-                let galley = painter.layout_no_wrap(
-                    todo.title.clone(),
-                    egui::FontId::proportional(14.0),
-                    ui.visuals().strong_text_color(),
-                );
-                let rect = egui::Rect::from_min_size(
-                    pointer + egui::vec2(14.0, 4.0),
-                    galley.size() + egui::vec2(12.0, 6.0),
-                );
-                painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
-                painter.rect_stroke(
-                    rect,
-                    4.0,
-                    egui::Stroke::new(1.0_f32, BLUE),
-                    egui::StrokeKind::Inside,
-                );
-                painter.galley(
-                    rect.min + egui::vec2(6.0, 3.0),
-                    galley,
-                    egui::Color32::WHITE,
-                );
+                paint_at_pointer(ui, pointer, &todo.title, BLUE);
             }
         }
         if let (Some(dragged_id), Some(drop)) = (&dragged, &target) {
@@ -381,6 +358,45 @@ impl FocusApp {
             ui.small("(내가 추가)");
         }
     }
+}
+
+/// `text` in a small framed label just below and right of `pointer`, above everything else:
+/// what is being dragged, or what dropping it would do.
+pub(super) fn paint_at_pointer(
+    ui: &egui::Ui,
+    pointer: egui::Pos2,
+    text: &str,
+    frame: egui::Color32,
+) {
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("dragged_todo"),
+    ));
+    let galley = painter.layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(14.0),
+        ui.visuals().strong_text_color(),
+    );
+    let size = galley.size() + egui::vec2(12.0, 6.0);
+    // Right of the pointer, or left of it when that would run off the window.
+    let screen = ui.ctx().screen_rect();
+    let mut left = pointer.x + 14.0;
+    if left + size.x > screen.right() - 4.0 {
+        left = (pointer.x - 14.0 - size.x).max(screen.left() + 4.0);
+    }
+    let rect = egui::Rect::from_min_size(egui::pos2(left, pointer.y + 4.0), size);
+    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0_f32, frame),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        rect.min + egui::vec2(6.0, 3.0),
+        galley,
+        egui::Color32::WHITE,
+    );
 }
 
 /// The handle a to-do or group is dragged by: three short lines.

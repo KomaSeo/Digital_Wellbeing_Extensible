@@ -1413,7 +1413,9 @@ pub(crate) fn todo_change_text(request: &TodoChangeRequest) -> String {
             target(),
             draft(todo)
         ),
-        TodoChange::Move { .. } => format!("{placement}\n{}", target()),
+        TodoChange::Move { .. } | TodoChange::SetAfter { .. } => {
+            format!("{placement}\n{}", target())
+        }
         TodoChange::AddAppointment { .. }
         | TodoChange::EditAppointment { .. }
         | TodoChange::RemoveAppointment { .. } => String::new(),
@@ -1562,6 +1564,45 @@ fn placement_text(request: &TodoChangeRequest) -> String {
                     .to_string(),
             );
         }
+        TodoChange::SetAfter { todo_id, after } => {
+            let mut changed: Vec<TodoItem> = request.open.to_vec();
+            if let Some(entry) = changed.iter_mut().find(|entry| &entry.id == todo_id) {
+                entry.after = after.clone();
+            }
+            let changed_outline = Outline::new(&changed);
+            let kind = if request.target.is_some_and(|target| target.group) {
+                "group"
+            } else {
+                "to-do"
+            };
+            let now_waits: Vec<String> = request
+                .target
+                .map(|target| target.after.clone())
+                .unwrap_or_default();
+            lines.push(format!(
+                "Make this {kind} wait for {} (until now: {}): it cannot be assigned before \
+                 they are finished.",
+                titles_of(after),
+                titles_of(&now_waits)
+            ));
+            lines.push(format!(
+                "Before: {}, waits for {}. After: {}, waits for {}.",
+                due_text(&outline, todo_id),
+                quoted_titles(&outline.blockers(todo_id)),
+                due_text(&changed_outline, todo_id),
+                quoted_titles(&changed_outline.blockers(todo_id)),
+            ));
+            lines.push(
+                "Approve an order that reflects how the work really depends on other work \
+                 (material to buy first, a draft before a review). Reject one that only serves \
+                 to put this off, such as making an urgent or overdue to-do wait for something \
+                 far off or unlikely to be finished. Taking a wait away lets the to-do start \
+                 sooner; approve it unless the order was plainly needed. The user drew it in the \
+                 to-do tab's graph and gives a reason only after a refusal; when you refuse, say \
+                 what reason would make it acceptable."
+                    .to_string(),
+            );
+        }
         _ => {}
     }
     if lines.is_empty() {
@@ -1588,6 +1629,15 @@ pub fn change_summary(change: &TodoChange, before: Option<&TodoItem>) -> String 
             Some(parent) => format!("move \"{}\" into the group {parent}", title(todo_id)),
             None => format!("move \"{}\" to the top", title(todo_id)),
         },
+        TodoChange::SetAfter { todo_id, after } => format!(
+            "make \"{}\" wait for {}",
+            title(todo_id),
+            if after.is_empty() {
+                "nothing".to_string()
+            } else {
+                after.join(", ")
+            }
+        ),
         TodoChange::AddAppointment { appointment } => format!(
             "add the appointment \"{}\" ({})",
             appointment.title,
