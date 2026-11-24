@@ -7,13 +7,23 @@
 //! (`Lockdown::covers_screen`), the window loses its frame, goes on top of every other window
 //! and, about once a second, is put back over the whole desktop (every monitor) and brought to
 //! the front. When the lock ends, the window gets its frame, place and size back. The agent
-//! closes a program kept in front of it for a few seconds (`machine::lockdown`).
+//! closes a program kept in front of it for a few seconds (`machine::lockdown`), except
+//! Windows' own programs such as the Settings app.
+//!
+//! When the user opens the Windows network settings from the covering window
+//! ([`Cover::step_back`]), the window stays over the desktop but stops holding the front for
+//! [`STEP_BACK`], so the Settings window can be used (the owner: "네트워크 설정이 안열리는데요").
+//! Any other program brought in front meanwhile is still closed by the agent.
 
 use eframe::egui;
 use std::time::{Duration, Instant};
 
 /// How often the window is put back over the screen and in front.
 const HOLD_EVERY: Duration = Duration::from_secs(1);
+
+/// How long the covering window lets other windows in front after the user opens the
+/// network settings.
+pub(crate) const STEP_BACK: Duration = Duration::from_secs(180);
 
 /// Responsibility: Remember whether the window covers the screen and where it was before.
 #[derive(Default)]
@@ -22,12 +32,36 @@ pub(crate) struct Cover {
     /// The window's outer position and inner size before it covered the screen.
     place_before: Option<(egui::Pos2, egui::Vec2)>,
     last_hold: Option<Instant>,
+    /// Until when the covering window lets other windows in front ([`Self::step_back`]).
+    stepped_back_until: Option<Instant>,
 }
 
 impl Cover {
     /// The window covers the screen now.
     pub(crate) fn covering(&self) -> bool {
         self.covering
+    }
+
+    /// While covering: let other windows (the Windows network settings the user is opening)
+    /// in front for [`STEP_BACK`]: the window leaves the top and stops taking the front.
+    /// Nothing happens when the window does not cover the screen.
+    pub(crate) fn step_back(&mut self, context: &egui::Context, title: &str) {
+        if !self.covering {
+            return;
+        }
+        self.stepped_back_until = Some(Instant::now() + STEP_BACK);
+        release(title);
+        context.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::WindowLevel::Normal,
+        ));
+    }
+
+    /// How long the covering window still lets other windows in front; `None` when it holds
+    /// the front.
+    pub(crate) fn stepped_back_for(&self) -> Option<Duration> {
+        self.stepped_back_until
+            .filter(|_| self.covering)
+            .and_then(|until| until.checked_duration_since(Instant::now()))
     }
 
     /// Start or stop covering the screen as `covers` says, and keep the window in front
@@ -62,6 +96,7 @@ impl Cover {
             }
         } else if !covers && self.covering {
             self.covering = false;
+            self.stepped_back_until = None;
             release(title);
             if !cfg!(windows) {
                 context.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -76,9 +111,18 @@ impl Cover {
             }
         }
         if self.covering {
-            if self
-                .last_hold
-                .is_none_or(|held| held.elapsed() >= HOLD_EVERY)
+            let stepped_back = self.stepped_back_for().is_some();
+            if !stepped_back && self.stepped_back_until.take().is_some() {
+                // The time is over: on top of every window again, at once.
+                context.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                    egui::WindowLevel::AlwaysOnTop,
+                ));
+                self.last_hold = None;
+            }
+            if !stepped_back
+                && self
+                    .last_hold
+                    .is_none_or(|held| held.elapsed() >= HOLD_EVERY)
             {
                 self.last_hold = Some(Instant::now());
                 if !hold_in_front(title) {

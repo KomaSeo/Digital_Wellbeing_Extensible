@@ -747,7 +747,9 @@ impl eframe::App for FocusApp {
                              닫지 않으니 아래 단추로 열어 네트워크를 고치세요. 연결되면 몇 초 안에 \
                              풀립니다.",
                         );
-                        network_buttons_ui(ui);
+                        if network_buttons_ui(ui) {
+                            self.cover.step_back(ui.ctx(), TITLE);
+                        }
                     }
                     ui.separator();
                 }
@@ -778,7 +780,17 @@ impl eframe::App for FocusApp {
                             seconds % 60
                         ),
                     );
-                    network_buttons_ui(ui);
+                    if network_buttons_ui(ui) {
+                        self.cover.step_back(ui.ctx(), TITLE);
+                    }
+                    if let Some(left) = self.cover.stepped_back_for() {
+                        ui.small(format!(
+                            "Windows 네트워크 설정을 쓸 수 있도록, 이 화면이 {}분 {}초 동안 맨 앞으로 \
+                             나오지 않습니다. 다른 앱을 앞에 두면 몇 초 뒤에 닫힙니다.",
+                            left.as_secs() / 60,
+                            left.as_secs() % 60
+                        ));
+                    }
                     ui.ctx().request_repaint_after(Duration::from_secs(1));
                     ui.separator();
                 }
@@ -826,13 +838,16 @@ impl eframe::App for FocusApp {
 
 /// The buttons that open the Windows network settings: the Settings app's network page and
 /// the network adapters ("네트워크 연결"). Both stay open while everything else is locked.
-fn network_buttons_ui(ui: &mut egui::Ui) {
+/// True when one was pressed: a covering window must then step back to let them in front.
+fn network_buttons_ui(ui: &mut egui::Ui) -> bool {
+    let mut pressed = false;
     ui.horizontal_wrapped(|ui| {
         if ui
             .button("네트워크 설정 열기")
             .on_hover_text("Windows 설정 → 네트워크 및 인터넷")
             .clicked()
         {
+            pressed = true;
             open_network_settings("ms-settings:network");
         }
         if ui
@@ -840,6 +855,7 @@ fn network_buttons_ui(ui: &mut egui::Ui) {
             .on_hover_text("Windows 설정 → 네트워크 및 인터넷 → Wi-Fi")
             .clicked()
         {
+            pressed = true;
             open_network_settings("ms-settings:network-wifi");
         }
         if ui
@@ -847,9 +863,11 @@ fn network_buttons_ui(ui: &mut egui::Ui) {
             .on_hover_text("제어판의 네트워크 연결(ncpa.cpl)")
             .clicked()
         {
+            pressed = true;
             open_network_settings("ncpa.cpl");
         }
     });
+    pressed
 }
 
 /// Open a page of the Windows settings (`ms-settings:…`) or a control panel item (`….cpl`).
