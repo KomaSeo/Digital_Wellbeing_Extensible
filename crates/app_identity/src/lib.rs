@@ -6,6 +6,8 @@
 
 /// The Windows service; it also runs as the per-session agent and as the update guard.
 pub const SERVICE_EXE: &str = "digital-wellbeing-service.exe";
+/// The Windows service's name (the service manager's and the `SafeBoot` registry key's).
+pub const SERVICE_NAME: &str = "DigitalWellbeing";
 /// The window the user sees.
 pub const FOCUS_EXE: &str = "digital-wellbeing-focus.exe";
 /// The MCP server Claude Desktop starts in the user's account.

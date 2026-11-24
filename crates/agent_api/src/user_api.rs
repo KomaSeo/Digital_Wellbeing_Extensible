@@ -19,6 +19,7 @@
 //! | `assign`         | `{ situation? }` (planner active)        | [`Status`] |
 //! | `install_program` | `{ path, kind }` (a signed installer, run by the service) | `system_care::CareStatus` |
 //! | `uninstall_program` | `{ program }` (a winget id from the service's list, uninstalled by the service) | `system_care::CareStatus` |
+//! | `block_safe_mode` | `{}` ("안전 모드 끄기": shut the ways into safe mode; the agent runs as SYSTEM) | `{ blocked, outcomes }` |
 //! | `waiting_add` | `{ title, notes?, check_on: "YYYY-MM-DD" }` | [`Status`] |
 //! | `waiting_end` | `{ id, arrived }` (arrived: dealing with it becomes a to-do) | [`Status`] |
 //! | `request_change` | `{ "request": ChangeKind, "reason": "…" }` | [`Status`], `last_decision` set |
@@ -579,6 +580,21 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let config = api.monitor.store().get();
             return serde_json::to_value(system_care::status(&data_directory, &config))
                 .map_err(|error| error.to_string());
+        }
+        // A stricter change, so anyone may make it, in strict mode too. Opening safe mode again
+        // needs the administrator's approval (`digital-wellbeing-service safe-mode-open`).
+        "block_safe_mode" => {
+            let outcomes = machine::safe_mode::block();
+            let user = machine::session::session_user(machine::session::current_session_id())
+                .unwrap_or_default();
+            tracing::info!(
+                "the ways into safe mode were shut by {user}: {}",
+                machine::safe_mode::outcome_lines(&outcomes).join(" | ")
+            );
+            return Ok(json!({
+                "blocked": machine::safe_mode::runs_in_safe_mode(),
+                "outcomes": outcomes,
+            }));
         }
         "uninstall_program" => {
             let program = params["program"]

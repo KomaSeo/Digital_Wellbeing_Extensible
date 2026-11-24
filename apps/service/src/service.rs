@@ -16,7 +16,7 @@ use windows_service::service::{
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::{define_windows_service, service_dispatcher};
 
-pub const SERVICE_NAME: &str = "DigitalWellbeing";
+pub const SERVICE_NAME: &str = app_identity::SERVICE_NAME;
 /// The sync server's service (`sync-server-setup`), on the computer that is the server.
 pub const SYNC_SERVICE_NAME: &str = "DigitalWellbeingSync";
 /// How often sessions are re-scanned and dead agents restarted.

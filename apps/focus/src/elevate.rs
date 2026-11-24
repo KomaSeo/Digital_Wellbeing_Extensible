@@ -2,7 +2,8 @@
 //! rights. Windows shows its administrator approval window (UAC); only when someone who may
 //! approve does so does the command run:
 //! - `settings-unlock` turns off an "administrator" protection;
-//! - `sync-login --request <file>` signs up or logs in to the sync server.
+//! - `sync-login --request <file>` signs up or logs in to the sync server;
+//! - `safe-mode-open --result <file>` opens the ways into safe mode again.
 
 /// Started (Windows asks for approval next), or why not.
 #[cfg(windows)]
@@ -75,7 +76,14 @@ pub(crate) fn run_sync_login(request: &machine::login::LoginRequestFile) -> Resu
         serde_json::to_string(request).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    let ran = run_elevated_and_wait(&service_program()?, &request_path);
+    let ran = run_elevated_and_wait(
+        &service_program()?,
+        &[
+            "sync-login".into(),
+            "--request".into(),
+            request_path.display().to_string(),
+        ],
+    );
     let _ = std::fs::remove_file(&request_path);
     let outcome = std::fs::read_to_string(&result_path)
         .ok()
@@ -91,11 +99,63 @@ pub(crate) fn run_sync_login(request: &machine::login::LoginRequestFile) -> Resu
     }
 }
 
+/// Open the ways into safe mode again through `digital-wellbeing-service safe-mode-open`, run
+/// with administrator rights (Windows asks for approval; a standard user's approval window
+/// asks for an administrator's password). Waits until it ends (call off the UI thread) and
+/// returns its message and the lines of its commands.
+pub(crate) fn run_safe_mode_open() -> Result<String, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let result_path = std::env::temp_dir().join(format!(
+        "dw-safe-mode-{}-{nanos}.result",
+        std::process::id()
+    ));
+    let ran = run_elevated_and_wait(
+        &service_program()?,
+        &[
+            "safe-mode-open".into(),
+            "--result".into(),
+            result_path.display().to_string(),
+        ],
+    );
+    let outcome = std::fs::read_to_string(&result_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let _ = std::fs::remove_file(&result_path);
+    ran?;
+    let outcome = outcome.ok_or("관리자 승인을 받지 못했거나, 명령이 결과를 남기지 않았습니다")?;
+    let outcomes: Vec<machine::safe_mode::CommandOutcome> =
+        serde_json::from_value(outcome["outcomes"].clone()).unwrap_or_default();
+    let mut lines = vec![outcome["message"].as_str().unwrap_or_default().to_string()];
+    lines.extend(machine::safe_mode::outcome_lines(&outcomes));
+    let message = lines.join("\n");
+    if outcome["ok"].as_bool() == Some(true) {
+        Ok(message)
+    } else {
+        Err(message)
+    }
+}
+
+/// Quote each argument for a Windows command line.
 #[cfg(windows)]
-fn run_elevated_and_wait(
-    program: &std::path::Path,
-    request_path: &std::path::Path,
-) -> Result<(), String> {
+fn command_line(arguments: &[String]) -> String {
+    arguments
+        .iter()
+        .map(|argument| {
+            if argument.contains(' ') {
+                format!("\"{argument}\"")
+            } else {
+                argument.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(windows)]
+fn run_elevated_and_wait(program: &std::path::Path, arguments: &[String]) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -106,7 +166,7 @@ fn run_elevated_and_wait(
     let wide = |text: &std::ffi::OsStr| -> Vec<u16> { text.encode_wide().chain([0]).collect() };
     let verb = wide("runas".as_ref());
     let file = wide(program.as_os_str());
-    let arguments = wide(format!("sync-login --request \"{}\"", request_path.display()).as_ref());
+    let arguments = wide(command_line(arguments).as_ref());
     // SAFETY: a zeroed SHELLEXECUTEINFOW is valid (all pointers null); its size is set below.
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
@@ -119,7 +179,8 @@ fn run_elevated_and_wait(
     if unsafe { ShellExecuteExW(&mut info) } == 0 || info.hProcess.is_null() {
         return Err("관리자 승인을 받지 못했습니다".into());
     }
-    // SAFETY: the process handle is ours until CloseHandle; two minutes is plenty for a login.
+    // SAFETY: the process handle is ours until CloseHandle; two minutes is plenty for a login
+    // or the safe mode commands.
     unsafe {
         WaitForSingleObject(info.hProcess, 120_000);
         CloseHandle(info.hProcess);
@@ -129,14 +190,9 @@ fn run_elevated_and_wait(
 
 /// Elsewhere (Linux, for development) the command runs as this user.
 #[cfg(not(windows))]
-fn run_elevated_and_wait(
-    program: &std::path::Path,
-    request_path: &std::path::Path,
-) -> Result<(), String> {
+fn run_elevated_and_wait(program: &std::path::Path, arguments: &[String]) -> Result<(), String> {
     std::process::Command::new(program)
-        .arg("sync-login")
-        .arg("--request")
-        .arg(request_path)
+        .args(arguments)
         .output()
         .map(|_| ())
         .map_err(|error| format!("{}: {error}", program.display()))

@@ -387,6 +387,10 @@ pub struct SettingsSnapshot {
     /// The models the key can use, for the model choice.
     #[serde(default)]
     pub models: crate::model_catalog::ModelCatalog,
+    /// Whether safe mode is no way around this program ([`crate::safe_mode::runs_in_safe_mode`]);
+    /// `None` where that cannot be read (not Windows).
+    #[serde(default)]
+    pub safe_mode_blocked: Option<bool>,
 }
 
 /// Setup is over (or an older version had locked the settings).
@@ -760,6 +764,7 @@ pub fn snapshot(data_directory: &Path) -> Result<SettingsSnapshot, String> {
         blocks: read_folder(&data_directory.join("blocks")),
         usage: read_folder(&data_directory.join("usage")),
         models: crate::model_catalog::load(data_directory),
+        safe_mode_blocked: crate::safe_mode::runs_in_safe_mode(),
     })
 }
 

@@ -52,6 +52,9 @@ fn main() -> anyhow::Result<()> {
         // Run with administrator rights (the Focus app asks Windows for them): turn off a
         // protection that only an administrator may turn off.
         Some("settings-unlock") => settings_unlock(),
+        // Also with administrator rights: open the ways into safe mode again (the Focus app's
+        // "안전 모드 켜기"; shutting them needs no approval, the agent does it).
+        Some("safe-mode-open") => safe_mode_open(&arguments[1..]),
         #[cfg(windows)]
         Some("install") => install::install(&arguments[1..]),
         #[cfg(windows)]
@@ -95,6 +98,7 @@ fn main() -> anyhow::Result<()> {
                 "usage (from an administrator terminal):\n  \
                  digital-wellbeing-service install [--manage <windows user>]... | [--manage-all] [--delete-data] [--block-safe-mode]\n  \
                  digital-wellbeing-service uninstall [--delete-data] [--restore-safe-mode]\n  \
+                 digital-wellbeing-service safe-mode-open (the ways into safe mode, open again)\n  \
                  digital-wellbeing-service sync-… (multi-device sync, see docs/sync.md)"
             );
             Ok(())
@@ -119,6 +123,53 @@ fn settings_unlock() -> anyhow::Result<()> {
     .map_err(anyhow::Error::msg)?;
     println!("엄격 모드를 껐습니다. 걸린 차단도 모두 풀립니다.");
     Ok(())
+}
+
+/// `safe-mode-open [--result <file>]`: open the ways into safe mode again
+/// ([`machine::safe_mode::open`]). Only an administrator can read the data folder, so reading
+/// it is the check that this runs with administrator rights. With `--result`, the outcome is
+/// also written to that file (`{"ok", "message", "outcomes"}`) for the Focus app that asked.
+fn safe_mode_open(arguments: &[String]) -> anyhow::Result<()> {
+    let result_path = arguments
+        .iter()
+        .position(|argument| argument == "--result")
+        .and_then(|index| arguments.get(index + 1))
+        .map(std::path::PathBuf::from);
+    let (ok, message, outcomes) = if std::fs::read_dir(machine::data_dir()).is_err() {
+        (
+            false,
+            "관리자 권한으로 실행해야 합니다".to_string(),
+            Vec::new(),
+        )
+    } else {
+        let outcomes = machine::safe_mode::open();
+        let (open, message) = match machine::safe_mode::runs_in_safe_mode() {
+            Some(false) => (
+                true,
+                "안전 모드로 들어가는 길을 다시 열었습니다. 안전 모드에서는 이 프로그램이 동작하지 \
+                 않습니다.",
+            ),
+            Some(true) => (
+                false,
+                "안전 모드를 다시 열지 못했습니다. 아래 명령의 결과를 보세요.",
+            ),
+            None => (false, "Windows에서만 됩니다."),
+        };
+        (open, message.to_string(), outcomes)
+    };
+    println!("{message}");
+    for line in machine::safe_mode::outcome_lines(&outcomes) {
+        println!("{line}");
+    }
+    if let Some(path) = result_path {
+        let result = serde_json::json!({ "ok": ok, "message": message, "outcomes": outcomes });
+        std::fs::write(&path, result.to_string())?;
+    }
+    if ok {
+        Ok(())
+    } else {
+        anyhow::bail!("{message}")
+    }
 }
 
 /// Log to `%ProgramData%\DigitalWellbeing\logs\<file>`; stderr if that fails.

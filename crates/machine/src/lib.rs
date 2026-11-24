@@ -25,6 +25,7 @@ pub mod lockdown;
 pub mod login;
 pub mod model_catalog;
 pub mod password;
+pub mod safe_mode;
 pub mod session;
 pub use setting_edits;
 pub mod settings;

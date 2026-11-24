@@ -319,45 +319,23 @@ fn remove_folder(folder: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Shut the ways into safe mode, where this program's service does not start (the commands
-/// of `docs/multi_account.md` 4.4): the Windows recovery environment (Shift + restart), the
-/// recovery screen after failed starts, and the boot menu. Each one that fails is reported and
-/// the rest still run; the install does not fail for them.
+/// Shut the ways into safe mode and list the service to run in it
+/// ([`machine::safe_mode::block`]). Each command that fails is reported and the rest still run;
+/// the install does not fail for them.
 fn block_safe_mode() {
-    run_each(&[
-        &["reagentc", "/disable"],
-        &["bcdedit", "/set", "{default}", "recoveryenabled", "No"],
-        &[
-            "bcdedit",
-            "/set",
-            "{default}",
-            "bootstatuspolicy",
-            "IgnoreAllFailures",
-        ],
-        &["bcdedit", "/set", "{bootmgr}", "displaybootmenu", "No"],
-    ]);
+    for line in machine::safe_mode::outcome_lines(&machine::safe_mode::block()) {
+        println!("{line}");
+    }
     println!("the ways into safe mode are shut (undo: uninstall --restore-safe-mode)");
 }
 
-/// Open the ways into safe mode again: what [`block_safe_mode`] changed goes back to Windows'
-/// own settings. Harmless on a PC where they were never shut.
+/// Open the ways into safe mode again ([`machine::safe_mode::open`]). Harmless on a PC where
+/// they were never shut.
 fn restore_safe_mode() {
-    run_each(&[
-        &["reagentc", "/enable"],
-        &["bcdedit", "/set", "{default}", "recoveryenabled", "Yes"],
-        &["bcdedit", "/deletevalue", "{default}", "bootstatuspolicy"],
-        &["bcdedit", "/deletevalue", "{bootmgr}", "displaybootmenu"],
-    ]);
-    println!("the ways into safe mode are open again");
-}
-
-fn run_each(commands: &[&[&str]]) {
-    for command in commands {
-        let (program, arguments) = command.split_first().expect("a command");
-        if let Err(error) = run(Command::new(program).args(arguments)) {
-            println!("warning: {error:#}");
-        }
+    for line in machine::safe_mode::outcome_lines(&machine::safe_mode::open()) {
+        println!("{line}");
     }
+    println!("the ways into safe mode are open again");
 }
 
 /// Make `data` a fresh, trusted folder. On a first install anything already

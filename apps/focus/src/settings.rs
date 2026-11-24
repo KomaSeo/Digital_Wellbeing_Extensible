@@ -357,6 +357,13 @@ pub struct SettingsTab {
     self_update_message: String,
     /// "지금 업데이트" was pressed once: the next press installs.
     confirming_install: bool,
+    /// "안전 모드 끄기" was pressed once: asks before shutting the ways into safe mode.
+    safe_mode_confirm: bool,
+    /// A safe mode command running off the window's thread (shutting takes the agent a few
+    /// seconds; opening waits for the administrator's approval).
+    safe_mode_waiting: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// What the last safe mode command said.
+    safe_mode_message: Option<Result<String, String>>,
 }
 
 /// Responsibility: Hold the editable copies of the three files and what they were when loaded
@@ -430,6 +437,9 @@ impl SettingsTab {
             self_update: None,
             self_update_message: String::new(),
             confirming_install: false,
+            safe_mode_confirm: false,
+            safe_mode_waiting: None,
+            safe_mode_message: None,
         }
     }
 
@@ -492,7 +502,10 @@ impl SettingsTab {
             Section::Blocking => self.blocking_ui(ui, &snapshot, protected),
             Section::Checks => self.checks_ui(ui, &snapshot, protected),
             Section::System => self.system_ui(ui, &snapshot, protected),
-            Section::Protection => self.protection_ui(ui, protected, protection, scheduled, sync),
+            Section::Protection => {
+                self.protection_ui(ui, protected, protection, scheduled, sync);
+                self.safe_mode_ui(ui, &snapshot);
+            }
         }
         self.autosave(ui.ctx());
     }
@@ -527,6 +540,131 @@ impl SettingsTab {
             self.scheduled_ui(ui, scheduled);
         } else {
             self.protect_ui(ui, sync);
+        }
+    }
+
+    /// Safe mode: whether it is a way around this program, a button that shuts it (anyone, a
+    /// stricter change) and one that opens it again (only with an administrator's approval).
+    /// The owner: "설정에 안전모드 끄기버튼과 키기 버튼을 만들어주고. 키기 버튼은 관리자 권한이
+    /// 있을 때만 동작하게 만들어 줄래?"
+    fn safe_mode_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
+        if let Some(receiver) = &self.safe_mode_waiting {
+            match receiver.try_recv() {
+                Ok(answer) => {
+                    self.safe_mode_message = Some(answer);
+                    self.safe_mode_waiting = None;
+                    // Read the state again at once.
+                    self.fetched_at = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ui.ctx().request_repaint_after(Duration::from_millis(500));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.safe_mode_waiting = None;
+                }
+            }
+        }
+        let busy = self.safe_mode_waiting.is_some();
+        crate::style::section(ui, "안전 모드");
+        ui.label(
+            "안전 모드는 Windows를 최소한의 드라이버와 서비스로만 켜는 방식입니다. 막지 않으면 이 \
+             프로그램은 안전 모드에서 동작하지 않으므로, 안전 모드로 켜면(예: shutdown /r /o 뒤의 \
+             문제 해결 → 고급 옵션 → 시작 설정) 모든 차단을 피할 수 있습니다.",
+        );
+        match snapshot.safe_mode_blocked {
+            Some(true) => {
+                ui.colored_label(
+                    GREEN,
+                    "지금: 막혀 있습니다. 안전 모드로 켜도 이 프로그램이 동작합니다.",
+                );
+            }
+            Some(false) => {
+                ui.colored_label(
+                    RED,
+                    "지금: 열려 있습니다. 안전 모드로 켜면 이 프로그램이 동작하지 않습니다.",
+                );
+            }
+            None => {
+                ui.colored_label(
+                    YELLOW,
+                    "지금: 이 PC에서는 알 수 없습니다(Windows에서만 확인).",
+                );
+            }
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    !busy && !self.safe_mode_confirm,
+                    egui::Button::new("안전 모드 끄기(막기)"),
+                )
+                .on_hover_text("누구나 바로 할 수 있습니다. 규칙을 더 엄격하게 만드는 변경입니다.")
+                .clicked()
+            {
+                self.safe_mode_confirm = true;
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("안전 모드 켜기(다시 열기)"))
+                .on_hover_text("Windows의 관리자 승인 창에서 관리자 계정으로 승인해야 동작합니다.")
+                .clicked()
+            {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let context = ui.ctx().clone();
+                thread::spawn(move || {
+                    let _ = sender.send(crate::elevate::run_safe_mode_open());
+                    context.request_repaint();
+                });
+                self.safe_mode_waiting = Some(receiver);
+                self.safe_mode_message = Some(Ok(
+                    "관리자 승인 창에서 관리자 계정으로 승인하면 안전 모드가 다시 열립니다.".into(),
+                ));
+            }
+            if busy {
+                ui.spinner();
+            }
+        });
+        ui.small(
+            "끄기는 누구나 바로 할 수 있습니다. 켜기는 Windows의 관리자 승인 창에서 관리자 계정의 \
+             비밀번호로 승인해야 동작합니다.",
+        );
+        if self.safe_mode_confirm {
+            ui.group(|ui| {
+                ui.colored_label(
+                    RED,
+                    "안전 모드를 막으면 Windows 복구 환경도 꺼져서 \"이 PC 초기화\", 시스템 복원, 자동 \
+                     복구를 쓸 수 없습니다. Windows가 고장 나면 관리자가 Windows 설치 USB로 \
+                     복구해야 합니다. 그리고 이 프로그램이 안전 모드에서도 동작하게 됩니다. \
+                     막을까요?",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("막기").clicked() {
+                        self.safe_mode_confirm = false;
+                        let (sender, receiver) = std::sync::mpsc::channel();
+                        let session = self.session;
+                        let context = ui.ctx().clone();
+                        thread::spawn(move || {
+                            let answer = call_value(session, "block_safe_mode", json!({}))
+                                .map_err(|error| error.to_string())
+                                .and_then(|reply| safe_mode_block_message(&reply));
+                            let _ = sender.send(answer);
+                            context.request_repaint();
+                        });
+                        self.safe_mode_waiting = Some(receiver);
+                        self.safe_mode_message = Some(Ok("안전 모드를 막는 중입니다…".into()));
+                    }
+                    if ui.button("취소").clicked() {
+                        self.safe_mode_confirm = false;
+                    }
+                });
+            });
+        }
+        match &self.safe_mode_message {
+            Some(Ok(message)) => {
+                ui.label(message);
+            }
+            Some(Err(message)) => {
+                ui.colored_label(RED, message);
+            }
+            None => {}
         }
     }
 
@@ -2877,6 +3015,23 @@ fn names_ui(
             text.clear();
         }
     });
+}
+
+/// What the agent's `block_safe_mode` answer means for the user: whether safe mode is now shut,
+/// with a line for each command.
+fn safe_mode_block_message(reply: &Value) -> Result<String, String> {
+    let outcomes: Vec<machine::safe_mode::CommandOutcome> =
+        serde_json::from_value(reply["outcomes"].clone()).unwrap_or_default();
+    let lines = machine::safe_mode::outcome_lines(&outcomes).join("\n");
+    match reply["blocked"].as_bool() {
+        Some(true) => Ok(format!(
+            "안전 모드를 막았습니다. 이제 안전 모드로 켜도 이 프로그램이 동작합니다.\n{lines}"
+        )),
+        Some(false) => Err(format!(
+            "안전 모드를 막지 못했습니다. 아래 명령의 결과를 보세요.\n{lines}"
+        )),
+        None => Err("Windows에서만 됩니다.".to_string()),
+    }
 }
 
 /// Calls and estimated cost today and this month, all users together.
