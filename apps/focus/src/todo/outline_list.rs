@@ -401,7 +401,15 @@ pub(super) fn paint_at_pointer(
 
 /// The handle a to-do or group is dragged by: three short lines.
 fn drag_handle_ui(ui: &mut egui::Ui, todo: &TodoItem, idle: bool) {
-    let sense = if idle {
+    let response = handle_ui(ui, idle);
+    response.dnd_set_drag_payload(DraggedTodo(todo.id.clone()));
+    response.on_hover_text("끌어서 다른 자리나 다른 묶음으로 옮깁니다");
+}
+
+/// A drag handle (three short lines) that can be dragged while `enabled`; the caller sets
+/// what dragging it carries.
+pub(super) fn handle_ui(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    let sense = if enabled {
         egui::Sense::drag()
     } else {
         egui::Sense::hover()
@@ -422,11 +430,10 @@ fn drag_handle_ui(ui: &mut egui::Ui, todo: &TodoItem, idle: bool) {
             egui::Stroke::new(1.5_f32, color),
         );
     }
-    response.dnd_set_drag_payload(DraggedTodo(todo.id.clone()));
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    response.on_hover_text("끌어서 다른 자리나 다른 묶음으로 옮깁니다");
+    response
 }
 
 /// With "지금 할 수 있는 일만": a to-do that can start now, or a group holding one.

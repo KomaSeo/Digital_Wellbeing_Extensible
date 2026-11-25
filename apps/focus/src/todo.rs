@@ -176,6 +176,13 @@ pub(crate) fn parse_clock(text: &str) -> Option<NaiveTime> {
 }
 
 /// "AI가 정함" / "예" / "아니요" for whether something is done away from the computer.
+/// Responsibility: Name a step being dragged to another place in its to-do's list.
+#[derive(Clone)]
+struct DraggedStep {
+    todo_id: String,
+    index: usize,
+}
+
 /// Responsibility: Hold the fields of a to-do as the user types them; empty ones are filled
 /// in by the AI (adding) or stay as they are (editing).
 #[derive(Default, Clone)]
@@ -742,7 +749,9 @@ impl FocusApp {
 
     /// The user's own notes and steps for a to-do (the current one in the Work tab, the
     /// opened one in the To-do tab); the AI sees them when it reviews "I finished it". A step's
-    /// text is edited in place and saved when the field loses focus.
+    /// text is edited in place and saved when the field loses focus. A step is dragged by its
+    /// handle to another place in the list (the owner: "일하기 창에서 단계의 순서를 바꿀 수
+    /// 있도록 해야할듯").
     fn notes_ui(&mut self, ui: &mut egui::Ui, todo_id: &str, planner: &PlannerStatus) {
         if self.todo_ui.notes_for.as_deref() != Some(todo_id) {
             self.todo_ui.notes_for = Some(todo_id.to_string());
@@ -765,8 +774,22 @@ impl FocusApp {
             .default_open(true)
             .show(ui, |ui| {
                 let mut remove = None;
+                let dragged: Option<DraggedStep> =
+                    egui::DragAndDrop::payload::<DraggedStep>(ui.ctx())
+                        .map(|payload| (*payload).clone())
+                        .filter(|payload| payload.todo_id == todo_id);
+                let pointer = ui.input(|input| input.pointer.latest_pos());
+                // Where the dragged step would go: the index it is inserted before.
+                let mut insert_at: Option<usize> = None;
+                let step_count = self.todo_ui.notes.steps.len();
                 for (index, step) in self.todo_ui.notes.steps.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
+                    let row = ui.horizontal(|ui| {
+                        let handle = outline_list::handle_ui(ui, step_count > 1);
+                        handle.dnd_set_drag_payload(DraggedStep {
+                            todo_id: todo_id.to_string(),
+                            index,
+                        });
+                        handle.on_hover_text("끌어서 단계의 순서를 바꿉니다");
                         save |= ui
                             .checkbox(&mut step.done, "")
                             .on_hover_text("끝낸 단계에 표시합니다")
@@ -782,6 +805,50 @@ impl FocusApp {
                             remove = Some(index);
                         }
                     });
+                    if let (Some(dragged), Some(pointer)) = (&dragged, pointer) {
+                        let rect = row.response.rect;
+                        if rect.y_range().contains(pointer.y) {
+                            let after = pointer.y > rect.center().y;
+                            let insertion = index + usize::from(after);
+                            // Dropped just before or after itself, it would not move.
+                            if insertion != dragged.index && insertion != dragged.index + 1 {
+                                let line = if after {
+                                    rect.bottom() + 1.0
+                                } else {
+                                    rect.top() - 1.0
+                                };
+                                ui.painter().hline(
+                                    rect.left()..=rect.right(),
+                                    line,
+                                    egui::Stroke::new(2.5_f32, outline_list::BLUE),
+                                );
+                                insert_at = Some(insertion);
+                            }
+                        }
+                    }
+                }
+                if let Some(dragged) = &dragged {
+                    if let (Some(pointer), Some(step)) =
+                        (pointer, self.todo_ui.notes.steps.get(dragged.index))
+                    {
+                        outline_list::paint_at_pointer(ui, pointer, &step.text, outline_list::BLUE);
+                    }
+                    if ui.input(|input| input.pointer.any_released()) {
+                        egui::DragAndDrop::clear_payload(ui.ctx());
+                        if let Some(insertion) = insert_at {
+                            let steps = &mut self.todo_ui.notes.steps;
+                            if dragged.index < steps.len() {
+                                let step = steps.remove(dragged.index);
+                                let target = if insertion > dragged.index {
+                                    insertion - 1
+                                } else {
+                                    insertion
+                                };
+                                steps.insert(target.min(steps.len()), step);
+                                save = true;
+                            }
+                        }
+                    }
                 }
                 if let Some(index) = remove {
                     self.todo_ui.notes.steps.remove(index);
