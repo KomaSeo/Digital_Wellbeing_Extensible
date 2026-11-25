@@ -111,10 +111,6 @@ pub enum PlannerError {
     BadExtension,
     #[error("연장은 5분에서 {MAX_EXTENSION_MINUTES}분까지 요청합니다. 약속은 끝난 뒤에 연장을 요청하세요")]
     BadTaskExtension,
-    #[error(
-        "사용을 멈춘 동안에는 AI를 쓰는 일을 하지 않습니다. 먼저 \"다시 사용하기\"를 누르세요"
-    )]
-    Stopped,
     #[error("AI: {0}")]
     Ai(#[from] JudgeError),
     #[error("저장하지 못했습니다: {0}")]
@@ -293,93 +289,12 @@ impl TaskPlanner {
             .max_by_key(|offer| offer.ended_at)
     }
 
-    /// The user stopped using the computer ("사용 중지"): every app is locked, and nothing
-    /// but the blocking runs (no AI checks, no picks, no appointments starting).
-    pub fn stopped(&self) -> bool {
-        self.state.get().stopped_at.is_some()
-    }
-
-    /// "사용 중지": hold the current task, paused, and stop everything but the blocking until
-    /// [`Self::resume_use`], which goes on with it. A running appointment ends instead.
-    pub fn stop_use(&self, now: DateTime<Utc>) -> Result<(), PlannerError> {
-        let _busy = self.busy.lock();
-        let mut stop_paused_task = false;
-        match self.state.get().assignment {
-            // An appointment has fixed times: it ends and does not start again.
-            Some(current) if current.appointment_id.is_some() => {
-                if let Some(appointment_id) = current.appointment_id {
-                    self.state.update(|planner_state| {
-                        planner_state.ended_appointments.insert(appointment_id);
-                    })?;
-                }
-                self.end(now)?;
-            }
-            // A task waits for "다시 사용하기", paused (the owner: "사용 정지하고 다시 시작해도
-            // 원래 할 일이 뜨도록"). One the user paused stays so; one whose time is up waits
-            // for its report.
-            Some(current) => {
-                stop_paused_task = current.paused_since.is_none() && !current.time_is_up(now);
-                if stop_paused_task {
-                    self.state.update(|planner_state| {
-                        if let Some(assignment) = planner_state.assignment.as_mut() {
-                            assignment.paused_since = Some(now);
-                        }
-                    })?;
-                }
-                self.focus.watch(None).map_err(focus_error)?;
-            }
-            None => {}
-        }
-        self.state.update(|planner_state| {
-            planner_state.stopped_at = Some(now);
-            planner_state.stop_paused_task = stop_paused_task;
-        })?;
-        info!("the user stopped using the computer");
-        Ok(())
-    }
-
-    /// End a stop: the task it paused goes on, with the time stopped added to its end, and is
-    /// watched again; a task whose to-do left the list meanwhile ends. The caller holds `busy`.
-    fn end_stop(&self, now: DateTime<Utc>) -> Result<(), PlannerError> {
-        let stop_paused_task = self.state.get().stop_paused_task;
-        self.state.update(|planner_state| {
-            planner_state.stopped_at = None;
-            planner_state.stop_paused_task = false;
-        })?;
-        let Some(current) = self.state.get().assignment else {
-            return Ok(());
-        };
-        let still_open = current
-            .todo_id
-            .as_deref()
-            .is_none_or(|id| self.open_todos().iter().any(|todo| todo.id == id));
-        if !still_open {
-            return self.end(now);
-        }
-        if stop_paused_task {
-            self.go_on(now)?;
-        }
-        if let Some(current) = self.state.get().assignment {
-            self.start_focus(&current)?;
-        }
-        Ok(())
-    }
-
     /// Keep what the user wrote about their situation for the picks from now on (the owner's
     /// request: "할일 받을 때 현재 상황을 설명할 수 있도록 칸을 만들어줘", "주관식으로").
     pub fn set_situation(&self, situation: &str) -> Result<(), PlannerError> {
         let situation: String = situation.trim().chars().take(MAX_NOTES_CHARS).collect();
         self.state
             .update(|planner_state| planner_state.situation = situation)?;
-        Ok(())
-    }
-
-    /// "다시 사용하기": the stop ends, and the task it held goes on ([`Self::end_stop`]).
-    /// Without one, the next task comes when the user asks for it.
-    pub fn resume_use(&self, now: DateTime<Utc>) -> Result<(), PlannerError> {
-        let _busy = self.busy.lock();
-        self.end_stop(now)?;
-        info!("the user uses the computer again");
         Ok(())
     }
 
@@ -549,7 +464,6 @@ impl TaskPlanner {
         }
         PlannerStatus {
             extension_offer: self.extension_offer(now),
-            stopped_at: state.stopped_at,
             situation: state.situation.clone(),
             active: self.is_active_with(&open_todos),
             assignment: state.assignment.clone(),
@@ -733,9 +647,7 @@ impl TaskPlanner {
             planner_state.task_notes.insert(todo_id.to_string(), notes);
         })?;
         // The window check reads the steps left of the current to-do: new ones count at once.
-        if !self.stopped() {
-            self.follow_assignment()?;
-        }
+        self.follow_assignment()?;
         Ok(())
     }
 
@@ -744,9 +656,6 @@ impl TaskPlanner {
     /// planner still assigns one to-do at a time.
     pub fn plan_week(&self, now: DateTime<Utc>) -> Result<WeekPlan, PlannerError> {
         let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
-        if self.stopped() {
-            return Err(PlannerError::Stopped);
-        }
         let open = self.open_todos();
         if open.is_empty() {
             return Err(PlannerError::NotActive);
@@ -843,9 +752,6 @@ impl TaskPlanner {
             return self.todo_change_with(now, change, reason, via, TodoChangeReview::ByTheAi);
         }
         let _busy = self.busy.try_lock().ok_or(PlannerError::Busy)?;
-        if self.stopped() {
-            return Err(PlannerError::Stopped);
-        }
         let reason = reason
             .trim()
             .chars()
@@ -1519,9 +1425,7 @@ impl TaskPlanner {
             }
         })?;
         // The window check follows: the new to-do, or the to-do's fewer steps.
-        if !self.stopped() {
-            self.follow_assignment()?;
-        }
+        self.follow_assignment()?;
         Ok(())
     }
 
@@ -1621,10 +1525,6 @@ impl TaskPlanner {
     /// one the AI picks. A task whose time is up must be reported first.
     pub fn assign(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
         let _busy = self.busy.lock();
-        // Asking for a task ends a stop (and goes on with the task it held).
-        if self.stopped() {
-            self.end_stop(now)?;
-        }
         if let Some(appointment) = self.keep_appointments(now)? {
             self.start_focus(&appointment)?;
             return Ok(appointment);
@@ -1661,20 +1561,13 @@ impl TaskPlanner {
         if self.state.changed_on_disk() {
             self.state.reload()?;
         }
-        // Stopped (here or on another device): nothing is watched; the task waits, paused.
-        if self.stopped() {
-            if self.focus.watched().is_some() {
-                self.focus.watch(None).map_err(focus_error)?;
-            }
-            return Ok(());
-        }
         self.follow_assignment()?;
         self.keep_appointments(now)?;
         Ok(())
     }
 
     /// Make the focus check watch the current assignment: after logon, when another device
-    /// (through sync) assigned, ended or stopped a task, and when the current to-do's steps
+    /// (through sync) assigned, ended or paused a task, and when the current to-do's steps
     /// changed.
     fn follow_assignment(&self) -> Result<(), PlannerError> {
         let watched = self.focus.watched();

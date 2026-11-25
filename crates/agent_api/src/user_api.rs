@@ -14,8 +14,6 @@
 //! | `status`         | `{}`                                     | [`Status`] |
 //! | `start_session`  | `{ "task": "..." }` (planner inactive)   | [`Status`] |
 //! | `stop_session`   | `{}` (planner inactive)                  | [`Status`] |
-//! | `stop_use`       | `{}` ("사용 중지": pause the task, lock every app, stop all but blocking) | [`Status`] |
-//! | `resume_use`     | `{}` ("다시 사용하기": go on with the task the stop held) | [`Status`] |
 //! | `assign`         | `{ situation? }` (planner active)        | [`Status`] |
 //! | `install_program` | `{ path, kind }` (a signed installer, run by the service) | `system_care::CareStatus` |
 //! | `uninstall_program` | `{ program }` (a winget id from the service's list, uninstalled by the service) | `system_care::CareStatus` |
@@ -364,8 +362,8 @@ fn status(api: &AgentApi) -> Status {
 }
 
 /// The lockdown in force now (see [`machine::lockdown`]): a broken AI connection, no network
-/// for a few minutes, a sync login not made yet, a paused task, to-dos with none assigned, or a
-/// stop ("사용 중지").
+/// for a few minutes, a sync login not made yet, a paused task, a task whose time is up, or
+/// to-dos with none assigned.
 pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<machine::lockdown::Lockdown> {
     let unreachable = ai_client::connection::unreachable();
     machine::lockdown::lockdown(
@@ -375,9 +373,7 @@ pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<machine::lockdown::
             .as_ref()
             .map(|unreachable| (Utc::now() - unreachable.since, unreachable.detail.as_str())),
         planner.and_then(|planner| {
-            if planner.stopped() {
-                Some(machine::lockdown::TaskLock::Stopped)
-            } else if machine::login::required(&machine::data_dir()) {
+            if machine::login::required(&machine::data_dir()) {
                 Some(machine::lockdown::TaskLock::LoginRequired)
             } else if planner.paused() {
                 Some(machine::lockdown::TaskLock::Paused)
@@ -818,20 +814,8 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             tracing::info!("{user} logged out");
             machine::login::changed();
         }
-        "stop_use" => {
-            let planner = api.planner.as_ref().ok_or("no task planner")?;
-            planner
-                .stop_use(Utc::now())
-                .map_err(|error| error.to_string())?;
-        }
-        "resume_use" => {
-            let planner = api.planner.as_ref().ok_or("no task planner")?;
-            planner
-                .resume_use(Utc::now())
-                .map_err(|error| error.to_string())?;
-        }
-        // The user pauses the current task and goes on with it (no AI: the window checks go
-        // on during a pause, so it frees nothing).
+        // The user pauses the current task and goes on with it (no AI: in strict mode the Focus
+        // app covers the screen during a pause, so it frees nothing).
         "pause_task" => {
             let planner = api.planner.as_ref().ok_or("no task planner")?;
             planner

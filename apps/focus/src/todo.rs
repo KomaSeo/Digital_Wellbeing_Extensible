@@ -82,8 +82,6 @@ pub struct TodoUiState {
     appointment_form_open: bool,
     /// The appointment the form edits; `None` = adding.
     appointment_editing: Option<String>,
-    /// "사용 중지" was pressed once: ask to confirm.
-    confirm_stop: bool,
     /// Why the current to-do went over its estimate, chosen with "다 못 했다".
     miss_cause: Option<MissCause>,
     /// With "그 밖의 이유": how many more minutes it needs (0: not given).
@@ -299,26 +297,13 @@ impl FocusApp {
         }
     }
 
-    /// The Work tab ("일하기"): the task the AI picked, its notes, asking for a change, and
-    /// "사용 중지". The list itself is managed in the To-do tab (the owner's request: "할 일
-    /// 목록 관리와 일 하기를 분리").
+    /// The Work tab ("일하기"): the task the AI picked, its notes and asking for a change. The
+    /// list itself is managed in the To-do tab (the owner's request: "할 일 목록 관리와 일 하기를
+    /// 분리").
     pub(crate) fn work_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
         self.planner_header_ui(ui, status);
         let planner = status.planner.clone();
-        if let Some(stopped_at) = planner.as_ref().and_then(|planner| planner.stopped_at) {
-            let held = planner
-                .as_ref()
-                .and_then(|planner| planner.assignment.as_ref())
-                .map(|assignment| assignment.task.clone());
-            self.stopped_ui(ui, stopped_at, held.as_deref());
-            return;
-        }
-        crate::style::section_with(ui, "데일리 웰빙", |ui| {
-            if planner.is_some() {
-                self.stop_button_ui(ui);
-            }
-        });
-        self.stop_confirm_ui(ui);
+        crate::style::section(ui, "데일리 웰빙");
         self.split_window_ui(ui.ctx());
         // An appointment runs even when the list is empty.
         match planner
@@ -348,106 +333,10 @@ impl FocusApp {
             ui.label("할 일 플래너에 연결하는 중…");
             return;
         };
-        if planner.stopped_at.is_some() {
-            ui.label("사용을 멈춘 동안에는 할 일 목록을 바꿀 수 없습니다.");
-            if ui.link("일하기 탭에서 다시 사용하기").clicked() {
-                self.tab = Tab::Work;
-            }
-            return;
-        }
         self.split_window_ui(ui.ctx());
         self.list_ui(ui, &planner);
         self.appointments_ui(ui, &planner);
         self.waiting_ui(ui, &planner);
-    }
-
-    /// "사용 중지": asks once to confirm, then holds the task (paused) and, in strict mode,
-    /// locks every app.
-    fn stop_button_ui(&mut self, ui: &mut egui::Ui) {
-        let idle = !self.pending.load(Ordering::SeqCst);
-        let locks = !self.todo_ui.without_review;
-        if !self.todo_ui.confirm_stop
-            && ui
-                .add_enabled(idle, egui::Button::new("사용 중지"))
-                .on_hover_text(if locks {
-                    "컴퓨터를 그만 쓸 때 누릅니다. 모든 앱과 웹사이트가 잠기고, 차단 말고는 아무것도 \
-                     하지 않습니다(AI도 부르지 않습니다)."
-                } else {
-                    "컴퓨터를 그만 쓸 때 누릅니다. 지금 할 일은 멈춰 두고 AI도 부르지 않습니다. 엄격 \
-                     모드가 아니므로 앱과 웹사이트는 잠그지 않습니다."
-                })
-                .clicked()
-        {
-            self.todo_ui.confirm_stop = true;
-        }
-    }
-
-    /// The question after "사용 중지", on lines of its own under the heading (in the heading's
-    /// row it ran off the window and hid its buttons).
-    fn stop_confirm_ui(&mut self, ui: &mut egui::Ui) {
-        if !self.todo_ui.confirm_stop {
-            return;
-        }
-        let locks = !self.todo_ui.without_review;
-        ui.colored_label(
-            RED,
-            if locks {
-                "지금 할 일은 멈춰 두었다가 다시 사용하면 남은 시간으로 이어집니다. 다시 사용하기 \
-                 전까지 이 앱이 화면을 덮습니다. 다른 앱은 닫지 않습니다."
-            } else {
-                "지금 할 일은 멈춰 두었다가 다시 사용하면 남은 시간으로 이어집니다. 엄격 모드가 \
-                 아니므로 앱과 웹사이트는 잠그지 않습니다."
-            },
-        );
-        ui.horizontal(|ui| {
-            if ui.button("멈추기").clicked() {
-                self.todo_ui.confirm_stop = false;
-                self.send("stop_use", json!({}));
-            }
-            if ui.button("취소").clicked() {
-                self.todo_ui.confirm_stop = false;
-            }
-        });
-    }
-
-    /// After "사용 중지": everything is locked until "다시 사용하기", which goes on with the
-    /// task the stop held (`held`, its sentence), if there was one.
-    fn stopped_ui(&mut self, ui: &mut egui::Ui, stopped_at: DateTime<Utc>, held: Option<&str>) {
-        let idle = !self.pending.load(Ordering::SeqCst);
-        crate::style::section(ui, "사용 중지");
-        ui.label(format!(
-            "{}에 사용을 멈췄습니다. {} AI 검사, 할 일 고르기, 약속 시작도 멈춥니다.",
-            stopped_at.with_timezone(&Local).format("%m-%d %H:%M"),
-            if self.todo_ui.without_review {
-                "엄격 모드가 아니므로 앱과 웹사이트는 잠그지 않습니다."
-            } else {
-                "이 앱이 화면을 덮고 있고(다른 앱은 닫지 않습니다), 차단 말고는 아무것도 하지 \
-                 않습니다."
-            }
-        ));
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    idle,
-                    egui::Button::new(egui::RichText::new("다시 사용하기").strong()),
-                )
-                .clicked()
-            {
-                self.send("resume_use", json!({}));
-            }
-            if !idle {
-                ui.spinner();
-            }
-        });
-        match held {
-            Some(task) => {
-                ui.label(format!("멈춰 둔 할 일: {task}"));
-                ui.small("다시 사용하면 이 할 일이 남은 시간으로 이어집니다.");
-            }
-            None => {
-                ui.small("다시 사용하면 \"할 일 받기\"를 눌러 다음 할 일을 받습니다.");
-            }
-        }
     }
 
     /// Nothing on the to-do list: the AI has nothing to pick from. The user adds to-dos; they

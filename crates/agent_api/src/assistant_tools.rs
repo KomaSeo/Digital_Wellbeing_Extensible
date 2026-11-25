@@ -561,7 +561,10 @@ pub fn summary(status: &Status) -> Value {
             "repeat_weekdays": appointment.repeat_weekdays,
         })).collect::<Vec<_>>()),
         "report_due": planner.is_some_and(|planner| planner.report_due),
-        "stopped_using": planner.is_some_and(|planner| planner.stopped_at.is_some()),
+        "paused": planner.is_some_and(|planner| planner
+            .assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.paused_since.is_some())),
         "all_apps_locked": status.lockdown.as_ref().map(|lockdown| &lockdown.reason),
         "open_todos": planner.map(|planner| {
             let outline = task_planner::outline::Outline::new(&planner.open_todos);

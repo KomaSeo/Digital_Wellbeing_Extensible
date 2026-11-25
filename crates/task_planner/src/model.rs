@@ -969,7 +969,9 @@ impl MissCause {
 /// Responsibility: Hold the planner's runtime record (planner_state.json): assignment, finished
 /// to-dos, request log.
 ///
-/// Runtime state (`planner_state.json`), written by the agent only.
+/// Runtime state (`planner_state.json`), written by the agent only. Files from versions with
+/// "사용 중지" (up to rc.95) may hold `stopped_at` and `stop_paused_task`; they are ignored, so a
+/// task such a stop held stays paused until the user goes on with it ("다시 시작").
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlannerState {
@@ -997,14 +999,6 @@ pub struct PlannerState {
     /// Appointments the user ended early ("done"): they do not start again.
     #[serde(default)]
     pub ended_appointments: BTreeSet<String>,
-    /// The user pressed "사용 중지" (stop using the computer): every app is locked and
-    /// nothing runs but the blocking, until they press "다시 사용하기".
-    #[serde(default)]
-    pub stopped_at: Option<DateTime<Utc>>,
-    /// The stop paused the current task (it was running): "다시 사용하기" goes on with it,
-    /// and the time stopped is added to its end. A task the user had paused stays paused.
-    #[serde(default)]
-    pub stop_paused_task: bool,
     /// Approved extensions of appointments: the new end, by appointment id.
     #[serde(default)]
     pub appointment_extensions: BTreeMap<String, DateTime<Utc>>,
@@ -1093,9 +1087,6 @@ pub struct PlannerStatus {
     /// Appointments that have not ended, soonest first.
     #[serde(default)]
     pub appointments: Vec<Appointment>,
-    /// The user stopped using the computer ("사용 중지") at this time.
-    #[serde(default)]
-    pub stopped_at: Option<DateTime<Utc>>,
     /// An appointment that just ended (within the last half hour) and may be extended.
     #[serde(default)]
     pub extension_offer: Option<ExtensionOffer>,

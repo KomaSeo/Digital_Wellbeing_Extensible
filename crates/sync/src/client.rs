@@ -115,7 +115,7 @@ pub struct SyncReport {
 pub fn atomic_keys(document_name: &str) -> &'static [&'static str] {
     match document_name {
         // One device's task with the other's end time would be a task nobody chose.
-        "planner_state.json" => &["assignment", "stopped_at", "week_plan"],
+        "planner_state.json" => &["assignment", "week_plan"],
         "settings_protection.json" => &["protected_since"],
         _ => &[],
     }

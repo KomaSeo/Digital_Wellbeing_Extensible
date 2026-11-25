@@ -138,12 +138,7 @@ fn run_agent(session: u32) -> anyhow::Result<()> {
         }),
     )));
     let probe_store = ai_store.clone();
-    let probe_planner = Arc::clone(&planner_cell);
-    thread::spawn(move || {
-        connection_probe_loop(probe_store, move || {
-            probe_planner.get().is_some_and(|planner| planner.stopped())
-        })
-    });
+    thread::spawn(move || connection_probe_loop(probe_store));
 
     let enforce = enforcer.start_background(Duration::from_millis(800));
     let _monitor = monitor.start_background();
@@ -207,15 +202,10 @@ fn planner_loop(planner: Arc<TaskPlanner>) {
 /// (the Models API, free) every few minutes, at once when either changes, and every 30
 /// seconds while the connection is broken or the API is out of reach (no network). An account without credit is checked with the
 /// smallest message, since the Models API answers without credit.
-/// While `stopped` ("사용 중지") nothing is checked: only the blocking runs.
-fn connection_probe_loop(ai_store: AiFocusStore, stopped: impl Fn() -> bool) {
+fn connection_probe_loop(ai_store: AiFocusStore) {
     let mut last_checked: Option<(String, String)> = None;
     let mut next_check = Instant::now();
     loop {
-        if stopped() {
-            thread::sleep(RELOAD_INTERVAL);
-            continue;
-        }
         let config = ai_store.get();
         let key = config.resolve_api_key();
         let checked = (key.clone().unwrap_or_default(), config.model.clone());

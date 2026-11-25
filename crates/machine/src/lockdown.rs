@@ -47,8 +47,6 @@ pub enum LockdownCause {
     Offline,
     /// There are to-dos but none is assigned: the user asks for their task ("할 일 받기").
     NoTask,
-    /// The user pressed "사용 중지".
-    Stopped,
     /// This Windows account has not logged in to the owner's sync login yet.
     LoginRequired,
     /// The user paused the current task ("일시 정지").
@@ -62,10 +60,6 @@ pub enum LockdownCause {
 pub enum TaskLock {
     /// There are to-dos but none is assigned.
     WaitingForTask,
-    /// The user stopped using the computer ("사용 중지"). Locks only in strict mode (once the
-    /// settings are protected), like every other lock: the owner asked that it lock nothing
-    /// outside strict mode.
-    Stopped,
     /// The PC syncs and has logins, and this Windows account has not logged in
     /// (`crate::login`).
     LoginRequired,
@@ -126,16 +120,6 @@ pub fn lockdown(
     offline: Option<(chrono::Duration, &str)>,
     task_lock: Option<TaskLock>,
 ) -> Option<Lockdown> {
-    if protected && task_lock == Some(TaskLock::Stopped) {
-        return Some(Lockdown {
-            cause: LockdownCause::Stopped,
-            reason: "사용을 멈췄습니다. 다시 쓰려면 일하기 탭에서 \"다시 사용하기\"를 누르세요"
-                .to_string(),
-            fix_now: Vec::new(),
-            browsers_allowed: false,
-            covers_screen: true,
-        });
-    }
     if !protected {
         return None;
     }
@@ -188,7 +172,6 @@ pub fn lockdown(
             LockdownCause::NoTask,
             "지금 할 일이 없습니다. 준비되면 \"할 일 받기\"를 누르세요".to_string(),
         ),
-        TaskLock::Stopped => unreachable!("handled first"),
         TaskLock::LoginRequired => (
             LockdownCause::LoginRequired,
             "이 PC는 여러 기기 동기화를 씁니다. 쓰려면 먼저 로그인하세요(Focus 앱 맨 위)"
@@ -356,7 +339,7 @@ impl BlockRule for LockdownRule {
          no answer for a few minutes (no network), every app but the browsers (Claude pages only) \
          and Windows' own programs (the Settings app among them) is closed, Claude Desktop \
          included. In the other locks (no task, \
-         stopped, login) the Focus app covers the screen and only a program kept in front of it \
+         paused, time up, login) the Focus app covers the screen and only a program kept in front of it \
          is closed (every program, when the Focus app is not running)."
     }
 
@@ -463,11 +446,6 @@ mod tests {
             Some(TaskLock::LoginRequired)
         )
         .is_none());
-        // Stopping locks in strict mode, before a broken connection; outside it, nothing.
-        let stopped = lockdown(true, &broken, None, Some(TaskLock::Stopped)).unwrap();
-        assert_eq!(stopped.cause, LockdownCause::Stopped);
-        assert!(!stopped.browsers_allowed);
-        assert!(lockdown(false, &broken, None, Some(TaskLock::Stopped)).is_none());
         // A paused task covers the screen in strict mode, like waiting for a task.
         let paused = lockdown(true, &Connection::Working, None, Some(TaskLock::Paused)).unwrap();
         assert_eq!(paused.cause, LockdownCause::Paused);
@@ -493,7 +471,7 @@ mod tests {
         // (the network) stay usable.
         assert!(!offline.covers_screen && offline.browsers_allowed);
         assert!(offline.fix_now.is_empty());
-        // It comes before the locks that cover the screen, after a broken key and a stop.
+        // It comes before the locks that cover the screen, after a broken key.
         let waiting = lockdown(
             true,
             &Connection::Working,
@@ -509,12 +487,6 @@ mod tests {
             lockdown(true, &broken, long, None).unwrap().cause,
             LockdownCause::Connection { .. }
         ));
-        assert_eq!(
-            lockdown(true, &Connection::Working, long, Some(TaskLock::Stopped))
-                .unwrap()
-                .cause,
-            LockdownCause::Stopped
-        );
         // Windows' own programs stay: the Settings app among them.
         assert!(LOCKDOWN_KEEPS.contains(&"systemsettings.exe"));
     }
