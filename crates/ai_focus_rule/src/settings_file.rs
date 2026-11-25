@@ -65,6 +65,11 @@ fn direction(path: &[&str], edit: &Edit, in_force: &Value) -> Direction {
         // 금지 하지 않도록 해줄래? 어차피 사용은 AI가 감시하니까"): an installed program is
         // still judged by the window checks.
         ["updatable_programs"] => Neutral,
+        // Takes effect at once (the owner: "API Key도 프로그램 업데이트와 마찬가지로 바로 적용되도록
+        // 만들어줘"): an expiring key must not leave the computer locked for days. A key that
+        // does not work locks everything anyway (`machine::lockdown`), so a new key frees
+        // nothing.
+        ["api_key"] => Neutral,
         ["revoked_grants"] | ["always_blocked_sites"] => adding_is_stricter(edit),
         // An id no longer blocked is dropped from the list: that lifts nothing.
         ["unblocked"] => removing_is_stricter(edit),

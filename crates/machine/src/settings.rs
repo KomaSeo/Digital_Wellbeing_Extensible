@@ -1522,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn during_a_lockdown_a_new_key_takes_effect_at_once() {
+    fn a_new_key_takes_effect_at_once_in_strict_mode() {
         let data_directory = temp_dir("lockdown_key");
         let now = Utc::now();
         put(
@@ -1551,17 +1551,20 @@ mod tests {
         // The model is not part of the fix: still scheduled.
         assert!(outcome.scheduled.is_some());
         assert_eq!(in_force(&data_directory, "ai_focus")["api_key"], "new");
-        // Without a lockdown the key is scheduled as usual.
+        // Without a lockdown too (the owner: "API Key도 프로그램 업데이트와 마찬가지로 바로
+        // 적용되도록 만들어줘"); the model is still scheduled.
         let outcome = put(
             &data_directory,
             now,
             "ai_focus",
-            &json!({ "api_key": "third" }),
+            &json!({ "api_key": "third", "model": "cheaper-model" }),
             "",
             &[],
         )
         .unwrap();
-        assert!(outcome.applied.is_empty(), "{outcome:?}");
+        assert_eq!(outcome.applied, ["api_key = third"], "{outcome:?}");
+        assert!(outcome.scheduled.is_some());
+        assert_eq!(in_force(&data_directory, "ai_focus")["api_key"], "third");
     }
 
     #[test]
@@ -2187,7 +2190,7 @@ mod direction_tests {
             ("ai_focus", "unblocked", json!("+b2"), Looser),
             ("ai_focus", "unblocked", json!("-b1"), Stricter),
             ("ai_focus", "model", json!("cheap"), Looser),
-            ("ai_focus", "api_key", json!("other"), Looser),
+            ("ai_focus", "api_key", json!("other"), Neutral),
             ("ai_focus", "browsers", json!("+x.exe"), Looser),
             ("ai_focus", "updated_at", json!("u"), Neutral),
             ("planner", "enabled", json!(true), Stricter),
