@@ -354,9 +354,9 @@ impl FocusApp {
     fn stop_button_ui(&mut self, ui: &mut egui::Ui) {
         let idle = !self.pending.load(Ordering::SeqCst);
         let locks = !self.todo_ui.without_review;
-        if !self.todo_ui.confirm_stop {
-            if ui
-                .add_enabled(idle && !self.todo_ui.confirm_stop, egui::Button::new("사용 중지"))
+        if !self.todo_ui.confirm_stop
+            && ui
+                .add_enabled(idle, egui::Button::new("사용 중지"))
                 .on_hover_text(if locks {
                     "컴퓨터를 그만 쓸 때 누릅니다. 모든 앱과 웹사이트가 잠기고, 차단 말고는 아무것도 \
                      하지 않습니다(AI도 부르지 않습니다)."
@@ -365,9 +365,8 @@ impl FocusApp {
                      모드가 아니므로 앱과 웹사이트는 잠그지 않습니다."
                 })
                 .clicked()
-            {
-                self.todo_ui.confirm_stop = true;
-            }
+        {
+            self.todo_ui.confirm_stop = true;
         }
     }
 
