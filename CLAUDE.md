@@ -14,6 +14,8 @@
 
 - User-facing docs (`docs/`, `installer/RELEASE_NOTES.md`) are in Korean, in complete sentences with explicit
   subjects and objects. Define every term before using it.
+- The README has two copies: `README.md` in English (what GitHub shows) and `README.ko.md` in Korean. Change both
+  together, and keep the "English | 한국어" links at the top of each.
 
 ## Design decisions
 
