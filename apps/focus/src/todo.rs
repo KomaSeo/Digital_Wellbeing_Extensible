@@ -77,6 +77,10 @@ pub struct TodoUiState {
     /// The notes as the agent had them when they were loaded or last saved: when the agent's
     /// change (a split took steps away) and nothing is being edited, they are loaded again.
     notes_base: TaskNotes,
+    /// The notes last sent to the agent and when, until the agent's copy shows them: meanwhile
+    /// its older copy is not an agent's change (it used to bring the old steps back for up to
+    /// two status polls, so a ticked step looked unticked for seconds).
+    notes_sent: Option<(TaskNotes, std::time::Instant)>,
     new_step: String,
     appointment_form: AppointmentForm,
     appointment_form_open: bool,
@@ -727,8 +731,18 @@ impl FocusApp {
     fn notes_ui(&mut self, ui: &mut egui::Ui, todo_id: &str, planner: &PlannerStatus) {
         let at_the_agent = planner.task_notes.get(todo_id).cloned().unwrap_or_default();
         let other_to_do = self.todo_ui.notes_for.as_deref() != Some(todo_id);
+        if other_to_do
+            || self
+                .todo_ui
+                .notes_sent
+                .as_ref()
+                .is_some_and(|(sent, at)| save_arrived(sent, *at, &at_the_agent))
+        {
+            self.todo_ui.notes_sent = None;
+        }
         // Changed by the agent (a split), with nothing typed meanwhile: shown as it is now.
-        let changed_there = at_the_agent != self.todo_ui.notes_base
+        let changed_there = self.todo_ui.notes_sent.is_none()
+            && at_the_agent != self.todo_ui.notes_base
             && self.todo_ui.notes == self.todo_ui.notes_base;
         if other_to_do || changed_there {
             if other_to_do {
@@ -945,19 +959,25 @@ impl FocusApp {
         }
         if save {
             self.todo_ui.notes_base = self.todo_ui.notes.clone();
+            self.todo_ui.notes_sent = Some((self.todo_ui.notes.clone(), std::time::Instant::now()));
             // Off the UI thread and outside the one-request-at-a-time rule: notes are small
-            // and harmless.
-            let (session, todo_id, notes) = (
+            // and harmless. The agent's answer is shown at once, not at the next status poll.
+            let (session, todo_id, notes, shared, context) = (
                 self.session,
                 todo_id.to_string(),
                 self.todo_ui.notes.clone(),
+                Arc::clone(&self.shared),
+                self.context.clone(),
             );
             thread::spawn(move || {
-                let _ = call(
+                if let Ok(status) = call(
                     session,
                     "task_notes_put",
                     json!({ "todo_id": todo_id, "notes": notes }),
-                );
+                ) {
+                    shared.lock().status = Some(Ok(status));
+                    context.request_repaint();
+                }
             });
         }
     }
@@ -2651,6 +2671,16 @@ fn current_time(planner: &PlannerStatus, todo: &TodoItem) -> TodoTime {
     )
 }
 
+/// How long the notes sent to the agent are kept on screen over its older copy: long enough for
+/// any save to arrive, short enough that a save that failed shows the agent's copy again.
+const NOTES_SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether the agent's copy of the notes may be shown again after `sent` was saved at `at`:
+/// the agent has them now, or the save is taken for lost.
+fn save_arrived(sent: &TaskNotes, at: std::time::Instant, at_the_agent: &TaskNotes) -> bool {
+    sent == at_the_agent || at.elapsed() > NOTES_SAVE_WAIT
+}
+
 fn minutes_text(minutes: i64) -> String {
     let minutes = minutes.max(0);
     match (minutes / 60, minutes % 60) {
@@ -2694,4 +2724,49 @@ fn until_not_busy(
         }
     }
     answer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn notes_with(steps: &[(&str, bool)]) -> TaskNotes {
+        TaskNotes {
+            text: String::new(),
+            steps: steps
+                .iter()
+                .map(|(text, done)| TaskStep {
+                    text: text.to_string(),
+                    done: *done,
+                    minutes: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_save_on_its_way_keeps_the_edit_over_the_agents_older_copy() {
+        let ticked = notes_with(&[("Write", true)]);
+        let older = notes_with(&[("Write", false)]);
+        assert!(!save_arrived(&ticked, std::time::Instant::now(), &older));
+    }
+
+    #[test]
+    fn the_agents_copy_shows_again_once_it_has_the_save() {
+        let ticked = notes_with(&[("Write", true)]);
+        assert!(save_arrived(
+            &ticked,
+            std::time::Instant::now(),
+            &ticked.clone()
+        ));
+    }
+
+    #[test]
+    fn a_lost_save_gives_way_to_the_agents_copy_after_the_wait() {
+        let ticked = notes_with(&[("Write", true)]);
+        let older = notes_with(&[("Write", false)]);
+        let long_ago =
+            std::time::Instant::now() - NOTES_SAVE_WAIT - std::time::Duration::from_secs(1);
+        assert!(save_arrived(&ticked, long_ago, &older));
+    }
 }
