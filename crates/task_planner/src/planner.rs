@@ -1679,9 +1679,9 @@ impl TaskPlanner {
     fn follow_assignment(&self) -> Result<(), PlannerError> {
         let watched = self.focus.watched();
         match self.state.get().assignment {
-            // Also when only the steps changed: the check reads them.
+            // Also when only the steps changed (the check reads them), and off while paused.
             Some(current) => {
-                if watched.as_ref() != Some(&self.watched_task(&current)) {
+                if watched != self.wanted_watch(&current) {
                     self.start_focus(&current)?;
                 }
             }
@@ -1721,10 +1721,14 @@ impl TaskPlanner {
             }
         })?;
         info!("the user paused \"{}\"", current.task);
-        self.state
+        let paused = self
+            .state
             .get()
             .assignment
-            .ok_or(PlannerError::NothingAssigned)
+            .ok_or(PlannerError::NothingAssigned)?;
+        // No window checks while paused.
+        self.start_focus(&paused)?;
+        Ok(paused)
     }
 
     /// The paused task goes on: the pause is logged and added to the end.
@@ -1755,10 +1759,14 @@ impl TaskPlanner {
             }
         })?;
         info!("the user went on with \"{}\"", current.task);
-        self.state
+        let going_on = self
+            .state
             .get()
             .assignment
-            .ok_or(PlannerError::NothingAssigned)
+            .ok_or(PlannerError::NothingAssigned)?;
+        // The window checks start again.
+        self.start_focus(&going_on)?;
+        Ok(going_on)
     }
 
     /// What the user did between `from` and `to`, in order: each assignment as one stretch,
@@ -2522,9 +2530,20 @@ impl TaskPlanner {
 
     fn start_focus(&self, assignment: &Assignment) -> Result<(), PlannerError> {
         self.focus
-            .watch(Some(self.watched_task(assignment)))
+            .watch(self.wanted_watch(assignment))
             .map_err(focus_error)?;
         Ok(())
+    }
+
+    /// What the focus check should watch during `assignment`: nothing while it is paused (the
+    /// owner: "두 모드 모두 일시 정지 동안 창 검사 멈추자"; in strict mode the Focus app covers
+    /// the screen meanwhile, and outside it the user may do something else), otherwise
+    /// [`Self::watched_task`]. The blocks made for it stay.
+    fn wanted_watch(&self, assignment: &Assignment) -> Option<WatchedTask> {
+        assignment
+            .paused_since
+            .is_none()
+            .then(|| self.watched_task(assignment))
     }
 
     /// What the focus check judges windows against during `assignment`: the task, and for a

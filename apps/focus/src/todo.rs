@@ -479,10 +479,11 @@ impl FocusApp {
     /// What the planner assigned, its progress, notes and steps, and asking for a change.
     fn now_ui(&mut self, ui: &mut egui::Ui, status: &Status, planner: &PlannerStatus) {
         let idle = !self.pending.load(Ordering::SeqCst);
+        // A paused task is shown too: the window check rests while it is paused.
         let assignment = planner
             .assignment
             .as_ref()
-            .filter(|_| status.session_active);
+            .filter(|assignment| status.session_active || assignment.paused_since.is_some());
         let Some(assignment) = assignment else {
             crate::style::notice(ui, crate::style::Tone::Information, WAITING_TEXT);
             if status.settings_protected {
@@ -621,8 +622,9 @@ impl FocusApp {
                             YELLOW,
                             format!(
                                 "{}부터 일시 정지 중입니다. 다시 시작하면 멈춘 만큼 끝나는 시각이 \
-                                 늦춰집니다. 엄격 모드에서는 일시 정지 중에 Focus 앱이 화면을 \
-                                 덮어 컴퓨터를 쓸 수 없습니다.",
+                                 늦춰집니다. 일시 정지 중에는 창 검사도 쉬고, 이미 걸린 차단은 \
+                                 남습니다. 엄격 모드에서는 일시 정지 중에 Focus 앱이 화면을 덮어 \
+                                 컴퓨터를 쓸 수 없습니다.",
                                 local_time(since)
                             ),
                         );
@@ -637,9 +639,9 @@ impl FocusApp {
                         let pause = ui
                             .add_enabled(ready, egui::Button::new("일시 정지"))
                             .on_hover_text(
-                                "할 일의 시간을 멈춥니다. 다시 시작하면 멈춘 만큼 끝나는 시각이 \
-                                 늦춰집니다. 엄격 모드에서는 일시 정지 중에 Focus 앱이 화면을 \
-                                 덮어 컴퓨터를 쓸 수 없습니다.",
+                                "할 일의 시간과 창 검사를 멈춥니다. 다시 시작하면 멈춘 만큼 끝나는 \
+                                 시각이 늦춰집니다. 엄격 모드에서는 일시 정지 중에 Focus 앱이 \
+                                 화면을 덮어 컴퓨터를 쓸 수 없습니다.",
                             );
                         if pause.clicked() {
                             self.send("pause_task", json!({}));

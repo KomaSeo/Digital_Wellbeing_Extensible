@@ -3462,3 +3462,34 @@ fn the_window_check_reads_the_steps_left_and_follows_their_changes() {
         "{watched}"
     );
 }
+
+#[test]
+fn no_window_checks_while_a_task_is_paused() {
+    let fixture = harness(true, &["a"]);
+    let now = Utc::now();
+    fixture.planner.assign(now).unwrap();
+    assert!(fixture.focus.state().session_active);
+    fixture.planner.pause(now).unwrap();
+    assert!(!fixture.focus.state().session_active);
+    // Neither the agent's round nor new steps start the checks again while paused.
+    fixture.planner.resume(now).unwrap();
+    fixture
+        .planner
+        .put_task_notes(
+            "a",
+            TaskNotes {
+                text: String::new(),
+                steps: vec![step("표 그리기", None, false)],
+            },
+        )
+        .unwrap();
+    assert!(!fixture.focus.state().session_active);
+    fixture.planner.unpause(now).unwrap();
+    let watched = fixture.focus.state();
+    assert!(watched.session_active);
+    assert!(
+        watched.task.contains("(남은 단계: 표 그리기)"),
+        "{}",
+        watched.task
+    );
+}
