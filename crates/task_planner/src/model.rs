@@ -31,6 +31,17 @@ pub struct TodoItem {
     pub priority: u8,
     #[serde(default)]
     pub estimate_minutes: Option<u32>,
+    /// The estimate was filled in by the AI (the user left it empty when adding the to-do),
+    /// not written by the user. A note for the AI and the user: such an estimate is a guess.
+    #[serde(default)]
+    pub estimate_by_ai: bool,
+    /// The estimate the to-do had first; kept when the estimate changes, to compare with the
+    /// time it really took.
+    #[serde(default)]
+    pub first_estimate_minutes: Option<u32>,
+    /// How many times the estimate changed after it was first set.
+    #[serde(default)]
+    pub estimate_changes: u32,
     /// Proposed by the user (from the Focus app or their AI assistant) and
     /// approved by the AI, rather than written by the admin.
     #[serde(default)]
@@ -76,6 +87,9 @@ impl TodoItem {
             deadline: None,
             priority: default_priority(),
             estimate_minutes: None,
+            estimate_by_ai: false,
+            first_estimate_minutes: None,
+            estimate_changes: 0,
             proposed: false,
             repeat: false,
             away_from_computer: None,
@@ -780,12 +794,16 @@ pub struct TaskNotes {
     pub steps: Vec<TaskStep>,
 }
 
-/// Responsibility: Hold one step of a to-do and whether it is done.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Responsibility: Hold one step of a to-do, whether it is done and how long it should take.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TaskStep {
     pub text: String,
     #[serde(default)]
     pub done: bool,
+    /// The user's estimate for this step. When every step left has one, their sum is how
+    /// long the to-do still needs ([`crate::time::todo_time`]).
+    #[serde(default)]
+    pub minutes: Option<u32>,
 }
 
 /// Responsibility: Hold the AI's overview of the coming week (today and the next six days):
@@ -831,12 +849,62 @@ pub struct WeekPlanTodo {
     pub minutes: u32,
 }
 
-/// Responsibility: Record that a to-do was finished.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Responsibility: Record that a to-do was finished, with its estimate and the time it took.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DoneRecord {
     pub todo_id: String,
     pub title: String,
     pub at: DateTime<Utc>,
+    /// Its estimate when it was finished, and its first estimate (records from before this
+    /// was kept: `None`).
+    #[serde(default)]
+    pub estimate_minutes: Option<u32>,
+    #[serde(default)]
+    pub first_estimate_minutes: Option<u32>,
+    /// The minutes spent on it (for a routine, on this round).
+    #[serde(default)]
+    pub spent_minutes: Option<i64>,
+    /// The group it was in.
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub routine: bool,
+}
+
+/// Responsibility: Record why a to-do took longer than its estimate, as the user said when
+/// they reported it unfinished (the owner: "왜 내가 예상된 시간을 넘어갔을까? 그 이유는 1) 내가
+/// 시간을 예상할 수 있을 정도로 단계를 세분화해놓지 않았거나 2) 내가 시간을 예상할 수 있을 정도로
+/// 이 일에 대해 잘 모른다").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EstimateMiss {
+    pub at: DateTime<Utc>,
+    pub todo_id: String,
+    pub title: String,
+    pub estimate_minutes: u32,
+    pub spent_minutes: i64,
+    pub cause: MissCause,
+}
+
+/// Responsibility: Name why a to-do went over its estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissCause {
+    /// Its steps were not split finely enough to estimate.
+    NotSplit,
+    /// The user did not know the work well enough.
+    NotKnown,
+    /// Anything else (interruptions, the work grew).
+    Other,
+}
+
+impl MissCause {
+    pub fn korean(self) -> &'static str {
+        match self {
+            MissCause::NotSplit => "단계를 충분히 나누지 않았다",
+            MissCause::NotKnown => "이 일에 대해 잘 몰랐다",
+            MissCause::Other => "그 밖의 이유",
+        }
+    }
 }
 
 /// Responsibility: Hold the planner's runtime record (planner_state.json): assignment, finished
@@ -889,6 +957,9 @@ pub struct PlannerState {
     /// What the user waits for from others (a reply, a delivery); never picked as a task.
     #[serde(default)]
     pub waiting: Vec<WaitingItem>,
+    /// Why to-dos went over their estimates, oldest first, capped.
+    #[serde(default)]
+    pub estimate_misses: VecDeque<EstimateMiss>,
 }
 
 /// Responsibility: Hold one thing the user waits for from others, until it arrives or the
@@ -950,6 +1021,16 @@ pub struct PlannerStatus {
     /// Minutes spent per open to-do: in total, or since it was last finished for a routine.
     #[serde(default)]
     pub minutes_this_round: BTreeMap<String, i64>,
+    /// Minutes spent in the last seven days per to-do id: the pace for the deadline risk
+    /// ([`crate::time::deadline_risk`]).
+    #[serde(default)]
+    pub minutes_last_week: BTreeMap<String, i64>,
+    /// How finished to-dos held to their first estimates, all together and per group
+    /// ([`crate::time::estimate_accuracy`]).
+    #[serde(default)]
+    pub estimate_accuracy: Option<crate::time::EstimateAccuracy>,
+    #[serde(default)]
+    pub group_accuracy: BTreeMap<String, crate::time::EstimateAccuracy>,
     /// Appointments that have not ended, soonest first.
     #[serde(default)]
     pub appointments: Vec<Appointment>,

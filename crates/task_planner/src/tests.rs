@@ -621,6 +621,9 @@ fn an_approved_addition_is_completed_by_the_ai_and_joins_the_list() {
     assert_eq!(after.constraints, "AI: needs a computer");
     assert_eq!(after.deadline.unwrap().to_string(), "2030-01-01");
     assert_eq!(after.estimate_minutes, Some(30));
+    // The user left the estimate empty: the AI's guess is marked as such.
+    assert!(after.estimate_by_ai);
+    assert_eq!(after.first_estimate_minutes, Some(30));
     assert!(after.proposed);
 
     // The agent applies it to planner.json.
@@ -962,6 +965,7 @@ fn a_question_starts_with_the_cached_rules_and_list_and_ends_with_what_changes()
         history: "",
         repick_reason: None,
         situation: "카페, 노트북만 있음",
+        time: &crate::time::TimeFacts::default(),
     });
     assert!(pick.contains("카페, 노트북만 있음"), "{pick}");
     // The list is in the cached start only.
@@ -1165,10 +1169,12 @@ fn notes_are_saved_for_open_todos_and_reach_the_done_review() {
             TaskStep {
                 text: "write intro".into(),
                 done: true,
+                minutes: Some(0),
             },
             TaskStep {
                 text: "  ".into(),
                 done: false,
+                minutes: Some(30),
             },
         ],
     };
@@ -1179,6 +1185,7 @@ fn notes_are_saved_for_open_todos_and_reach_the_done_review() {
         .is_err());
     let saved = &fixture.planner.status().task_notes["a"];
     assert_eq!(saved.steps.len(), 1, "empty steps are dropped");
+    assert_eq!(saved.steps[0].minutes, None, "0 minutes is no estimate");
     let state = fixture.planner.state_store_for_tests().get();
     let text = crate::advisor::review_text(&ReviewRequest {
         instructions: crate::advisor::REVIEW_PROMPT,
@@ -3084,4 +3091,91 @@ fn drawing_the_order_needs_no_ai() {
         "{unknown:?}"
     );
     assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_new_estimate_needs_no_review_and_keeps_the_first_one() {
+    let fixture = harness(true, &["a"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.todos[0].estimate_minutes = Some(60))
+        .unwrap();
+    // An AI that would refuse is never asked.
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let estimate = |minutes: u32| TodoChange::Edit {
+        todo_id: "a".into(),
+        todo: ProposalInput {
+            estimate_minutes: Some(minutes),
+            ..Default::default()
+        },
+    };
+    for minutes in [90, 120] {
+        let record = fixture
+            .planner
+            .review_todo_change(Utc::now(), estimate(minutes), "", "work tab")
+            .unwrap();
+        assert!(record.approved);
+        apply_writes(&fixture, fixture.planner.writes_for(&record));
+    }
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+    let todo = fixture.planner.open_todos()[0].clone();
+    assert_eq!(todo.estimate_minutes, Some(120));
+    assert_eq!(todo.first_estimate_minutes, Some(60));
+    assert_eq!(todo.estimate_changes, 2);
+    assert!(!todo.estimate_by_ai);
+}
+
+#[test]
+fn going_over_the_estimate_is_recorded_with_its_cause_and_the_done_record_keeps_the_time() {
+    let fixture = harness(true, &["a"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| {
+            config.todos[0].estimate_minutes = Some(30);
+            config.todos[0].first_estimate_minutes = Some(20);
+        })
+        .unwrap();
+    let started = Utc::now() - chrono::Duration::minutes(45);
+    fixture.planner.assign(started).unwrap();
+    let miss = fixture
+        .planner
+        .record_estimate_miss(Utc::now(), "a", MissCause::NotSplit)
+        .unwrap();
+    assert_eq!(
+        (miss.estimate_minutes, miss.cause),
+        (30, MissCause::NotSplit)
+    );
+    assert!(miss.spent_minutes >= 44, "{}", miss.spent_minutes);
+    assert_eq!(
+        fixture
+            .planner
+            .state_store_for_tests()
+            .get()
+            .estimate_misses
+            .len(),
+        1
+    );
+    assert!(fixture
+        .planner
+        .record_estimate_miss(Utc::now(), "nowhere", MissCause::Other)
+        .is_err());
+    // Finished: the record keeps both estimates and the time it took.
+    fixture
+        .planner
+        .request_change(
+            Utc::now(),
+            ChangeKind::Done,
+            "finished it",
+            Evidence::default(),
+        )
+        .unwrap();
+    let done = fixture.planner.state_store_for_tests().get().done;
+    let record = done.last().unwrap();
+    assert_eq!(
+        (record.estimate_minutes, record.first_estimate_minutes),
+        (Some(30), Some(20))
+    );
+    assert!(record.spent_minutes.unwrap() >= 44);
 }

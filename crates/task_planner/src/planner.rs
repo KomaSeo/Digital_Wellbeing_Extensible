@@ -22,10 +22,10 @@ use crate::advisor::{
 use crate::focus_link::{FocusLink, WatchedTask};
 use crate::model::{
     occurrence_day, series_id, Appointment, AppointmentInput, Assignment, AssignmentSource,
-    AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, Evidence, ExtensionOffer, IdleSpan,
-    PlannerConfig, PlannerState, PlannerStatus, ProposalInput, TaskNotes, TaskStep, TimetableEntry,
-    TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WaitingItem, WeekPlan,
-    WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
+    AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, EstimateMiss, Evidence, ExtensionOffer,
+    IdleSpan, MissCause, PlannerConfig, PlannerState, PlannerStatus, ProposalInput, TaskNotes,
+    TaskStep, TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite,
+    WaitingItem, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
 use crate::outline::Outline;
 use ai_client::JudgeError;
@@ -51,6 +51,8 @@ const MAX_ASSIGNMENT_MINUTES: u32 = 720;
 const DEFAULT_ASSIGNMENT_MINUTES: u32 = 60;
 /// Finished assignments kept for the time spent per to-do (a few weeks).
 const ASSIGNMENT_LOG_CAPACITY: usize = 1000;
+/// Reasons for going over an estimate kept (oldest dropped first).
+const ESTIMATE_MISSES_KEPT: usize = 200;
 const MAX_TASK_NOTES_CHARS: usize = 4000;
 const MAX_TASK_STEPS: usize = 50;
 /// The longest appointment.
@@ -526,10 +528,15 @@ impl TaskPlanner {
                 .sum();
             minutes_this_round.insert(todo.id.clone(), spent);
         }
+        let mut minutes_last_week: BTreeMap<String, i64> = BTreeMap::new();
         for span in &spans {
             let Some(todo_id) = &span.todo_id else {
                 continue;
             };
+            let last_week = span.minutes_within(now - Duration::days(7), span.ended);
+            if last_week > 0 {
+                *minutes_last_week.entry(todo_id.clone()).or_insert(0) += last_week;
+            }
             let total = span.minutes();
             *minutes_total.entry(todo_id.clone()).or_insert(0) += total;
             let today = span.minutes_within(start_of_today, span.ended);
@@ -567,6 +574,9 @@ impl TaskPlanner {
                 .as_ref()
                 .is_some_and(|assignment| assignment.time_is_up(now)),
             minutes_this_round,
+            minutes_last_week,
+            estimate_accuracy: crate::time::estimate_accuracy(&state.done).0,
+            group_accuracy: crate::time::estimate_accuracy(&state.done).1,
             appointments: self.appointments(now),
             waiting: state.waiting.clone(),
             open_todos,
@@ -666,6 +676,42 @@ impl TaskPlanner {
 
     /// Save the user's notes and steps for an open to-do. They change nothing the rules
     /// depend on, so no AI is asked.
+    /// The user said why `todo_id` went over its estimate ("다 못 했다" on a to-do past its
+    /// estimate). Kept for the AI's questions and the statistics; it changes nothing else.
+    pub fn record_estimate_miss(
+        &self,
+        now: DateTime<Utc>,
+        todo_id: &str,
+        cause: MissCause,
+    ) -> Result<EstimateMiss, PlannerError> {
+        let open = self.open_todos();
+        let todo = open
+            .iter()
+            .find(|todo| todo.id == todo_id && !todo.group)
+            .ok_or_else(|| PlannerError::UnknownTodo(todo_id.to_string()))?;
+        let state = self.state.get();
+        let miss = EstimateMiss {
+            at: now,
+            todo_id: todo.id.clone(),
+            title: todo.title.clone(),
+            estimate_minutes: todo.estimate_minutes.unwrap_or(0),
+            spent_minutes: spent_this_round(&state, todo, now),
+            cause,
+        };
+        self.state.update(|planner_state| {
+            planner_state.estimate_misses.push_back(miss.clone());
+            while planner_state.estimate_misses.len() > ESTIMATE_MISSES_KEPT {
+                planner_state.estimate_misses.pop_front();
+            }
+        })?;
+        info!(
+            "\"{}\" went over its estimate: {}",
+            miss.title,
+            cause.korean()
+        );
+        Ok(miss)
+    }
+
     pub fn put_task_notes(&self, todo_id: &str, mut notes: TaskNotes) -> Result<(), PlannerError> {
         if !self.open_todos().iter().any(|todo| todo.id == todo_id) {
             return Err(PlannerError::UnknownTodo(todo_id.to_string()));
@@ -674,6 +720,10 @@ impl TaskPlanner {
         notes.steps.truncate(MAX_TASK_STEPS);
         for step in &mut notes.steps {
             step.text = step.text.trim().chars().take(MAX_TITLE_CHARS).collect();
+            step.minutes = step
+                .minutes
+                .filter(|minutes| *minutes > 0)
+                .map(|minutes| minutes.min(6000));
         }
         notes.steps.retain(|step| !step.text.is_empty());
         self.state.update(|planner_state| {
@@ -923,7 +973,7 @@ impl TaskPlanner {
                 via: via.trim().chars().take(40).collect(),
                 approved: true,
                 reply: if review_by == TodoChangeReview::NotNeeded {
-                    "묶음, 위치, 먼저 끝낼 일의 변경이라서 AI 심사 없이 바로 적용했습니다."
+                    "묶음, 위치, 먼저 끝낼 일, 예상 시간의 변경이라서 AI 심사 없이 바로 적용했습니다."
                 } else {
                     "아직 엄격 모드가 아니어서 AI 심사 없이 바로 적용했습니다."
                 }
@@ -1210,6 +1260,13 @@ impl TaskPlanner {
                     // Into another group: at the end of it.
                     if before.rank != after.rank {
                         changed_fields.insert("rank".into(), json!(after.rank));
+                    }
+                    if before.estimate_minutes != after.estimate_minutes {
+                        changed_fields.extend(estimate_record(
+                            before,
+                            after.estimate_minutes,
+                            false,
+                        ));
                     }
                 }
                 writes.push(TodoListWrite::Merge {
@@ -1956,9 +2013,16 @@ impl TaskPlanner {
                             .then_some(change.estimate_minutes),
                         ..Default::default()
                     };
-                    let changed_fields = edited_fields(&draft);
+                    let mut changed_fields = edited_fields(&draft);
                     if changed_fields.is_empty() {
                         continue;
+                    }
+                    if let Some(estimate) = draft.estimate_minutes {
+                        changed_fields.extend(estimate_record(
+                            todo,
+                            Some(estimate.min(6000)),
+                            true,
+                        ));
                     }
                     let outside_the_file = !in_settings.contains(&todo.id);
                     if outside_the_file {
@@ -1987,8 +2051,13 @@ impl TaskPlanner {
                         .filter(|step| !step.is_empty())
                         .take(MAX_TASK_STEPS)
                         .map(|text| TaskStep {
-                            // A step that was checked stays checked.
+                            // A step that was checked stays checked, and keeps its minutes.
                             done: before.steps.iter().any(|old| old.done && old.text == text),
+                            minutes: before
+                                .steps
+                                .iter()
+                                .find(|old| old.text == text)
+                                .and_then(|old| old.minutes),
                             text,
                         })
                         .collect();
@@ -2084,6 +2153,11 @@ impl TaskPlanner {
                         todo_id: todo.id.clone(),
                         title: todo.title.clone(),
                         at: now,
+                        estimate_minutes: todo.estimate_minutes,
+                        first_estimate_minutes: todo.first_estimate_minutes,
+                        spent_minutes: Some(spent_this_round(&self.state.get(), todo, now)),
+                        parent: todo.parent.clone(),
+                        routine: todo.repeat,
                     };
                     self.state
                         .update(|planner_state| planner_state.done.push(record))?;
@@ -2194,6 +2268,16 @@ impl TaskPlanner {
         let now_local = local_now_text();
         let advisor = (self.advisor)(&self.focus.ai_settings())?;
         let config = self.config.get();
+        let status = self.status();
+        let time = crate::time::TimeFacts {
+            spent: status.minutes_this_round,
+            notes: status.task_notes,
+            last_week: status.minutes_last_week,
+            today: Some(now.with_timezone(&Local).date_naive()),
+            accuracy: status.estimate_accuracy,
+            group_accuracy: status.group_accuracy,
+            misses: state.estimate_misses.iter().cloned().collect(),
+        };
         let pick = advisor.pick(&PickRequest {
             instructions: config.instructions.pick_or_default(),
             now_local: &now_local,
@@ -2205,6 +2289,7 @@ impl TaskPlanner {
             repick_reason,
             appointments: &self.appointments(now),
             situation: &state.situation,
+            time: &time,
         })?;
         if !open.iter().any(|todo| todo.id == pick.todo_id) {
             return Err(PlannerError::BadPick(pick.todo_id));
@@ -2433,7 +2518,8 @@ enum TodoChangeReview {
 /// is empty), removing a group (only an empty one may go), moving a to-do or a group
 /// anywhere, making it wait for other to-dos or no longer wait (the owner: "그룹 옮기는 거랑
 /// 선행/후행 연결/연결 해제하는 건 AI 심사 하고 있으면 하지 않는 걸로 바꾸자"), and an edit
-/// that changes only those two (the form's 위치 and 먼저 끝낼 일). `open` is the open list.
+/// that changes only those two (the form's 위치 and 먼저 끝낼 일) or the estimate (예상 다시
+/// 적기; the owner: "심사 없이 바로 적용해"). `open` is the open list.
 pub fn needs_no_review(change: &TodoChange, open: &[TodoItem]) -> bool {
     let outline = Outline::new(open);
     match change {
@@ -2445,6 +2531,10 @@ pub fn needs_no_review(change: &TodoChange, open: &[TodoItem]) -> bool {
             after.parent = before.parent.clone();
             after.after = before.after.clone();
             after.rank = before.rank;
+            after.estimate_minutes = before.estimate_minutes;
+            after.first_estimate_minutes = before.first_estimate_minutes;
+            after.estimate_changes = before.estimate_changes;
+            after.estimate_by_ai = before.estimate_by_ai;
             &after == before
         }),
         _ => false,
@@ -2737,6 +2827,9 @@ fn completed_todo(
         constraints,
         deadline,
         priority,
+        estimate_by_ai: draft.estimate_minutes.is_none() && estimate_minutes.is_some(),
+        first_estimate_minutes: estimate_minutes,
+        estimate_changes: 0,
         estimate_minutes,
         proposed: true,
         repeat: draft.repeat.unwrap_or(false),
@@ -2758,7 +2851,67 @@ fn edited(before: &TodoItem, draft: &ProposalInput, outline: &Outline) -> TodoIt
     if after.parent != before.parent {
         after.rank = next_rank(outline, after.parent.as_deref());
     }
+    if after.estimate_minutes != before.estimate_minutes {
+        let record = estimate_record(before, after.estimate_minutes, false);
+        let mut item = serde_json::to_value(&after).unwrap_or(Value::Null);
+        if let Value::Object(item_fields) = &mut item {
+            item_fields.extend(record);
+        }
+        after = serde_json::from_value(item).unwrap_or(after);
+    }
     after
+}
+
+/// The record of an estimate that changes from `before`'s to `estimate`: the first estimate
+/// is kept, a change of an estimate that was set is counted, and who set it now (`by_ai`),
+/// as `planner.json` stores them.
+fn estimate_record(before: &TodoItem, estimate: Option<u32>, by_ai: bool) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert(
+        "first_estimate_minutes".into(),
+        json!(before
+            .first_estimate_minutes
+            .or(before.estimate_minutes)
+            .or(estimate)),
+    );
+    let changes = before.estimate_changes + u32::from(before.estimate_minutes.is_some());
+    fields.insert("estimate_changes".into(), json!(changes));
+    fields.insert("estimate_by_ai".into(), json!(by_ai));
+    fields
+}
+
+/// The minutes spent on `todo`: in total, or since it was last finished for a routine.
+fn spent_this_round(state: &PlannerState, todo: &TodoItem, now: DateTime<Utc>) -> i64 {
+    let last_done = todo
+        .repeat
+        .then(|| {
+            state
+                .done
+                .iter()
+                .filter(|done| done.todo_id == todo.id)
+                .map(|done| done.at)
+                .max()
+        })
+        .flatten();
+    state
+        .assignment_log
+        .iter()
+        .cloned()
+        .chain(
+            state
+                .assignment
+                .as_ref()
+                .map(|current| current.span_until(now)),
+        )
+        .filter(|span| span.todo_id.as_deref() == Some(todo.id.as_str()))
+        .map(|span| {
+            let started = match last_done {
+                Some(done_at) => span.started.max(done_at),
+                None => span.started,
+            };
+            span.minutes_within(started, span.ended)
+        })
+        .sum()
 }
 
 /// The fields of a to-do that `draft` sets, as `planner.json` stores them: an empty title or

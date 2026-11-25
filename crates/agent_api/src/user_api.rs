@@ -19,6 +19,7 @@
 //! | `assign`         | `{ situation? }` (planner active)        | [`Status`] |
 //! | `install_program` | `{ path, kind }` (a signed installer, run by the service) | `system_care::CareStatus` |
 //! | `uninstall_program` | `{ program }` (a winget id from the service's list, uninstalled by the service) | `system_care::CareStatus` |
+//! | `estimate_miss` | `{ todo_id, cause }` (why a to-do went over its estimate: `not_split`, `not_known`, `other`) | [`Status`] |
 //! | `block_safe_mode` | `{}` ("안전 모드 끄기": shut the ways into safe mode; the agent runs as SYSTEM) | `{ blocked, outcomes }` |
 //! | `waiting_add` | `{ title, notes?, check_on: "YYYY-MM-DD" }` | [`Status`] |
 //! | `waiting_end` | `{ id, arrived }` (arrived: dealing with it becomes a to-do) | [`Status`] |
@@ -985,6 +986,18 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .map_err(|error| format!("params.notes: {error}"))?;
             planner
                 .put_task_notes(todo_id, notes)
+                .map_err(|error| error.to_string())?;
+        }
+        // Why a to-do went over its estimate, asked when it is reported unfinished.
+        "estimate_miss" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            let todo_id = params["todo_id"]
+                .as_str()
+                .ok_or("params.todo_id required")?;
+            let cause: task_planner::MissCause = serde_json::from_value(params["cause"].clone())
+                .map_err(|error| format!("params.cause: {error}"))?;
+            planner
+                .record_estimate_miss(Utc::now(), todo_id, cause)
                 .map_err(|error| error.to_string())?;
         }
         "plan_week" => {

@@ -390,6 +390,8 @@ pub struct PickRequest<'a> {
     /// The user's situation in their own words ([`crate::PlannerState::situation`]); may be
     /// empty.
     pub situation: &'a str,
+    /// Time spent, steps and how estimates held ([`crate::time::time_section`]).
+    pub time: &'a crate::time::TimeFacts,
 }
 
 /// Responsibility: Carry what the AI sees when it gives the overview of this week.
@@ -1181,11 +1183,13 @@ pub(crate) fn pick_text(request: &PickRequest) -> String {
             )
         })
         .collect();
+    let time = crate::time::time_section(request.open, request.time);
     format!(
         "Now: {now}\n\nUpcoming appointments (fixed):\n\
-         {appointments}\n\nRecently finished:\n{done}\n\n\
+         {appointments}\n\nRecently finished:\n{done}\n\n{time}{time_gap}\
          Previous assignment: {prev}\n{repick}{situation}\nRecent foreground activity (oldest \
          first):\n{history}",
+        time_gap = if time.is_empty() { "" } else { "\n" },
         now = request.now_local,
         situation = if request.situation.trim().is_empty() {
             String::new()

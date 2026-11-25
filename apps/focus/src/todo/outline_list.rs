@@ -9,7 +9,11 @@ use eframe::egui;
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use task_planner::outline::{Outline, OutlineRow};
+use task_planner::time::{deadline_risk, estimate_notes, group_time, todo_time};
 use task_planner::{PlannerStatus, TodoItem};
+
+/// A to-do over its estimate, or a group with one.
+const ORANGE: egui::Color32 = egui::Color32::from_rgb(230, 140, 60);
 
 pub(super) const BLUE: egui::Color32 = egui::Color32::from_rgb(110, 160, 230);
 pub(super) const GREY: egui::Color32 = egui::Color32::from_gray(140);
@@ -219,12 +223,52 @@ impl FocusApp {
             ui.add_space(indent);
             drag_handle_ui(ui, todo, idle);
             if todo.group {
-                self.group_line_ui(ui, outline, todo, idle);
+                self.group_line_ui(ui, outline, todo, planner, idle);
             } else {
                 self.todo_line_ui(ui, outline, todo, planner, current);
             }
         });
-        if !todo.group {
+        if todo.group {
+            if let Some(text) = deadline_risk_text(outline, todo, planner) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(indent + 40.0);
+                    ui.colored_label(RED, text);
+                });
+            }
+        } else {
+            let time = todo_time(
+                todo,
+                planner
+                    .minutes_this_round
+                    .get(&todo.id)
+                    .copied()
+                    .unwrap_or(0),
+                planner.task_notes.get(&todo.id),
+            );
+            let mut notes: Vec<String> = estimate_notes(todo, &time)
+                .into_iter()
+                .map(|note| note.korean())
+                .collect();
+            if let (Some(accuracy), Some(estimate)) = (
+                todo.parent
+                    .as_ref()
+                    .and_then(|parent| planner.group_accuracy.get(parent))
+                    .filter(|accuracy| (accuracy.ratio() - 1.0).abs() >= 0.2),
+                time.estimate.filter(|_| time.over_by.is_none()),
+            ) {
+                notes.push(format!(
+                    "이 묶음은 보통 {:.1}배 걸려서 약 {}",
+                    accuracy.ratio(),
+                    minutes_text((f64::from(estimate) * accuracy.ratio()).round() as i64)
+                ));
+            }
+            if !notes.is_empty() && !todo.repeat {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(indent + 40.0);
+                    ui.small(format!("↳ 예상: {}", notes.join(" · ")))
+                        .on_hover_text("예상 시간을 믿기 어려운 까닭(기록에서 계산)");
+                });
+            }
             let blockers = outline.blockers(&todo.id);
             if !blockers.is_empty() {
                 ui.horizontal_wrapped(|ui| {
@@ -253,7 +297,14 @@ impl FocusApp {
 
     /// A group's line: fold it, its name, how many to-dos it holds, its deadline, what it
     /// waits for, and its buttons.
-    fn group_line_ui(&mut self, ui: &mut egui::Ui, outline: &Outline, todo: &TodoItem, idle: bool) {
+    fn group_line_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        outline: &Outline,
+        todo: &TodoItem,
+        planner: &PlannerStatus,
+        idle: bool,
+    ) {
         let collapsed = self.todo_ui.collapsed.contains(&todo.id);
         if ui.small_button(if collapsed { "▶" } else { "▼" }).clicked() {
             if collapsed {
@@ -263,8 +314,29 @@ impl FocusApp {
             }
         }
         ui.label(egui::RichText::new(&todo.title).strong().size(15.0));
-        let leaves = outline.leaves_under(&todo.id);
-        ui.small(format!("할 일 {}개", leaves.len()));
+        // The sum of what its to-dos still need and took (the owner: "그룹인 경우 하위 task의
+        // 합계로 할 일을 측정해야겠지"); routines are never finished, so they are left out.
+        let sums = group_time(
+            outline,
+            &todo.id,
+            &planner.minutes_this_round,
+            &planner.task_notes,
+        );
+        let mut parts = vec![format!("할 일 {}개", sums.todos + sums.routines)];
+        if sums.remaining > 0 {
+            parts.push(format!("남은 예상 {}", minutes_text(sums.remaining)));
+        }
+        if sums.spent > 0 {
+            parts.push(format!("들인 {}", minutes_text(sums.spent)));
+        }
+        if sums.without_estimate > 0 {
+            parts.push(format!("예상 없는 할 일 {}개", sums.without_estimate));
+        }
+        ui.small(parts.join(" · "))
+            .on_hover_text("남은 예상: 끝나지 않은 할 일의 남은 시간의 합(반복하는 일 제외)");
+        if sums.over > 0 {
+            ui.colored_label(ORANGE, format!("예상을 넘긴 할 일 {}개", sums.over));
+        }
         if let Some((text, color, source)) = due_label(outline, todo) {
             ui.colored_label(color, text).on_hover_text(source);
         }
@@ -337,15 +409,48 @@ impl FocusApp {
         }
         ui.label(format!("P{}", todo.priority));
         // Time spent (since the last finish, for a routine) against the estimate.
-        let spent = planner
-            .minutes_this_round
-            .get(&todo.id)
-            .copied()
-            .unwrap_or(0);
-        ui.small(match todo.estimate_minutes {
-            Some(minutes) => format!("{} / {}", minutes_text(spent), minutes_text(minutes as i64)),
-            None => format!("{} / 예상 없음", minutes_text(spent)),
-        });
+        let time = todo_time(
+            todo,
+            planner
+                .minutes_this_round
+                .get(&todo.id)
+                .copied()
+                .unwrap_or(0),
+            planner.task_notes.get(&todo.id),
+        );
+        match (time.estimate, time.over_by) {
+            (Some(estimate), Some(over)) => {
+                ui.colored_label(
+                    ORANGE,
+                    egui::RichText::new(format!(
+                        "{} / {} · {} 초과",
+                        minutes_text(time.spent),
+                        minutes_text(i64::from(estimate)),
+                        minutes_text(over)
+                    ))
+                    .small(),
+                )
+                .on_hover_text("들인 시간 / 예상 시간");
+            }
+            (Some(estimate), None) => {
+                ui.small(format!(
+                    "{} / {}",
+                    minutes_text(time.spent),
+                    minutes_text(i64::from(estimate))
+                ))
+                .on_hover_text("들인 시간 / 예상 시간");
+            }
+            (None, _) => {
+                ui.small(format!("{} / 예상 없음", minutes_text(time.spent)));
+            }
+        }
+        if time.steps_left > 0 {
+            let steps = planner
+                .task_notes
+                .get(&todo.id)
+                .map_or(0, |notes| notes.steps.len());
+            ui.small(format!("단계 {}/{steps}", steps - time.steps_left));
+        }
         if waiting {
             ui.label(egui::RichText::new(&todo.title).color(GREY));
         } else {
@@ -397,6 +502,51 @@ pub(super) fn paint_at_pointer(
         galley,
         egui::Color32::WHITE,
     );
+}
+
+/// "마감 위험: …" for a group with its own deadline whose work left does not fit the time the
+/// recent pace gives; `None` when it fits or there is nothing to judge by.
+fn deadline_risk_text(
+    outline: &Outline,
+    group: &TodoItem,
+    planner: &PlannerStatus,
+) -> Option<String> {
+    let due = group.deadline?;
+    let sums = group_time(
+        outline,
+        &group.id,
+        &planner.minutes_this_round,
+        &planner.task_notes,
+    );
+    let own_week: i64 = outline
+        .leaves_under(&group.id)
+        .iter()
+        .map(|leaf| {
+            planner
+                .minutes_last_week
+                .get(&leaf.id)
+                .copied()
+                .unwrap_or(0)
+        })
+        .sum();
+    let all_week: i64 = planner.minutes_last_week.values().sum();
+    let risk = deadline_risk(
+        sums.remaining,
+        due,
+        Local::now().date_naive(),
+        own_week,
+        all_week,
+    )?;
+    Some(format!(
+        "마감 위험: 남은 일 {}, 마감까지 할 수 있는 시간 약 {}(최근 7일 {} 하루 평균 {} × {}일). {} \
+         모자랍니다.",
+        minutes_text(risk.remaining),
+        minutes_text(risk.pace * risk.days),
+        if risk.own_pace { "이 묶음에" } else { "모든 일에" },
+        minutes_text(risk.pace),
+        risk.days,
+        minutes_text(risk.short_by)
+    ))
 }
 
 /// The handle a to-do or group is dragged by: three short lines.

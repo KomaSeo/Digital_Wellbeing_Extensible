@@ -20,6 +20,7 @@ mod model;
 pub mod outline;
 mod planner;
 mod settings_file;
+pub mod time;
 
 pub use advisor::{
     change_summary, claude_advisor_provider, Advisor, AdvisorProvider, AppointmentRequest,
@@ -34,10 +35,10 @@ pub use json_store::JsonStore;
 pub use model::{
     occurrence_day, series_id, weekdays_korean, Appointment, AppointmentInput, Assignment,
     AssignmentSource, AssignmentSpan, ChangeKind, ChangeRecord, Confirmations, DoneRecord,
-    Evidence, ExtensionOffer, IdleSpan, PlannerConfig, PlannerInstructions, PlannerState,
-    PlannerStatus, ProposalInput, ProposalRecord, TaskNotes, TaskStep, TimetableEntry,
-    TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WaitingItem, WeekPlan,
-    WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
+    EstimateMiss, Evidence, ExtensionOffer, IdleSpan, MissCause, PlannerConfig,
+    PlannerInstructions, PlannerState, PlannerStatus, ProposalInput, ProposalRecord, TaskNotes,
+    TaskStep, TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite,
+    WaitingItem, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
 pub use planner::{needs_no_review, PlannerError, TaskPlanner};
 

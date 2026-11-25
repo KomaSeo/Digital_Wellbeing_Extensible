@@ -22,9 +22,10 @@ use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use std::thread;
 use task_planner::outline::Outline;
+use task_planner::time::{todo_time, TodoTime};
 use task_planner::{
-    AppointmentInput, ChangeKind, PlannerStatus, TaskNotes, TaskStep, TodoChange, TodoChangeRecord,
-    TodoItem, WhenTimeIsUp,
+    AppointmentInput, ChangeKind, MissCause, PlannerStatus, TaskNotes, TaskStep, TodoChange,
+    TodoChangeRecord, TodoItem, WhenTimeIsUp,
 };
 
 /// Shown while there are to-dos but nothing is assigned.
@@ -78,6 +79,12 @@ pub struct TodoUiState {
     appointment_editing: Option<String>,
     /// "사용 중지" was pressed once: ask to confirm.
     confirm_stop: bool,
+    /// Why the current to-do went over its estimate, chosen with "다 못 했다".
+    miss_cause: Option<MissCause>,
+    /// With "그 밖의 이유": how many more minutes it needs (0: not given).
+    more_minutes: u32,
+    /// The Work tab's "예상 다시 적기": the new estimate, in minutes.
+    new_estimate: u32,
     /// The form for something to wait for, added by hand.
     waiting_form_open: bool,
     waiting_title: String,
@@ -535,15 +542,24 @@ impl FocusApp {
                         if !todo.constraints.is_empty() {
                             ui.label(format!("조건: {}", todo.constraints));
                         }
+                        let time = current_time(planner, todo);
+                        let left = match time.remaining {
+                            Some(remaining) if time.from_steps => {
+                                format!(" · 남은 예상 {}(단계 기준)", minutes_text(remaining))
+                            }
+                            _ => String::new(),
+                        };
                         ui.small(format!(
-                            "마감 {} · 중요도 {} · 예상 {}",
+                            "마감 {} · 중요도 {} · 예상 {} · 들인 시간 {}{left}",
                             todo.deadline
                                 .map_or("없음".into(), |deadline| deadline.to_string()),
                             todo.priority,
                             todo.estimate_minutes
                                 .map_or("없음".into(), |minutes| minutes_text(minutes as i64)),
+                            minutes_text(time.spent),
                         ));
                     });
+                self.over_estimate_ui(ui, planner, todo);
             }
             if let Some(todo_id) = assignment.todo_id.as_deref() {
                 let unlocked = unlocked_by(&planner.open_todos, todo_id);
@@ -664,7 +680,61 @@ impl FocusApp {
             .as_ref()
             .and_then(|todo_id| planner.open_todos.iter().find(|todo| &todo.id == todo_id))
             .cloned();
-        self.change_ui(ui, report_due, current_todo.as_ref());
+        let over_estimate = current_todo
+            .as_ref()
+            .map(|todo| current_time(planner, todo))
+            .filter(|time| time.over_by.is_some());
+        self.change_ui(ui, report_due, current_todo.as_ref(), over_estimate);
+    }
+
+    /// The current to-do went over its estimate: say so, and let the user write a new one
+    /// (no AI review, in strict mode too: the owner, "심사 없이 바로 적용해").
+    fn over_estimate_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus, todo: &TodoItem) {
+        let time = current_time(planner, todo);
+        let (Some(over), Some(estimate)) = (time.over_by, time.estimate) else {
+            return;
+        };
+        crate::style::notice(
+            ui,
+            crate::style::Tone::Warning,
+            format!(
+                "이 할 일은 예상 시간을 넘었습니다. 예상 {}, 지금까지 들인 시간 {}({} 초과). 단계를 \
+                 더 잘게 나누고 단계마다 시간을 적거나, 예상을 다시 적으세요.",
+                minutes_text(i64::from(estimate)),
+                minutes_text(time.spent),
+                minutes_text(over)
+            ),
+        );
+        if self.todo_ui.new_estimate == 0 {
+            self.todo_ui.new_estimate = u32::try_from(time.spent + 30).unwrap_or(u32::MAX);
+        }
+        let idle = !self.pending.load(Ordering::SeqCst);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("예상 다시 적기");
+            ui.add(
+                egui::DragValue::new(&mut self.todo_ui.new_estimate)
+                    .range(1..=6000)
+                    .suffix("분"),
+            );
+            ui.small(format!(
+                "= {} (지금까지 들인 시간 포함)",
+                minutes_text(i64::from(self.todo_ui.new_estimate))
+            ));
+            if ui.add_enabled(idle, egui::Button::new("적용")).clicked() {
+                self.send(
+                    "todo_change",
+                    json!({
+                        "change": {
+                            "kind": "edit",
+                            "todo_id": todo.id,
+                            "todo": { "estimate_minutes": self.todo_ui.new_estimate },
+                        },
+                        "reason": "",
+                    }),
+                );
+                self.todo_ui.new_estimate = 0;
+            }
+        });
     }
 
     /// What the user waits for from others: when it comes, dealing with it becomes a to-do
@@ -795,8 +865,31 @@ impl FocusApp {
                             .on_hover_text("끝낸 단계에 표시합니다")
                             .changed();
                         save |= ui
-                            .add(egui::TextEdit::singleline(&mut step.text).desired_width(320.0))
+                            .add(egui::TextEdit::singleline(&mut step.text).desired_width(260.0))
                             .lost_focus();
+                        let mut minutes = step.minutes.unwrap_or(0);
+                        let response = ui
+                            .add(
+                                egui::DragValue::new(&mut minutes)
+                                    .range(0..=600)
+                                    .custom_formatter(|value, _| {
+                                        if value <= 0.0 {
+                                            "–분".to_string()
+                                        } else {
+                                            format!("{value}분")
+                                        }
+                                    })
+                                    .custom_parser(|text| {
+                                        let digits: String =
+                                            text.chars().filter(char::is_ascii_digit).collect();
+                                        Some(digits.parse::<f64>().unwrap_or(0.0))
+                                    }),
+                            )
+                            .on_hover_text("이 단계의 예상 시간(분). 눌러서 적거나 좌우로 끕니다");
+                        if response.changed() {
+                            step.minutes = (minutes > 0).then_some(minutes);
+                        }
+                        save |= response.drag_stopped() || response.lost_focus();
                         if ui
                             .small_button("x")
                             .on_hover_text("이 단계를 지웁니다")
@@ -854,6 +947,36 @@ impl FocusApp {
                     self.todo_ui.notes.steps.remove(index);
                     save = true;
                 }
+                // What the steps left add up to: the time the to-do still needs.
+                let left: Vec<&TaskStep> = self
+                    .todo_ui
+                    .notes
+                    .steps
+                    .iter()
+                    .filter(|step| !step.done)
+                    .collect();
+                if !left.is_empty() {
+                    let timed = left.iter().filter(|step| step.minutes.is_some()).count();
+                    let sum: u32 = left.iter().filter_map(|step| step.minutes).sum();
+                    ui.small(if timed == left.len() {
+                        format!(
+                            "남은 단계 {}개 · {} = 이 할 일의 남은 예상",
+                            left.len(),
+                            minutes_text(i64::from(sum))
+                        )
+                    } else if timed == 0 {
+                        "단계마다 예상 시간(분)을 적으면, 남은 단계의 합이 이 할 일의 남은 예상이 \
+                         됩니다."
+                            .to_string()
+                    } else {
+                        format!(
+                            "남은 단계 {}개 중 {}개에 예상 시간이 없습니다. 모두 적으면 그 합이 이 할 \
+                             일의 남은 예상이 됩니다.",
+                            left.len(),
+                            left.len() - timed
+                        )
+                    });
+                }
                 ui.horizontal(|ui| {
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.todo_ui.new_step)
@@ -868,6 +991,7 @@ impl FocusApp {
                         self.todo_ui.notes.steps.push(TaskStep {
                             text: self.todo_ui.new_step.trim().to_string(),
                             done: false,
+                            minutes: None,
                         });
                         self.todo_ui.new_step.clear();
                         save = true;
@@ -897,6 +1021,104 @@ impl FocusApp {
                 );
             });
         }
+    }
+
+    /// Why the current to-do went over its estimate (the owner: "왜 내가 예상된 시간을
+    /// 넘어갔을까? 그 이유는 1) 내가 시간을 예상할 수 있을 정도로 단계를 세분화해놓지 않았거나 2) 내가
+    /// 시간을 예상할 수 있을 정도로 이 일에 대해 잘 모른다"), and what to do about it.
+    fn miss_cause_ui(&mut self, ui: &mut egui::Ui, time: &TodoTime) {
+        ui.add_space(4.0);
+        ui.colored_label(
+            YELLOW,
+            format!(
+                "이 할 일은 예상({})보다 {} 더 걸렸습니다. 왜 넘겼나요?",
+                minutes_text(i64::from(time.estimate.unwrap_or(0))),
+                minutes_text(time.over_by.unwrap_or(0))
+            ),
+        );
+        let cause = &mut self.todo_ui.miss_cause;
+        for (choice, label) in [
+            (MissCause::NotSplit, "단계를 충분히 나누지 않았다"),
+            (MissCause::NotKnown, "이 일에 대해 잘 몰랐다"),
+            (MissCause::Other, "그 밖의 이유(방해받음, 일이 커짐)"),
+        ] {
+            if ui.radio(*cause == Some(choice), label).clicked() {
+                *cause = Some(choice);
+            }
+        }
+        match self.todo_ui.miss_cause {
+            Some(MissCause::NotSplit) => {
+                ui.small(
+                    "보낸 뒤 \"메모와 단계\"에서 단계를 더 잘게 나누고 단계마다 시간(분)을 적으세요. \
+                     남은 단계의 합이 이 할 일의 남은 예상이 되고, AI가 다음 할당 시간을 단계에 맞춥니다.",
+                );
+            }
+            Some(MissCause::NotKnown) => {
+                ui.small(
+                    "다음에 이 할 일을 받으면, 먼저 무엇이 필요한지 알아보고 단계를 적으세요. 단계를 \
+                     적으면 남은 시간을 더 잘 예상할 수 있습니다.",
+                );
+            }
+            Some(MissCause::Other) => {
+                ui.horizontal(|ui| {
+                    ui.label("앞으로 얼마나 더 걸릴까요?");
+                    ui.add(
+                        egui::DragValue::new(&mut self.todo_ui.more_minutes)
+                            .range(0..=6000)
+                            .suffix("분"),
+                    );
+                });
+                ui.small(format!(
+                    "적으면 예상이 \"들인 시간 {} + 적은 시간\"으로 바뀝니다(0이면 그대로).",
+                    minutes_text(time.spent)
+                ));
+            }
+            None => {
+                ui.small(
+                    "이유를 고르면 보낼 수 있습니다. 고른 이유는 기록되고, AI가 다음에 참고합니다.",
+                );
+            }
+        }
+    }
+
+    /// Record why `todo` went over its estimate and, with "그 밖의 이유" and a time, the new
+    /// estimate. Off the window's thread, beside the report itself.
+    fn send_estimate_miss(&mut self, todo: &TodoItem, time: &TodoTime, cause: MissCause) {
+        let session = self.session;
+        let todo_id = todo.id.clone();
+        let more = std::mem::take(&mut self.todo_ui.more_minutes);
+        let new_estimate = (cause == MissCause::Other && more > 0)
+            .then(|| u32::try_from(time.spent).unwrap_or(0).saturating_add(more));
+        thread::spawn(move || {
+            let _ = call(
+                session,
+                "estimate_miss",
+                json!({ "todo_id": todo_id, "cause": cause }),
+            );
+            if let Some(estimate) = new_estimate {
+                // The report goes at the same time and keeps the planner busy for a moment:
+                // try again until it is through.
+                for _ in 0..20 {
+                    let answer = call(
+                        session,
+                        "todo_change",
+                        json!({
+                            "change": {
+                                "kind": "edit",
+                                "todo_id": todo_id,
+                                "todo": { "estimate_minutes": estimate },
+                            },
+                            "reason": "",
+                            "via": "focus app",
+                        }),
+                    );
+                    if answer.is_ok() {
+                        break;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        });
     }
 
     /// Open the to-do form to edit `todo` (in the To-do tab's list).
@@ -937,7 +1159,13 @@ impl FocusApp {
 
     /// Asking the AI to change what the planner assigned. `current_todo`: the to-do from the
     /// list the task is, if it is one.
-    fn change_ui(&mut self, ui: &mut egui::Ui, report_due: bool, current_todo: Option<&TodoItem>) {
+    fn change_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        report_due: bool,
+        current_todo: Option<&TodoItem>,
+        over_estimate: Option<TodoTime>,
+    ) {
         let idle = !self.pending.load(Ordering::SeqCst);
         // The answer to the request sent last has come (or the request failed): an answer
         // clears the reason, an approval also the proof. After an error both stay.
@@ -1017,6 +1245,9 @@ impl FocusApp {
                             "할 일은 목록에 남습니다. 어디까지 했는지 적으세요. 보고한 뒤에는 \"할 일 \
                              받기\"로 다음 할 일을 받습니다.",
                         );
+                        if let Some(time) = over_estimate {
+                            self.miss_cause_ui(ui, &time);
+                        }
                     }
                     ChangeChoice::Extend => {
                         ui.horizontal(|ui| {
@@ -1107,7 +1338,12 @@ impl FocusApp {
                     .unwrap_or(written)
                     .trim();
                 let enough = written.chars().count() >= 4;
-                let ready = idle && request.is_some() && (done_at_once || enough);
+                // Over the estimate, "다 못 했다" also says why.
+                let cause_missing = self.choice == ChangeChoice::NotFinished
+                    && over_estimate.is_some()
+                    && self.todo_ui.miss_cause.is_none();
+                let ready =
+                    idle && request.is_some() && (done_at_once || enough) && !cause_missing;
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
@@ -1129,6 +1365,13 @@ impl FocusApp {
                                 if self.proof_screenshot {
                                     params["proof_screenshot_after_secs"] =
                                         json!(PROOF_SCREENSHOT_DELAY_SECONDS);
+                                }
+                            }
+                            if matches!(request, ChangeKind::NotFinished) {
+                                if let (Some(todo), Some(time), Some(cause)) =
+                                    (current_todo, over_estimate, self.todo_ui.miss_cause.take())
+                                {
+                                    self.send_estimate_miss(todo, &time, cause);
                                 }
                             }
                             // The texts stay until the AI answers (see below), so an error
@@ -2323,6 +2566,19 @@ fn local_time(time: DateTime<Utc>) -> String {
 }
 
 /// `95` → `1 h 35 min`.
+/// How `todo` stands against its estimate, from the status.
+fn current_time(planner: &PlannerStatus, todo: &TodoItem) -> TodoTime {
+    todo_time(
+        todo,
+        planner
+            .minutes_this_round
+            .get(&todo.id)
+            .copied()
+            .unwrap_or(0),
+        planner.task_notes.get(&todo.id),
+    )
+}
+
 fn minutes_text(minutes: i64) -> String {
     let minutes = minutes.max(0);
     match (minutes / 60, minutes % 60) {
