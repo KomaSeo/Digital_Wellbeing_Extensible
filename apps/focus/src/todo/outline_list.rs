@@ -518,17 +518,8 @@ fn deadline_risk_text(
         &planner.minutes_this_round,
         &planner.task_notes,
     );
-    let own_week: i64 = outline
-        .leaves_under(&group.id)
-        .iter()
-        .map(|leaf| {
-            planner
-                .minutes_last_week
-                .get(&leaf.id)
-                .copied()
-                .unwrap_or(0)
-        })
-        .sum();
+    let own_week =
+        task_planner::time::minutes_under(outline, &group.id, &planner.minutes_last_week);
     let all_week: i64 = planner.minutes_last_week.values().sum();
     let risk = deadline_risk(
         sums.remaining,

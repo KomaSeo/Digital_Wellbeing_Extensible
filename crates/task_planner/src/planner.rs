@@ -23,9 +23,10 @@ use crate::focus_link::{FocusLink, WatchedTask};
 use crate::model::{
     occurrence_day, series_id, Appointment, AppointmentInput, Assignment, AssignmentSource,
     AssignmentSpan, ChangeKind, ChangeRecord, DoneRecord, EstimateMiss, Evidence, ExtensionOffer,
-    IdleSpan, MissCause, PlannerConfig, PlannerState, PlannerStatus, ProposalInput, TaskNotes,
-    TaskStep, TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite,
-    WaitingItem, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
+    IdleSpan, MissCause, PlannerConfig, PlannerState, PlannerStatus, ProposalInput, SplitPart,
+    TaskNotes, TaskStep, TimetableEntry, TimetableKind, TodoChange, TodoChangeRecord, TodoItem,
+    TodoListWrite, WaitingItem, WeekPlan, WeekPlanDay, WeekPlanTodo, WhenTimeIsUp,
+    APPOINTMENT_GRACE_MINUTES,
 };
 use crate::outline::Outline;
 use ai_client::JudgeError;
@@ -134,6 +135,8 @@ pub enum PlannerError {
     IntoItself(String),
     #[error("이렇게 하면 서로를 기다려서 아무것도 시작할 수 없게 됩니다: {0}")]
     WaitingLoop(String),
+    #[error("나눌 수 없습니다: {0}")]
+    BadSplit(String),
 }
 
 /// Responsibility: Own the planner's config and state stores, and run assign / request_change
@@ -729,6 +732,10 @@ impl TaskPlanner {
         self.state.update(|planner_state| {
             planner_state.task_notes.insert(todo_id.to_string(), notes);
         })?;
+        // The window check reads the steps left of the current to-do: new ones count at once.
+        if !self.stopped() {
+            self.follow_assignment()?;
+        }
         Ok(())
     }
 
@@ -829,6 +836,7 @@ impl TaskPlanner {
                     | TodoChange::Remove { .. }
                     | TodoChange::Move { .. }
                     | TodoChange::SetAfter { .. }
+                    | TodoChange::Split { .. }
                     | TodoChange::EditAppointment { .. }
             )
         {
@@ -926,14 +934,19 @@ impl TaskPlanner {
                         .ok_or_else(|| PlannerError::UnknownTodo(todo_id.clone()))?,
                 )
             }
-            // Moving and drawing the order need no reason: no AI reviews them.
-            TodoChange::Move { todo_id, .. } | TodoChange::SetAfter { todo_id, .. } => Some(
+            // Moving, drawing the order and splitting need no reason: no AI reviews them.
+            TodoChange::Move { todo_id, .. }
+            | TodoChange::SetAfter { todo_id, .. }
+            | TodoChange::Split { todo_id, .. } => Some(
                 open.iter()
                     .find(|existing| &existing.id == todo_id)
                     .cloned()
                     .ok_or_else(|| PlannerError::UnknownTodo(todo_id.clone()))?,
             ),
         };
+        if let (Some(before), TodoChange::Split { .. }) = (&target, &change) {
+            check_split(&change, before)?;
+        }
         // Where to-dos sit and what they wait for is checked whoever reviews the change.
         check_placement(&change, target.as_ref(), &open)?;
 
@@ -951,6 +964,27 @@ impl TaskPlanner {
                 .review_appointment_change(now, change, reason, via, &open, &recent, review_by);
         }
         if review_by != TodoChangeReview::ByTheAi {
+            // What a split makes: the to-do afterwards and the new to-dos.
+            let split = match (&change, &target) {
+                (
+                    TodoChange::Split {
+                        parts,
+                        keep_first,
+                        in_order,
+                        ..
+                    },
+                    Some(before),
+                ) => Some(split_todos(
+                    now,
+                    before,
+                    parts,
+                    *keep_first,
+                    *in_order,
+                    &outline,
+                    self.minutes_spent_on(&before.id, now),
+                )),
+                _ => None,
+            };
             let after = match &change {
                 // The user's own fields, and the defaults for the empty ones (no AI fills them).
                 TodoChange::Add { todo } => Some(completed_todo(now, todo, None, &outline)),
@@ -963,27 +997,31 @@ impl TaskPlanner {
                 TodoChange::SetAfter { after, .. } => {
                     target.as_ref().map(|before| waiting_for(before, after))
                 }
+                TodoChange::Split { .. } => split.as_ref().map(|(kept, _)| kept.clone()),
                 _ => None,
             };
             let record = TodoChangeRecord {
                 id: format!("c{}", now.timestamp_millis()),
                 at: now,
+                reply: if review_by == TodoChangeReview::None {
+                    "아직 엄격 모드가 아니어서 AI 심사 없이 바로 적용했습니다."
+                } else if matches!(change, TodoChange::Split { .. }) {
+                    "같은 일을 단계의 경계로 나눈 것이라서 AI 심사 없이 바로 적용했습니다."
+                } else {
+                    "묶음, 위치, 먼저 끝낼 일, 예상 시간의 변경이라서 AI 심사 없이 바로 적용했습니다."
+                }
+                .to_string(),
                 change,
                 reason,
                 via: via.trim().chars().take(40).collect(),
                 approved: true,
-                reply: if review_by == TodoChangeReview::NotNeeded {
-                    "묶음, 위치, 먼저 끝낼 일, 예상 시간의 변경이라서 AI 심사 없이 바로 적용했습니다."
-                } else {
-                    "아직 엄격 모드가 아니어서 AI 심사 없이 바로 적용했습니다."
-                }
-                .to_string(),
                 ai_failed: false,
                 before: target,
                 after,
                 scheduled_update: None,
                 appointment: None,
                 appointment_before: None,
+                created: split.map(|(_, created)| created).unwrap_or_default(),
             };
             self.log_todo_change(&record)?;
             return Ok(record);
@@ -1046,6 +1084,7 @@ impl TaskPlanner {
             scheduled_update: None,
             appointment: None,
             appointment_before: None,
+            created: Vec::new(),
         };
         self.log_todo_change(&record)?;
         Ok(record)
@@ -1189,6 +1228,7 @@ impl TaskPlanner {
             scheduled_update: None,
             appointment,
             appointment_before,
+            created: Vec::new(),
         };
         self.log_todo_change(&record)?;
         Ok(record)
@@ -1299,6 +1339,11 @@ impl TaskPlanner {
                 });
                 writes
             }
+            TodoChange::Split {
+                todo_id,
+                keep_first,
+                ..
+            } => self.split_writes(record, todo_id, *keep_first),
             // Kept outside the file, unless an edit has put it there by the time this applies.
             TodoChange::Remove { todo_id } => vec![
                 TodoListWrite::Dismiss(todo_id.clone()),
@@ -1337,6 +1382,147 @@ impl TaskPlanner {
                 vec![TodoListWrite::RemoveAppointment(appointment_id.clone())]
             }
         }
+    }
+
+    /// The writes that apply the split `record` of `todo_id`: the to-do becomes a group or
+    /// keeps its first part (its estimate follows), the new to-dos are put on the list, and
+    /// when the to-do stays, what waited for it waits for the new to-dos too (as a group it
+    /// holds them, so what waits for it waits for them already).
+    fn split_writes(
+        &self,
+        record: &TodoChangeRecord,
+        todo_id: &str,
+        keep_first: bool,
+    ) -> Vec<TodoListWrite> {
+        let config_ids: Vec<String> = self
+            .config
+            .get()
+            .todos
+            .into_iter()
+            .map(|todo| todo.id)
+            .collect();
+        let mut writes = Vec::new();
+        let mut merge = |todo: &TodoItem, changed_fields: Map<String, Value>| {
+            let outside_the_file = !config_ids.contains(&todo.id);
+            if outside_the_file {
+                writes.push(TodoListWrite::Dismiss(todo.id.clone()));
+            }
+            writes.push(TodoListWrite::Merge {
+                todo_id: todo.id.clone(),
+                changed_fields,
+                base: outside_the_file.then(|| todo.clone()),
+            });
+        };
+        if let (Some(before), Some(after)) = (&record.before, &record.after) {
+            let after_fields = serde_json::to_value(after).unwrap_or_default();
+            let changed_fields: Map<String, Value> = [
+                "group",
+                "estimate_minutes",
+                "estimate_by_ai",
+                "first_estimate_minutes",
+                "estimate_changes",
+            ]
+            .into_iter()
+            .map(|field| (field.to_string(), after_fields[field].clone()))
+            .collect();
+            merge(before, changed_fields);
+        }
+        if keep_first {
+            let created_ids: Vec<String> =
+                record.created.iter().map(|todo| todo.id.clone()).collect();
+            for waiting in self.open_todos() {
+                if !waiting.after.iter().any(|waited_id| waited_id == todo_id)
+                    || created_ids.contains(&waiting.id)
+                {
+                    continue;
+                }
+                let mut after = waiting.after.clone();
+                after.extend(
+                    created_ids
+                        .iter()
+                        .filter(|created_id| !waiting.after.contains(created_id))
+                        .cloned(),
+                );
+                let mut changed_fields = Map::new();
+                changed_fields.insert("after".into(), json!(after));
+                merge(&waiting, changed_fields);
+            }
+        }
+        writes.extend(record.created.iter().cloned().map(TodoListWrite::Put));
+        writes
+    }
+
+    /// After a split is written to the list: each new to-do gets the steps of its part, the
+    /// to-do keeps the steps of its first part or, made a group, hands its memo to the first
+    /// new to-do. When it was the current task and became a group, the task goes on as the
+    /// first new to-do; the time spent before stays with the group.
+    pub fn split_applied(
+        &self,
+        now: DateTime<Utc>,
+        record: &TodoChangeRecord,
+    ) -> Result<(), PlannerError> {
+        let TodoChange::Split {
+            todo_id,
+            parts,
+            keep_first,
+            ..
+        } = &record.change
+        else {
+            return Ok(());
+        };
+        let made = parts_made(parts, *keep_first);
+        self.state.update(|planner_state| {
+            for (todo, part) in record.created.iter().zip(&made) {
+                planner_state.task_notes.insert(
+                    todo.id.clone(),
+                    TaskNotes {
+                        text: String::new(),
+                        steps: part.steps.clone(),
+                    },
+                );
+            }
+            if *keep_first {
+                if let Some(first) = parts.first() {
+                    planner_state
+                        .task_notes
+                        .entry(todo_id.clone())
+                        .or_default()
+                        .steps = first.steps.clone();
+                }
+                return;
+            }
+            let memo = planner_state
+                .task_notes
+                .remove(todo_id)
+                .map(|notes| notes.text)
+                .unwrap_or_default();
+            let Some(first) = record.created.first() else {
+                return;
+            };
+            if let Some(notes) = planner_state.task_notes.get_mut(&first.id) {
+                notes.text = memo;
+            }
+            let current = planner_state
+                .assignment
+                .as_ref()
+                .is_some_and(|assignment| assignment.todo_id.as_deref() == Some(todo_id));
+            if current {
+                close_span(planner_state, now);
+                if let Some(assignment) = &mut planner_state.assignment {
+                    assignment.todo_id = Some(first.id.clone());
+                    assignment.at = now;
+                    assignment.idle.clear();
+                    if assignment.paused_since.is_some() {
+                        assignment.paused_since = Some(now);
+                    }
+                }
+            }
+        })?;
+        // The window check follows: the new to-do, or the to-do's fewer steps.
+        if !self.stopped() {
+            self.follow_assignment()?;
+        }
+        Ok(())
     }
 
     /// The writes that put `moved` into its group (`moved.parent`) just before the to-do
@@ -1487,17 +1673,15 @@ impl TaskPlanner {
         Ok(())
     }
 
-    /// Make the focus check watch the current assignment: after logon, and when another
-    /// device (through sync) assigned, ended or stopped a task.
+    /// Make the focus check watch the current assignment: after logon, when another device
+    /// (through sync) assigned, ended or stopped a task, and when the current to-do's steps
+    /// changed.
     fn follow_assignment(&self) -> Result<(), PlannerError> {
         let watched = self.focus.watched();
         match self.state.get().assignment {
+            // Also when only the steps changed: the check reads them.
             Some(current) => {
-                let scope = current.todo_id.as_deref().unwrap_or("free");
-                let same = watched
-                    .as_ref()
-                    .is_some_and(|watched| watched.task == current.task && watched.scope == scope);
-                if !same {
+                if watched.as_ref() != Some(&self.watched_task(&current)) {
                     self.start_focus(&current)?;
                 }
             }
@@ -2337,6 +2521,18 @@ impl TaskPlanner {
     }
 
     fn start_focus(&self, assignment: &Assignment) -> Result<(), PlannerError> {
+        self.focus
+            .watch(Some(self.watched_task(assignment)))
+            .map_err(focus_error)?;
+        Ok(())
+    }
+
+    /// What the focus check judges windows against during `assignment`: the task, and for a
+    /// to-do its notes and the steps not done yet (the owner: "단계를 넣고 Haiku로만 돌려보자"),
+    /// so that a step that needs an app or site lets it be used. Steps change while the task
+    /// runs; [`Self::follow_assignment`] passes the new text on, and a new text lifts the
+    /// blocks made for the old one (`ai_focus_rule::SavedBlocks`).
+    fn watched_task(&self, assignment: &Assignment) -> WatchedTask {
         // During an appointment the window checks ask whether a window has to do with it
         // (messages, a map, a booking), not whether it is "the task".
         let task = if assignment.appointment_id.is_some() {
@@ -2347,6 +2543,7 @@ impl TaskPlanner {
                 assignment.task
             )
         } else {
+            let mut task = assignment.task.clone();
             // The pick saw no notes (only constraints): the window checks get the to-do's
             // notes, which often name the apps and sites the work needs.
             let notes = assignment
@@ -2359,20 +2556,32 @@ impl TaskPlanner {
                 })
                 .map(|todo| todo.notes.trim().to_string())
                 .filter(|notes| !notes.is_empty() && !assignment.task.contains(notes.as_str()));
-            match notes {
-                Some(notes) => format!("{}\n(이 할 일의 메모: {notes})", assignment.task),
-                None => assignment.task.clone(),
+            if let Some(notes) = notes {
+                task.push_str(&format!("\n(이 할 일의 메모: {notes})"));
             }
+            let steps_left: Vec<String> = assignment
+                .todo_id
+                .as_deref()
+                .and_then(|todo_id| self.state.get().task_notes.get(todo_id).cloned())
+                .map(|notes| {
+                    notes
+                        .steps
+                        .into_iter()
+                        .filter(|step| !step.done)
+                        .map(|step| step.text)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !steps_left.is_empty() {
+                task.push_str(&format!("\n(남은 단계: {})", steps_left.join(", ")));
+            }
+            task
         };
-        // Blocks belong to the to-do (see `SavedBlocks`).
         let scope = assignment
             .todo_id
             .clone()
             .unwrap_or_else(|| "free".to_string());
-        self.focus
-            .watch(Some(WatchedTask { task, scope }))
-            .map_err(focus_error)?;
-        Ok(())
+        WatchedTask { task, scope }
     }
 
     fn end(&self, now: DateTime<Utc>) -> Result<(), PlannerError> {
@@ -2519,13 +2728,14 @@ enum TodoChangeReview {
 /// anywhere, making it wait for other to-dos or no longer wait (the owner: "그룹 옮기는 거랑
 /// 선행/후행 연결/연결 해제하는 건 AI 심사 하고 있으면 하지 않는 걸로 바꾸자"), and an edit
 /// that changes only those two (the form's 위치 and 먼저 끝낼 일) or the estimate (예상 다시
-/// 적기; the owner: "심사 없이 바로 적용해"). `open` is the open list.
+/// 적기; the owner: "심사 없이 바로 적용해"), and splitting a to-do at its step boundaries (the
+/// same work, cut into pieces). `open` is the open list.
 pub fn needs_no_review(change: &TodoChange, open: &[TodoItem]) -> bool {
     let outline = Outline::new(open);
     match change {
         TodoChange::Add { todo } => todo.group,
         TodoChange::Remove { todo_id } => outline.get(todo_id).is_some_and(|todo| todo.group),
-        TodoChange::Move { .. } | TodoChange::SetAfter { .. } => true,
+        TodoChange::Move { .. } | TodoChange::SetAfter { .. } | TodoChange::Split { .. } => true,
         TodoChange::Edit { todo_id, todo } => outline.get(todo_id).is_some_and(|before| {
             let mut after = edited(before, todo, &outline);
             after.parent = before.parent.clone();
@@ -2563,6 +2773,148 @@ fn check_ready(open: &[TodoItem], todo_id: &str) -> Result<(), PlannerError> {
         ));
     }
     Ok(())
+}
+
+/// Refuse a split of `before` that cannot be made: a group or a routine, fewer than two parts,
+/// a part without steps, a new to-do without a title, or no new to-do at all.
+fn check_split(change: &TodoChange, before: &TodoItem) -> Result<(), PlannerError> {
+    let TodoChange::Split {
+        parts, keep_first, ..
+    } = change
+    else {
+        return Ok(());
+    };
+    let refuse = |why: String| Err(PlannerError::BadSplit(why));
+    if before.group {
+        return refuse(format!("\"{}\"은(는) 묶음입니다", before.title));
+    }
+    if before.repeat {
+        return refuse(format!("\"{}\"은(는) 반복하는 할 일입니다", before.title));
+    }
+    if parts.len() < 2 {
+        return refuse("단계 사이에 경계를 하나 이상 넣으세요".into());
+    }
+    if parts.iter().any(|part| part.steps.is_empty()) {
+        return refuse("단계가 없는 부분이 있습니다".into());
+    }
+    let made = parts_made(parts, *keep_first);
+    if made.is_empty() {
+        return refuse("새로 만들 할 일이 없습니다(나눈 부분의 단계를 모두 끝냈습니다)".into());
+    }
+    for (number, part) in parts.iter().enumerate() {
+        if !made.iter().any(|made_part| std::ptr::eq(*made_part, part)) {
+            continue;
+        }
+        let length = part.todo_title().chars().count();
+        if !(2..=MAX_TITLE_CHARS).contains(&length) {
+            return refuse(format!(
+                "{}번 할 일의 이름을 적으세요(2~{MAX_TITLE_CHARS}글자)",
+                number + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The parts of a split that become new to-dos: those not finished, after the first when the
+/// first stays the to-do itself.
+fn parts_made(parts: &[SplitPart], keep_first: bool) -> Vec<&SplitPart> {
+    parts
+        .iter()
+        .skip(usize::from(keep_first))
+        .filter(|part| !part.finished())
+        .collect()
+}
+
+/// What splitting `before` (with `spent` minutes spent on it) into `parts` makes: the to-do
+/// afterwards and the new to-dos, in order. As a group it is measured by the sums of the new
+/// to-dos (its own estimate goes); kept with its first part, its estimate becomes the time
+/// spent and the minutes of the steps left, counted afresh, since it now covers less work.
+/// A new to-do takes the minutes of its steps left as its estimate (none when a step has
+/// none), the importance, deadline and constraints of `before`, and sits in `before` (a
+/// group) or just after it, waiting for the one before it when `in_order`.
+fn split_todos(
+    now: DateTime<Utc>,
+    before: &TodoItem,
+    parts: &[SplitPart],
+    keep_first: bool,
+    in_order: bool,
+    outline: &Outline,
+    spent: i64,
+) -> (TodoItem, Vec<TodoItem>) {
+    let made = parts_made(parts, keep_first);
+    let mut kept = before.clone();
+    if keep_first {
+        let estimate = parts.first().and_then(SplitPart::minutes_left).map(|left| {
+            u32::try_from(spent.max(0))
+                .unwrap_or(u32::MAX)
+                .saturating_add(left)
+                .min(6000)
+        });
+        kept.estimate_minutes = estimate;
+        kept.first_estimate_minutes = estimate;
+    } else {
+        kept.group = true;
+        kept.estimate_minutes = None;
+        kept.first_estimate_minutes = None;
+    }
+    kept.estimate_by_ai = false;
+    kept.estimate_changes = 0;
+    // Just after `before` among its siblings, before the next one.
+    let next_rank = outline
+        .children(before.parent.as_deref())
+        .iter()
+        .map(|sibling| sibling.rank)
+        .filter(|rank| *rank > before.rank)
+        .fold(f64::INFINITY, f64::min);
+    let rank_step = if next_rank.is_finite() {
+        (next_rank - before.rank) / (made.len() + 1) as f64
+    } else {
+        1.0
+    };
+    let mut next_id = now.timestamp_millis() + 1;
+    let mut created: Vec<TodoItem> = Vec::new();
+    for (index, part) in made.iter().enumerate() {
+        while outline.get(&format!("p{next_id}")).is_some() {
+            next_id += 1;
+        }
+        let estimate = part.minutes_left().filter(|minutes| *minutes > 0);
+        let waits_for = match created.last() {
+            Some(previous) if in_order => vec![previous.id.clone()],
+            None if in_order && keep_first => vec![before.id.clone()],
+            _ if keep_first => before.after.clone(),
+            _ => Vec::new(),
+        };
+        created.push(TodoItem {
+            id: format!("p{next_id}"),
+            title: part.todo_title(),
+            notes: String::new(),
+            constraints: before.constraints.clone(),
+            deadline: before.deadline,
+            priority: before.priority,
+            estimate_minutes: estimate,
+            estimate_by_ai: false,
+            first_estimate_minutes: estimate,
+            estimate_changes: 0,
+            proposed: true,
+            repeat: false,
+            away_from_computer: before.away_from_computer,
+            group: false,
+            parent: if keep_first {
+                before.parent.clone()
+            } else {
+                Some(before.id.clone())
+            },
+            rank: if keep_first {
+                before.rank + rank_step * (index + 1) as f64
+            } else {
+                (index + 1) as f64
+            },
+            after: waits_for,
+        });
+        next_id += 1;
+    }
+    (kept, created)
 }
 
 /// Refuse a change that puts a to-do into something that is not a group or into itself,
@@ -2774,6 +3126,36 @@ fn clean_change(change: TodoChange, now: DateTime<Utc>) -> Result<TodoChange, Pl
                 appointment,
             },
             _ => unreachable!("an addition stays an addition"),
+        },
+        TodoChange::Split {
+            todo_id,
+            parts,
+            keep_first,
+            in_order,
+        } => TodoChange::Split {
+            todo_id,
+            parts: parts
+                .into_iter()
+                .map(|part| SplitPart {
+                    title: part.title.split_whitespace().collect::<Vec<_>>().join(" "),
+                    steps: part
+                        .steps
+                        .into_iter()
+                        .map(|step| TaskStep {
+                            text: step.text.trim().chars().take(MAX_TITLE_CHARS).collect(),
+                            minutes: step
+                                .minutes
+                                .filter(|minutes| *minutes > 0)
+                                .map(|minutes| minutes.min(6000)),
+                            ..step
+                        })
+                        .filter(|step| !step.text.is_empty())
+                        .take(MAX_TASK_STEPS)
+                        .collect(),
+                })
+                .collect(),
+            keep_first,
+            in_order,
         },
         other @ (TodoChange::Remove { .. } | TodoChange::RemoveAppointment { .. }) => other,
     };

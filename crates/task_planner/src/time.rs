@@ -118,7 +118,8 @@ pub fn estimate_notes(todo: &TodoItem, time: &TodoTime) -> Vec<EstimateNote> {
 }
 
 /// Responsibility: Add up the to-dos inside a group (at any depth), routines left out: they
-/// are never finished, so their time would only grow.
+/// are never finished, so their time would only grow. The time spent counts the groups' own
+/// time too: a to-do split into a group keeps what was spent on it before.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GroupTime {
     pub todos: usize,
@@ -160,7 +161,24 @@ pub fn group_time(
             sums.over += 1;
         }
     }
+    // A to-do split into a group keeps the time spent on it before the split.
+    sums.spent += outline
+        .groups_under(group_id)
+        .iter()
+        .map(|group| spent.get(&group.id).copied().unwrap_or(0))
+        .sum::<i64>();
     sums
+}
+
+/// The minutes in `minutes` (by to-do id) of everything inside `group_id`: its to-dos, and
+/// the groups' own time (a to-do split into a group keeps what was spent on it before).
+pub fn minutes_under(outline: &Outline, group_id: &str, minutes: &BTreeMap<String, i64>) -> i64 {
+    outline
+        .leaves_under(group_id)
+        .into_iter()
+        .chain(outline.groups_under(group_id))
+        .map(|todo| minutes.get(&todo.id).copied().unwrap_or(0))
+        .sum()
 }
 
 /// Responsibility: Say that the work left before a deadline does not fit the time the
@@ -369,11 +387,7 @@ pub fn time_section(open: &[TodoItem], facts: &TimeFacts) -> String {
         }
         if let (Some(due), Some(today)) = (group.deadline, facts.today) {
             line.push_str(&format!(", due {due}"));
-            let own_week: i64 = outline
-                .leaves_under(&group.id)
-                .iter()
-                .map(|leaf| facts.last_week.get(&leaf.id).copied().unwrap_or(0))
-                .sum();
+            let own_week = minutes_under(&outline, &group.id, &facts.last_week);
             if let Some(risk) = deadline_risk(sums.remaining, due, today, own_week, all_week) {
                 line.push_str(&format!(
                     "; at the pace of the last seven days ({} min a day {}) about {} min fit \

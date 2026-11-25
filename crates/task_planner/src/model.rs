@@ -608,6 +608,23 @@ pub enum TodoChange {
     /// to-do tab's graph (one box dropped on another, an arrow taken away). Like a move, it
     /// needs no reason unless the AI refuses.
     SetAfter { todo_id: String, after: Vec<String> },
+    /// Split a to-do into to-dos at boundaries set between its steps (the owner: "할 일
+    /// 나누기는 하나하나 클릭하지 말고 경계를 단위로 설정할 수 있게 해줘"). Needs no AI review: the
+    /// work stays the same, only cut into pieces.
+    Split {
+        todo_id: String,
+        /// The parts in their order, each with its steps as they were (done or not) and the
+        /// title of its to-do.
+        parts: Vec<SplitPart>,
+        /// The first part stays the to-do itself (only its steps shrink) and the other parts
+        /// become to-dos just after it; otherwise the to-do becomes a group that holds a new
+        /// to-do for each part.
+        #[serde(default)]
+        keep_first: bool,
+        /// Each new to-do waits for the one before it.
+        #[serde(default)]
+        in_order: bool,
+    },
     /// Add an appointment; the AI decides whether to accept it (owner's appointment rules).
     AddAppointment { appointment: AppointmentInput },
     /// Change an appointment on the list (keeps its id). In strict mode the AI decides by the
@@ -618,6 +635,45 @@ pub enum TodoChange {
     },
     /// Take an appointment off the list. Needs no AI review: it only frees time for to-dos.
     RemoveAppointment { appointment_id: String },
+}
+
+/// Responsibility: Carry one part of a to-do split at its step boundaries
+/// ([`TodoChange::Split`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SplitPart {
+    /// The title of the part's to-do; may be empty for a part of one step, whose text it
+    /// takes (the owner: "경계에 포함되어 있는 일이 하나면 그 단계가 곧 할 일이 되지만, 경계에
+    /// 포함되어 있는 일이 여러 개면 유저가 할 일을 구분해야해").
+    pub title: String,
+    pub steps: Vec<TaskStep>,
+}
+
+impl SplitPart {
+    /// The title of its to-do: the one given, or the step's text for a part of one step.
+    pub fn todo_title(&self) -> String {
+        let given = self.title.split_whitespace().collect::<Vec<_>>().join(" ");
+        match self.steps.as_slice() {
+            [only] if given.is_empty() => {
+                only.text.split_whitespace().collect::<Vec<_>>().join(" ")
+            }
+            _ => given,
+        }
+    }
+
+    /// Every step of it is done: it becomes no to-do.
+    pub fn finished(&self) -> bool {
+        self.steps.iter().all(|step| step.done)
+    }
+
+    /// The minutes its steps not done yet add up to, when every one of them has minutes.
+    pub fn minutes_left(&self) -> Option<u32> {
+        self.steps
+            .iter()
+            .filter(|step| !step.done)
+            .map(|step| step.minutes)
+            .sum()
+    }
 }
 
 /// Responsibility: Record one to-do change, the AI's decision, and what the list holds if
@@ -652,6 +708,9 @@ pub struct TodoChangeRecord {
     /// The appointment as it was before an edit.
     #[serde(default)]
     pub appointment_before: Option<Appointment>,
+    /// The to-dos a split made, one for each part that becomes a new to-do.
+    #[serde(default)]
+    pub created: Vec<TodoItem>,
 }
 
 /// Responsibility: Name one write to the to-do list that applies a [`TodoChangeRecord`].

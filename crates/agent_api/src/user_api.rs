@@ -963,6 +963,10 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                         .appointment_edited(Utc::now(), appointment_id)
                         .map_err(|error| error.to_string())?;
                 }
+                // The steps go with their parts; the current task may go on as a new to-do.
+                planner
+                    .split_applied(Utc::now(), &record)
+                    .map_err(|error| error.to_string())?;
             }
             last_proposal = Some(ProposalRecord {
                 at: record.at,

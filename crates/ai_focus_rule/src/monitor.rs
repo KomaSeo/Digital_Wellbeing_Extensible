@@ -63,10 +63,11 @@ pub struct VerdictLogEntry {
 
 /// Responsibility: Record why something is blocked.
 ///
-/// Blocks do not expire: a block that lifted itself after a while would only
-/// make the monitor judge (and pay for) the same app or site again. A block
-/// ends when the user is granted access (see `request_access`), when an
-/// administrator lifts it (`AiFocusConfig::unblocked`).
+/// Blocks do not expire while the task stays the same: a block that lifted itself after a
+/// while would only make the monitor judge (and pay for) the same app or site again. A block
+/// ends when the user is granted access (see `request_access`), when an administrator lifts
+/// it (`AiFocusConfig::unblocked`), or when the task the check reads changes (a new task, or
+/// the current to-do's steps changed; see [`SavedBlocks`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockedEntry {
     /// Unique id, so the Settings tab can name this block in the config file
@@ -101,9 +102,13 @@ pub struct NewBlock {
 /// Responsibility: Hold the blocks in force, as saved to disk so that logging
 /// out and back in (which restarts the agent) does not lift them.
 ///
-/// Blocks belong to the to-do they were made for (`scope`, see
-/// [`AiFocusConfig::task_scope`]): `processes` and `tabs` are those of the current to-do,
-/// `other_scopes` those of the others, which apply again when their to-do comes back.
+/// Blocks belong to the task they were made for, as the check reads it (`scope`: the
+/// task's text, with the current to-do's steps left). When that text changes, the blocks
+/// are lifted and windows are judged afresh, so a step that needs an app or site lets it
+/// be used at once (the owner: "지금 걸린 차단 리스트는 저장해두지 말자. 그래서 단계만
+/// 수정하면 바로 적법한 접근을 허용하게 만들자"); nothing is kept for a task that comes back.
+/// `other_scopes` holds the blocks other devices made for their tasks (taken in by sync),
+/// which apply here when this device watches the same task.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedBlocks {
@@ -113,9 +118,12 @@ pub struct SavedBlocks {
     /// one, and without a planner.
     pub scope: String,
     pub other_scopes: HashMap<String, BlockSet>,
+    /// The scopes are task texts. Files without it (older versions) keyed blocks by to-do
+    /// and kept other to-dos' blocks in `other_scopes`; those are dropped when read.
+    pub by_task_text: bool,
 }
 
-/// Responsibility: Hold the blocks of one to-do that is not the current one.
+/// Responsibility: Hold the blocks of a task this device does not watch now.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BlockSet {
@@ -191,6 +199,7 @@ fn merge_saved_blocks(
         tabs: current.tabs,
         scope: memory.scope.clone(),
         other_scopes: merged,
+        by_task_text: true,
     }
 }
 
@@ -213,9 +222,9 @@ pub struct MonitorState {
     /// Off-task verdicts in a row per app (or per grant of an app); see
     /// [`Self::apply_judgement`]. Browser tabs are blocked at the first one.
     strikes: HashMap<String, u32>,
-    /// The to-do the blocks below belong to (see [`SavedBlocks`]).
+    /// The task the blocks below belong to, as the check read it (see [`SavedBlocks`]).
     pub block_scope: String,
-    /// Blocks of the other to-dos, by to-do.
+    /// Blocks other devices made for their tasks, by task.
     pub other_scopes: HashMap<String, BlockSet>,
     /// Normalized process name -> block.
     pub blocked_processes: HashMap<String, BlockedEntry>,
@@ -242,9 +251,9 @@ pub struct MonitorState {
 }
 
 impl MonitorState {
-    /// Start over for a new task (or a stopped session). Strikes start from
-    /// zero; blocks stay with their to-do: re-entering the task (or stopping and starting)
-    /// must not lift them.
+    /// Start over for a new task (or a stopped session). Strikes start from zero. Blocks are
+    /// not touched here: a new task lifts them ([`Self::switch_block_scope`]), a stopped
+    /// session keeps them.
     pub fn reset(&mut self, task: &str) {
         *self = Self {
             task: task.to_string(),
@@ -259,18 +268,15 @@ impl MonitorState {
         };
     }
 
-    /// Put away the blocks of the current to-do and bring back those of `scope`.
+    /// Lift the blocks made for the task before (they are not kept for it) and take up those
+    /// another device made for `scope`, the task as the check reads it now.
     pub fn switch_block_scope(&mut self, scope: &str) {
         if self.block_scope == scope {
             return;
         }
-        let leaving = BlockSet {
-            processes: std::mem::take(&mut self.blocked_processes),
-            tabs: std::mem::take(&mut self.blocked_tabs),
-        };
-        if !leaving.processes.is_empty() || !leaving.tabs.is_empty() {
-            self.other_scopes
-                .insert(std::mem::take(&mut self.block_scope), leaving);
+        let lifted = self.blocked_processes.len() + self.blocked_tabs.len();
+        if lifted > 0 {
+            info!("the task changed: {lifted} blocks made for the task before are lifted");
         }
         let coming = self.other_scopes.remove(scope).unwrap_or_default();
         self.blocked_processes = coming.processes;
@@ -813,7 +819,12 @@ impl FocusMonitor {
             state.blocked_processes = saved.processes;
             state.blocked_tabs = saved.tabs;
             state.block_scope = saved.scope;
-            state.other_scopes = saved.other_scopes;
+            // An older file kept every to-do's blocks: they are not kept any more.
+            state.other_scopes = if saved.by_task_text {
+                saved.other_scopes
+            } else {
+                HashMap::new()
+            };
             let now = Utc::now();
             let mut missing: Vec<&mut BlockedEntry> = state
                 .blocked_processes
@@ -866,6 +877,7 @@ impl FocusMonitor {
                 tabs: state.blocked_tabs.clone(),
                 scope: state.block_scope.clone(),
                 other_scopes: state.other_scopes.clone(),
+                by_task_text: true,
             }
         };
         if self.blocks.changed_on_disk() {
@@ -966,9 +978,10 @@ impl FocusMonitor {
             } else {
                 ""
             };
-            // A new to-do brings its own blocks; without a session the last ones stay.
-            if config.session_active && state.block_scope != config.task_scope {
-                state.switch_block_scope(&config.task_scope);
+            // A new task, or other steps of the to-do, lifts the blocks made before; without
+            // a session the last ones stay.
+            if !task.is_empty() && state.block_scope != task {
+                state.switch_block_scope(task);
                 scope_switched = true;
             }
             if state.task != task {
@@ -1512,7 +1525,11 @@ fn goes_up(verdict: Verdict) -> bool {
 }
 
 /// The models a window check asks in turn, cheapest first ([`FocusMonitor::run_judge`]).
-pub const CHECK_TIERS: [&str; 3] = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
+///
+/// Haiku only since the window check reads the steps left (the owner: "단계를 넣고 Haiku로만
+/// 돌려보자"; it was Haiku, then Sonnet, then Opus). Adding models back here brings the
+/// passing on back.
+pub const CHECK_TIERS: [&str; 1] = ["claude-haiku-5-5"];
 
 /// `earlier`'s verdicts where it found a window on task, `later`'s for the rest.
 fn settle(mut earlier: Judgement, later: Judgement) -> Judgement {
@@ -2042,7 +2059,7 @@ mod tests {
     }
 
     #[test]
-    fn changing_task_rechecks_at_once_and_keeps_blocks() {
+    fn changing_task_rechecks_at_once_and_lifts_blocks() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
         let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
@@ -2054,17 +2071,18 @@ mod tests {
             .store()
             .update(|stored_config| stored_config.task = "play games".into())
             .unwrap();
+        *fixture.verdict.lock() = Verdict::OnTask;
         fixture
             .monitor
             .step(start_time + ChronoDuration::seconds(1));
-        // Reset, then judged again under the new task; the block stays.
+        // Reset, the block made for the old task lifted, and judged again under the new one.
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
         assert_eq!(fixture.monitor.state().task, "play games");
-        assert_eq!(fixture.monitor.state().blocked_processes.len(), 1);
+        assert!(fixture.monitor.state().blocked_processes.is_empty());
     }
 
     #[test]
-    fn blocks_belong_to_the_todo_they_were_made_for() {
+    fn new_steps_lift_the_blocks_and_nothing_is_kept_for_a_task_that_comes_back() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
         config.task_scope = "thesis-todo".into();
@@ -2072,13 +2090,13 @@ mod tests {
         let start_time = Utc::now();
         fixture.monitor.step(start_time);
         assert_eq!(fixture.monitor.state().blocked_processes.len(), 1);
-        // Another to-do (a break): its own blocks, none yet.
+        // The same to-do with a step that needs the app: the block goes, and the app is
+        // judged against the new steps.
         fixture
             .monitor
             .store()
             .update(|stored_config| {
-                stored_config.task = "rest and play".into();
-                stored_config.task_scope = "rest-todo".into();
+                stored_config.task = "thesis\n(남은 단계: Steam 게임 리뷰 자료 모으기)".into();
             })
             .unwrap();
         *fixture.verdict.lock() = Verdict::OnTask;
@@ -2086,22 +2104,21 @@ mod tests {
             .monitor
             .step(start_time + ChronoDuration::seconds(1));
         assert!(fixture.monitor.state().blocked_processes.is_empty());
-        // Back to the thesis: its block applies again.
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        // Back to the old text: the old block does not come back.
         fixture
             .monitor
             .store()
-            .update(|stored_config| {
-                stored_config.task = "thesis".into();
-                stored_config.task_scope = "thesis-todo".into();
-            })
+            .update(|stored_config| stored_config.task = "thesis".into())
             .unwrap();
         fixture
             .monitor
             .step(start_time + ChronoDuration::seconds(2));
-        assert_eq!(fixture.monitor.state().blocked_processes.len(), 1);
+        assert!(fixture.monitor.state().blocked_processes.is_empty());
         let saved = fixture.monitor.blocks.get();
-        assert_eq!(saved.scope, "thesis-todo");
-        assert_eq!(saved.processes.len(), 1);
+        assert_eq!(saved.scope, "thesis");
+        assert!(saved.processes.is_empty() && saved.other_scopes.is_empty());
+        assert!(saved.by_task_text);
     }
 
     #[test]
@@ -2529,21 +2546,13 @@ mod tests {
     }
 
     #[test]
-    fn blocks_survive_a_task_change_and_a_session_restart() {
+    fn blocks_survive_a_stopped_session_and_go_on_with_the_same_task() {
         let mut config = session("thesis");
         config.strikes_to_block = 1;
         let fixture = harness(Verdict::OffTask, foreground("steam.exe", "Steam"), config);
         let start_time = Utc::now();
         fixture.monitor.step(start_time);
-        fixture
-            .monitor
-            .store()
-            .update(|stored_config| stored_config.task = "thesis.".into())
-            .unwrap();
         *fixture.current.lock() = None;
-        fixture
-            .monitor
-            .step(start_time + ChronoDuration::seconds(1));
         fixture
             .monitor
             .store()
@@ -2551,8 +2560,51 @@ mod tests {
             .unwrap();
         fixture
             .monitor
+            .step(start_time + ChronoDuration::seconds(1));
+        assert_eq!(fixture.monitor.state().process_blocks().len(), 1);
+        fixture
+            .monitor
+            .store()
+            .update(|stored_config| stored_config.session_active = true)
+            .unwrap();
+        fixture
+            .monitor
             .step(start_time + ChronoDuration::seconds(2));
         assert_eq!(fixture.monitor.state().process_blocks().len(), 1);
+        // Saved with its task (the background loop saves after every step), so an agent
+        // restart (logging out and in) keeps it.
+        fixture.monitor.save_blocks();
+        let saved = fixture.monitor.blocks.get();
+        assert_eq!((saved.scope.as_str(), saved.processes.len()), ("thesis", 1));
+    }
+
+    #[test]
+    fn blocks_of_other_to_dos_from_an_older_file_are_dropped() {
+        let mut old = SavedBlocks {
+            scope: "thesis-todo".into(),
+            ..Default::default()
+        };
+        old.other_scopes.insert(
+            "rest-todo".into(),
+            BlockSet {
+                processes: HashMap::from([(
+                    "steam.exe".to_string(),
+                    BlockedEntry {
+                        id: "b1".into(),
+                        reason: "game".into(),
+                        title: "Steam".into(),
+                    },
+                )]),
+                tabs: HashMap::new(),
+            },
+        );
+        let fixture = harness(
+            Verdict::OnTask,
+            foreground("code.exe", "main.rs"),
+            session("thesis"),
+        );
+        let monitor = fixture.monitor.with_block_store(JsonStore::in_memory(old));
+        assert!(monitor.state().other_scopes.is_empty());
     }
 
     #[test]
@@ -2671,19 +2723,20 @@ mod tests {
     }
 
     #[test]
-    fn a_window_goes_to_a_larger_model_only_while_each_finds_it_off_task() {
-        let [haiku, sonnet, opus] = CHECK_TIERS.map(str::to_string);
+    fn haiku_alone_checks_a_window_whatever_models_the_settings_name() {
+        let haiku = CHECK_TIERS[0].to_string();
+        assert_eq!(CHECK_TIERS.len(), 1);
         let shared = Arc::new(ModelJudges {
             verdicts: Mutex::new(HashMap::from([
                 (haiku.clone(), Verdict::OnTask),
-                (sonnet.clone(), Verdict::OnTask),
-                (opus.clone(), Verdict::OnTask),
+                ("main".to_string(), Verdict::OffTask),
+                ("cheap".to_string(), Verdict::OffTask),
             ])),
             calls: Mutex::new(Vec::new()),
         });
         let provided = Arc::clone(&shared);
         let mut config = session("thesis");
-        // The settings' model and recheck model do not choose the window check's models.
+        // The settings' model and recheck model do not choose the window check's model.
         config.model = "main".into();
         config.recheck_model = "cheap".into();
         config.strikes_to_block = 1;
@@ -2710,63 +2763,23 @@ mod tests {
             shared.verdicts.lock().insert(model.to_string(), verdict);
         };
         let start_time = Utc::now();
-        // Haiku finds it on task: settled, no larger model asked.
         monitor.step(start_time);
         assert_eq!(calls(), [(haiku.clone(), false)]);
-        // Due again; Haiku says off task, Sonnet on task: Sonnet's word stands, no block.
+        // Haiku finds it off task: no larger model is asked, and it is blocked on Haiku's
+        // word.
         set(&haiku, Verdict::OffTask);
         let second = start_time + ChronoDuration::minutes(16);
         monitor.step(second);
-        assert_eq!(calls(), [(haiku.clone(), false), (sonnet.clone(), true)]);
-        assert!(monitor.state().process_blocks().is_empty());
-        // Haiku unsure: no larger model is asked, nothing is blocked, and the window is
-        // judged again (by Haiku first) after the check interval.
-        set(&haiku, Verdict::Unsure);
-        set(&sonnet, Verdict::OffTask);
-        let unsure = second + ChronoDuration::minutes(16);
-        monitor.step(unsure);
         assert_eq!(calls(), [(haiku.clone(), false)]);
-        assert!(monitor.state().process_blocks().is_empty());
-        monitor.step(unsure + ChronoDuration::seconds(30));
-        assert!(calls().is_empty(), "judged again before the check interval");
-        monitor.step(unsure + ChronoDuration::seconds(61));
-        assert_eq!(calls(), [(haiku.clone(), false)]);
-        // Haiku off task, Sonnet unsure: Sonnet's "unsure" stands too; Opus is not asked,
-        // nothing is blocked.
-        set(&haiku, Verdict::OffTask);
-        set(&sonnet, Verdict::Unsure);
-        let sonnet_unsure = unsure + ChronoDuration::minutes(16);
-        monitor.step(sonnet_unsure);
-        assert_eq!(calls(), [(haiku.clone(), false), (sonnet.clone(), true)]);
-        assert!(monitor.state().process_blocks().is_empty());
-        // Haiku and Sonnet off task, Opus on task: Opus decides; no block.
-        set(&sonnet, Verdict::OffTask);
-        let third = sonnet_unsure + ChronoDuration::minutes(16);
-        monitor.step(third);
-        assert_eq!(
-            calls(),
-            [
-                (haiku.clone(), false),
-                (sonnet.clone(), true),
-                (opus.clone(), true)
-            ]
-        );
-        assert!(monitor.state().process_blocks().is_empty());
-        // All three find it off task: blocked, on Opus's word.
-        set(&opus, Verdict::OffTask);
-        let fourth = third + ChronoDuration::minutes(16);
-        monitor.step(fourth);
-        assert_eq!(calls().len(), 3);
         assert_eq!(monitor.state().process_blocks().len(), 1);
-        // A window Haiku finds not related (a sync tool) passes like one on task: no larger
-        // model is asked, nothing is blocked, and it is due again only after the on-task
-        // recheck time.
+        // A window Haiku finds not related (a sync tool) passes, and is due again only
+        // after the on-task recheck time.
         set(&haiku, Verdict::NotRelated);
         *current.lock() = Some(foreground("OneDrive.exe", "OneDrive - 동기화 완료"));
-        let fifth = fourth + ChronoDuration::minutes(1);
-        monitor.step(fifth);
+        let third = second + ChronoDuration::minutes(1);
+        monitor.step(third);
         assert_eq!(calls(), [(haiku.clone(), false)]);
-        monitor.step(fifth + ChronoDuration::minutes(5));
+        monitor.step(third + ChronoDuration::minutes(5));
         assert!(calls().is_empty());
         assert_eq!(monitor.state().process_blocks().len(), 1);
     }

@@ -1319,8 +1319,8 @@ impl SettingsTab {
             );
             ui.small(
                 "기본 모델은 할 일 고르기, 심사, 접근 요청이 씁니다. 창 검사는 이 선택과 \
-                 상관없이 Haiku, Sonnet, Opus 순서로 묻습니다. 앞 모델이 할 일과 관계있다고 본 창은 \
-                 그대로 두고, 딴짓이나 애매하다고 본 창만 다음 모델이 다시 봅니다.",
+                 상관없이 Haiku 하나가 합니다. 창 검사는 할 일 문장과 지금 할 일의 남은 단계를 보고 \
+                 판단하므로, 단계를 고치면 몇 초 뒤부터 새 단계로 판단합니다.",
             );
             match (catalog.fetched_at, catalog.error.is_empty()) {
                 (Some(fetched_at), _) => {
@@ -1554,8 +1554,10 @@ impl SettingsTab {
 
         crate::style::section(ui, "걸린 차단");
         ui.small(
-            "차단은 그 차단이 생긴 할 일에 붙어 있어서, 그 할 일을 받았을 때만 적용됩니다. 차단 풀기는 \
-             예약됩니다. 바로 필요하면 차단 탭에서 접근을 요청하세요.",
+            "AI가 만든 차단은 지금 할 일에만 붙어 있습니다. 새 할 일을 받거나 지금 할 일의 단계를 \
+             고치면 모두 풀리고, 창 검사가 새 할 일과 단계를 보고 다시 판단합니다. 차단 풀기는 \
+             예약됩니다. 바로 필요하면 단계를 고치거나 차단 탭에서 접근을 요청하세요. 다른 기기가 \
+             만든 차단은 그 기기의 할 일과 함께 보입니다.",
         );
         // A to-do's title from its id, for the blocks of each to-do.
         let titles: HashMap<String, String> = snapshot
@@ -1571,13 +1573,20 @@ impl SettingsTab {
                 ))
             })
             .collect();
+        // Blocks belong to the task as the window check read it (its text; older files: a
+        // to-do's id).
         let scope_label = |scope: &str| match scope {
             "" => "할 일 없이".to_string(),
             "free" => "목록 밖의 일".to_string(),
-            todo_id => format!(
-                "할 일 \"{}\"",
-                titles.get(todo_id).map_or(todo_id, String::as_str)
-            ),
+            todo_id if titles.contains_key(todo_id) => format!("할 일 \"{}\"", titles[todo_id]),
+            task => {
+                let first_line = task.lines().next().unwrap_or_default();
+                let mut shown: String = first_line.chars().take(40).collect();
+                if shown.chars().count() < task.chars().count() {
+                    shown.push('…');
+                }
+                format!("할 일 \"{shown}\"")
+            }
         };
         if let Some(drafts) = &mut self.drafts {
             let mut any = false;

@@ -1417,9 +1417,10 @@ pub(crate) fn todo_change_text(request: &TodoChangeRequest) -> String {
             target(),
             draft(todo)
         ),
-        // Never reviewed: moves and the order are put in force at once.
+        // Never reviewed: moves, the order and splits are put in force at once.
         TodoChange::Move { .. }
         | TodoChange::SetAfter { .. }
+        | TodoChange::Split { .. }
         | TodoChange::AddAppointment { .. }
         | TodoChange::EditAppointment { .. }
         | TodoChange::RemoveAppointment { .. } => String::new(),
@@ -1561,6 +1562,26 @@ pub fn change_summary(change: &TodoChange, before: Option<&TodoItem>) -> String 
             } else {
                 after.join(", ")
             }
+        ),
+        TodoChange::Split {
+            todo_id,
+            parts,
+            keep_first,
+            in_order,
+        } => format!(
+            "split \"{}\" at its step boundaries into {}{}{}",
+            title(todo_id),
+            parts
+                .iter()
+                .map(|part| format!("\"{}\"", part.todo_title()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if *keep_first {
+                " (the first part stays the to-do itself)"
+            } else {
+                " (the to-do became a group holding them)"
+            },
+            if *in_order { ", one after another" } else { "" }
         ),
         TodoChange::AddAppointment { appointment } => format!(
             "add the appointment \"{}\" ({})",

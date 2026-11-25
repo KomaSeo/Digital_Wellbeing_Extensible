@@ -3179,3 +3179,286 @@ fn going_over_the_estimate_is_recorded_with_its_cause_and_the_done_record_keeps_
     );
     assert!(record.spent_minutes.unwrap() >= 44);
 }
+
+fn step(text: &str, minutes: Option<u32>, done: bool) -> TaskStep {
+    TaskStep {
+        text: text.into(),
+        done,
+        minutes,
+    }
+}
+
+fn part(title: &str, steps: &[TaskStep]) -> SplitPart {
+    SplitPart {
+        title: title.into(),
+        steps: steps.to_vec(),
+    }
+}
+
+#[test]
+fn splitting_into_a_group_needs_no_review_and_takes_the_steps_and_the_current_task_along() {
+    let fixture = harness(true, &["a", "x"]);
+    let due = chrono::NaiveDate::from_ymd_opt(2030, 1, 31).unwrap();
+    fixture
+        .planner
+        .config_store()
+        .update(|config| {
+            config.todos[0].estimate_minutes = Some(180);
+            config.todos[0].priority = 5;
+            config.todos[0].deadline = Some(due);
+            config.todos[1].after = vec!["a".into()];
+        })
+        .unwrap();
+    let steps = [
+        step("A 조사", Some(30), true),
+        step("B 조사", Some(40), false),
+        step("A 쓰기", Some(50), false),
+        step("검토", Some(20), true),
+    ];
+    fixture
+        .planner
+        .put_task_notes(
+            "a",
+            TaskNotes {
+                text: "어디까지 했는지".into(),
+                steps: steps.to_vec(),
+            },
+        )
+        .unwrap();
+    let started = Utc::now() - chrono::Duration::minutes(30);
+    fixture.planner.assign(started).unwrap();
+    // An AI that would refuse is never asked.
+    fixture.advisor.approve.store(false, Ordering::SeqCst);
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            TodoChange::Split {
+                todo_id: "a".into(),
+                parts: vec![
+                    part("조사", &steps[0..2]),
+                    part("", &steps[2..3]),
+                    // Every step done: it becomes no to-do.
+                    part("", &steps[3..4]),
+                ],
+                keep_first: false,
+                in_order: true,
+            },
+            "",
+            "work tab",
+        )
+        .unwrap();
+    assert!(record.approved, "{}", record.reply);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+    assert_eq!(record.created.len(), 2);
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    fixture.planner.split_applied(Utc::now(), &record).unwrap();
+
+    let open = fixture.planner.open_todos();
+    let find = |todo_id: &str| open.iter().find(|todo| todo.id == todo_id).unwrap().clone();
+    let group = find("a");
+    assert!(group.group);
+    assert_eq!(group.estimate_minutes, None);
+    let (first, second) = (find(&record.created[0].id), find(&record.created[1].id));
+    assert_eq!(
+        (first.title.as_str(), second.title.as_str()),
+        ("조사", "A 쓰기")
+    );
+    assert_eq!(first.parent.as_deref(), Some("a"));
+    assert_eq!(second.after, vec![first.id.clone()]);
+    assert!(first.after.is_empty());
+    // The steps left decide the estimates; importance and deadline come along.
+    assert_eq!(
+        (first.estimate_minutes, second.estimate_minutes),
+        (Some(40), Some(50))
+    );
+    assert_eq!((first.priority, first.deadline), (5, Some(due)));
+    // What waited for the to-do waits for the group, so for every part.
+    assert_eq!(find("x").after, vec!["a".to_string()]);
+
+    let state = fixture.planner.state_store_for_tests().get();
+    assert!(!state.task_notes.contains_key("a"));
+    assert_eq!(state.task_notes[&first.id].steps, steps[0..2].to_vec());
+    assert_eq!(state.task_notes[&first.id].text, "어디까지 했는지");
+    assert_eq!(state.task_notes[&second.id].steps, steps[2..3].to_vec());
+    // The task goes on as the first part; the half hour before stays with the group.
+    let assignment = state.assignment.clone().unwrap();
+    assert_eq!(assignment.todo_id.as_deref(), Some(first.id.as_str()));
+    assert_eq!(
+        state.assignment_log.back().unwrap().todo_id.as_deref(),
+        Some("a")
+    );
+    let status = fixture.planner.status();
+    let outline = crate::outline::Outline::new(&status.open_todos);
+    let sums = crate::time::group_time(
+        &outline,
+        "a",
+        &status.minutes_this_round,
+        &status.task_notes,
+    );
+    assert!(sums.spent >= 29, "{sums:?}");
+    assert_eq!(sums.remaining, 90);
+}
+
+#[test]
+fn keeping_the_first_part_shrinks_the_to_do_and_what_waited_for_it_waits_for_the_new_one() {
+    let fixture = harness(true, &["a", "b", "x"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| {
+            config.todos[0].estimate_minutes = Some(300);
+            config.todos[0].estimate_changes = 2;
+            config.todos[0].rank = 1.0;
+            config.todos[0].after = vec!["b".into()];
+            config.todos[1].rank = 2.0;
+            config.todos[2].rank = 3.0;
+            config.todos[2].after = vec!["a".into()];
+        })
+        .unwrap();
+    let steps = [
+        step("준비", Some(30), true),
+        step("초안", Some(20), false),
+        step("쓰기", Some(40), false),
+        step("다듬기", None, false),
+    ];
+    fixture
+        .planner
+        .put_task_notes(
+            "a",
+            TaskNotes {
+                text: "메모".into(),
+                steps: steps.to_vec(),
+            },
+        )
+        .unwrap();
+    let record = fixture
+        .planner
+        .review_todo_change(
+            Utc::now(),
+            TodoChange::Split {
+                todo_id: "a".into(),
+                // The first part stays "title a": it needs no name.
+                parts: vec![part("", &steps[0..2]), part("쓰고 다듬기", &steps[2..4])],
+                keep_first: true,
+                in_order: false,
+            },
+            "",
+            "to-do tab",
+        )
+        .unwrap();
+    assert!(record.approved);
+    apply_writes(&fixture, fixture.planner.writes_for(&record));
+    fixture.planner.split_applied(Utc::now(), &record).unwrap();
+
+    let open = fixture.planner.open_todos();
+    let find = |todo_id: &str| open.iter().find(|todo| todo.id == todo_id).unwrap().clone();
+    let kept = find("a");
+    assert!(!kept.group);
+    assert_eq!(kept.title, "title a");
+    // Nothing spent yet: the steps left of the first part, counted afresh.
+    assert_eq!(kept.estimate_minutes, Some(20));
+    assert_eq!(
+        (kept.first_estimate_minutes, kept.estimate_changes),
+        (Some(20), 0)
+    );
+    let new = find(&record.created[0].id);
+    assert_eq!(new.title, "쓰고 다듬기");
+    // A step without minutes: no estimate yet.
+    assert_eq!(new.estimate_minutes, None);
+    assert_eq!(new.parent, None);
+    assert!(new.rank > 1.0 && new.rank < 2.0, "{}", new.rank);
+    assert_eq!(new.after, vec!["b".to_string()]);
+    assert_eq!(find("x").after, vec!["a".to_string(), new.id.clone()]);
+    let state = fixture.planner.state_store_for_tests().get();
+    assert_eq!(state.task_notes["a"].steps, steps[0..2].to_vec());
+    assert_eq!(state.task_notes["a"].text, "메모");
+    assert_eq!(state.task_notes[&new.id].steps, steps[2..4].to_vec());
+}
+
+#[test]
+fn a_split_that_cannot_be_made_is_refused() {
+    let fixture = harness(true, &["a", "r", "g"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| {
+            config.todos[1].repeat = true;
+            config.todos[2].group = true;
+        })
+        .unwrap();
+    let one = step("하나", Some(10), false);
+    let two = step("둘", Some(10), false);
+    let split = |todo_id: &str, parts: Vec<SplitPart>| TodoChange::Split {
+        todo_id: todo_id.into(),
+        parts,
+        keep_first: false,
+        in_order: false,
+    };
+    let refused = |change: TodoChange| {
+        matches!(
+            fixture
+                .planner
+                .review_todo_change(Utc::now(), change, "", "work tab"),
+            Err(PlannerError::BadSplit(_))
+        )
+    };
+    let fine = vec![
+        part("", std::slice::from_ref(&one)),
+        part("", std::slice::from_ref(&two)),
+    ];
+    assert!(refused(split("r", fine.clone())), "a routine");
+    assert!(refused(split("g", fine)), "a group");
+    assert!(
+        refused(split("a", vec![part("", &[one.clone(), two.clone()])])),
+        "one part"
+    );
+    assert!(
+        refused(split(
+            "a",
+            vec![
+                part("", &[one.clone(), two.clone()]),
+                part("", std::slice::from_ref(&two))
+            ]
+        )),
+        "a part of several steps without a name"
+    );
+    let done = step("끝", None, true);
+    assert!(
+        refused(split(
+            "a",
+            vec![part("", std::slice::from_ref(&done)), part("", &[done])]
+        )),
+        "nothing left to make"
+    );
+    assert!(fixture
+        .planner
+        .open_todos()
+        .iter()
+        .all(|todo| !todo.group || todo.id == "g"));
+}
+
+#[test]
+fn the_window_check_reads_the_steps_left_and_follows_their_changes() {
+    let fixture = harness(true, &["a"]);
+    let mut notes = TaskNotes {
+        text: "메모".into(),
+        steps: vec![
+            step("자료 찾기", Some(10), true),
+            step("표 그리기", None, false),
+        ],
+    };
+    fixture.planner.put_task_notes("a", notes.clone()).unwrap();
+    fixture.planner.assign(Utc::now()).unwrap();
+    let watched = fixture.focus.state().task;
+    assert!(watched.contains("(남은 단계: 표 그리기)"), "{watched}");
+    assert!(!watched.contains("자료 찾기"), "{watched}");
+    // A step added while the task runs reaches the check at once.
+    notes.steps.push(step("엑셀로 계산하기", None, false));
+    fixture.planner.put_task_notes("a", notes).unwrap();
+    let watched = fixture.focus.state().task;
+    assert!(
+        watched.contains("(남은 단계: 표 그리기, 엑셀로 계산하기)"),
+        "{watched}"
+    );
+}

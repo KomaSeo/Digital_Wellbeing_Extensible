@@ -165,6 +165,23 @@ impl<'a> Outline<'a> {
             .collect()
     }
 
+    /// `group_id` itself and the groups inside it, at any depth.
+    pub fn groups_under(&self, group_id: &str) -> Vec<&'a TodoItem> {
+        let Some(group) = self.index_of.get(group_id).copied() else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        self.push_rows(Some(group), 0, &mut rows);
+        self.get(group_id)
+            .into_iter()
+            .chain(
+                rows.into_iter()
+                    .map(|row| row.todo)
+                    .filter(|todo| todo.group),
+            )
+            .collect()
+    }
+
     /// Whatever waits for `todo_id` may start: it is not open (finished, removed, unknown), it
     /// is a routine (a routine is never over, so it never holds anything up), or it is a group
     /// with no unfinished to-do inside.

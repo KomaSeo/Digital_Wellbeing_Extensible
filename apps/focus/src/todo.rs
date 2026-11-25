@@ -12,6 +12,7 @@
 
 mod graph;
 mod outline_list;
+mod split;
 
 use crate::{ChangeChoice, FocusApp, Tab, GREEN, RED};
 use agent_api::user_api::{call, Status};
@@ -20,6 +21,7 @@ use eframe::egui;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread;
 use task_planner::outline::Outline;
 use task_planner::time::{todo_time, TodoTime};
@@ -72,6 +74,9 @@ pub struct TodoUiState {
     /// Notes and steps being edited, for this to-do.
     notes_for: Option<String>,
     notes: TaskNotes,
+    /// The notes as the agent had them when they were loaded or last saved: when the agent's
+    /// change (a split took steps away) and nothing is being edited, they are loaded again.
+    notes_base: TaskNotes,
     new_step: String,
     appointment_form: AppointmentForm,
     appointment_form_open: bool,
@@ -83,12 +88,17 @@ pub struct TodoUiState {
     miss_cause: Option<MissCause>,
     /// With "그 밖의 이유": how many more minutes it needs (0: not given).
     more_minutes: u32,
+    /// With "잘 몰랐다": put an "알아보기" to-do in front of it, of this many minutes.
+    look_into: bool,
+    look_into_minutes: u32,
     /// The Work tab's "예상 다시 적기": the new estimate, in minutes.
     new_estimate: u32,
     /// The form for something to wait for, added by hand.
     waiting_form_open: bool,
     waiting_title: String,
     waiting_check_on: String,
+    /// The "할 일로 나누기" window, while it is open.
+    split: Option<split::SplitWindow>,
 }
 
 /// Responsibility: Hold the fields of an appointment as the user types them.
@@ -309,6 +319,7 @@ impl FocusApp {
             }
         });
         self.stop_confirm_ui(ui);
+        self.split_window_ui(ui.ctx());
         // An appointment runs even when the list is empty.
         match planner
             .clone()
@@ -344,6 +355,7 @@ impl FocusApp {
             }
             return;
         }
+        self.split_window_ui(ui.ctx());
         self.list_ui(ui, &planner);
         self.appointments_ui(ui, &planner);
         self.waiting_ui(ui, &planner);
@@ -822,10 +834,18 @@ impl FocusApp {
     /// handle to another place in the list (the owner: "일하기 창에서 단계의 순서를 바꿀 수
     /// 있도록 해야할듯").
     fn notes_ui(&mut self, ui: &mut egui::Ui, todo_id: &str, planner: &PlannerStatus) {
-        if self.todo_ui.notes_for.as_deref() != Some(todo_id) {
+        let at_the_agent = planner.task_notes.get(todo_id).cloned().unwrap_or_default();
+        let other_to_do = self.todo_ui.notes_for.as_deref() != Some(todo_id);
+        // Changed by the agent (a split), with nothing typed meanwhile: shown as it is now.
+        let changed_there = at_the_agent != self.todo_ui.notes_base
+            && self.todo_ui.notes == self.todo_ui.notes_base;
+        if other_to_do || changed_there {
+            if other_to_do {
+                self.todo_ui.new_step.clear();
+            }
             self.todo_ui.notes_for = Some(todo_id.to_string());
-            self.todo_ui.notes = planner.task_notes.get(todo_id).cloned().unwrap_or_default();
-            self.todo_ui.new_step.clear();
+            self.todo_ui.notes = at_the_agent.clone();
+            self.todo_ui.notes_base = at_the_agent;
         }
         let mut save = false;
         let steps = &self.todo_ui.notes.steps;
@@ -838,173 +858,202 @@ impl FocusApp {
                 steps.iter().filter(|step| step.done).count()
             )
         };
-        egui::CollapsingHeader::new(header)
-            .id_salt(("task_notes", todo_id))
-            .default_open(true)
-            .show(ui, |ui| {
-                let mut remove = None;
-                let dragged: Option<DraggedStep> =
-                    egui::DragAndDrop::payload::<DraggedStep>(ui.ctx())
-                        .map(|payload| (*payload).clone())
-                        .filter(|payload| payload.todo_id == todo_id);
-                let pointer = ui.input(|input| input.pointer.latest_pos());
-                // Where the dragged step would go: the index it is inserted before.
-                let mut insert_at: Option<usize> = None;
-                let step_count = self.todo_ui.notes.steps.len();
-                for (index, step) in self.todo_ui.notes.steps.iter_mut().enumerate() {
-                    let row = ui.horizontal(|ui| {
-                        let handle = outline_list::handle_ui(ui, step_count > 1);
-                        handle.dnd_set_drag_payload(DraggedStep {
-                            todo_id: todo_id.to_string(),
-                            index,
-                        });
-                        handle.on_hover_text("끌어서 단계의 순서를 바꿉니다");
-                        save |= ui
-                            .checkbox(&mut step.done, "")
-                            .on_hover_text("끝낸 단계에 표시합니다")
-                            .changed();
-                        save |= ui
-                            .add(egui::TextEdit::singleline(&mut step.text).desired_width(260.0))
-                            .lost_focus();
-                        let mut minutes = step.minutes.unwrap_or(0);
-                        let response = ui
-                            .add(
-                                egui::DragValue::new(&mut minutes)
-                                    .range(0..=600)
-                                    .custom_formatter(|value, _| {
-                                        if value <= 0.0 {
-                                            "–분".to_string()
-                                        } else {
-                                            format!("{value}분")
-                                        }
-                                    })
-                                    .custom_parser(|text| {
-                                        let digits: String =
-                                            text.chars().filter(char::is_ascii_digit).collect();
-                                        Some(digits.parse::<f64>().unwrap_or(0.0))
-                                    }),
-                            )
-                            .on_hover_text("이 단계의 예상 시간(분). 눌러서 적거나 좌우로 끕니다");
-                        if response.changed() {
-                            step.minutes = (minutes > 0).then_some(minutes);
-                        }
-                        save |= response.drag_stopped() || response.lost_focus();
-                        if ui
-                            .small_button("x")
-                            .on_hover_text("이 단계를 지웁니다")
-                            .clicked()
-                        {
-                            remove = Some(index);
-                        }
+        // A to-do of two steps or more can be cut into to-dos at their boundaries.
+        let splittable = planner
+            .open_todos
+            .iter()
+            .find(|todo| todo.id == todo_id)
+            .filter(|todo| !todo.group && !todo.repeat && steps.len() >= 2)
+            .cloned();
+        let idle = !self.pending.load(Ordering::SeqCst);
+        let mut open_split = false;
+        egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            ui.make_persistent_id(("task_notes", todo_id)),
+            true,
+        )
+        .show_header(ui, |ui| {
+            ui.label(header);
+            if splittable.is_some()
+                && ui
+                    .add_enabled(idle, egui::Button::new("할 일로 나누기").small())
+                    .on_hover_text(
+                        "단계 사이에 경계를 넣어 이 할 일을 여러 할 일로 나눕니다. 엄격 모드에서도 \
+                         AI 심사 없이 바로 적용됩니다.",
+                    )
+                    .clicked()
+            {
+                open_split = true;
+            }
+        })
+        .body(|ui| {
+            let mut remove = None;
+            let dragged: Option<DraggedStep> = egui::DragAndDrop::payload::<DraggedStep>(ui.ctx())
+                .map(|payload| (*payload).clone())
+                .filter(|payload| payload.todo_id == todo_id);
+            let pointer = ui.input(|input| input.pointer.latest_pos());
+            // Where the dragged step would go: the index it is inserted before.
+            let mut insert_at: Option<usize> = None;
+            let step_count = self.todo_ui.notes.steps.len();
+            for (index, step) in self.todo_ui.notes.steps.iter_mut().enumerate() {
+                let row = ui.horizontal(|ui| {
+                    let handle = outline_list::handle_ui(ui, step_count > 1);
+                    handle.dnd_set_drag_payload(DraggedStep {
+                        todo_id: todo_id.to_string(),
+                        index,
                     });
-                    if let (Some(dragged), Some(pointer)) = (&dragged, pointer) {
-                        let rect = row.response.rect;
-                        if rect.y_range().contains(pointer.y) {
-                            let after = pointer.y > rect.center().y;
-                            let insertion = index + usize::from(after);
-                            // Dropped just before or after itself, it would not move.
-                            if insertion != dragged.index && insertion != dragged.index + 1 {
-                                let line = if after {
-                                    rect.bottom() + 1.0
-                                } else {
-                                    rect.top() - 1.0
-                                };
-                                ui.painter().hline(
-                                    rect.left()..=rect.right(),
-                                    line,
-                                    egui::Stroke::new(2.5_f32, outline_list::BLUE),
-                                );
-                                insert_at = Some(insertion);
-                            }
-                        }
-                    }
-                }
-                if let Some(dragged) = &dragged {
-                    if let (Some(pointer), Some(step)) =
-                        (pointer, self.todo_ui.notes.steps.get(dragged.index))
-                    {
-                        outline_list::paint_at_pointer(ui, pointer, &step.text, outline_list::BLUE);
-                    }
-                    if ui.input(|input| input.pointer.any_released()) {
-                        egui::DragAndDrop::clear_payload(ui.ctx());
-                        if let Some(insertion) = insert_at {
-                            let steps = &mut self.todo_ui.notes.steps;
-                            if dragged.index < steps.len() {
-                                let step = steps.remove(dragged.index);
-                                let target = if insertion > dragged.index {
-                                    insertion - 1
-                                } else {
-                                    insertion
-                                };
-                                steps.insert(target.min(steps.len()), step);
-                                save = true;
-                            }
-                        }
-                    }
-                }
-                if let Some(index) = remove {
-                    self.todo_ui.notes.steps.remove(index);
-                    save = true;
-                }
-                // What the steps left add up to: the time the to-do still needs.
-                let left: Vec<&TaskStep> = self
-                    .todo_ui
-                    .notes
-                    .steps
-                    .iter()
-                    .filter(|step| !step.done)
-                    .collect();
-                if !left.is_empty() {
-                    let timed = left.iter().filter(|step| step.minutes.is_some()).count();
-                    let sum: u32 = left.iter().filter_map(|step| step.minutes).sum();
-                    ui.small(if timed == left.len() {
-                        format!(
-                            "남은 단계 {}개 · {} = 이 할 일의 남은 예상",
-                            left.len(),
-                            minutes_text(i64::from(sum))
+                    handle.on_hover_text("끌어서 단계의 순서를 바꿉니다");
+                    save |= ui
+                        .checkbox(&mut step.done, "")
+                        .on_hover_text("끝낸 단계에 표시합니다")
+                        .changed();
+                    save |= ui
+                        .add(egui::TextEdit::singleline(&mut step.text).desired_width(260.0))
+                        .lost_focus();
+                    let mut minutes = step.minutes.unwrap_or(0);
+                    let response = ui
+                        .add(
+                            egui::DragValue::new(&mut minutes)
+                                .range(0..=600)
+                                .custom_formatter(|value, _| {
+                                    if value <= 0.0 {
+                                        "–분".to_string()
+                                    } else {
+                                        format!("{value}분")
+                                    }
+                                })
+                                .custom_parser(|text| {
+                                    let digits: String =
+                                        text.chars().filter(char::is_ascii_digit).collect();
+                                    Some(digits.parse::<f64>().unwrap_or(0.0))
+                                }),
                         )
-                    } else if timed == 0 {
-                        "단계마다 예상 시간(분)을 적으면, 남은 단계의 합이 이 할 일의 남은 예상이 \
-                         됩니다."
-                            .to_string()
-                    } else {
-                        format!(
-                            "남은 단계 {}개 중 {}개에 예상 시간이 없습니다. 모두 적으면 그 합이 이 할 \
-                             일의 남은 예상이 됩니다.",
-                            left.len(),
-                            left.len() - timed
-                        )
-                    });
-                }
-                ui.horizontal(|ui| {
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut self.todo_ui.new_step)
-                            .hint_text("단계 추가")
-                            .desired_width(280.0),
-                    );
-                    let entered = response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    if (ui.small_button("추가").clicked() || entered)
-                        && !self.todo_ui.new_step.trim().is_empty()
+                        .on_hover_text("이 단계의 예상 시간(분). 눌러서 적거나 좌우로 끕니다");
+                    if response.changed() {
+                        step.minutes = (minutes > 0).then_some(minutes);
+                    }
+                    save |= response.drag_stopped() || response.lost_focus();
+                    if ui
+                        .small_button("x")
+                        .on_hover_text("이 단계를 지웁니다")
+                        .clicked()
                     {
-                        self.todo_ui.notes.steps.push(TaskStep {
-                            text: self.todo_ui.new_step.trim().to_string(),
-                            done: false,
-                            minutes: None,
-                        });
-                        self.todo_ui.new_step.clear();
-                        save = true;
+                        remove = Some(index);
                     }
                 });
+                if let (Some(dragged), Some(pointer)) = (&dragged, pointer) {
+                    let rect = row.response.rect;
+                    if rect.y_range().contains(pointer.y) {
+                        let after = pointer.y > rect.center().y;
+                        let insertion = index + usize::from(after);
+                        // Dropped just before or after itself, it would not move.
+                        if insertion != dragged.index && insertion != dragged.index + 1 {
+                            let line = if after {
+                                rect.bottom() + 1.0
+                            } else {
+                                rect.top() - 1.0
+                            };
+                            ui.painter().hline(
+                                rect.left()..=rect.right(),
+                                line,
+                                egui::Stroke::new(2.5_f32, outline_list::BLUE),
+                            );
+                            insert_at = Some(insertion);
+                        }
+                    }
+                }
+            }
+            if let Some(dragged) = &dragged {
+                if let (Some(pointer), Some(step)) =
+                    (pointer, self.todo_ui.notes.steps.get(dragged.index))
+                {
+                    outline_list::paint_at_pointer(ui, pointer, &step.text, outline_list::BLUE);
+                }
+                if ui.input(|input| input.pointer.any_released()) {
+                    egui::DragAndDrop::clear_payload(ui.ctx());
+                    if let Some(insertion) = insert_at {
+                        let steps = &mut self.todo_ui.notes.steps;
+                        if dragged.index < steps.len() {
+                            let step = steps.remove(dragged.index);
+                            let target = if insertion > dragged.index {
+                                insertion - 1
+                            } else {
+                                insertion
+                            };
+                            steps.insert(target.min(steps.len()), step);
+                            save = true;
+                        }
+                    }
+                }
+            }
+            if let Some(index) = remove {
+                self.todo_ui.notes.steps.remove(index);
+                save = true;
+            }
+            // What the steps left add up to: the time the to-do still needs.
+            let left: Vec<&TaskStep> = self
+                .todo_ui
+                .notes
+                .steps
+                .iter()
+                .filter(|step| !step.done)
+                .collect();
+            if !left.is_empty() {
+                let timed = left.iter().filter(|step| step.minutes.is_some()).count();
+                let sum: u32 = left.iter().filter_map(|step| step.minutes).sum();
+                ui.small(if timed == left.len() {
+                    format!(
+                        "남은 단계 {}개 · {} = 이 할 일의 남은 예상",
+                        left.len(),
+                        minutes_text(i64::from(sum))
+                    )
+                } else if timed == 0 {
+                    "단계마다 예상 시간(분)을 적으면, 남은 단계의 합이 이 할 일의 남은 예상이 \
+                         됩니다."
+                        .to_string()
+                } else {
+                    format!(
+                        "남은 단계 {}개 중 {}개에 예상 시간이 없습니다. 모두 적으면 그 합이 이 할 \
+                             일의 남은 예상이 됩니다.",
+                        left.len(),
+                        left.len() - timed
+                    )
+                });
+            }
+            ui.horizontal(|ui| {
                 let response = ui.add(
-                    egui::TextEdit::multiline(&mut self.todo_ui.notes.text)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("메모: 어디까지 했는지, 무엇이 남았는지"),
+                    egui::TextEdit::singleline(&mut self.todo_ui.new_step)
+                        .hint_text("단계 추가")
+                        .desired_width(280.0),
                 );
-                save |= response.lost_focus();
+                let entered =
+                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if (ui.small_button("추가").clicked() || entered)
+                    && !self.todo_ui.new_step.trim().is_empty()
+                {
+                    self.todo_ui.notes.steps.push(TaskStep {
+                        text: self.todo_ui.new_step.trim().to_string(),
+                        done: false,
+                        minutes: None,
+                    });
+                    self.todo_ui.new_step.clear();
+                    save = true;
+                }
             });
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut self.todo_ui.notes.text)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("메모: 어디까지 했는지, 무엇이 남았는지"),
+            );
+            save |= response.lost_focus();
+        });
+        if let (true, Some(todo)) = (open_split, &splittable) {
+            let steps = self.todo_ui.notes.steps.clone();
+            self.open_split(todo, steps);
+        }
         if save {
+            self.todo_ui.notes_base = self.todo_ui.notes.clone();
             // Off the UI thread and outside the one-request-at-a-time rule: notes are small
             // and harmless.
             let (session, todo_id, notes) = (
@@ -1025,7 +1074,7 @@ impl FocusApp {
     /// Why the current to-do went over its estimate (the owner: "왜 내가 예상된 시간을
     /// 넘어갔을까? 그 이유는 1) 내가 시간을 예상할 수 있을 정도로 단계를 세분화해놓지 않았거나 2) 내가
     /// 시간을 예상할 수 있을 정도로 이 일에 대해 잘 모른다"), and what to do about it.
-    fn miss_cause_ui(&mut self, ui: &mut egui::Ui, time: &TodoTime) {
+    fn miss_cause_ui(&mut self, ui: &mut egui::Ui, time: &TodoTime, title: &str) {
         ui.add_space(4.0);
         ui.colored_label(
             YELLOW,
@@ -1043,6 +1092,12 @@ impl FocusApp {
         ] {
             if ui.radio(*cause == Some(choice), label).clicked() {
                 *cause = Some(choice);
+                if choice == MissCause::NotKnown {
+                    self.todo_ui.look_into = true;
+                    if self.todo_ui.look_into_minutes == 0 {
+                        self.todo_ui.look_into_minutes = 30;
+                    }
+                }
             }
         }
         match self.todo_ui.miss_cause {
@@ -1053,10 +1108,26 @@ impl FocusApp {
                 );
             }
             Some(MissCause::NotKnown) => {
-                ui.small(
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(
+                        &mut self.todo_ui.look_into,
+                        format!("앞에 \"{}\" 할 일 넣기", look_into_title(title)),
+                    );
+                    if self.todo_ui.look_into {
+                        ui.add(
+                            egui::DragValue::new(&mut self.todo_ui.look_into_minutes)
+                                .range(5..=240)
+                                .suffix("분"),
+                        );
+                    }
+                });
+                ui.small(if self.todo_ui.look_into {
+                    "알아보기 할 일은 할 일 추가처럼 AI가 심사합니다. AI가 받아들이면 이 할 일은 \
+                     알아보기를 먼저 끝내야 받을 수 있습니다. 알아보면서 이 할 일의 단계를 적으세요."
+                } else {
                     "다음에 이 할 일을 받으면, 먼저 무엇이 필요한지 알아보고 단계를 적으세요. 단계를 \
-                     적으면 남은 시간을 더 잘 예상할 수 있습니다.",
-                );
+                     적으면 남은 시간을 더 잘 예상할 수 있습니다."
+                });
             }
             Some(MissCause::Other) => {
                 ui.horizontal(|ui| {
@@ -1088,12 +1159,80 @@ impl FocusApp {
         let more = std::mem::take(&mut self.todo_ui.more_minutes);
         let new_estimate = (cause == MissCause::Other && more > 0)
             .then(|| u32::try_from(time.spent).unwrap_or(0).saturating_add(more));
+        // "잘 몰랐다": an "알아보기" to-do in front of it, if the AI takes it.
+        let look_into = (cause == MissCause::NotKnown
+            && std::mem::take(&mut self.todo_ui.look_into))
+        .then(|| {
+            json!({
+                "kind": "add",
+                "todo": {
+                    "title": look_into_title(&todo.title),
+                    "notes": format!(
+                        "\"{}\"에 무엇이 필요한지 알아보고, 그 할 일의 단계와 단계마다 걸릴 \
+                         시간을 적습니다.",
+                        todo.title
+                    ),
+                    "deadline": todo.deadline,
+                    "priority": todo.priority,
+                    "estimate_minutes": self.todo_ui.look_into_minutes.max(5),
+                    "parent": todo.parent,
+                },
+            })
+        });
+        let look_into_reason = format!(
+            "\"{}\"이(가) 예상보다 오래 걸렸습니다. 이 일에 대해 잘 몰랐기 때문입니다. 먼저 무엇이 \
+             필요한지 알아보고 단계를 적은 뒤에 이어 하려고 합니다.",
+            todo.title
+        );
+        let waits_for = todo.after.clone();
+        let shared = Arc::clone(&self.shared);
+        let context = self.context.clone();
         thread::spawn(move || {
             let _ = call(
                 session,
                 "estimate_miss",
                 json!({ "todo_id": todo_id, "cause": cause }),
             );
+            if let Some(change) = look_into {
+                // The report goes at the same time and keeps the planner busy: try again
+                // until it is through.
+                let answer = until_not_busy(|| {
+                    call(
+                        session,
+                        "todo_change",
+                        json!({ "change": change, "reason": look_into_reason, "via": "work tab" }),
+                    )
+                });
+                let added = match answer {
+                    Ok(status) => {
+                        let record = status.last_todo_change.clone();
+                        shared.lock().todo_change = record.clone();
+                        record
+                            .filter(|record| record.approved)
+                            .and_then(|record| record.after)
+                    }
+                    Err(error) => {
+                        shared.lock().message = error;
+                        None
+                    }
+                };
+                if let Some(added) = added {
+                    let mut after = waits_for;
+                    after.push(added.id);
+                    let _ = until_not_busy(|| {
+                        call(
+                            session,
+                            "todo_change",
+                            json!({
+                                "change": { "kind": "set_after", "todo_id": todo_id, "after": after },
+                                "reason": "",
+                                "via": "work tab",
+                            }),
+                        )
+                    });
+                }
+                context.request_repaint();
+            }
             if let Some(estimate) = new_estimate {
                 // The report goes at the same time and keeps the planner busy for a moment:
                 // try again until it is through.
@@ -1245,7 +1384,10 @@ impl FocusApp {
                              받기\"로 다음 할 일을 받습니다.",
                         );
                         if let Some(time) = over_estimate {
-                            self.miss_cause_ui(ui, &time);
+                            let title = current_todo
+                                .map(|todo| todo.title.clone())
+                                .unwrap_or_default();
+                            self.miss_cause_ui(ui, &time, &title);
                         }
                     }
                     ChangeChoice::Extend => {
@@ -1598,6 +1740,7 @@ impl FocusApp {
             TodoChange::Remove { .. }
             | TodoChange::Move { .. }
             | TodoChange::SetAfter { .. }
+            | TodoChange::Split { .. }
             | TodoChange::RemoveAppointment { .. } => {}
         }
     }
@@ -2323,6 +2466,26 @@ fn change_summary_korean(record: &TodoChangeRecord) -> String {
         TodoChange::SetAfter { todo_id, .. } => {
             format!("\"{}\" 먼저 끝낼 일 바꾸기", title(todo_id))
         }
+        TodoChange::Split {
+            todo_id,
+            keep_first,
+            ..
+        } => {
+            let made: Vec<String> = record
+                .created
+                .iter()
+                .map(|todo| format!("\"{}\"", todo.title))
+                .collect();
+            if *keep_first {
+                format!("\"{}\"에서 {} 나누기", title(todo_id), made.join(", "))
+            } else {
+                format!(
+                    "\"{}\"을(를) 묶음으로 바꾸고 {}(으)로 나누기",
+                    title(todo_id),
+                    made.join(", ")
+                )
+            }
+        }
         TodoChange::AddAppointment { appointment } => format!(
             "약속 \"{}\"({}) 추가",
             appointment.title,
@@ -2408,6 +2571,25 @@ fn todo_only_rows_ui(
         ui.small(estimate_zero);
     });
     ui.end_row();
+    // A long to-do is better split (the owner's plan: suggest it when adding one over two
+    // hours).
+    if form.estimate_minutes > task_planner::time::LONG_ESTIMATE_MINUTES {
+        ui.label("");
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!(
+                    "{}이 넘는 일은 예상이 빗나가기 쉽습니다. 저장한 뒤 \"메모와 단계\"에서 단계로 \
+                     나누고 단계마다 시간을 적으세요. 성격이 다른 단계들은 \"할 일로 나누기\"로 \
+                     따로 할 일로 만들 수 있습니다.",
+                    minutes_text(i64::from(task_planner::time::LONG_ESTIMATE_MINUTES))
+                ))
+                .small()
+                .color(YELLOW),
+            )
+            .wrap(),
+        );
+        ui.end_row();
+    }
     ui.label("반복");
     ui.checkbox(
         &mut form.repeat,
@@ -2598,4 +2780,27 @@ fn reason_start(choice: ChangeChoice) -> &'static str {
         ChangeChoice::Repick => "다른 일을 받으려는 까닭: ",
         ChangeChoice::End => "AI 검사를 멈추려는 까닭: ",
     }
+}
+
+/// "알아보기: <title>", as long as a title may be.
+fn look_into_title(title: &str) -> String {
+    format!("알아보기: {title}").chars().take(120).collect()
+}
+
+/// `request` again (every half second, for half a minute at most) while the planner is busy
+/// with another request.
+fn until_not_busy(
+    request: impl Fn() -> Result<agent_api::user_api::Status, String>,
+) -> Result<agent_api::user_api::Status, String> {
+    let mut answer = request();
+    for _ in 0..60 {
+        match &answer {
+            Err(error) if error.contains("다른 요청을 아직 처리하고 있습니다") => {
+                thread::sleep(std::time::Duration::from_millis(500));
+                answer = request();
+            }
+            _ => break,
+        }
+    }
+    answer
 }
