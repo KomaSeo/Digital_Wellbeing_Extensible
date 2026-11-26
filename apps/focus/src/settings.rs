@@ -1319,8 +1319,9 @@ impl SettingsTab {
             );
             ui.small(
                 "기본 모델은 할 일 고르기, 심사, 접근 요청이 씁니다. 창 검사는 이 선택과 \
-                 상관없이 Haiku 하나가 합니다. 창 검사는 할 일 문장과 지금 할 일의 남은 단계를 보고 \
-                 판단하므로, 단계를 고치면 몇 초 뒤부터 새 단계로 판단합니다.",
+                 상관없이 Haiku, Sonnet, Opus 순서로 묻습니다. 앞 모델이 딴짓으로 본 창만 다음 모델이 \
+                 다시 보므로, 세 모델이 모두 딴짓으로 봐야 막힙니다. 창 검사는 할 일 문장과 지금 할 일의 \
+                 남은 단계를 보고 판단하므로, 단계를 고치면 몇 초 뒤부터 새 단계로 판단합니다.",
             );
             match (catalog.fetched_at, catalog.error.is_empty()) {
                 (Some(fetched_at), _) => {
@@ -3233,9 +3234,9 @@ pub(crate) fn escalation_ui(ui: &mut egui::Ui, snapshot: &SettingsSnapshot) {
     let columns = UsageColumns::gather(snapshot);
     crate::style::section(ui, "창 검사 단계");
     ui.small(
-        "창 검사는 Haiku에게 먼저 묻습니다. Haiku가 할 일과 관계있다고 보지 않은 창(딴짓, 애매함, \
-         답에서 빠진 창)만 Sonnet에게 넘기고, Sonnet도 그렇게 보지 않은 창만 Opus에게 넘깁니다. 넘긴 \
-         비율이 높을수록 비용이 많이 듭니다. 비율은 Haiku 검사 수에 대한 비율입니다.",
+        "창 검사는 Haiku에게 먼저 묻습니다. Haiku가 딴짓으로 본 창과 답에서 빠진 창만 Sonnet에게 \
+         넘기고, Sonnet도 딴짓으로 본 창만 Opus에게 넘깁니다. 넘긴 비율이 높을수록 비용이 많이 듭니다. \
+         비율은 Haiku 검사 수에 대한 비율입니다.",
     );
     let calls = |rows: &BTreeMap<String, Vec<Totals>>, purpose: &str| -> Vec<Totals> {
         UsageColumns::column_totals(rows, Some(purpose))

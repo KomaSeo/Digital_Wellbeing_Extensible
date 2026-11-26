@@ -120,7 +120,7 @@ Claude를 부른다 → 다시 잠금을 잡고 결과를 넣는다" 순서로 �
 | `model` | `claude-opus-5-5` | 할 일 고르기, 심사, 접근 요청이 쓰는 Claude 모델(**기본 모델**)의 이름입니다. 창 검사는 이 모델을 쓰지 않습니다(5.8절). 머신 설치의 설정 탭에서는 이름을 적지 않고 목록에서 고릅니다(5.15절). |
 | `check_effort` | `low` | 창 검사에서 AI가 답하기 전에 얼마나 생각할지(**노력**)입니다. `low`, `medium`, `high`, `xhigh`, `max` 중 하나이고, 모르는 값은 `low`로 봅니다. 창 검사는 자주 일어나므로 기본값이 가장 낮습니다. |
 | `decision_effort` | `medium` | 그 밖의 판단(할 일 고르기와 심사, 약속과 연장 심사, 7일 계획, 접근 요청)의 노력입니다. 모르는 값은 `medium`으로 봅니다. |
-| `recheck_model` | `claude-haiku-5-5` | **다시 검사 모델**입니다. 예전 버전(rc.53까지)에서 이미 판정한 창을 다시 검사할 때 먼저 쓰던 모델입니다. 지금은 창 검사를 Haiku 하나가 하기 때문에(5.8절) 쓰지 않습니다. |
+| `recheck_model` | `claude-haiku-5-5` | **다시 검사 모델**입니다. 예전 버전(rc.53까지)에서 이미 판정한 창을 다시 검사할 때 먼저 쓰던 모델입니다. 지금은 창 검사가 기본 모델과 상관없이 Haiku, Sonnet, Opus 순서로 묻기 때문에(5.8절) 쓰지 않습니다. |
 | `api_key` | `""` | Anthropic API 키입니다. 프로그램은 환경 변수 `ANTHROPIC_API_KEY`가 없을 때만 이 값을 씁니다. 프로그램은 이 키를 **암호화하지 않고** 저장합니다. |
 | `send_screenshot` | `true` | 모니터가 화면 캡처를 Claude에게 보낼지 정합니다. |
 | `strikes_to_block` | `2` | 같은 앱이 `off_task`를 연속 몇 번 받으면 모니터가 그 앱을 차단할지 정합니다. 브라우저 탭에는 이 값을 쓰지 않습니다(첫 판정에서 차단). |
@@ -396,9 +396,9 @@ YouTube는 강의를 볼 때도 쓰고 딴짓을 할 때도 씁니다. 그래서
 **판정 기록이 지워지는 경우:** 할 일이 바뀌거나 AI 검사가 멈추면, `reset()`이 모든 기록을 지웁니다. 같은 앱이라도 새 할 일에는 필요 없을 수 있기 때문입니다.
 기록은 다시 검사할 시각이 지나도 24시간 동안 남습니다(`VERDICTS_KEPT_FOR`). 다시 검사할 때 지난번 판정을 알아야 하기 때문입니다(아래). 24시간이 지난 기록은 새 판정을 적을 때 함께 정리됩니다.
 
-**창 검사는 Haiku 하나가 합니다 (rc.94부터).** 소유자가 창 검사에 남은 단계를 넣기로 하면서 "단계를 넣고 Haiku로만 돌려보자"라고 해서, `CHECK_TIERS`에 Claude Haiku 5.5 하나만 남겼습니다. Haiku가 딴짓으로 본 창은 다른 모델에게 묻지 않고 그대로 경고와 차단이 됩니다. 아래의 차례 묻기 코드(`run_judge`, `settle`, `goes_up`)는 그대로 두었으므로, `CHECK_TIERS`에 모델을 다시 넣으면 예전처럼 동작합니다. 아래 1~9번은 rc.93까지의 동작입니다.
+**Haiku 하나로 검사했던 때 (rc.94~rc.97).** 소유자가 창 검사에 남은 단계를 넣기로 하면서 "단계를 넣고 Haiku로만 돌려보자"라고 해서, rc.94부터 `CHECK_TIERS`에 Claude Haiku 5.5 하나만 남겼습니다. 그동안은 Haiku가 딴짓으로 본 창이 다른 모델에게 묻지 않고 그대로 경고와 차단이 되었습니다. 소유자가 "Haiku만으로 판단하게 했더니 오류가 너무 많다. 롤백하자"라고 해서 rc.98부터 아래의 차례 묻기로 되돌렸습니다. 남은 단계는 계속 창 검사에 들어갑니다([`task_planner.md`](task_planner.md) 4.19절).
 
-**rc.93까지: 창 검사는 싼 모델부터 차례로 묻습니다** (`run_judge`, `CHECK_TIERS`, `settle`). 소유자가 "HAIKU --> SONNET --> OPUS 방식(하위 단계에서 허락 안해주면 다음 단계에서 허락 확인. 하위 단계에서 허락 하면 다음 단계 넘어가지 않고 유지)"을 묻고, 창 검사에만 쓰기로 정했습니다("창 검사 2번으로 해보고 너가 몇 번 시험 해보고 그 이후에 괜찮으면 넣어줘", "심사는 건들지 말자 일단").
+**창 검사는 싼 모델부터 차례로 묻습니다** (rc.93까지, 그리고 rc.98부터) (`run_judge`, `CHECK_TIERS`, `settle`). 소유자가 "HAIKU --> SONNET --> OPUS 방식(하위 단계에서 허락 안해주면 다음 단계에서 허락 확인. 하위 단계에서 허락 하면 다음 단계 넘어가지 않고 유지)"을 묻고, 창 검사에만 쓰기로 정했습니다("창 검사 2번으로 해보고 너가 몇 번 시험 해보고 그 이후에 괜찮으면 넣어줘", "심사는 건들지 말자 일단").
 1. 모든 창 검사(처음 보는 창이든, 다시 검사할 시각이 된 창이든)는 Claude Haiku 5.5에게 먼저 묻습니다.
 2. Haiku가 할 일과 관계있음(`on_task`)이라고 본 창은 그 판정으로 확정합니다. 다음 모델에게 묻지 않습니다.
 3. Haiku가 딴짓(`off_task`)으로 본 창이 하나라도 있으면, 같은 화면 캡처와 같은 내용으로 Claude Sonnet 5.5에게 묻습니다. 함께 묻는 뒤쪽 창의 판정이 빠져 있어도 Sonnet에게 묻습니다. Sonnet이 딴짓으로 본 창은 Claude Opus 5.5가 판정하고, 그 판정을 따릅니다.
@@ -852,7 +852,7 @@ Anthropic은 공식 Rust SDK를 제공하지 않으므로, 코드는 REST API를
 | `verdict_is_discarded_when_access_is_granted_during_the_check` | 판정하는 동안 허용이 승인되면, 모니터가 그 판정을 버린다(다시 차단하지 않는다). |
 | `grant_lifts_a_long_title_block_and_its_tab_stays_open` | 긴 제목의 탭도 허용이 차단을 풀고, 허용된 탭은 닫히지 않는다. |
 | `a_window_without_a_verdict_is_judged_at_once` | 판정 기록이 없는 창은 처음 보인 확인에서 바로 판정된다. 판정이 유효한 창으로 돌아가면 Claude를 부르지 않는다. |
-| `haiku_alone_checks_a_window_whatever_models_the_settings_name` | 창 검사는 Haiku에게만 묻는다. Haiku가 `off_task`로 보면 다른 모델에게 묻지 않고 차단한다. 할 일과 관계없음은 통과한다. 설정의 기본 모델과 다시 검사 모델은 쓰지 않는다. |
+| `a_window_goes_to_a_larger_model_only_while_each_finds_it_off_task` | 창 검사는 Haiku에게 먼저 묻고, 딴짓일 때만 Sonnet, 그다음 Opus에게 넘긴다. 애매함은 그 모델에서 멈추고 차단하지 않으며, 검사 간격 뒤에 다시 Haiku부터 검사한다. 셋 다 `off_task`면 차단한다. 설정의 기본 모델과 다시 검사 모델은 쓰지 않는다. |
 | `a_later_model_decides_only_the_windows_the_earlier_found_off_task` | 앞 모델이 할 일과 관계있다고 본 창은 그 판정을 그대로 쓰고, 나머지 창만 뒤 모델의 판정을 쓴다. |
 | `verdicts_come_due_again` | `on_task` 판정은 `recheck_minutes` 뒤에, `unsure` 판정은 `check_interval_secs` 뒤에 다시 판정할 때가 된다. 할 일이 바뀌면 모든 판정 기록이 지워진다. |
 | `no_screenshot_while_a_private_app_is_visible_behind` | 비공개 앱이 뒤에 보이기만 해도 화면 캡처를 보내지 않는다. |

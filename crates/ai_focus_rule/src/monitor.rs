@@ -1526,10 +1526,10 @@ fn goes_up(verdict: Verdict) -> bool {
 
 /// The models a window check asks in turn, cheapest first ([`FocusMonitor::run_judge`]).
 ///
-/// Haiku only since the window check reads the steps left (the owner: "단계를 넣고 Haiku로만
-/// 돌려보자"; it was Haiku, then Sonnet, then Opus). Adding models back here brings the
-/// passing on back.
-pub const CHECK_TIERS: [&str; 1] = ["claude-haiku-5-5"];
+/// From rc.94 to rc.97 Haiku alone checked, with the steps left in the task (the owner:
+/// "단계를 넣고 Haiku로만 돌려보자"); it made too many mistakes, so the three are back (the
+/// owner: "Haiku만으로 판단하게 했더니 오류가 너무 많다. 롤백하자"). The steps stay.
+pub const CHECK_TIERS: [&str; 3] = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
 
 /// `earlier`'s verdicts where it found a window on task, `later`'s for the rest.
 fn settle(mut earlier: Judgement, later: Judgement) -> Judgement {
@@ -2723,20 +2723,19 @@ mod tests {
     }
 
     #[test]
-    fn haiku_alone_checks_a_window_whatever_models_the_settings_name() {
-        let haiku = CHECK_TIERS[0].to_string();
-        assert_eq!(CHECK_TIERS.len(), 1);
+    fn a_window_goes_to_a_larger_model_only_while_each_finds_it_off_task() {
+        let [haiku, sonnet, opus] = CHECK_TIERS.map(str::to_string);
         let shared = Arc::new(ModelJudges {
             verdicts: Mutex::new(HashMap::from([
                 (haiku.clone(), Verdict::OnTask),
-                ("main".to_string(), Verdict::OffTask),
-                ("cheap".to_string(), Verdict::OffTask),
+                (sonnet.clone(), Verdict::OnTask),
+                (opus.clone(), Verdict::OnTask),
             ])),
             calls: Mutex::new(Vec::new()),
         });
         let provided = Arc::clone(&shared);
         let mut config = session("thesis");
-        // The settings' model and recheck model do not choose the window check's model.
+        // The settings' model and recheck model do not choose the window check's models.
         config.model = "main".into();
         config.recheck_model = "cheap".into();
         config.strikes_to_block = 1;
@@ -2763,23 +2762,63 @@ mod tests {
             shared.verdicts.lock().insert(model.to_string(), verdict);
         };
         let start_time = Utc::now();
+        // Haiku finds it on task: settled, no larger model asked.
         monitor.step(start_time);
         assert_eq!(calls(), [(haiku.clone(), false)]);
-        // Haiku finds it off task: no larger model is asked, and it is blocked on Haiku's
-        // word.
+        // Due again; Haiku says off task, Sonnet on task: Sonnet's word stands, no block.
         set(&haiku, Verdict::OffTask);
         let second = start_time + ChronoDuration::minutes(16);
         monitor.step(second);
+        assert_eq!(calls(), [(haiku.clone(), false), (sonnet.clone(), true)]);
+        assert!(monitor.state().process_blocks().is_empty());
+        // Haiku unsure: no larger model is asked, nothing is blocked, and the window is
+        // judged again (by Haiku first) after the check interval.
+        set(&haiku, Verdict::Unsure);
+        set(&sonnet, Verdict::OffTask);
+        let unsure = second + ChronoDuration::minutes(16);
+        monitor.step(unsure);
         assert_eq!(calls(), [(haiku.clone(), false)]);
+        assert!(monitor.state().process_blocks().is_empty());
+        monitor.step(unsure + ChronoDuration::seconds(30));
+        assert!(calls().is_empty(), "judged again before the check interval");
+        monitor.step(unsure + ChronoDuration::seconds(61));
+        assert_eq!(calls(), [(haiku.clone(), false)]);
+        // Haiku off task, Sonnet unsure: Sonnet's "unsure" stands too; Opus is not asked,
+        // nothing is blocked.
+        set(&haiku, Verdict::OffTask);
+        set(&sonnet, Verdict::Unsure);
+        let sonnet_unsure = unsure + ChronoDuration::minutes(16);
+        monitor.step(sonnet_unsure);
+        assert_eq!(calls(), [(haiku.clone(), false), (sonnet.clone(), true)]);
+        assert!(monitor.state().process_blocks().is_empty());
+        // Haiku and Sonnet off task, Opus on task: Opus decides; no block.
+        set(&sonnet, Verdict::OffTask);
+        let third = sonnet_unsure + ChronoDuration::minutes(16);
+        monitor.step(third);
+        assert_eq!(
+            calls(),
+            [
+                (haiku.clone(), false),
+                (sonnet.clone(), true),
+                (opus.clone(), true)
+            ]
+        );
+        assert!(monitor.state().process_blocks().is_empty());
+        // All three find it off task: blocked, on Opus's word.
+        set(&opus, Verdict::OffTask);
+        let fourth = third + ChronoDuration::minutes(16);
+        monitor.step(fourth);
+        assert_eq!(calls().len(), 3);
         assert_eq!(monitor.state().process_blocks().len(), 1);
-        // A window Haiku finds not related (a sync tool) passes, and is due again only
-        // after the on-task recheck time.
+        // A window Haiku finds not related (a sync tool) passes like one on task: no larger
+        // model is asked, nothing is blocked, and it is due again only after the on-task
+        // recheck time.
         set(&haiku, Verdict::NotRelated);
         *current.lock() = Some(foreground("OneDrive.exe", "OneDrive - 동기화 완료"));
-        let third = second + ChronoDuration::minutes(1);
-        monitor.step(third);
+        let fifth = fourth + ChronoDuration::minutes(1);
+        monitor.step(fifth);
         assert_eq!(calls(), [(haiku.clone(), false)]);
-        monitor.step(third + ChronoDuration::minutes(5));
+        monitor.step(fifth + ChronoDuration::minutes(5));
         assert!(calls().is_empty());
         assert_eq!(monitor.state().process_blocks().len(), 1);
     }
