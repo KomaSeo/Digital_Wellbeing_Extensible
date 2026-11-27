@@ -28,7 +28,7 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
     egui::CollapsingHeader::new("엄격 모드 켜기 (설정 잠그기)")
         .default_open(true)
         .show(ui, |ui| open_settings = protection_guide(ui));
-    egui::CollapsingHeader::new("할 일 받기, 완료 보고, 묶음과 순서, 약속, 일시 정지")
+    egui::CollapsingHeader::new("할 일 받기, 완료 보고, 묶음과 순서, 약속, 일시 정지, 치팅 시간")
         .default_open(false)
         .show(ui, task_flow_guide);
     egui::CollapsingHeader::new("Claude Desktop으로 이 프로그램 쓰기")
@@ -255,6 +255,15 @@ fn task_flow_guide(ui: &mut egui::Ui) {
          멈춘 만큼 끝나는 시각이 늦춰져 남은 시간으로 이어집니다. 할 일이 없거나 시간이 다 된 할 일은 \
          엄격 모드에서 이미 화면이 덮여 있으므로 따로 누를 것이 없습니다. 예전의 \"사용 중지\"는 \
          일시 정지와 하는 일이 같아져서 없앴습니다.",
+    );
+    paragraph(
+        ui,
+        "치팅 시간: AI의 창 검사와 AI가 건 차단이 쉬는 시간입니다. 설정 탭의 AI 규칙에서 하루 예산, 주 \
+         예산, 정해진 시간대 가운데 하나를 고릅니다. 예산이면 일하기 탭의 \"치팅 시작\"으로 시작하고 \
+         \"치팅 끝내기\"로 일찍 끝내며, 남은 시간은 나중에 씁니다. 정해진 시간대이면 저절로 시작하고 \
+         끝납니다. 그동안 하던 일은 일시 정지했다가 끝나면 다시 시작하고, 엄격 모드에서도 화면을 덮지 \
+         않습니다. 항상 막을 프로그램과 웹사이트는 그대로 막힙니다. AI에게 묻지 않으며, 엄격 모드에서 \
+         치팅 시간을 늘리는 변경은 예약됩니다.",
     );
     paragraph(
         ui,

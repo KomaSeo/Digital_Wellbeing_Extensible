@@ -28,4 +28,11 @@ pub trait FocusLink: Send + Sync {
 
     /// Watch `task` (start the focus check), or stop it with `None`.
     fn watch(&self, task: Option<WatchedTask>) -> Result<(), String>;
+
+    /// Rest the focus check and the blocks the AI made, during cheat time (`true`), or end the
+    /// rest. The always-blocked programs and sites stay blocked either way.
+    fn rest(&self, resting: bool) -> Result<(), String>;
+
+    /// Whether the focus check rests ([`Self::rest`]).
+    fn resting(&self) -> bool;
 }

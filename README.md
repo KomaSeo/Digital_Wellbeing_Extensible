@@ -21,6 +21,7 @@ Digital Wellbeing is a Windows program that helps one person stay on the to-dos 
 - The AI looks at the open windows and closes apps and tabs that are unrelated to the current task. The moment it blocks one, an "Is this block right?" (맞는 차단인가요?) window appears, where the user can request access on the spot.
 - When the user has finished the task, is stuck or needs more time, they send a change request, and the AI decides in light of the life rules.
 - There are also always-blocked programs and websites, appointments (to-dos at a fixed time), pausing and more.
+- Cheat time is time when the AI checks rest. The user gives it as a daily budget, a weekly budget or fixed times of day, and uses it without the AI's approval, in strict mode too.
 - The program can be used by talking to it through Claude Desktop.
 - Once strict mode is on, the program stops the user from dodging the rules by breaking the API key, not taking tasks, changing the time zone and the like.
 

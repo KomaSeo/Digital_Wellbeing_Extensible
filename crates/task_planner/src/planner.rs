@@ -39,6 +39,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracing::info;
 
+pub(crate) mod cheat;
+pub use cheat::parse_time_of_day;
+
 const REQUEST_LOG_CAPACITY: usize = 50;
 const MAX_TITLE_CHARS: usize = 120;
 const MAX_NOTES_CHARS: usize = 1000;
@@ -97,6 +100,14 @@ pub enum PlannerError {
     NoLongerUsed,
     #[error("지금 할 일이 없습니다")]
     NothingAssigned,
+    #[error("치팅 시간이 꺼져 있습니다(설정 → AI 규칙 → 치팅 시간)")]
+    CheatOff,
+    #[error("치팅 시간은 정해진 시간대에 저절로 시작합니다")]
+    CheatByTimes,
+    #[error("남은 치팅 시간이 없습니다")]
+    NoCheatLeft,
+    #[error("약속 중에는 치팅 시간을 시작할 수 없습니다")]
+    CheatDuringAppointment,
     #[error("약속은 시각이 정해져 있어서 일시 정지할 수 없습니다")]
     AppointmentCannotPause,
     #[error("약속에 제목(2~{MAX_TITLE_CHARS}글자)과 시간을 적어 주세요. 끝은 시작보다 늦고 지금보다 뒤여야 하며, 약속은 24시간을 넘지 못합니다")]
@@ -367,6 +378,8 @@ impl TaskPlanner {
             idle: Vec::new(),
         };
         info!("appointment started: {}", running.title);
+        // An appointment is fixed: it ends cheat time.
+        self.finish_cheat(now, false)?;
         self.apply(assignment.clone())?;
         Ok(Some(assignment))
     }
@@ -494,6 +507,7 @@ impl TaskPlanner {
             group_accuracy: crate::time::estimate_accuracy(&state.done).1,
             appointments: self.appointments(now),
             waiting: state.waiting.clone(),
+            cheat: self.cheat_view(&state, now),
             open_todos,
         }
     }
@@ -1523,6 +1537,8 @@ impl TaskPlanner {
     /// one the AI picks. A task whose time is up must be reported first.
     pub fn assign(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
         let _busy = self.busy.lock();
+        // Asking for work ends cheat time (and the task it paused goes on).
+        self.finish_cheat(now, true)?;
         if let Some(appointment) = self.keep_appointments(now)? {
             self.start_focus(&appointment)?;
             return Ok(appointment);
@@ -1561,6 +1577,7 @@ impl TaskPlanner {
         }
         self.follow_assignment()?;
         self.keep_appointments(now)?;
+        self.keep_cheat(now)?;
         Ok(())
     }
 
@@ -1625,6 +1642,8 @@ impl TaskPlanner {
     /// The paused task goes on: the pause is logged and added to the end.
     pub fn unpause(&self, now: DateTime<Utc>) -> Result<Assignment, PlannerError> {
         let _busy = self.busy.lock();
+        // Going on with the task during cheat time ends the cheat time.
+        self.finish_cheat(now, true)?;
         self.go_on(now)
     }
 
@@ -1714,8 +1733,7 @@ impl TaskPlanner {
             }
             push(cursor, end, kind);
         }
-        entries.sort_by_key(|entry| entry.start);
-        entries
+        cheat::with_cheat_times(entries, &state, from, to, now)
     }
 
     /// The user asks to change the assignment. Returns the AI's decision;

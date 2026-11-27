@@ -26,8 +26,8 @@ use std::thread;
 use task_planner::outline::Outline;
 use task_planner::time::{todo_time, TodoTime};
 use task_planner::{
-    AppointmentInput, ChangeKind, MissCause, PlannerStatus, TaskNotes, TaskStep, TodoChange,
-    TodoChangeRecord, TodoItem, WhenTimeIsUp,
+    AppointmentInput, ChangeKind, CheatMode, MissCause, PlannerStatus, TaskNotes, TaskStep,
+    TodoChange, TodoChangeRecord, TodoItem, WhenTimeIsUp,
 };
 
 /// Shown while there are to-dos but nothing is assigned.
@@ -309,6 +309,9 @@ impl FocusApp {
         let planner = status.planner.clone();
         crate::style::section(ui, "데일리 웰빙");
         self.split_window_ui(ui.ctx());
+        if let Some(planner) = &planner {
+            self.cheat_ui(ui, planner);
+        }
         // An appointment runs even when the list is empty.
         match planner
             .clone()
@@ -327,6 +330,96 @@ impl FocusApp {
                     self.tab = Tab::Blocking;
                 }
             });
+        }
+    }
+
+    /// Cheat time (the owner: "엄격모드에서 치팅시간을 설정할 수 있도록 해줄래?"): while it runs,
+    /// what is left and a button to end it; otherwise the budget left and a button to start
+    /// it, or the times of day it starts by itself. Nothing when it is off.
+    fn cheat_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
+        let cheat = &planner.cheat;
+        let idle = !self.pending.load(Ordering::SeqCst);
+        if let Some(running) = &cheat.running {
+            let minutes_left = (running.until - Utc::now()).num_minutes().max(0) + 1;
+            crate::style::notice(
+                ui,
+                crate::style::Tone::Information,
+                format!(
+                    "치팅 시간입니다. {}에 끝납니다({} 남음). 치팅 시간에는 AI의 창 검사와 AI가 건 \
+                     차단이 쉬고, 엄격 모드에서도 화면을 덮지 않습니다. 항상 막을 프로그램과 \
+                     웹사이트는 그대로 막힙니다.{}",
+                    local_time(running.until),
+                    minutes_text(minutes_left),
+                    if running.paused_task {
+                        " 하던 일은 일시 정지했고, 치팅 시간이 끝나면 저절로 다시 시작합니다."
+                    } else {
+                        ""
+                    }
+                ),
+            );
+            if ui
+                .add_enabled(idle, egui::Button::new("치팅 끝내기"))
+                .on_hover_text(if cheat.mode == CheatMode::Times {
+                    "이 시간대의 치팅 시간이 지금 끝납니다. 다음 시간대에 다시 저절로 시작합니다."
+                } else {
+                    "남은 치팅 시간은 나중에 쓸 수 있습니다."
+                })
+                .clicked()
+            {
+                self.send("cheat_end", json!({}));
+            }
+            ui.separator();
+            return;
+        }
+        let appointment = planner
+            .assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.appointment_id.is_some());
+        match cheat.mode {
+            CheatMode::Off => {}
+            CheatMode::Daily | CheatMode::Weekly => {
+                let left = cheat.minutes_left.unwrap_or_default();
+                ui.horizontal_wrapped(|ui| {
+                    let ready = idle && left > 0 && !appointment;
+                    let start = ui
+                        .add_enabled(ready, egui::Button::new("치팅 시작"))
+                        .on_hover_text(
+                            "남은 치팅 시간만큼 AI의 창 검사와 AI가 건 차단을 쉽니다. 하던 일은 일시 \
+                             정지하고, 치팅 시간이 끝나면 다시 시작합니다. 일찍 끝내면 남은 시간은 \
+                             나중에 씁니다.",
+                        )
+                        .on_disabled_hover_text(if appointment {
+                            "약속 중에는 치팅 시간을 시작할 수 없습니다."
+                        } else {
+                            "남은 치팅 시간이 없습니다."
+                        });
+                    if start.clicked() {
+                        self.send("cheat_start", json!({}));
+                    }
+                    ui.label(format!(
+                        "{} 남은 치팅 시간 {} (모두 {})",
+                        if cheat.mode == CheatMode::Daily {
+                            "오늘"
+                        } else {
+                            "이번 주"
+                        },
+                        minutes_text(left),
+                        minutes_text(i64::from(cheat.budget_minutes))
+                    ));
+                });
+                ui.separator();
+            }
+            CheatMode::Times => {
+                ui.small(format!(
+                    "치팅 시간: 날마다 {}에 저절로 시작합니다.",
+                    if cheat.times.is_empty() {
+                        "(정한 시간대 없음)".to_string()
+                    } else {
+                        cheat.times.join(", ")
+                    }
+                ));
+                ui.separator();
+            }
         }
     }
 
@@ -379,7 +472,7 @@ impl FocusApp {
             .filter(|assignment| status.session_active || assignment.paused_since.is_some());
         let Some(assignment) = assignment else {
             crate::style::notice(ui, crate::style::Tone::Information, WAITING_TEXT);
-            if status.settings_protected {
+            if status.settings_protected && planner.cheat.running.is_none() {
                 ui.colored_label(
                     RED,
                     "할 일을 받기 전까지는 이 앱이 화면을 덮습니다. 다른 앱은 닫지 않고 그대로 둡니다.",
@@ -511,6 +604,19 @@ impl FocusApp {
             if assignment.appointment_id.is_none() {
                 let ready = !self.pending.load(Ordering::SeqCst);
                 match assignment.paused_since {
+                    Some(_) if planner.cheat.running.is_some() => {
+                        ui.colored_label(
+                            YELLOW,
+                            "치팅 시간 동안 일시 정지했습니다. 치팅 시간이 끝나면 저절로 다시 \
+                             시작하고, 멈춘 만큼 끝나는 시각이 늦춰집니다.",
+                        );
+                        if ui
+                            .add_enabled(ready, egui::Button::new("치팅 끝내고 다시 시작"))
+                            .clicked()
+                        {
+                            self.send("unpause_task", json!({}));
+                        }
+                    }
                     Some(since) => {
                         ui.colored_label(
                             YELLOW,

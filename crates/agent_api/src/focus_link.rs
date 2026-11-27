@@ -47,4 +47,16 @@ impl FocusLink for MonitorLink {
             .map(drop)
             .map_err(|error| error.to_string())
     }
+
+    fn rest(&self, resting: bool) -> Result<(), String> {
+        self.0
+            .store()
+            .update(|config| config.cheat_active = resting)
+            .map(drop)
+            .map_err(|error| error.to_string())
+    }
+
+    fn resting(&self) -> bool {
+        self.0.store().get().cheat_active
+    }
 }

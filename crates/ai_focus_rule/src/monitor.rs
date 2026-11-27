@@ -968,6 +968,11 @@ impl FocusMonitor {
         if self.close_always_blocked_sites(now, &config) {
             return;
         }
+        // Cheat time: no window checks, and the AI's blocked tabs stay open (the always-blocked
+        // sites above are still closed).
+        if config.cheat_active {
+            return;
+        }
         let mut scope_switched = false;
         {
             let mut state = self.state.lock();

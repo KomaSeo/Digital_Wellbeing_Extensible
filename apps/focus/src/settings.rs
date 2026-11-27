@@ -38,8 +38,8 @@ use system_care::installer::{InstallOutcome, InstallerKind};
 use system_care::uninstall::UninstallOutcome;
 use system_care::{CareStatus, UpdateOutcome};
 use task_planner::{
-    Confirmations, PlannerConfig, APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT,
-    PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
+    CheatMode, Confirmations, PlannerConfig, APPOINTMENT_PROMPT, COMPLETION_PROMPT,
+    EXTENSION_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
 };
 
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(200, 150, 40);
@@ -142,6 +142,12 @@ const APPOINTMENT_RULES: Block = Block {
     id: "appointment_rules",
     file: "planner",
     paths: &[&["appointment_rules"]],
+    has_default: false,
+};
+const CHEAT: Block = Block {
+    id: "cheat",
+    file: "planner",
+    paths: &[&["cheat"]],
     has_default: false,
 };
 const APPOINTMENT_INSTRUCTION: Block = Block {
@@ -1414,6 +1420,8 @@ impl SettingsTab {
         }
         self.block_bar(ui, &APPOINTMENT_RULES, snapshot, protected);
 
+        self.cheat_ui(ui, snapshot, protected);
+
         crate::style::section(ui, "AI 지시문");
         ui.label(
             "플래너의 AI에게 무엇을 어떤 기준으로 판단하라고 알려 주는 글입니다. 정확도를 위해 \
@@ -1513,6 +1521,115 @@ impl SettingsTab {
                     self.block_bar(ui, block, snapshot, protected);
                 });
         }
+    }
+
+    /// Cheat time (the owner: "엄격모드에서 치팅시간을 설정할 수 있도록 해줄래?"): how it is
+    /// given, a daily or weekly budget the user starts with a button, or times of the day that
+    /// start by themselves. More of it is scheduled in strict mode; less applies at once.
+    fn cheat_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
+        crate::style::section(ui, "치팅 시간");
+        ui.label(
+            "치팅 시간은 AI의 창 검사와 AI가 건 차단이 쉬는 시간입니다. 그동안 하던 일은 일시 정지했다가 \
+             치팅 시간이 끝나면 다시 시작하고, 엄격 모드에서도 화면을 덮지 않습니다. 항상 막을 \
+             프로그램과 웹사이트는 그대로 막힙니다. AI에게 묻지 않고, 여기서 정한 시간이 한도입니다.",
+        );
+        if let Some(drafts) = &mut self.drafts {
+            let cheat = &mut drafts.planner.cheat;
+            ui.horizontal_wrapped(|ui| {
+                ui.radio_value(&mut cheat.mode, CheatMode::Off, "끄기");
+                ui.radio_value(&mut cheat.mode, CheatMode::Daily, "하루 예산");
+                ui.radio_value(&mut cheat.mode, CheatMode::Weekly, "주 예산");
+                ui.radio_value(&mut cheat.mode, CheatMode::Times, "정해진 시간대");
+            });
+            match cheat.mode {
+                CheatMode::Off => {
+                    ui.small("치팅 시간이 없습니다.");
+                }
+                CheatMode::Daily => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("하루에");
+                        ui.add(
+                            egui::DragValue::new(&mut cheat.daily_minutes)
+                                .range(0..=720)
+                                .suffix("분"),
+                        );
+                        ui.small(
+                            "일하기 탭의 \"치팅 시작\"으로 시작하고, 나누어 쓸 수 있습니다. 자정에 다시 \
+                             채워집니다.",
+                        );
+                    });
+                }
+                CheatMode::Weekly => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("한 주(월요일부터 일요일까지)에");
+                        ui.add(
+                            egui::DragValue::new(&mut cheat.weekly_minutes)
+                                .range(0..=5040)
+                                .suffix("분"),
+                        );
+                        ui.small(
+                            "일하기 탭의 \"치팅 시작\"으로 시작하고, 나누어 쓸 수 있습니다. 월요일 \
+                             자정에 다시 채워집니다.",
+                        );
+                    });
+                }
+                CheatMode::Times => {
+                    ui.small(
+                        "날마다 이 시간대에 치팅 시간이 저절로 시작하고 끝납니다. 약속 중에는 시작하지 \
+                         않습니다. 일찍 끝내면 그 시간대에는 다시 시작하지 않습니다.",
+                    );
+                    let mut remove = None;
+                    ui.horizontal_wrapped(|ui| {
+                        for (index, time) in cheat.times.iter().enumerate() {
+                            if ui.small_button(format!("{time}  x")).clicked() {
+                                remove = Some(index);
+                            }
+                        }
+                        if cheat.times.is_empty() {
+                            ui.small("(없음)");
+                        }
+                    });
+                    if let Some(index) = remove {
+                        cheat.times.remove(index);
+                    }
+                    let text = self.adding.entry("cheat_times").or_default();
+                    let parsed = task_planner::parse_time_of_day(text);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(text)
+                                .hint_text("예: 21:00-22:00")
+                                .desired_width(140.0),
+                        );
+                        if ui
+                            .add_enabled(parsed.is_some(), egui::Button::new("추가"))
+                            .clicked()
+                        {
+                            if let Some((start, end)) = parsed {
+                                let time =
+                                    format!("{}-{}", start.format("%H:%M"), end.format("%H:%M"));
+                                if !cheat.times.contains(&time) {
+                                    cheat.times.push(time);
+                                }
+                                text.clear();
+                            }
+                        }
+                        if !text.trim().is_empty() && parsed.is_none() {
+                            ui.colored_label(
+                                RED,
+                                "\"시작-끝\"을 24시간제로 적으세요(끝이 같은 날 시작보다 늦게). 자정을 \
+                                 넘기려면 두 개로 나누세요(23:00-23:59, 00:00-01:00).",
+                            );
+                        }
+                    });
+                }
+            }
+        }
+        if protected {
+            ui.small(
+                "엄격 모드에서는 치팅 시간을 줄이거나 끄면 바로 적용되고, 늘리거나 방식을 바꾸면 예약됩니다.",
+            );
+        }
+        self.block_bar(ui, &CHEAT, snapshot, protected);
     }
 
     // --- blocking -----------------------------------------------------------------------

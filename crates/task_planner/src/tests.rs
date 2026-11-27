@@ -191,6 +191,8 @@ impl Advisor for FakeAdvisor {
 #[derive(Default)]
 struct FakeFocus {
     watched: parking_lot::Mutex<Option<crate::WatchedTask>>,
+    /// Cheat time: the focus check and the AI's blocks rest.
+    resting: AtomicBool,
 }
 
 /// Responsibility: Show a test what the fake focus check watches, as the real one's settings
@@ -231,6 +233,15 @@ impl crate::FocusLink for FakeFocus {
     fn watch(&self, task: Option<crate::WatchedTask>) -> Result<(), String> {
         *self.watched.lock() = task;
         Ok(())
+    }
+
+    fn rest(&self, resting: bool) -> Result<(), String> {
+        self.resting.store(resting, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn resting(&self) -> bool {
+        self.resting.load(Ordering::SeqCst)
     }
 }
 
@@ -3452,4 +3463,235 @@ fn no_window_checks_while_a_task_is_paused() {
         "{}",
         watched.task
     );
+}
+
+// --- cheat time ----------------------------------------------------------------------------
+
+/// Noon today in local time (cheat times of day are local), as UTC.
+fn local_noon() -> chrono::DateTime<Utc> {
+    use chrono::TimeZone;
+    let today = chrono::Local::now().date_naive();
+    chrono::Local
+        .from_local_datetime(&today.and_hms_opt(12, 0, 0).unwrap())
+        .earliest()
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+fn give_cheat(fixture: &Harness, cheat: crate::CheatConfig) {
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.cheat = cheat)
+        .unwrap();
+}
+
+#[test]
+fn a_daily_cheat_pauses_the_task_rests_the_check_and_ends_with_its_budget() {
+    // The owner: "엄격모드에서 치팅시간을 설정할 수 있도록 해줄래?"
+    let fixture = harness(true, &["a", "b"]);
+    give_cheat(
+        &fixture,
+        crate::CheatConfig {
+            mode: crate::CheatMode::Daily,
+            daily_minutes: 30,
+            ..Default::default()
+        },
+    );
+    let noon = local_noon();
+    let minutes = |count: i64| noon + chrono::Duration::minutes(count);
+    let assignment = fixture.planner.assign(noon).unwrap();
+    let planned_end = assignment.until.unwrap();
+
+    let session = fixture.planner.start_cheat(minutes(5)).unwrap();
+    assert_eq!(session.until, minutes(35));
+    assert!(session.paused_task);
+    assert!(fixture.planner.cheating());
+    assert!(fixture.focus.resting());
+    assert!(!fixture.focus.state().session_active);
+    let status = fixture.planner.status();
+    assert!(status.assignment.unwrap().paused_since.is_some());
+    // Twenty minutes left ten minutes in (a started minute counts).
+    let state = fixture.planner.state_store_for_tests().get();
+    let config = fixture.planner.config_store().get().cheat;
+    assert_eq!(
+        crate::planner::cheat::minutes_left(&config, &state, minutes(15)),
+        Some(20)
+    );
+
+    // The planner loop ends it with the budget; the task goes on, its end later by the 30
+    // minutes it waited.
+    fixture.planner.resume(minutes(36)).unwrap();
+    assert!(!fixture.planner.cheating());
+    assert!(!fixture.focus.resting());
+    assert!(fixture.focus.state().session_active);
+    let going_on = fixture.planner.status().assignment.unwrap();
+    assert!(going_on.paused_since.is_none());
+    assert_eq!(
+        going_on.until,
+        Some(planned_end + chrono::Duration::minutes(30))
+    );
+    // The day's budget is used up.
+    assert!(matches!(
+        fixture.planner.start_cheat(minutes(40)),
+        Err(PlannerError::NoCheatLeft)
+    ));
+}
+
+#[test]
+fn cheat_time_without_a_task_ends_when_the_user_asks_for_work() {
+    let fixture = harness(true, &["a"]);
+    give_cheat(
+        &fixture,
+        crate::CheatConfig {
+            mode: crate::CheatMode::Weekly,
+            weekly_minutes: 60,
+            ..Default::default()
+        },
+    );
+    let noon = local_noon();
+    let session = fixture.planner.start_cheat(noon).unwrap();
+    assert!(!session.paused_task);
+    assert!(fixture.focus.resting());
+    // Asking for a task ends it after ten minutes; fifty are left this week.
+    let assignment = fixture
+        .planner
+        .assign(noon + chrono::Duration::minutes(10))
+        .unwrap();
+    assert_eq!(assignment.todo_id.as_deref(), Some("a"));
+    assert!(!fixture.planner.cheating());
+    assert!(!fixture.focus.resting());
+    let state = fixture.planner.state_store_for_tests().get();
+    let config = fixture.planner.config_store().get().cheat;
+    assert_eq!(
+        crate::planner::cheat::minutes_left(&config, &state, noon + chrono::Duration::minutes(20)),
+        Some(50)
+    );
+}
+
+#[test]
+fn cheat_times_of_day_start_and_end_by_themselves_and_stay_ended_when_ended_early() {
+    let fixture = harness(true, &["a"]);
+    give_cheat(
+        &fixture,
+        crate::CheatConfig {
+            mode: crate::CheatMode::Times,
+            times: vec!["11:50-12:30".into()],
+            ..Default::default()
+        },
+    );
+    let noon = local_noon();
+    let minutes = |count: i64| noon + chrono::Duration::minutes(count);
+    fixture.planner.assign(noon).unwrap();
+    // The button does not start it: the times of day do.
+    assert!(matches!(
+        fixture.planner.start_cheat(noon),
+        Err(PlannerError::CheatByTimes)
+    ));
+    fixture.planner.resume(minutes(1)).unwrap();
+    let running = fixture.planner.status().cheat.running.unwrap();
+    assert!(running.by_times && running.paused_task);
+    assert_eq!(running.until, minutes(30));
+    // Ended early: not started again within the same time of day.
+    fixture.planner.end_cheat(minutes(5)).unwrap();
+    assert!(!fixture.planner.cheating());
+    fixture.planner.resume(minutes(6)).unwrap();
+    assert!(!fixture.planner.cheating());
+    assert!(fixture
+        .planner
+        .status()
+        .assignment
+        .unwrap()
+        .paused_since
+        .is_none());
+    // After its end nothing starts either.
+    fixture.planner.resume(minutes(31)).unwrap();
+    assert!(!fixture.planner.cheating());
+}
+
+#[test]
+fn cheat_time_needs_a_way_of_giving_it_and_shows_in_the_timetable() {
+    let fixture = harness(true, &["a"]);
+    let noon = local_noon();
+    let minutes = |count: i64| noon + chrono::Duration::minutes(count);
+    assert!(matches!(
+        fixture.planner.start_cheat(noon),
+        Err(PlannerError::CheatOff)
+    ));
+    give_cheat(
+        &fixture,
+        crate::CheatConfig {
+            mode: crate::CheatMode::Daily,
+            daily_minutes: 20,
+            ..Default::default()
+        },
+    );
+    fixture.planner.assign(noon).unwrap();
+    fixture.planner.start_cheat(minutes(10)).unwrap();
+    fixture.planner.unpause(minutes(25)).unwrap();
+    assert!(!fixture.planner.cheating());
+    let entries = fixture.planner.timetable(noon, minutes(40), minutes(40));
+    let kinds: Vec<(TimetableKind, i64)> = entries
+        .iter()
+        .map(|entry| (entry.kind, (entry.end - entry.start).num_minutes()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            (TimetableKind::Task, 10),
+            (TimetableKind::Cheat, 15),
+            (TimetableKind::Task, 15)
+        ]
+    );
+}
+
+#[test]
+fn giving_less_cheat_time_is_stricter_and_more_is_scheduled() {
+    use serde_json::json;
+    use setting_edits::{direction, Direction, Edit};
+    let in_force = json!({ "cheat": { "mode": "daily", "daily_minutes": 30, "weekly_minutes": 0, "times": ["21:00-22:00"] } });
+    let set = |path: &[&str], value: serde_json::Value| Edit::Set {
+        path: path.iter().map(|part| part.to_string()).collect(),
+        value,
+    };
+    let of = |edit: Edit| direction(&crate::settings_file::SETTINGS_FILE, &edit, &in_force);
+    assert_eq!(
+        of(set(&["cheat", "mode"], json!("off"))),
+        Direction::Stricter
+    );
+    assert_eq!(
+        of(set(&["cheat", "mode"], json!("times"))),
+        Direction::Looser
+    );
+    assert_eq!(
+        of(set(&["cheat", "daily_minutes"], json!(20))),
+        Direction::Stricter
+    );
+    assert_eq!(
+        of(set(&["cheat", "daily_minutes"], json!(45))),
+        Direction::Looser
+    );
+    assert_eq!(
+        of(Edit::RemoveItems {
+            path: vec!["cheat".into(), "times".into()],
+            items: vec![json!("21:00-22:00")],
+        }),
+        Direction::Stricter
+    );
+    assert_eq!(
+        of(Edit::AddItems {
+            path: vec!["cheat".into(), "times".into()],
+            items: vec![json!("12:00-13:00")],
+        }),
+        Direction::Looser
+    );
+}
+
+#[test]
+fn times_of_day_are_read_only_when_well_formed() {
+    let parsed = crate::parse_time_of_day(" 21:00 - 22:30 ").unwrap();
+    assert_eq!(parsed.0.to_string(), "21:00:00");
+    assert_eq!(parsed.1.to_string(), "22:30:00");
+    assert!(crate::parse_time_of_day("22:00-21:00").is_none());
+    assert!(crate::parse_time_of_day("9pm-10pm").is_none());
 }

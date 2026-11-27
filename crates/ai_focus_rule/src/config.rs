@@ -42,6 +42,11 @@ pub struct AiFocusConfig {
     /// Runtime only, like `task` in the agent: never saved.
     #[serde(skip)]
     pub task_scope: String,
+    /// Cheat time runs (the planner's `CheatSession`): no window checks, and the blocks the
+    /// AI made are not enforced; the always-blocked programs and sites still are. Runtime
+    /// only: the planner sets it again after a restart.
+    #[serde(skip)]
+    pub cheat_active: bool,
     /// Seconds after which a window judged unsure (or an app judged off_task that is
     /// still collecting strikes) is judged again; also the pause after a failed call.
     /// New windows are judged at once, whatever this says.
@@ -117,6 +122,7 @@ impl Default for AiFocusConfig {
             session_active: false,
             task: String::new(),
             task_scope: String::new(),
+            cheat_active: false,
             check_interval_secs: 60,
             model: DEFAULT_MODEL.to_string(),
             recheck_model: DEFAULT_RECHECK_MODEL.to_string(),
@@ -227,6 +233,7 @@ impl AiFocusStore {
         fresh.session_active = config.session_active;
         fresh.task = std::mem::take(&mut config.task);
         fresh.task_scope = std::mem::take(&mut config.task_scope);
+        fresh.cheat_active = config.cheat_active;
         *config = fresh;
         Ok(())
     }

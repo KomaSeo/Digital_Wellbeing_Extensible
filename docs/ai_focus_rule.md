@@ -557,6 +557,7 @@ Other open windows (title only; judge each in `others`):
 - `NoTask`는 맡은 할 일이 없어서 사용자가 "할 일 받기"를 누르기를 기다리는 경우입니다(**할 일을 기다리는 잠금**, [`task_planner.md`](task_planner.md) 4.7절).
 - `LoginRequired`는 여러 기기 동기화를 쓰는 PC에서 이 Windows 계정이 아직 로그인하지 않은 경우입니다([`sync.md`](sync.md)).
 - `Paused`는 사용자가 지금 할 일을 일시 정지한 경우입니다([`task_planner.md`](task_planner.md) 4.14절). 엄격 모드에서만 잠급니다.
+- **치팅 시간**(AI의 검사가 쉬는 시간, [`task_planner.md`](task_planner.md) 4.20절, rc.101부터)에는 `NoTask`, `Paused`, 보고를 기다리는 잠금과 `Offline`이 걸리지 않습니다. 그래서 엄격 모드에서도 치팅 시간에는 화면을 덮지 않습니다. `Connection`과 `LoginRequired`는 치팅 시간에도 걸립니다.
 모든 이유가 엄격 모드일 때만 걸립니다. rc.95까지는 사용 중지의 잠금(`Stopped`)도 있어서 다른 모든 이유보다 먼저 보였지만, rc.96에서 사용 중지와 함께 없앴습니다([`task_planner.md`](task_planner.md) 4.13절). 나머지가 함께 있으면 AI 연결이 먼저, 그다음 인터넷(`Offline`)이 보입니다. 인터넷 잠금은 화면을 덮는 잠금보다 먼저입니다. 화면을 덮으면 Windows 설정을 쓸 수 없기 때문입니다. 예전 버전(rc.54까지)에는 컴퓨터 없이 하는 일을 하는 동안의 잠금(`AwayFromComputer`)도 있었습니다([`task_planner.md`](task_planner.md) 4.11절).
 - **화면 덮기.** 할 일을 기다리는 잠금, 로그인이 필요한 잠금, 일시 정지의 잠금, 보고를 기다리는 잠금에서는 프로그램을 끄지 않습니다(`Lockdown.covers_screen`). 대신 Focus 앱이 테두리 없이 모든 모니터를 덮고, 다른 모든 창보다 위에 있으며, 1초마다 다시 모든 화면을 덮고 맨 앞으로 나옵니다(`apps/focus/src/cover.rs`; Windows에서는 `HWND_TOPMOST`와 가상 화면 전체 크기, 다른 운영체제에서는 전체 화면). 일하기 탭이 보이고, 잠금이 풀리면 창은 원래 자리와 크기로 돌아갑니다. 덮는 동안에는 창을 닫거나 숨길 수 없습니다.
   - 다른 앱과 창은 열린 채로 남습니다. 그래서 백그라운드 앱이 꺼지지 않고, 할 일을 받으면 하던 창이 그대로 있습니다. 소유자가 "앱이나 웹사이트를 도륙내는 대신에, digital wellbeing focus앱이 전체화면으로 전환되게 만들고 항상 맨 앞으로 나오게 만들 수 있나?"라고 묻고, 방식을 듣고 "그래"라고 해서 바뀌었습니다. 예전에는 아래의 AI 연결 잠금처럼 남기는 프로그램 말고는 모두 껐습니다.
@@ -588,6 +589,8 @@ Other open windows (title only; judge each in `others`):
 - **한계:** 화면에 로그인해야 하는 와이파이(카페, 호텔)는 로그인 페이지가 브라우저에서 닫히므로 연결할 수 없습니다. Claude API만 막힌 네트워크(인터넷은 되지만 Anthropic만 막힘)도 같은 잠금이 걸립니다. 인터넷이 정말 끊긴 동안에는 하던 오프라인 작업도 할 수 없습니다.
 
 **한계.** 탭은 제목으로 판단하므로, 제목에 "Claude"가 든 다른 페이지는 열린 채로 남습니다.
+
+**치팅 시간에 쉬는 것** (rc.101부터): 치팅 시간이 시작하면 플래너가 AI 집중 규칙에게 쉬라고 알립니다(`FocusLink::rest`, `AiFocusConfig::cheat_active`). 쉬는 동안 모니터는 항상 막을 웹사이트의 탭만 닫고 창 검사를 하지 않으며(`FocusMonitor::step`), AI가 만든 차단은 프로그램을 막지 않습니다(`AiFocusRule::evaluate`). AI가 만든 차단은 지워지지 않으므로 치팅 시간이 끝나면 다시 걸립니다. 항상 막을 프로그램은 다른 규칙(`list_based_rule`)이 막으므로 치팅 시간에도 막힙니다. `cheat_active`는 파일에 쓰지 않습니다. agent가 다시 시작하면 플래너가 15초 안에 다시 알립니다.
 
 ### 5.14 지금 할 일의 차단 목록 (`SavedBlocks.scope`, rc.94부터)
 

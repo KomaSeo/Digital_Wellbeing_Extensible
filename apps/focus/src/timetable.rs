@@ -34,6 +34,7 @@ fn kind_color(kind: TimetableKind) -> egui::Color32 {
         TimetableKind::AwayFromComputer => egui::Color32::from_rgb(80, 160, 90),
         TimetableKind::Appointment => egui::Color32::from_rgb(200, 140, 60),
         TimetableKind::Unknown => egui::Color32::from_gray(150),
+        TimetableKind::Cheat => egui::Color32::from_rgb(170, 100, 200),
     }
 }
 
@@ -43,6 +44,7 @@ fn kind_label(kind: TimetableKind) -> &'static str {
         TimetableKind::AwayFromComputer => "컴퓨터 없이 하는 일(예전 기록)",
         TimetableKind::Appointment => "약속",
         TimetableKind::Unknown => "멈춤",
+        TimetableKind::Cheat => "치팅",
     }
 }
 
@@ -153,7 +155,8 @@ impl TimetableView {
         for entry in entries {
             let minutes = (entry.end - entry.start).num_minutes();
             *by_kind.entry(kind_label(entry.kind)).or_default() += minutes;
-            if entry.kind != TimetableKind::Unknown {
+            // Cheat time is no task's time.
+            if !matches!(entry.kind, TimetableKind::Unknown | TimetableKind::Cheat) {
                 *by_task.entry(entry.task.clone()).or_default() += minutes;
             }
         }
@@ -163,6 +166,7 @@ impl TimetableView {
                 TimetableKind::AwayFromComputer,
                 TimetableKind::Appointment,
                 TimetableKind::Unknown,
+                TimetableKind::Cheat,
             ] {
                 let minutes = by_kind.get(kind_label(kind)).copied().unwrap_or(0);
                 ui.colored_label(kind_color(kind), "■");

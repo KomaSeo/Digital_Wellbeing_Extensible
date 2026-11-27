@@ -27,6 +27,8 @@
 //! | `todo_change`    | `{ "change": TodoChange, "reason": "…", "via": "…" }` | [`Status`], `last_todo_change` set; approved = in force |
 //! | `todo_change_schedule` | `{ "id": "…" }` (a change the AI did not approve) | [`Status`], `last_todo_change` set |
 //! | `task_notes_put` | `{ "todo_id": "…", "notes": TaskNotes }` | [`Status`] |
+//! | `cheat_start` | `{}` (cheat time with a daily or weekly budget; no AI) | [`Status`] |
+//! | `cheat_end` | `{}` (ends cheat time early) | [`Status`] |
 //! | `plan_week`      | `{}` (one AI call)                       | [`Status`] with `planner.week_plan` |
 //! | `settings_get`   | `{}`                                     | [`machine::settings::SettingsSnapshot`] |
 //! | `settings_put`   | `{ "name": "policy"\|"ai_focus"\|"planner", "content": {…}, "via": "…" }` | [`machine::settings::PutOutcome`] (what is in force now, what was scheduled) |
@@ -363,18 +365,23 @@ fn status(api: &AgentApi) -> Status {
 
 /// The lockdown in force now (see [`machine::lockdown`]): a broken AI connection, no network
 /// for a few minutes, a sync login not made yet, a paused task, a task whose time is up, or
-/// to-dos with none assigned.
+/// to-dos with none assigned. During cheat time only the first two can lock: nothing covers
+/// the screen, and with no AI check running, no network is no reason to lock either.
 pub fn lockdown_now(planner: Option<&TaskPlanner>) -> Option<machine::lockdown::Lockdown> {
     let unreachable = ai_client::connection::unreachable();
+    let cheating = planner.is_some_and(TaskPlanner::cheating);
     machine::lockdown::lockdown(
         machine::settings::is_protected(&machine::data_dir()),
         &ai_client::connection::current().0,
         unreachable
             .as_ref()
+            .filter(|_| !cheating)
             .map(|unreachable| (Utc::now() - unreachable.since, unreachable.detail.as_str())),
         planner.and_then(|planner| {
             if machine::login::required(&machine::data_dir()) {
                 Some(machine::lockdown::TaskLock::LoginRequired)
+            } else if cheating {
+                None
             } else if planner.paused() {
                 Some(machine::lockdown::TaskLock::Paused)
             } else if planner.report_due(chrono::Utc::now()) {
@@ -826,6 +833,20 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             let planner = api.planner.as_ref().ok_or("no task planner")?;
             planner
                 .unpause(Utc::now())
+                .map_err(|error| error.to_string())?;
+        }
+        // Cheat time: the task is paused and the AI's checks rest; the budget in the settings
+        // is the limit, so no AI is asked (cheat times of day start by themselves).
+        "cheat_start" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            planner
+                .start_cheat(Utc::now())
+                .map_err(|error| error.to_string())?;
+        }
+        "cheat_end" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            planner
+                .end_cheat(Utc::now())
                 .map_err(|error| error.to_string())?;
         }
         "request_change" => {

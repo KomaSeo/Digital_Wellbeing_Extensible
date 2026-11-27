@@ -2138,6 +2138,7 @@ mod direction_tests {
             "enabled": false, "life_rules": "a", "appointment_rules": "",
             "confirmations": { "settings_times": 3, "settings_interval_hours": 48 },
             "instructions": { "pick": "" },
+            "cheat": { "mode": "daily", "daily_minutes": 30, "weekly_minutes": 0, "times": ["21:00-22:00"] },
         });
         // (file, field, new value, expected); `+x`/`-x` add or remove the list item `x`.
         let rows: Vec<(&str, &str, Value, Direction)> = vec![
@@ -2216,6 +2217,14 @@ mod direction_tests {
                 Looser,
             ),
             ("planner", "instructions.pick", json!("mine"), Looser),
+            // Cheat time (rc.101): less of it at once, more of it (or another way) scheduled.
+            ("planner", "cheat.mode", json!("off"), Stricter),
+            ("planner", "cheat.mode", json!("weekly"), Looser),
+            ("planner", "cheat.daily_minutes", json!(20), Stricter),
+            ("planner", "cheat.daily_minutes", json!(60), Looser),
+            ("planner", "cheat.weekly_minutes", json!(120), Looser),
+            ("planner", "cheat.times", json!("-21:00-22:00"), Stricter),
+            ("planner", "cheat.times", json!("+12:00-13:00"), Looser),
         ];
         for (file, field, new_value, expected) in rows {
             let before = match file {

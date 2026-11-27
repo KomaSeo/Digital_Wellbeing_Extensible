@@ -259,6 +259,76 @@ pub struct PlannerConfig {
     pub instructions: PlannerInstructions,
     /// How often, and how far apart, a scheduled update is confirmed before it takes effect.
     pub confirmations: Confirmations,
+    /// When the user may cheat: the AI check rests and the task waits ([`CheatConfig`]).
+    pub cheat: CheatConfig,
+}
+
+/// Responsibility: Hold how the owner gives themselves cheat time (planner.json).
+///
+/// During cheat time the window check and the AI's blocks rest, the current task is paused,
+/// and the screen is not covered even in strict mode; the always-blocked programs and sites
+/// stay blocked. Like every setting, giving more of it is a scheduled update in strict mode
+/// (`settings_file`), giving less applies at once.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CheatConfig {
+    pub mode: CheatMode,
+    /// Minutes a day, in [`CheatMode::Daily`].
+    pub daily_minutes: u32,
+    /// Minutes a week (Monday to Sunday), in [`CheatMode::Weekly`].
+    pub weekly_minutes: u32,
+    /// "HH:MM-HH:MM" in local time, the end later the same day, in [`CheatMode::Times`].
+    pub times: Vec<String>,
+}
+
+/// Responsibility: Name how cheat time is given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheatMode {
+    /// No cheat time.
+    #[default]
+    Off,
+    /// A budget of minutes a day, started by the user ("치팅 시작").
+    Daily,
+    /// A budget of minutes a week, started by the user.
+    Weekly,
+    /// Fixed times of the day, which start and end by themselves.
+    Times,
+}
+
+/// Responsibility: Hold the cheat time running now (planner_state.json).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheatSession {
+    pub started: DateTime<Utc>,
+    /// It ends by itself then (the budget left, or the end of the time of day).
+    pub until: DateTime<Utc>,
+    /// The cheat time paused the current task: it goes on when the cheat time ends.
+    #[serde(default)]
+    pub paused_task: bool,
+    /// Started by one of [`CheatConfig::times`].
+    #[serde(default)]
+    pub by_times: bool,
+}
+
+/// Responsibility: Hold one cheat time that ended (for the budgets and the timetable).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheatSpan {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
+/// Responsibility: Carry what the Focus app shows about cheat time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CheatView {
+    pub mode: CheatMode,
+    pub running: Option<CheatSession>,
+    /// What is left of the day's or the week's budget (`None` without a budget).
+    pub minutes_left: Option<i64>,
+    /// The day's or the week's budget.
+    pub budget_minutes: u32,
+    /// [`CheatConfig::times`].
+    pub times: Vec<String>,
 }
 
 /// Responsibility: Hold how many "yes" answers a scheduled update needs, and the hours
@@ -829,6 +899,8 @@ pub enum TimetableKind {
     /// A task done at the computer, but the user did not touch the computer: what they did
     /// is not known.
     Unknown,
+    /// Cheat time ([`CheatConfig`]).
+    Cheat,
 }
 
 /// Responsibility: Hold one stretch of the timetable (the Statistics tab).
@@ -1013,6 +1085,16 @@ pub struct PlannerState {
     /// Why to-dos went over their estimates, oldest first, capped.
     #[serde(default)]
     pub estimate_misses: VecDeque<EstimateMiss>,
+    /// The cheat time running now.
+    #[serde(default)]
+    pub cheat: Option<CheatSession>,
+    /// Cheat times that ended, oldest first (the last few weeks).
+    #[serde(default)]
+    pub cheat_log: VecDeque<CheatSpan>,
+    /// The user ended a cheat time of the day early: the times of day do not start it again
+    /// before this.
+    #[serde(default)]
+    pub cheat_declined_until: Option<DateTime<Utc>>,
 }
 
 /// Responsibility: Hold one thing the user waits for from others, until it arrives or the
@@ -1093,4 +1175,7 @@ pub struct PlannerStatus {
     /// What the user waits for from others.
     #[serde(default)]
     pub waiting: Vec<WaitingItem>,
+    /// Cheat time: how it is given, what is left, and whether it runs.
+    #[serde(default)]
+    pub cheat: CheatView,
 }

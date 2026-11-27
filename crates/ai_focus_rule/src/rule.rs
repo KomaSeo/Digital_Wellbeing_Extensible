@@ -33,6 +33,10 @@ impl BlockRule for AiFocusRule {
     }
 
     fn evaluate(&self, processes: &[ProcessSnapshot]) -> Vec<BlockEvent> {
+        // Cheat time: the blocks the AI made rest (they come back when it ends).
+        if self.monitor.store().get().cheat_active {
+            return Vec::new();
+        }
         let blocks = self.monitor.state().process_blocks();
         if blocks.is_empty() {
             return Vec::new();
