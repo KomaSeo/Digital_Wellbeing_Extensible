@@ -814,14 +814,23 @@ impl eframe::App for FocusApp {
                             status.sync.as_ref(),
                             status.settings_protected,
                         );
-                        self.settings.ui(
+                        let cheat_now = status.planner.as_ref().map(|planner| settings::CheatNow {
+                            planner,
+                            busy: self.pending.load(Ordering::SeqCst),
+                            message: &message,
+                        });
+                        let cheat_request = self.settings.ui(
                             ui,
                             status.settings_protected,
                             status.settings_protection.as_ref(),
                             status.settings_protection_scheduled.as_ref(),
                             status.lockdown.as_ref(),
                             status.sync.as_ref(),
-                        )
+                            cheat_now,
+                        );
+                        if let Some(method) = cheat_request {
+                            self.send(method, json!({}));
+                        }
                     }
                     Tab::Statistics => self.statistics_tab(ui, &status),
                     Tab::Help => {

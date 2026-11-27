@@ -333,9 +333,9 @@ impl FocusApp {
         }
     }
 
-    /// Cheat time (the owner: "엄격모드에서 치팅시간을 설정할 수 있도록 해줄래?"): while it runs,
-    /// what is left and a button to end it; otherwise the budget left and a button to start
-    /// it, or the times of day it starts by itself. Nothing when it is off.
+    /// Cheat time while it runs: what is left and a button to end it early. It is started in
+    /// the Settings tab, not here (the owner: "치팅 버튼을 일하기가 아니라 설정 창에 추가해줄래?
+    /// 뭔가 치팅을 권장하는 느낌이 드네"), so nothing shows when it does not run.
     fn cheat_ui(&mut self, ui: &mut egui::Ui, planner: &PlannerStatus) {
         let cheat = &planner.cheat;
         let idle = !self.pending.load(Ordering::SeqCst);
@@ -362,64 +362,13 @@ impl FocusApp {
                 .on_hover_text(if cheat.mode == CheatMode::Times {
                     "이 시간대의 치팅 시간이 지금 끝납니다. 다음 시간대에 다시 저절로 시작합니다."
                 } else {
-                    "남은 치팅 시간은 나중에 쓸 수 있습니다."
+                    "쓰지 않은 치팅 시간은 그대로 남습니다."
                 })
                 .clicked()
             {
                 self.send("cheat_end", json!({}));
             }
             ui.separator();
-            return;
-        }
-        let appointment = planner
-            .assignment
-            .as_ref()
-            .is_some_and(|assignment| assignment.appointment_id.is_some());
-        match cheat.mode {
-            CheatMode::Off => {}
-            CheatMode::Daily | CheatMode::Weekly => {
-                let left = cheat.minutes_left.unwrap_or_default();
-                ui.horizontal_wrapped(|ui| {
-                    let ready = idle && left > 0 && !appointment;
-                    let start = ui
-                        .add_enabled(ready, egui::Button::new("치팅 시작"))
-                        .on_hover_text(
-                            "남은 치팅 시간만큼 AI의 창 검사와 AI가 건 차단을 쉽니다. 하던 일은 일시 \
-                             정지하고, 치팅 시간이 끝나면 다시 시작합니다. 일찍 끝내면 남은 시간은 \
-                             나중에 씁니다.",
-                        )
-                        .on_disabled_hover_text(if appointment {
-                            "약속 중에는 치팅 시간을 시작할 수 없습니다."
-                        } else {
-                            "남은 치팅 시간이 없습니다."
-                        });
-                    if start.clicked() {
-                        self.send("cheat_start", json!({}));
-                    }
-                    ui.label(format!(
-                        "{} 남은 치팅 시간 {} (모두 {})",
-                        if cheat.mode == CheatMode::Daily {
-                            "오늘"
-                        } else {
-                            "이번 주"
-                        },
-                        minutes_text(left),
-                        minutes_text(i64::from(cheat.budget_minutes))
-                    ));
-                });
-                ui.separator();
-            }
-            CheatMode::Times => {
-                ui.small(format!(
-                    "치팅 시간: 날마다 {}에 저절로 시작합니다.",
-                    if cheat.times.is_empty() {
-                        "(정한 시간대 없음)".to_string()
-                    } else {
-                        cheat.times.join(", ")
-                    }
-                ));
-                ui.separator();
-            }
         }
     }
 
@@ -2738,7 +2687,7 @@ fn appointment_time_text(start: DateTime<Utc>, end: DateTime<Utc>) -> String {
     }
 }
 
-fn local_time(time: DateTime<Utc>) -> String {
+pub(crate) fn local_time(time: DateTime<Utc>) -> String {
     time.with_timezone(&Local).format("%H:%M").to_string()
 }
 
@@ -2766,7 +2715,7 @@ fn save_arrived(sent: &TaskNotes, at: std::time::Instant, at_the_agent: &TaskNot
     sent == at_the_agent || at.elapsed() > NOTES_SAVE_WAIT
 }
 
-fn minutes_text(minutes: i64) -> String {
+pub(crate) fn minutes_text(minutes: i64) -> String {
     let minutes = minutes.max(0);
     match (minutes / 60, minutes % 60) {
         (0, rest) => format!("{rest}분"),

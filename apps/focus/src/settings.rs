@@ -38,7 +38,7 @@ use system_care::installer::{InstallOutcome, InstallerKind};
 use system_care::uninstall::UninstallOutcome;
 use system_care::{CareStatus, UpdateOutcome};
 use task_planner::{
-    CheatMode, Confirmations, PlannerConfig, APPOINTMENT_PROMPT, COMPLETION_PROMPT,
+    CheatMode, Confirmations, PlannerConfig, PlannerStatus, APPOINTMENT_PROMPT, COMPLETION_PROMPT,
     EXTENSION_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
 };
 
@@ -370,6 +370,18 @@ pub struct SettingsTab {
     safe_mode_waiting: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// What the last safe mode command said.
     safe_mode_message: Option<Result<String, String>>,
+    /// "치팅 시작" or "치팅 끝내기" was pressed this frame: the app sends this request.
+    cheat_request: Option<&'static str>,
+    /// A cheat time request was sent from here: its refusal shows under the buttons.
+    cheat_sent: bool,
+}
+
+/// Responsibility: Carry what the Settings tab's cheat time buttons need from the app: the
+/// cheat time in force, whether a request is on its way, and what the last one said.
+pub(crate) struct CheatNow<'a> {
+    pub planner: &'a PlannerStatus,
+    pub busy: bool,
+    pub message: &'a str,
 }
 
 /// Responsibility: Hold the editable copies of the three files and what they were when loaded
@@ -446,6 +458,8 @@ impl SettingsTab {
             safe_mode_confirm: false,
             safe_mode_waiting: None,
             safe_mode_message: None,
+            cheat_request: None,
+            cheat_sent: false,
         }
     }
 
@@ -458,7 +472,8 @@ impl SettingsTab {
         scheduled: Option<&agent_api::user_api::ProtectionView>,
         lockdown: Option<&Lockdown>,
         sync: Option<&agent_api::user_api::SyncStatus>,
-    ) {
+        cheat_now: Option<CheatNow>,
+    ) -> Option<&'static str> {
         self.fix_now = lockdown
             .map(|lockdown| lockdown.fix_now.clone())
             .unwrap_or_default();
@@ -477,7 +492,7 @@ impl SettingsTab {
         }
         let Some(snapshot) = self.latest.clone() else {
             ui.label("agent에 연결하는 중…");
-            return;
+            return None;
         };
         if self.drafts.is_none() {
             let saved = read_drafts_file();
@@ -504,7 +519,7 @@ impl SettingsTab {
         );
         match self.section {
             Section::Connection => self.connection_ui(ui, &snapshot, protected),
-            Section::Rules => self.rules_ui(ui, &snapshot, protected),
+            Section::Rules => self.rules_ui(ui, &snapshot, protected, cheat_now),
             Section::Blocking => self.blocking_ui(ui, &snapshot, protected),
             Section::Checks => self.checks_ui(ui, &snapshot, protected),
             Section::System => self.system_ui(ui, &snapshot, protected),
@@ -514,6 +529,7 @@ impl SettingsTab {
             }
         }
         self.autosave(ui.ctx());
+        self.cheat_request.take()
     }
 
     /// Show the protection's part of the tab next (from a link elsewhere in the app).
@@ -1384,7 +1400,13 @@ impl SettingsTab {
 
     // --- rules for the AI ---------------------------------------------------------------
 
-    fn rules_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
+    fn rules_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &SettingsSnapshot,
+        protected: bool,
+        cheat_now: Option<CheatNow>,
+    ) {
         crate::style::section(ui, "생활 규칙");
         ui.label(
             "AI의 모든 결정(지금 할 일 고르기, 변경 요청 심사, 완료 보고 심사, 할 일 변경 심사, 앞으로 7일 계획)이 따르는 \
@@ -1420,7 +1442,7 @@ impl SettingsTab {
         }
         self.block_bar(ui, &APPOINTMENT_RULES, snapshot, protected);
 
-        self.cheat_ui(ui, snapshot, protected);
+        self.cheat_ui(ui, snapshot, protected, cheat_now);
 
         crate::style::section(ui, "AI 지시문");
         ui.label(
@@ -1526,13 +1548,22 @@ impl SettingsTab {
     /// Cheat time (the owner: "엄격모드에서 치팅시간을 설정할 수 있도록 해줄래?"): how it is
     /// given, a daily or weekly budget the user starts with a button, or times of the day that
     /// start by themselves. More of it is scheduled in strict mode; less applies at once.
-    fn cheat_ui(&mut self, ui: &mut egui::Ui, snapshot: &SettingsSnapshot, protected: bool) {
+    fn cheat_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &SettingsSnapshot,
+        protected: bool,
+        cheat_now: Option<CheatNow>,
+    ) {
         crate::style::section(ui, "치팅 시간");
         ui.label(
             "치팅 시간은 AI의 창 검사와 AI가 건 차단이 쉬는 시간입니다. 그동안 하던 일은 일시 정지했다가 \
              치팅 시간이 끝나면 다시 시작하고, 엄격 모드에서도 화면을 덮지 않습니다. 항상 막을 \
              프로그램과 웹사이트는 그대로 막힙니다. AI에게 묻지 않고, 여기서 정한 시간이 한도입니다.",
         );
+        if let Some(cheat_now) = cheat_now {
+            self.cheat_now_ui(ui, &cheat_now);
+        }
         if let Some(drafts) = &mut self.drafts {
             let cheat = &mut drafts.planner.cheat;
             ui.horizontal_wrapped(|ui| {
@@ -1554,7 +1585,7 @@ impl SettingsTab {
                                 .suffix("분"),
                         );
                         ui.small(
-                            "일하기 탭의 \"치팅 시작\"으로 시작하고, 나누어 쓸 수 있습니다. 자정에 다시 \
+                            "이 영역의 \"치팅 시작\"으로 시작하고, 나누어 쓸 수 있습니다. 자정에 다시 \
                              채워집니다.",
                         );
                     });
@@ -1568,7 +1599,7 @@ impl SettingsTab {
                                 .suffix("분"),
                         );
                         ui.small(
-                            "일하기 탭의 \"치팅 시작\"으로 시작하고, 나누어 쓸 수 있습니다. 월요일 \
+                            "이 영역의 \"치팅 시작\"으로 시작하고, 나누어 쓸 수 있습니다. 월요일 \
                              자정에 다시 채워집니다.",
                         );
                     });
@@ -1630,6 +1661,95 @@ impl SettingsTab {
             );
         }
         self.block_bar(ui, &CHEAT, snapshot, protected);
+    }
+
+    /// The cheat time in force: what is left and "치팅 시작" (a budget), when it starts by
+    /// itself (times of day), or, while it runs, when it ends and "치팅 끝내기". The buttons
+    /// are here and not in the Work tab (the owner: "치팅 버튼을 일하기가 아니라 설정 창에
+    /// 추가해줄래? 뭔가 치팅을 권장하는 느낌이 드네").
+    fn cheat_now_ui(&mut self, ui: &mut egui::Ui, cheat_now: &CheatNow) {
+        let cheat = &cheat_now.planner.cheat;
+        let ready = !cheat_now.busy;
+        if cheat_now.message.is_empty() {
+            // The last request went through.
+            self.cheat_sent = false;
+        }
+        if let Some(running) = &cheat.running {
+            let minutes_left = (running.until - Utc::now()).num_minutes().max(0) + 1;
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    GREEN,
+                    format!(
+                        "지금 치팅 시간입니다. {}에 끝납니다({} 남음).",
+                        crate::todo::local_time(running.until),
+                        crate::todo::minutes_text(minutes_left)
+                    ),
+                );
+                if ui
+                    .add_enabled(ready, egui::Button::new("치팅 끝내기"))
+                    .clicked()
+                {
+                    self.cheat_request = Some("cheat_end");
+                    self.cheat_sent = true;
+                }
+            });
+        } else {
+            match cheat.mode {
+                CheatMode::Off => {}
+                CheatMode::Daily | CheatMode::Weekly => {
+                    let left = cheat.minutes_left.unwrap_or_default();
+                    let appointment = cheat_now
+                        .planner
+                        .assignment
+                        .as_ref()
+                        .is_some_and(|assignment| assignment.appointment_id.is_some());
+                    ui.horizontal_wrapped(|ui| {
+                        let start = ui
+                            .add_enabled(ready && left > 0 && !appointment, egui::Button::new("치팅 시작"))
+                            .on_hover_text(
+                                "남은 치팅 시간만큼 AI의 창 검사와 AI가 건 차단을 쉽니다. 하던 일은 \
+                                 일시 정지하고, 치팅 시간이 끝나면 다시 시작합니다.",
+                            )
+                            .on_disabled_hover_text(if appointment {
+                                "약속 중에는 치팅 시간을 시작할 수 없습니다."
+                            } else {
+                                "남은 치팅 시간이 없습니다."
+                            });
+                        if start.clicked() {
+                            self.cheat_request = Some("cheat_start");
+                            self.cheat_sent = true;
+                        }
+                        ui.label(format!(
+                            "{} 남은 치팅 시간 {} (모두 {})",
+                            if cheat.mode == CheatMode::Daily {
+                                "오늘"
+                            } else {
+                                "이번 주"
+                            },
+                            crate::todo::minutes_text(left),
+                            crate::todo::minutes_text(i64::from(cheat.budget_minutes))
+                        ));
+                    });
+                }
+                CheatMode::Times => {
+                    ui.label(format!(
+                        "지금은 날마다 {}에 치팅 시간이 저절로 시작합니다.",
+                        if cheat.times.is_empty() {
+                            "(정한 시간대 없음)".to_string()
+                        } else {
+                            cheat.times.join(", ")
+                        }
+                    ));
+                }
+            }
+        }
+        if self.cheat_sent && !cheat_now.message.is_empty() {
+            ui.colored_label(RED, cheat_now.message);
+        }
+        if cheat.mode != CheatMode::Off || cheat.running.is_some() {
+            ui.add_space(6.0);
+            ui.small("아래에서 치팅 시간을 주는 방식을 바꿉니다.");
+        }
     }
 
     // --- blocking -----------------------------------------------------------------------
