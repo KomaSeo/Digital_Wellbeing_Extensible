@@ -415,8 +415,6 @@ impl FocusApp {
             });
             return;
         };
-        let report_due = planner.report_due;
-
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             if let Some(todo_id) = assignment.todo_id.as_deref() {
@@ -500,9 +498,9 @@ impl FocusApp {
                 } else {
                     ui.colored_label(
                         RED,
-                        "시간이 다 되었습니다. 아래 \"완료 보고\"에서 끝냈는지 알려 주세요. 보고하기 \
-                         전에는 다른 일로 넘어가지 않고, 엄격 모드에서는 보고할 때까지 이 앱이 화면을 \
-                         덮습니다.",
+                        "시간이 다 되었습니다. 아래 \"변경 요청\"에서 끝냈는지, 다 못 했는지, 시간이 더 \
+                         필요한지 알려 주세요. 보낼 때까지 다음 할 일을 받지 않고, 엄격 모드에서는 이 앱이 \
+                         화면을 덮습니다.",
                     );
                 }
             }
@@ -564,22 +562,6 @@ impl FocusApp {
             self.notes_ui(ui, &todo_id, planner);
         }
 
-        // Only a report once the time is up; "not finished" only then.
-        if report_due
-            && !matches!(
-                self.choice,
-                ChangeChoice::Done
-                    | ChangeChoice::NotFinished
-                    | ChangeChoice::Extend
-                    | ChangeChoice::AlreadyDone
-                    | ChangeChoice::Changed
-            )
-        {
-            self.choice = ChangeChoice::Done;
-        }
-        if !report_due && self.choice == ChangeChoice::NotFinished {
-            self.choice = ChangeChoice::Done;
-        }
         // The to-do from the list the task is (none for an appointment or a free task).
         let current_todo = assignment
             .todo_id
@@ -590,7 +572,7 @@ impl FocusApp {
             .as_ref()
             .map(|todo| current_time(planner, todo))
             .filter(|time| time.over_by.is_some());
-        self.change_ui(ui, report_due, current_todo.as_ref(), over_estimate);
+        self.change_ui(ui, current_todo.as_ref(), over_estimate);
     }
 
     /// The current to-do went over its estimate: say so, and let the user write a new one
@@ -1211,7 +1193,6 @@ impl FocusApp {
     fn change_ui(
         &mut self,
         ui: &mut egui::Ui,
-        report_due: bool,
         current_todo: Option<&TodoItem>,
         over_estimate: Option<TodoTime>,
     ) {
@@ -1235,11 +1216,9 @@ impl FocusApp {
                 }
             }
         }
-        egui::CollapsingHeader::new(if report_due {
-            "완료 보고"
-        } else {
-            "변경 요청"
-        })
+        // The same before and after the time is up (the owner: "시간 끝나고 보고하는 것과 시간
+        // 끝나기 전에 보고하는 방식에 차이가 있을 필요가 없다").
+        egui::CollapsingHeader::new("변경 요청")
             .id_salt("ask_to_change")
             .default_open(true)
             .show(ui, |ui| {
@@ -1249,12 +1228,9 @@ impl FocusApp {
                     ui.radio_value(&mut self.choice, ChangeChoice::AlreadyDone, "이미 처리했어요");
                     ui.radio_value(&mut self.choice, ChangeChoice::Changed, "일이 변경되었어요");
                     ui.radio_value(&mut self.choice, ChangeChoice::Extend, "연장하기");
-                    if report_due {
-                        ui.radio_value(&mut self.choice, ChangeChoice::NotFinished, "다 못 했다");
-                    } else {
-                        ui.radio_value(&mut self.choice, ChangeChoice::Repick, "다른 일 받기");
-                        ui.radio_value(&mut self.choice, ChangeChoice::End, "AI 검사 멈추기");
-                    }
+                    ui.radio_value(&mut self.choice, ChangeChoice::NotFinished, "다 못 했다");
+                    ui.radio_value(&mut self.choice, ChangeChoice::Repick, "다른 일 받기");
+                    ui.radio_value(&mut self.choice, ChangeChoice::End, "AI 검사 멈추기");
                 });
                 // Outside strict mode a changed to-do is simply edited in the form.
                 if self.choice == ChangeChoice::Changed && self.todo_ui.without_review {

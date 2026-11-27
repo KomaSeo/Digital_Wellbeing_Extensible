@@ -179,7 +179,7 @@ pub fn lockdown(
         ),
         TaskLock::ReportDue => (
             LockdownCause::ReportDue,
-            "할 일의 시간이 끝났습니다. 일하기 탭에서 끝냈는지 보고하세요(끝냈다, 연장하기, 못 끝냄 등)"
+            "할 일의 시간이 끝났습니다. 일하기 탭의 \"변경 요청\"에서 보고하세요(끝냈다, 다 못 했다, 연장하기 등)"
                 .to_string(),
         ),
         TaskLock::Paused => (

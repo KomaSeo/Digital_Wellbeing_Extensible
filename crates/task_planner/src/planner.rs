@@ -85,14 +85,12 @@ pub enum PlannerError {
     BadProposal,
     #[error("\"{0}\"은(는) 이미 목록에 있습니다")]
     Duplicate(String),
-    #[error("할 일 시간이 다 됐습니다. 먼저 끝냈는지 보고하세요(끝냈다 또는 다 못 했다)")]
+    #[error(
+        "할 일 시간이 다 됐습니다. 먼저 변경 요청으로 보고하세요(끝냈다, 다 못 했다, 연장하기 등)"
+    )]
     ReportFirst,
     #[error("지금 할 일은 목록의 할 일이 아닙니다(약속이나 목록 밖의 일)")]
     NotFromTheList,
-    #[error(
-        "\"다 못 했다\"는 할 일 시간이 다 된 뒤에 보고합니다. 그 전에는 \"다른 일 받기\"를 쓰세요"
-    )]
-    NotTimeYet,
     #[error(
         "시간이 다 됐을 때의 동작은 더 이상 고르지 않습니다. 시간이 다 되면 완료 보고를 합니다"
     )]
@@ -1906,9 +1904,9 @@ impl TaskPlanner {
         if reason.trim().chars().count() < MIN_REASON_CHARS {
             return Err(PlannerError::ReasonTooShort);
         }
-        let time_is_up = assignment
-            .as_ref()
-            .is_some_and(|assignment| assignment.time_is_up(now));
+        // The same requests before and after the planned end (the owner: "시간 끝나고 보고하는
+        // 것과 시간 끝나기 전에 보고하는 방식에 차이가 있을 필요가 없다"); once it is up, one
+        // of them comes before a new task (`assign`, `ReportFirst`).
         match request {
             ChangeKind::SetWhenTimeIsUp { .. } => return Err(PlannerError::NoLongerUsed),
             ChangeKind::Done
@@ -1929,7 +1927,6 @@ impl TaskPlanner {
             {
                 return Err(PlannerError::NotFromTheList)
             }
-            ChangeKind::NotFinished if !time_is_up => return Err(PlannerError::NotTimeYet),
             ChangeKind::Extend { .. } if assignment.is_none() => {
                 return Err(PlannerError::NothingAssigned)
             }
@@ -1942,14 +1939,6 @@ impl TaskPlanner {
             {
                 return Err(PlannerError::BadTaskExtension)
             }
-            // Nothing else before the report (more time, or the to-do having changed or been
-            // done already, are ways to report too).
-            ChangeKind::Done
-            | ChangeKind::AlreadyDone
-            | ChangeKind::Changed
-            | ChangeKind::NotFinished
-            | ChangeKind::Extend { .. } => {}
-            _ if time_is_up => return Err(PlannerError::ReportFirst),
             _ => {}
         }
         match request {

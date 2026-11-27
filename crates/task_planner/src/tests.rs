@@ -1019,18 +1019,19 @@ fn when_the_time_is_up_the_task_stays_until_the_user_reports() {
             .request_change(now, kind, "보고합니다 진행 상황", Evidence::default())
     };
 
-    // "Not finished" only once the time is up.
-    assert!(matches!(
-        report(before_end, ChangeKind::NotFinished),
-        Err(PlannerError::NotTimeYet)
-    ));
-    // Once it is up, nothing but a report: no new task, no repick.
+    // Before the end the task just runs.
+    assert_eq!(
+        fixture
+            .planner
+            .assign(before_end)
+            .unwrap()
+            .todo_id
+            .as_deref(),
+        Some("a")
+    );
+    // Once it is up, no new task before a report or another request.
     assert!(matches!(
         fixture.planner.assign(at_end),
-        Err(PlannerError::ReportFirst)
-    ));
-    assert!(matches!(
-        report(at_end, ChangeKind::Repick),
         Err(PlannerError::ReportFirst)
     ));
     assert!(matches!(
@@ -1072,6 +1073,49 @@ fn when_the_time_is_up_the_task_stays_until_the_user_reports() {
         .assign(at_end + chrono::Duration::minutes(5))
         .unwrap();
     assert_eq!(fixture.advisor.picks.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn reports_and_requests_are_the_same_before_and_after_the_time_is_up() {
+    // The owner: "시간 끝나고 보고하는 것과 시간 끝나기 전에 보고하는 방식에 차이가 있을 필요가
+    // 없다".
+    let fixture = harness(true, &["a", "b"]);
+    let start = Utc::now();
+    fixture.planner.assign(start).unwrap();
+    let report = |now, kind: ChangeKind| {
+        fixture
+            .planner
+            .request_change(now, kind, "보고합니다 진행 상황", Evidence::default())
+    };
+
+    // "Not finished" before the end: taken without the AI, the to-do stays, nothing is
+    // assigned until the user asks again.
+    let early = start + chrono::Duration::minutes(10);
+    let record = report(early, ChangeKind::NotFinished).unwrap();
+    assert!(record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 0);
+    let status = fixture.planner.status();
+    assert!(status.assignment.is_none());
+    assert_eq!(status.open_todos.len(), 2);
+
+    // After the end, "another task" is reviewed and applied like before it.
+    let second = fixture
+        .planner
+        .assign(early + chrono::Duration::minutes(1))
+        .unwrap();
+    let after_end = second.until.unwrap() + chrono::Duration::minutes(1);
+    let record = report(after_end, ChangeKind::Repick).unwrap();
+    assert!(record.approved);
+    assert_eq!(fixture.advisor.reviews.load(Ordering::SeqCst), 1);
+    let next = fixture.planner.status().assignment.unwrap();
+    assert!(next.at >= after_end);
+    assert!(!next.time_is_up(after_end));
+
+    // And "stop the AI check" after the end as well.
+    let third_end = next.until.unwrap() + chrono::Duration::minutes(1);
+    let record = report(third_end, ChangeKind::End).unwrap();
+    assert!(record.approved);
+    assert!(fixture.planner.status().assignment.is_none());
 }
 
 #[test]
