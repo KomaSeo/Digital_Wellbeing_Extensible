@@ -170,11 +170,10 @@ struct FocusApp {
     /// Minutes asked for with "연장하기".
     extend_minutes: u32,
     /// The assignment whose time-up was seen last (`None` before the first status): a new
-    /// one brings the window up with [`block_prompt::TimeUpPrompt`].
+    /// one brings the window up on the Work tab.
     seen_time_up: Option<Option<String>>,
     /// The assignment whose websites were opened last (`None` before the first status).
     opened_for: Option<Option<String>>,
-    time_up_prompt: Option<block_prompt::TimeUpPrompt>,
     access: AccessForm,
     login: login::LoginForm,
     timetable: timetable::TimetableView,
@@ -272,7 +271,6 @@ impl FocusApp {
             extend_minutes: 30,
             seen_time_up: None,
             opened_for: None,
-            time_up_prompt: None,
             access: AccessForm::default(),
             login: login::LoginForm::default(),
             timetable: timetable::TimetableView::default(),
@@ -636,7 +634,9 @@ impl eframe::App for FocusApp {
                 Some(_) => {}
             }
         }
-        // The current task's time is up: ask at once whether it is finished or needs more time.
+        // The current task's time is up: bring the window up on the Work tab, where the same
+        // "변경 요청" as before takes the report. No window of its own (the owner: "통일해. UI를
+        // 불필요하게 늘리니 친구들이 쓰기 힘들어 한다").
         if let Some(Ok(current_status)) = &status {
             let due = current_status
                 .planner
@@ -650,8 +650,8 @@ impl eframe::App for FocusApp {
             match &self.seen_time_up {
                 None => self.seen_time_up = Some(newest),
                 Some(seen) if *seen != newest => {
-                    if let Some(assignment) = due {
-                        self.time_up_prompt = Some(block_prompt::TimeUpPrompt::new(assignment));
+                    if due.is_some() {
+                        self.tab = Tab::Work;
                         tray::show_window(TITLE);
                         context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         context.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -683,7 +683,6 @@ impl eframe::App for FocusApp {
         }
         self.block_prompt_ui(context);
         self.extension_prompt_ui(context);
-        self.time_up_prompt_ui(context);
         egui::TopBottomPanel::top("tabs").show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Work, "일하기");

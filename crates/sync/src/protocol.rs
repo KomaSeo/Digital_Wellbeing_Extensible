@@ -152,6 +152,7 @@ mod tests {
     #[test]
     fn versions_are_ordered_like_releases() {
         assert!(version_order("0.1.0-rc.9") < version_order("0.1.0-rc.31"));
+        assert!(version_order("0.1.0-rc.99") < version_order("0.1.0-rc.100"));
         assert!(version_order("0.1.0-rc.31") < version_order("0.1.0"));
         assert!(version_order("0.1.0") < version_order("0.2.0-rc.1"));
         assert!(version_order("") < version_order("0.1.0-rc.1"));

@@ -479,8 +479,11 @@ impl FocusApp {
                 let total = (until - assignment.at).num_seconds().max(1) as f32;
                 let elapsed = (clock - assignment.at).num_seconds().max(0) as f32;
                 let minutes_left = (until - clock).num_minutes();
+                // Up the moment `until` passes (whole minutes alone would say "0분 남음" for the
+                // first minute after it, while the agent already asks for the report).
+                let running = clock < until;
                 ui.add(egui::ProgressBar::new((elapsed / total).min(1.0)).text(
-                    if minutes_left >= 0 {
+                    if running {
                         format!(
                             "{}까지 · {} 남음",
                             local_time(until),
@@ -490,7 +493,7 @@ impl FocusApp {
                         format!("{}에 시간이 다 되었습니다", local_time(until))
                     },
                 ));
-                if minutes_left >= 0 {
+                if running {
                     ui.small(
                         "시간이 다 되면 끝냈는지 보고합니다. 다음 할 일은 보고한 뒤 \"할 일 받기\"로 \
                          받습니다.",
