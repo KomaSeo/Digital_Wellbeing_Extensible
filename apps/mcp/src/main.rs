@@ -9,7 +9,7 @@
 //! update of the settings (life rules, the planner's AI instructions, any other setting): in
 //! the setup stage it takes effect at once; once they are protected, such an update takes effect only after the user answered "is this
 //! update really right?" with yes as often and as far apart as the settings say (by default
-//! three times, two days apart), in the Focus app. No tool
+//! three times, two hours apart), in the Focus app. No tool
 //! answers that question.
 //!
 //! Setup and tool reference (Korean): `docs/claude_desktop.md`.

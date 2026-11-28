@@ -288,7 +288,7 @@ pub enum CheatMode {
     /// No cheat time.
     #[default]
     Off,
-    /// A budget of minutes a day, started by the user ("치팅 시작").
+    /// A budget of minutes a day, started by the user ("비상 사용 시작").
     Daily,
     /// A budget of minutes a week, started by the user.
     Weekly,
@@ -377,7 +377,9 @@ impl Default for Confirmations {
     fn default() -> Self {
         Self {
             settings_times: 3,
-            settings_interval_hours: 48,
+            // Two hours (the owner, rc.104: "설정 업데이트 간격을 3번 2시간으로 하자"; two days
+            // before).
+            settings_interval_hours: 2,
             todo_change_times: 3,
             todo_change_interval_hours: 2,
         }

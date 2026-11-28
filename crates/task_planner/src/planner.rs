@@ -100,13 +100,13 @@ pub enum PlannerError {
     NoLongerUsed,
     #[error("지금 할 일이 없습니다")]
     NothingAssigned,
-    #[error("치팅 시간이 꺼져 있습니다(설정 → AI 규칙 → 치팅 시간)")]
+    #[error("비상 사용이 꺼져 있습니다(설정 → AI 규칙 → 비상 사용)")]
     CheatOff,
-    #[error("치팅 시간은 정해진 시간대에 저절로 시작합니다")]
+    #[error("비상 사용은 정해진 시간대에 저절로 시작합니다")]
     CheatByTimes,
-    #[error("남은 치팅 시간이 없습니다")]
+    #[error("남은 비상 사용 시간이 없습니다")]
     NoCheatLeft,
-    #[error("약속 중에는 치팅 시간을 시작할 수 없습니다")]
+    #[error("약속 중에는 비상 사용을 시작할 수 없습니다")]
     CheatDuringAppointment,
     #[error("약속은 시각이 정해져 있어서 일시 정지할 수 없습니다")]
     AppointmentCannotPause,

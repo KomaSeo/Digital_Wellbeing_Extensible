@@ -581,7 +581,7 @@ fn a_computer_joins_the_unlock_list_after_the_confirmations_when_the_listed_one_
     let on_desktop = fs::read_to_string(desktop.join("settings_reservations.json")).unwrap();
     assert!(on_desktop.contains(&scheduled.id), "{on_desktop}");
 
-    // No question before its time; then three "yes", two days apart (the defaults).
+    // No question before its time; then three "yes", two hours apart (the defaults).
     assert!(settings::answer(&new_pc, now, &scheduled.id, true).is_err());
     let mut asked_at = scheduled.first_question_at;
     let mut answers = 0;
@@ -598,7 +598,7 @@ fn a_computer_joins_the_unlock_list_after_the_confirmations_when_the_listed_one_
     }
     assert_eq!(answers, 3);
     assert!(
-        asked_at - now >= Days::days(6),
+        asked_at - now >= Days::hours(6),
         "applied after {}",
         asked_at - now
     );

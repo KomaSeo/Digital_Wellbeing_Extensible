@@ -1752,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn a_protected_edit_takes_effect_after_three_yes_answers_two_days_apart() {
+    fn a_protected_edit_takes_effect_after_three_yes_answers_two_hours_apart() {
         let data_directory = temp_dir("three_yes");
         let start = Utc::now();
         put(
@@ -1777,7 +1777,7 @@ mod tests {
         .unwrap();
         let scheduled = outcome.scheduled.expect("life rules are scheduled");
         assert!(outcome.applied.is_empty());
-        assert_eq!(scheduled.first_question_at, start + Duration::days(2));
+        assert_eq!(scheduled.first_question_at, start + Duration::hours(2));
         let id = scheduled.id;
         assert_eq!(
             in_force(&data_directory, "planner")["life_rules"],
@@ -1785,21 +1785,25 @@ mod tests {
         );
 
         // Not before the question is due.
-        assert!(answer(&data_directory, start + Duration::days(1), &id, true).is_err());
-        assert_eq!(questions_due(&data_directory, start + Duration::days(1)), 0);
-        // The first question waits until it is answered, here a day late.
-        let first_answer = start + Duration::days(3);
+        assert!(answer(&data_directory, start + Duration::hours(1), &id, true).is_err());
+        assert_eq!(
+            questions_due(&data_directory, start + Duration::hours(1)),
+            0
+        );
+        // The first question waits until it is answered, here an hour late.
+        let first_answer = start + Duration::hours(3);
         assert_eq!(questions_due(&data_directory, first_answer), 1);
         assert_eq!(
             answer(&data_directory, first_answer, &id, true).unwrap(),
             AnswerOutcome::Approved {
                 approvals: 1,
-                next_question_at: first_answer + Duration::days(2),
+                next_question_at: first_answer + Duration::hours(2),
             }
         );
-        // The next question is two days after the answer, not after the schedule.
-        assert!(answer(&data_directory, start + Duration::days(4), &id, true).is_err());
-        let second_answer = first_answer + Duration::days(2);
+        // The next question is two hours after the answer, not after the schedule (two
+        // hours by default since rc.104).
+        assert!(answer(&data_directory, start + Duration::hours(4), &id, true).is_err());
+        let second_answer = first_answer + Duration::hours(2);
         answer(&data_directory, second_answer, &id, true).unwrap();
         assert_eq!(
             in_force(&data_directory, "planner")["life_rules"],
@@ -1808,7 +1812,7 @@ mod tests {
         assert_eq!(
             answer(
                 &data_directory,
-                second_answer + Duration::days(2),
+                second_answer + Duration::hours(2),
                 &id,
                 true
             )

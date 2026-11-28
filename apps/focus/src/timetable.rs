@@ -44,7 +44,7 @@ fn kind_label(kind: TimetableKind) -> &'static str {
         TimetableKind::AwayFromComputer => "컴퓨터 없이 하는 일(예전 기록)",
         TimetableKind::Appointment => "약속",
         TimetableKind::Unknown => "멈춤",
-        TimetableKind::Cheat => "치팅",
+        TimetableKind::Cheat => "비상 사용",
     }
 }
 

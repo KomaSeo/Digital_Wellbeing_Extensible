@@ -48,7 +48,7 @@
 //!
 //! The `settings_*` methods let a standard user edit the admin settings: during setup an
 //! edit takes effect at once; once protected it is scheduled and takes effect only after
-//! three "yes" answers two days apart; see [`machine::settings`].
+//! three "yes" answers two hours apart (by default); see [`machine::settings`].
 //!
 //!
 //! `propose_todo` asks the AI to add a to-do to the planner's list; it judges

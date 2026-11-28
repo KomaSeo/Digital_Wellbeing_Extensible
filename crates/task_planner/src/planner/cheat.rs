@@ -18,7 +18,7 @@ use tracing::info;
 const CHEAT_LOG_DAYS: i64 = 35;
 
 impl TaskPlanner {
-    /// The user starts cheat time ("치팅 시작"): with a daily or weekly budget only, for what
+    /// The user starts cheat time ("비상 사용 시작"): with a daily or weekly budget only, for what
     /// is left of it. A cheat time already running is returned as it is.
     pub fn start_cheat(&self, now: DateTime<Utc>) -> Result<CheatSession, PlannerError> {
         let _busy = self.busy.lock();
@@ -43,7 +43,7 @@ impl TaskPlanner {
         self.begin_cheat(now, now + Duration::minutes(minutes), false)
     }
 
-    /// The user ends cheat time early ("치팅 끝내기"). A time of day ended early does not start
+    /// The user ends cheat time early ("비상 사용 끝내기"). A time of day ended early does not start
     /// again before its end.
     pub fn end_cheat(&self, now: DateTime<Utc>) -> Result<(), PlannerError> {
         let _busy = self.busy.lock();
@@ -317,7 +317,7 @@ pub(super) fn with_cheat_times(
             start,
             end,
             kind: TimetableKind::Cheat,
-            task: "치팅 시간".into(),
+            task: "비상 사용".into(),
             todo_id: None,
         });
         entries = carved;

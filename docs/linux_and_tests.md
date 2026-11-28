@@ -13,7 +13,7 @@
 | **Wayland** | X11을 대신하는 새 방식입니다. 보안상 한 프로그램이 다른 프로그램의 창을 볼 수 없습니다. |
 | **Xvfb** | 화면 없이 메모리 안에서만 도는 가상 X11 서버입니다. 테스트할 때 씁니다. |
 | **CI** | GitHub Actions가 push할 때마다 자동으로 빌드하고 테스트하는 일입니다(`.github/workflows/ci.yml`). |
-| **엄격 모드와 예약된 업데이트** | 설치 직후, 곧 엄격 모드를 켜기 전(설정 단계)에는 agent가 저장 요청(`settings_put`)을 받으면 설정 파일을 바로 씁니다. 엄격 모드를 켜는 요청(`settings_protect`)을 받은 뒤로는, agent가 저장한 파일을 설정 하나하나의 변경으로 나눕니다. 규칙을 더 엄격하게 만드는 변경은 바로 쓰고, 그 밖의 변경(생활 규칙 등)은 **예약된 업데이트**로 보관합니다. 예약된 업데이트는 "이 업데이트가 정말 맞나요?"라는 확인 질문에 사용자가 세 번 연속 "예"라고 답해야(`settings_answer`) 적용됩니다. 질문은 이틀 간격으로 옵니다. 예전 버전에서는 엄격 모드를 **설정 보호**라고 불렀습니다([`multi_account.md`](multi_account.md) 6.4절). |
+| **엄격 모드와 예약된 업데이트** | 설치 직후, 곧 엄격 모드를 켜기 전(설정 단계)에는 agent가 저장 요청(`settings_put`)을 받으면 설정 파일을 바로 씁니다. 엄격 모드를 켜는 요청(`settings_protect`)을 받은 뒤로는, agent가 저장한 파일을 설정 하나하나의 변경으로 나눕니다. 규칙을 더 엄격하게 만드는 변경은 바로 쓰고, 그 밖의 변경(생활 규칙 등)은 **예약된 업데이트**로 보관합니다. 예약된 업데이트는 "이 업데이트가 정말 맞나요?"라는 확인 질문에 사용자가 세 번 연속 "예"라고 답해야(`settings_answer`) 적용됩니다. 질문은 기본값으로 두 시간 간격으로 옵니다. 예전 버전에서는 엄격 모드를 **설정 보호**라고 불렀습니다([`multi_account.md`](multi_account.md) 6.4절). |
 | **데일리 웰빙(daily wellbeing)** | AI가 창을 지금 할 일에 비추어 검사하는 상태입니다. Focus 앱에서는 할 일 플래너가 할 일 목록에서 지금 할 일을 할당할 때 켜집니다. 사용자 API에서는 할 일 목록이 비어 있을 때 `start_session`이 적은 할 일로 켜고 `stop_session`이 끕니다(**AI 검사 멈추기**). 테스트는 이 두 요청을 씁니다. |
 | **할 일 변경** | 할 일 목록에 할 일을 추가하거나, 고치거나, 지우겠다고 agent의 AI에게 보내는 요청(`todo_change`)입니다. AI가 승인한 변경은 엄격 모드여도 바로 적용됩니다. AI가 거절한 변경은 사용자가 AI 없이 하기로 할 수 있고(`todo_change_schedule`), 그 변경은 두 시간 간격의 확인 질문을 세 번 거쳐 적용됩니다([`task_planner.md`](task_planner.md) 4.6절). |
 | **가짜 Claude 서버** | 테스트가 띄우는 작은 HTTP 서버입니다. Claude Messages API와 같은 모양의 답을 돌려주므로, API 키와 비용 없이 판정 과정을 시험할 수 있습니다. |
@@ -60,7 +60,7 @@ xvfb-run -a cargo test --workspace
 
 **끝에서 끝까지 테스트** (`apps/service/tests/e2e_linux.rs`): 실제 agent 실행 파일을 띄우고, 사용자가 Focus 앱으로 하는 일을 같은 API로 합니다.
 1. 테스트는 임시 데이터 폴더, 가짜 Claude 서버, 테스트 전용 포트를 정하고 agent를 실행합니다(`DW_DATA_DIR`, `DW_CLAUDE_API_URL`, `DW_PORT_BASE`).
-   테스트는 확인 질문의 간격도 이틀 대신 2초로 줄입니다(`DW_SETTINGS_CONFIRM_INTERVAL_SECONDS=2`).
+   테스트는 확인 질문의 간격도 두 시간 대신 2초로 줄입니다(`DW_SETTINGS_CONFIRM_INTERVAL_SECONDS=2`).
 2. 테스트는 진짜 X11 창 두 개를 만듭니다. 앞에는 "Funny cats - YouTube", 뒤에는 "Rust docs - Google Chrome"입니다. 테스트 프로세스 자신을 브라우저로 등록하므로, 이 창들은 브라우저 탭처럼 다뤄집니다.
 3. 테스트는 사용자 API로 AI 검사를 시작합니다(`start_session`, 할 일은 "write my thesis").
 4. 가짜 Claude 서버는 제목에 "cats"가 있으면 `off_task`, 없으면 `on_task`라고 답합니다. 변경 요청과 할 일 변경은 요청 글에 "please reject"가 있으면 거절하고, 없으면 승인합니다. 할 일 변경을 승인할 때는 빈 칸을 채운 할 일(메모 "filled by the stand-in", 중요도 2, 예상 시간 25분)도 돌려줍니다.

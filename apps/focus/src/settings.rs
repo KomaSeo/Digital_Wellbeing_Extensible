@@ -370,7 +370,7 @@ pub struct SettingsTab {
     safe_mode_waiting: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// What the last safe mode command said.
     safe_mode_message: Option<Result<String, String>>,
-    /// "치팅 시작" or "치팅 끝내기" was pressed this frame: the app sends this request.
+    /// "비상 사용 시작" or "비상 사용 끝내기" was pressed this frame: the app sends this request.
     cheat_request: Option<&'static str>,
     /// A cheat time request was sent from here: its refusal shows under the buttons.
     cheat_sent: bool,
@@ -1674,10 +1674,10 @@ impl SettingsTab {
         protected: bool,
         cheat_now: Option<CheatNow>,
     ) {
-        crate::style::section(ui, "치팅 시간");
+        crate::style::section(ui, "비상 사용");
         ui.label(
-            "치팅 시간은 AI의 창 검사와 AI가 건 차단이 쉬는 시간입니다. 그동안 하던 일은 일시 정지했다가 \
-             치팅 시간이 끝나면 다시 시작하고, 엄격 모드에서도 화면을 덮지 않습니다. 항상 막을 \
+            "비상 사용은 AI의 창 검사와 AI가 건 차단이 쉬는 시간입니다. 그동안 하던 일은 일시 정지했다가 \
+             비상 사용이 끝나면 다시 시작하고, 엄격 모드에서도 화면을 덮지 않습니다. 항상 막을 \
              프로그램과 웹사이트는 그대로 막힙니다. AI에게 묻지 않고, 여기서 정한 시간이 한도입니다.",
         );
         if let Some(cheat_now) = cheat_now {
@@ -1693,7 +1693,7 @@ impl SettingsTab {
             });
             match cheat.mode {
                 CheatMode::Off => {
-                    ui.small("치팅 시간이 없습니다.");
+                    ui.small("비상 사용이 없습니다.");
                 }
                 CheatMode::Daily => {
                     ui.horizontal_wrapped(|ui| {
@@ -1704,7 +1704,7 @@ impl SettingsTab {
                                 .suffix("분"),
                         );
                         ui.small(
-                            "이 영역의 \"치팅 시작\"으로 시작하고, 나누어 쓸 수 있습니다. 자정에 다시 \
+                            "이 영역의 \"비상 사용 시작\"으로 시작하고, 나누어 쓸 수 있습니다. 자정에 다시 \
                              채워집니다.",
                         );
                     });
@@ -1718,14 +1718,14 @@ impl SettingsTab {
                                 .suffix("분"),
                         );
                         ui.small(
-                            "이 영역의 \"치팅 시작\"으로 시작하고, 나누어 쓸 수 있습니다. 월요일 \
+                            "이 영역의 \"비상 사용 시작\"으로 시작하고, 나누어 쓸 수 있습니다. 월요일 \
                              자정에 다시 채워집니다.",
                         );
                     });
                 }
                 CheatMode::Times => {
                     ui.small(
-                        "날마다 이 시간대에 치팅 시간이 저절로 시작하고 끝납니다. 약속 중에는 시작하지 \
+                        "날마다 이 시간대에 비상 사용이 저절로 시작하고 끝납니다. 약속 중에는 시작하지 \
                          않습니다. 일찍 끝내면 그 시간대에는 다시 시작하지 않습니다.",
                     );
                     let mut remove = None;
@@ -1776,14 +1776,14 @@ impl SettingsTab {
         }
         if protected {
             ui.small(
-                "엄격 모드에서는 치팅 시간을 줄이거나 끄면 바로 적용되고, 늘리거나 방식을 바꾸면 예약됩니다.",
+                "엄격 모드에서는 비상 사용 시간을 줄이거나 끄면 바로 적용되고, 늘리거나 방식을 바꾸면 예약됩니다.",
             );
         }
         self.block_bar(ui, &CHEAT, snapshot, protected);
     }
 
-    /// The cheat time in force: what is left and "치팅 시작" (a budget), when it starts by
-    /// itself (times of day), or, while it runs, when it ends and "치팅 끝내기". The buttons
+    /// The cheat time in force: what is left and "비상 사용 시작" (a budget), when it starts by
+    /// itself (times of day), or, while it runs, when it ends and "비상 사용 끝내기". The buttons
     /// are here and not in the Work tab (the owner: "치팅 버튼을 일하기가 아니라 설정 창에
     /// 추가해줄래? 뭔가 치팅을 권장하는 느낌이 드네").
     fn cheat_now_ui(&mut self, ui: &mut egui::Ui, cheat_now: &CheatNow) {
@@ -1799,13 +1799,13 @@ impl SettingsTab {
                 ui.colored_label(
                     GREEN,
                     format!(
-                        "지금 치팅 시간입니다. {}에 끝납니다({} 남음).",
+                        "지금 비상 사용 중입니다. {}에 끝납니다({} 남음).",
                         crate::todo::local_time(running.until),
                         crate::todo::minutes_text(minutes_left)
                     ),
                 );
                 if ui
-                    .add_enabled(ready, egui::Button::new("치팅 끝내기"))
+                    .add_enabled(ready, egui::Button::new("비상 사용 끝내기"))
                     .clicked()
                 {
                     self.cheat_request = Some("cheat_end");
@@ -1824,22 +1824,22 @@ impl SettingsTab {
                         .is_some_and(|assignment| assignment.appointment_id.is_some());
                     ui.horizontal_wrapped(|ui| {
                         let start = ui
-                            .add_enabled(ready && left > 0 && !appointment, egui::Button::new("치팅 시작"))
+                            .add_enabled(ready && left > 0 && !appointment, egui::Button::new("비상 사용 시작"))
                             .on_hover_text(
-                                "남은 치팅 시간만큼 AI의 창 검사와 AI가 건 차단을 쉽니다. 하던 일은 \
-                                 일시 정지하고, 치팅 시간이 끝나면 다시 시작합니다.",
+                                "남은 비상 사용 시간만큼 AI의 창 검사와 AI가 건 차단을 쉽니다. 하던 일은 \
+                                 일시 정지하고, 비상 사용이 끝나면 다시 시작합니다.",
                             )
                             .on_disabled_hover_text(if appointment {
-                                "약속 중에는 치팅 시간을 시작할 수 없습니다."
+                                "약속 중에는 비상 사용을 시작할 수 없습니다."
                             } else {
-                                "남은 치팅 시간이 없습니다."
+                                "남은 비상 사용 시간이 없습니다."
                             });
                         if start.clicked() {
                             self.cheat_request = Some("cheat_start");
                             self.cheat_sent = true;
                         }
                         ui.label(format!(
-                            "{} 남은 치팅 시간 {} (모두 {})",
+                            "{} 남은 비상 사용 시간 {} (모두 {})",
                             if cheat.mode == CheatMode::Daily {
                                 "오늘"
                             } else {
@@ -1852,7 +1852,7 @@ impl SettingsTab {
                 }
                 CheatMode::Times => {
                     ui.label(format!(
-                        "지금은 날마다 {}에 치팅 시간이 저절로 시작합니다.",
+                        "지금은 날마다 {}에 비상 사용이 저절로 시작합니다.",
                         if cheat.times.is_empty() {
                             "(정한 시간대 없음)".to_string()
                         } else {
@@ -1867,7 +1867,7 @@ impl SettingsTab {
         }
         if cheat.mode != CheatMode::Off || cheat.running.is_some() {
             ui.add_space(6.0);
-            ui.small("아래에서 치팅 시간을 주는 방식을 바꿉니다.");
+            ui.small("아래에서 비상 사용 시간을 주는 방식을 바꿉니다.");
         }
     }
 
@@ -2271,7 +2271,7 @@ impl SettingsTab {
                 });
             ui.small(format!(
                 "지금 고른 값: 설정 업데이트는 {} 간격으로 {}번, 할 일 변경은 {} 간격으로 {}번 \
-                 묻습니다. 기본값은 이틀(48시간) 간격으로 3번, 2시간 간격으로 3번입니다.",
+                 묻습니다. 기본값은 둘 다 2시간 간격으로 3번입니다.",
                 interval_text(numbers.settings_interval_seconds()),
                 numbers.settings_times(),
                 interval_text(numbers.todo_change_interval_seconds()),

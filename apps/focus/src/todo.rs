@@ -345,24 +345,24 @@ impl FocusApp {
                 ui,
                 crate::style::Tone::Information,
                 format!(
-                    "치팅 시간입니다. {}에 끝납니다({} 남음). 치팅 시간에는 AI의 창 검사와 AI가 건 \
+                    "비상 사용 중입니다. {}에 끝납니다({} 남음). 비상 사용 중에는 AI의 창 검사와 AI가 건 \
                      차단이 쉬고, 엄격 모드에서도 화면을 덮지 않습니다. 항상 막을 프로그램과 \
                      웹사이트는 그대로 막힙니다.{}",
                     local_time(running.until),
                     minutes_text(minutes_left),
                     if running.paused_task {
-                        " 하던 일은 일시 정지했고, 치팅 시간이 끝나면 저절로 다시 시작합니다."
+                        " 하던 일은 일시 정지했고, 비상 사용이 끝나면 저절로 다시 시작합니다."
                     } else {
                         ""
                     }
                 ),
             );
             if ui
-                .add_enabled(idle, egui::Button::new("치팅 끝내기"))
+                .add_enabled(idle, egui::Button::new("비상 사용 끝내기"))
                 .on_hover_text(if cheat.mode == CheatMode::Times {
-                    "이 시간대의 치팅 시간이 지금 끝납니다. 다음 시간대에 다시 저절로 시작합니다."
+                    "이 시간대의 비상 사용이 지금 끝납니다. 다음 시간대에 다시 저절로 시작합니다."
                 } else {
-                    "쓰지 않은 치팅 시간은 그대로 남습니다."
+                    "쓰지 않은 비상 사용 시간은 그대로 남습니다."
                 })
                 .clicked()
             {
@@ -556,11 +556,11 @@ impl FocusApp {
                     Some(_) if planner.cheat.running.is_some() => {
                         ui.colored_label(
                             YELLOW,
-                            "치팅 시간 동안 일시 정지했습니다. 치팅 시간이 끝나면 저절로 다시 \
+                            "비상 사용 동안 일시 정지했습니다. 비상 사용이 끝나면 저절로 다시 \
                              시작하고, 멈춘 만큼 끝나는 시각이 늦춰집니다.",
                         );
                         if ui
-                            .add_enabled(ready, egui::Button::new("치팅 끝내고 다시 시작"))
+                            .add_enabled(ready, egui::Button::new("비상 사용 끝내고 다시 시작"))
                             .clicked()
                         {
                             self.send("unpause_task", json!({}));
