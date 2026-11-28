@@ -3,6 +3,7 @@
 3. Execute program in background in small tray although program has been closed.
 4. 관리자가 아닌 사용자가 관리자 권한을 external based rule에 따라 받을 수 있도록 프로그램을 제작하기. <-- 이게 ring 5가 될거다.
 5. background에서도 돌아갈 수 있도록 제작하기 - 관리자가 아닌 경우 프로그램을 종료할 수 없도록 만들기.
+6. 하지 말아야 할 일 금지하기도 중요하지만 해야 할 일 재밌게 만들기도 중요하다
 
 
 backlog - 뭔가 privacy방지를 위해서 evaluate 대상의 filtering이 필요할 거 같긴 한데.
