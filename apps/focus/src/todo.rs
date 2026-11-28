@@ -2344,9 +2344,15 @@ fn todo_change_line(record: &TodoChangeRecord) -> String {
     } else {
         ""
     };
+    let from_phone = if record.via == "phone" {
+        " (휴대폰)"
+    } else {
+        ""
+    };
     format!(
-        "{}{} — \"{}\" → {}",
+        "{}{}{} — \"{}\" → {}",
         change_summary_korean(record),
+        from_phone,
         scheduled,
         record.reason,
         record.reply

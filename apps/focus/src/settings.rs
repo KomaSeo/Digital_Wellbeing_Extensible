@@ -374,6 +374,14 @@ pub struct SettingsTab {
     cheat_request: Option<&'static str>,
     /// A cheat time request was sent from here: its refusal shows under the buttons.
     cheat_sent: bool,
+    /// The code made for a phone, until when it works, and the page to open on the phone.
+    phone_code: Option<(String, DateTime<Utc>, String)>,
+    /// What the last phone request said when it failed.
+    phone_message: String,
+    /// "연결 끊기" was pressed once for this phone: asks before taking it off.
+    phone_remove_confirm: Option<String>,
+    /// The phone that joined with the last code made here.
+    phone_joined: Option<String>,
 }
 
 /// Responsibility: Carry what the Settings tab's cheat time buttons need from the app: the
@@ -460,6 +468,10 @@ impl SettingsTab {
             safe_mode_message: None,
             cheat_request: None,
             cheat_sent: false,
+            phone_code: None,
+            phone_message: String::new(),
+            phone_remove_confirm: None,
+            phone_joined: None,
         }
     }
 
@@ -479,6 +491,9 @@ impl SettingsTab {
             .unwrap_or_default();
         self.refresh();
         sync_ui(ui, sync);
+        if let Some(sync) = sync {
+            self.phones_ui(ui, sync);
+        }
         if self.reservations_ui(ui) {
             // Answered or withdrawn: the drafts are rebased on what is now true.
             self.fetched_at = None;
@@ -530,6 +545,110 @@ impl SettingsTab {
         }
         self.autosave(ui.ctx());
         self.cheat_request.take()
+    }
+
+    /// The phones that see the to-do list through the sync server: connecting one with a
+    /// one-time code, and taking one off (the owner: "핸드폰에서 할 일 만 관리할 수 있게 만들 수
+    /// 있나.").
+    fn phones_ui(&mut self, ui: &mut egui::Ui, sync: &agent_api::user_api::SyncStatus) {
+        egui::CollapsingHeader::new(format!("휴대폰({}대)", sync.phones.len()))
+            .id_salt("sync_phones")
+            .default_open(self.phone_code.is_some())
+            .show(ui, |ui| {
+                ui.label(
+                    "연결한 휴대폰은 브라우저에서 할 일 목록을 보고, 할 일을 추가하거나 고치거나 지우고, \
+                     약속을 추가할 수 있습니다. 설정은 바꿀 수 없습니다. 휴대폰이 보낸 변경은 켜져 있는 \
+                     PC가 할 일 탭에서와 똑같이 처리합니다. 엄격 모드에서는 AI가 승인해야 적용됩니다.",
+                );
+                ui.small(
+                    "휴대폰과 서버 사이는 암호화하지 않습니다(HTTP). 공용 와이파이에서는 같은 \
+                     와이파이의 다른 사람이 할 일 목록을 엿볼 수 있습니다.",
+                );
+                if ui.button("휴대폰 연결하기").clicked() {
+                    match call_value(self.session, "phone_code", json!({})) {
+                        Ok(answer) => {
+                            let expires_at = serde_json::from_value(answer["expires_at"].clone())
+                                .unwrap_or_else(|_| Utc::now());
+                            self.phone_code = Some((
+                                answer["code"].as_str().unwrap_or_default().to_string(),
+                                expires_at,
+                                answer["page"].as_str().unwrap_or_default().to_string(),
+                            ));
+                            self.phone_message.clear();
+                            self.phone_joined = None;
+                        }
+                        Err(error) => self.phone_message = error,
+                    }
+                }
+                // A phone that joined after the code was made used it: the code is done.
+                if let Some((_, expires_at, _)) = &self.phone_code {
+                    let made_at = *expires_at
+                        - chrono::Duration::minutes(agent_api::user_api::PHONE_CODE_MINUTES);
+                    if let Some(phone) = sync
+                        .phones
+                        .iter()
+                        .filter(|phone| phone.paired_at >= made_at)
+                        .max_by_key(|phone| phone.paired_at)
+                    {
+                        self.phone_joined = Some(phone.name.clone());
+                        self.phone_code = None;
+                    }
+                }
+                if let Some(name) = &self.phone_joined {
+                    ui.colored_label(GREEN, format!("\"{name}\"이(가) 연결되었습니다."));
+                }
+                if let Some((code, expires_at, page)) = &self.phone_code {
+                    if *expires_at > Utc::now() {
+                        ui.group(|ui| {
+                            ui.label("1. 휴대폰의 브라우저에서 이 주소를 엽니다.");
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong(page);
+                                if ui.small_button("복사").clicked() {
+                                    ui.ctx().copy_text(page.clone());
+                                }
+                            });
+                            ui.label("2. 페이지에 이 코드를 넣습니다.");
+                            ui.label(egui::RichText::new(code).size(28.0).strong().monospace());
+                            ui.small(format!(
+                                "코드는 {}까지 한 번만 쓸 수 있습니다. 서버에는 다음 동기화(20초쯤 뒤)에 \
+                                 닿으므로, 그 전에 넣으면 \"맞지 않는다\"고 나올 수 있습니다.",
+                                local(*expires_at)
+                            ));
+                        });
+                    } else {
+                        ui.small("만든 코드의 시간이 지났습니다. 다시 \"휴대폰 연결하기\"를 누르세요.");
+                    }
+                }
+                if !self.phone_message.is_empty() {
+                    ui.colored_label(RED, &self.phone_message);
+                }
+                for phone in &sync.phones {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("{} — {}에 연결", phone.name, local(phone.paired_at)));
+                        let confirming = self.phone_remove_confirm.as_deref() == Some(&phone.id);
+                        let label = if confirming {
+                            "정말 연결 끊기"
+                        } else {
+                            "연결 끊기"
+                        };
+                        if ui.small_button(label).clicked() {
+                            if confirming {
+                                match call_value(
+                                    self.session,
+                                    "phone_remove",
+                                    json!({ "id": phone.id }),
+                                ) {
+                                    Ok(_) => self.phone_message.clear(),
+                                    Err(error) => self.phone_message = error,
+                                }
+                                self.phone_remove_confirm = None;
+                            } else {
+                                self.phone_remove_confirm = Some(phone.id.clone());
+                            }
+                        }
+                    });
+                }
+            });
     }
 
     /// Show the protection's part of the tab next (from a link elsewhere in the app).
@@ -3733,6 +3852,7 @@ fn via_label(via: &str) -> String {
         "settings tab" => "설정 탭".to_string(),
         "to-do tab" => "할 일 탭".to_string(),
         "claude desktop" => "Claude Desktop".to_string(),
+        "phone" => "휴대폰".to_string(),
         other => other.to_string(),
     }
 }

@@ -199,6 +199,8 @@ fn read_value(path: &Path) -> Option<Value> {
 pub struct SyncClient {
     data_directory: PathBuf,
     config: ClientConfig,
+    /// This PC's agent runs and can review phone requests ([`crate::phone`]).
+    phone_ready: bool,
 }
 
 /// Held while one sync runs on a data folder (`sync.lock`), so the service's loop and a
@@ -247,7 +249,14 @@ impl SyncClient {
         Self {
             data_directory,
             config,
+            phone_ready: false,
         }
+    }
+
+    /// Say in the sync rounds that this PC can review phone requests.
+    pub fn phone_ready(mut self, ready: bool) -> Self {
+        self.phone_ready = ready;
+        self
     }
 
     pub fn config(&self) -> &ClientConfig {
@@ -327,6 +336,9 @@ impl SyncClient {
         let mut state = SyncState::load(&self.data_directory);
         state.last_attempt = Some(Utc::now());
         let result = self.rounds(&mut state, transport);
+        if result.is_ok() {
+            crate::phone::prune_outcomes(&self.data_directory)?;
+        }
         match &result {
             Ok(report) => {
                 state.last_success = state.last_attempt;
@@ -380,6 +392,10 @@ impl SyncClient {
                 // The server keeps the device list itself (the user no longer removes
                 // devices by hand).
                 forget_devices: Vec::new(),
+                phone_ready: self.phone_ready,
+                // What this PC's agent decided about the phone requests it was given; sent
+                // until `phones.json` shows them.
+                phone_outcomes: crate::phone::pending_outcomes(&self.data_directory),
             };
             let plaintext = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
             let sealed = envelope::seal(&self.config.device_id, &self.config.key, &plaintext)?;

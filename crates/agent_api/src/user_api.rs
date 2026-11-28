@@ -27,6 +27,8 @@
 //! | `todo_change`    | `{ "change": TodoChange, "reason": "…", "via": "…" }` | [`Status`], `last_todo_change` set; approved = in force |
 //! | `todo_change_schedule` | `{ "id": "…" }` (a change the AI did not approve) | [`Status`], `last_todo_change` set |
 //! | `task_notes_put` | `{ "todo_id": "…", "notes": TaskNotes }` | [`Status`] |
+//! | `phone_code` | `{}` (a one-time code a phone joins with; this PC must sync) | `{ code, expires_at, page }` |
+//! | `phone_remove` | `{ id }` (takes a phone off) | `{ ok }` |
 //! | `cheat_start` | `{}` (cheat time with a daily or weekly budget; no AI) | [`Status`] |
 //! | `cheat_end` | `{}` (ends cheat time early) | [`Status`] |
 //! | `plan_week`      | `{}` (one AI call)                       | [`Status`] with `planner.week_plan` |
@@ -192,7 +194,13 @@ pub struct SyncStatus {
     /// Devices the last sync asked to take off the list that the server kept: (id, why).
     #[serde(default)]
     pub not_forgotten: Vec<(String, String)>,
+    /// The phones connected to the server ([`sync::phone`]), as this PC last got them.
+    #[serde(default)]
+    pub phones: Vec<sync::phone::Phone>,
 }
+
+/// How long a phone code is good for.
+pub const PHONE_CODE_MINUTES: i64 = sync::phone::CODE_MINUTES;
 
 /// Days without a sync after which the server takes a device off its list.
 pub const DEVICE_PRUNE_DAYS: i64 = sync::server::PRUNE_AFTER_DAYS;
@@ -205,7 +213,18 @@ pub fn sync_status(data_directory: &std::path::Path) -> Option<SyncStatus> {
     let config = read("sync.json")?;
     let state = read("sync_state.json").unwrap_or(Value::Null);
     let text = |value: &Value| value.as_str().map(str::to_string);
+    let removed = serde_json::from_value::<sync::phone::PhoneAccess>(
+        read(sync::phone::ACCESS_DOCUMENT).unwrap_or(Value::Null),
+    )
+    .unwrap_or_default()
+    .removed;
     Some(SyncStatus {
+        // Taken off here but not yet by the server: no longer shown.
+        phones: sync::phone::phones(data_directory)
+            .phones
+            .into_iter()
+            .filter(|phone| !removed.contains(&phone.id))
+            .collect(),
         device_details: serde_json::from_value(state["device_details"].clone()).unwrap_or_default(),
         not_forgotten: serde_json::from_value(state["not_forgotten"].clone()).unwrap_or_default(),
         devices: serde_json::from_value(state["devices"].clone()).unwrap_or_default(),
@@ -814,6 +833,25 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .end_waiting(Utc::now(), id, params["arrived"].as_bool().unwrap_or(false))
                 .map_err(|error| error.to_string())?;
             apply_list_writes(&data_directory, planner, &writes)?;
+        }
+        // A code a phone joins the to-do page with (the owner: "핸드폰에서 할 일 만 관리할 수
+        // 있게 만들 수 있나."). It reaches the server with the next sync.
+        "phone_code" => {
+            let config = sync::client::ClientConfig::load(&data_directory).ok_or(
+                "이 PC가 동기화 서버에 연결되어 있지 않습니다. 휴대폰은 동기화 서버를 거쳐 연결합니다",
+            )?;
+            let now = Utc::now();
+            let code = sync::phone::new_code(&data_directory, now)?;
+            return Ok(json!({
+                "code": code,
+                "expires_at": now + chrono::Duration::minutes(sync::phone::CODE_MINUTES),
+                "page": format!("{}/phone", config.server_url.trim_end_matches('/')),
+            }));
+        }
+        "phone_remove" => {
+            let id = params["id"].as_str().ok_or("params.id required")?;
+            sync::phone::remove_phone(&data_directory, id)?;
+            return Ok(json!({ "ok": true }));
         }
         "logout" => {
             let user = machine::login::session_user().ok_or("이 세션의 Windows 계정을 모릅니다")?;

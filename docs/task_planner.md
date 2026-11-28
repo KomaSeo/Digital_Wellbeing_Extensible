@@ -851,6 +851,8 @@ Focus 앱은 agent에게 다음 요청을 보낼 수 있습니다. 남은 할 �
 - `{ "kind": "edit_appointment", "appointment_id": "...", "appointment": { 추가와 같은 칸 } }` (4.12절)
 - `{ "kind": "remove_appointment", "appointment_id": "..." }`
 
+휴대폰(동기화 서버의 할 일 페이지, [`sync.md`](sync.md) 11장)이 보낸 할 일 변경은 PC의 서비스가 `todo_change`로 agent에게 넘기고, 출처(`via`)는 `"phone"`입니다. 휴대폰을 연결하는 코드는 `phone_code`(인자 없음, 답은 `{ code, expires_at, page }`)로 만들고, 휴대폰의 연결은 `phone_remove`(`{ "id": "…" }`)로 끊습니다.
+
 일시 정지(4.14절)의 요청은 `pause_task`와 `unpause_task`입니다. 둘 다 인자가 없습니다. 치팅 시간(4.20절)의 요청은 `cheat_start`(하루 예산이나 주 예산일 때 시작)와 `cheat_end`(일찍 끝내기)이고, 둘 다 인자가 없으며 AI를 부르지 않습니다. 정해진 시간대의 치팅 시간은 `cheat_start`로 시작할 수 없습니다. 사용 중지의 요청(`stop_use`, `resume_use`)은 rc.96에서 없앴습니다(4.13절).
 
 **agent가 직접 거부하는 것이 중요합니다.** Focus 앱이 화면에서 버튼만 숨긴다면, 사용자는 다른 프로그램으로 agent에게

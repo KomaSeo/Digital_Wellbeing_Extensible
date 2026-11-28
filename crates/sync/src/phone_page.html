@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1b1d21">
+<title>할 일</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --background: #f4f5f7; --card: #ffffff; --text: #1d2026; --weak: #6b7280; --line: #e3e5e9;
+    --accent: #3a78c8; --accent-text: #ffffff; --green: #2f8f4e; --red: #c0392b; --yellow: #a26b00;
+    --field: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: #16181c; --card: #1f2227; --text: #e8eaee; --weak: #9aa1ac; --line: #30343b;
+      --accent: #5b95e0; --accent-text: #0d1117; --green: #5cc27f; --red: #ec6f61; --yellow: #e0b04a;
+      --field: #16181c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--background); color: var(--text);
+    font: 16px/1.5 -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
+    padding: env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom));
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; padding: 14px 0 6px; }
+  h1 { font-size: 24px; margin: 0; }
+  h2 { font-size: 15px; color: var(--weak); font-weight: 600; margin: 22px 0 8px; }
+  .weak { color: var(--weak); font-size: 14px; }
+  .notice { border-radius: 10px; padding: 10px 12px; margin: 8px 0; font-size: 14px; background: var(--card); border: 1px solid var(--line); }
+  .notice.warning { border-color: var(--yellow); }
+  .notice.error { border-color: var(--red); color: var(--red); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  .row { padding: 10px 12px; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: 0; }
+  .todo { cursor: pointer; }
+  .todo .title { font-weight: 500; }
+  .group-title { font-weight: 700; padding: 10px 12px 4px; border-top: 1px solid var(--line); }
+  .card > .group-title:first-child { border-top: 0; }
+  .meta { color: var(--weak); font-size: 13px; }
+  .details { margin-top: 8px; }
+  .notes { white-space: pre-wrap; font-size: 14px; margin: 6px 0; }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  button {
+    font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text);
+    border-radius: 10px; padding: 9px 14px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button.danger { color: var(--red); }
+  button:disabled { opacity: 0.5; }
+  .actions { display: flex; gap: 8px; margin: 10px 0 4px; }
+  .actions button { flex: 1; }
+  label { display: block; font-size: 14px; color: var(--weak); margin: 12px 0 4px; }
+  input, textarea, select {
+    width: 100%; font: inherit; color: var(--text); background: var(--field);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  }
+  textarea { min-height: 72px; resize: vertical; }
+  .pair #code { font-size: 22px; letter-spacing: 3px; text-transform: uppercase; text-align: center; }
+  .inline { display: flex; gap: 8px; }
+  .inline > * { flex: 1; min-width: 0; }
+  .chip { display: inline-block; font-size: 12px; border-radius: 999px; padding: 1px 8px; border: 1px solid var(--line); margin-left: 6px; white-space: nowrap; }
+  .chip.done { color: var(--green); border-color: var(--green); }
+  .chip.refused { color: var(--red); border-color: var(--red); }
+  .chip.waiting { color: var(--yellow); border-color: var(--yellow); }
+  .reply { font-size: 14px; margin-top: 4px; white-space: pre-wrap; }
+  .hidden { display: none; }
+  .footer { margin-top: 28px; text-align: center; }
+  .footer button { font-size: 14px; color: var(--weak); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="heading">할 일</h1>
+  <span class="weak" id="state"></span>
+</header>
+<main id="main"></main>
+<script>
+"use strict";
+// The phone's to-do page of Digital Wellbeing (served by the sync server). It reads the to-do
+// list and sends changes; a PC reviews each change with the AI (in strict mode) and applies it.
+const TOKEN_KEY = "dw_phone_token";
+const main = document.getElementById("main");
+const stateLine = document.getElementById("state");
+let data = null;
+let view = { screen: "list", open: null, form: null };
+let message = null;
+let pollTimer = null;
+
+function storedToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (error) { return ""; }
+}
+function storeToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token); else localStorage.removeItem(TOKEN_KEY);
+  } catch (error) { /* private window: the phone joins again next time */ }
+}
+
+// Build an element: el("div", { class: "row", onclick }, [children or text]).
+function el(tag, attributes, children) {
+  const element = document.createElement(tag);
+  for (const [name, value] of Object.entries(attributes || {})) {
+    if (value === undefined || value === null || value === false) continue;
+    if (name.startsWith("on")) element.addEventListener(name.slice(2), value);
+    else if (name === "text") element.textContent = value;
+    else element.setAttribute(name, value === true ? "" : value);
+  }
+  for (const child of [].concat(children || [])) {
+    if (child === null || child === undefined || child === false) continue;
+    element.append(typeof child === "string" ? document.createTextNode(child) : child);
+  }
+  return element;
+}
+
+async function api(body) {
+  const response = await fetch("/phone/api", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return response.json();
+}
+
+function minutesText(minutes) {
+  const hours = Math.floor(minutes / 60), rest = minutes % 60;
+  if (hours === 0) return rest + "분";
+  return rest === 0 ? hours + "시간" : hours + "시간 " + rest + "분";
+}
+function two(number) { return String(number).padStart(2, "0"); }
+function clock(date) { return two(date.getHours()) + ":" + two(date.getMinutes()); }
+function dayText(date) {
+  const weekdays = ["일", "월", "화", "수", "목", "금", "토"];
+  return two(date.getMonth() + 1) + "-" + two(date.getDate()) + " (" + weekdays[date.getDay()] + ")";
+}
+function todayText() {
+  const now = new Date();
+  return now.getFullYear() + "-" + two(now.getMonth() + 1) + "-" + two(now.getDate());
+}
+
+function todos() { return (data && data.list && data.list.todos) || []; }
+function todoTitle(todoId) {
+  const found = todos().find((todo) => todo.id === todoId);
+  return found ? found.title : "(목록에 없는 할 일)";
+}
+
+async function load() {
+  const token = storedToken();
+  if (!token) { data = null; render(); return; }
+  try {
+    const answer = await api({ action: "list", token });
+    if (answer.unpaired) { storeToken(""); data = null; message = { tone: "error", text: answer.error }; }
+    else if (answer.error) { message = { tone: "error", text: answer.error }; }
+    else {
+      data = answer;
+      // "보냈습니다" goes once every request has its outcome (the outcomes show instead).
+      if (message && message.tone === "" && data.requests.every((request) => request.status === "done")) message = null;
+    }
+  } catch (error) {
+    message = { tone: "error", text: "서버에 닿지 않습니다. 인터넷 연결을 확인하세요." };
+  }
+  render();
+  schedulePoll();
+}
+
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  if (!storedToken()) return;
+  const waiting = data && data.requests.some((request) => request.status !== "done");
+  pollTimer = setTimeout(load, waiting ? 4000 : 30000);
+}
+
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+
+function render() {
+  main.replaceChildren();
+  if (message) main.append(el("div", { class: "notice " + message.tone, text: message.text }));
+  if (!storedToken()) { renderPair(); stateLine.textContent = ""; return; }
+  if (!data) { main.append(el("p", { class: "weak", text: "불러오는 중…" })); return; }
+  stateLine.textContent = data.pc_ready ? "PC 켜짐" : "켜진 PC 없음";
+  if (view.screen === "form") { renderForm(); return; }
+  renderList();
+}
+
+function renderPair() {
+  const code = el("input", { id: "code", autocomplete: "off", autocapitalize: "characters", placeholder: "ABCD-EFGH", maxlength: "9" });
+  const name = el("input", { id: "name", value: "휴대폰", maxlength: "40" });
+  const button = el("button", { class: "primary", text: "연결하기" });
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const answer = await api({ action: "pair", code: code.value, name: name.value });
+      if (answer.error) { message = { tone: "error", text: answer.error }; }
+      else { storeToken(answer.token); message = null; await load(); return; }
+    } catch (error) {
+      message = { tone: "error", text: "서버에 닿지 않습니다." };
+    }
+    render();
+  });
+  main.append(el("div", { class: "pair" }, [
+    el("p", { text: "이 휴대폰을 연결합니다. PC의 Focus 앱에서 설정 탭 → 기기 동기화 → \"휴대폰 연결하기\"를 누르면 코드가 나옵니다. 코드는 10분 동안 한 번만 쓸 수 있습니다." }),
+    el("label", { for: "code", text: "코드" }), code,
+    el("label", { for: "name", text: "이 휴대폰의 이름" }), name,
+    el("div", { class: "actions" }, button),
+    el("p", { class: "weak", text: "연결한 휴대폰은 할 일 목록을 보고, 할 일을 추가하거나 고치거나 지우고, 약속을 추가할 수 있습니다. 설정은 바꿀 수 없습니다." }),
+  ]));
+}
+
+function changeSummary(change) {
+  switch (change.kind) {
+    case "add": return "할 일 추가: " + ((change.todo && change.todo.title) || "");
+    case "edit": return "고치기: " + todoTitle(change.todo_id);
+    case "remove": return "지우기: " + todoTitle(change.todo_id);
+    case "add_appointment": {
+      const appointment = change.appointment || {};
+      const start = new Date(appointment.start), end = new Date(appointment.end);
+      return "약속 추가: " + (appointment.title || "") + " (" + dayText(start) + " " + clock(start) + "–" + clock(end) + ")";
+    }
+    default: return change.kind;
+  }
+}
+
+function renderList() {
+  main.append(el("div", { class: "actions" }, [
+    el("button", { class: "primary", text: "+ 할 일", onclick: () => openForm({ kind: "add" }) }),
+    el("button", { text: "+ 약속", onclick: () => openForm({ kind: "add_appointment" }) }),
+  ]));
+  if (!data.pc_ready) {
+    main.append(el("div", { class: "notice warning", text: "지금 켜진 PC가 없습니다. 보낸 요청은 PC가 켜지면 처리됩니다." }));
+  }
+  if (data.strict) {
+    main.append(el("p", { class: "weak", text: "엄격 모드입니다. 보낸 변경은 PC가 AI에게 물어, 승인되면 적용됩니다." }));
+  }
+  renderRequests();
+  renderTodos();
+  renderAppointments();
+  main.append(el("div", { class: "footer" }, el("button", {
+    text: "이 휴대폰의 연결 끊기",
+    onclick: () => {
+      if (!confirm("이 휴대폰의 연결을 끊을까요? 다시 쓰려면 PC에서 새 코드를 만들어야 합니다.")) return;
+      storeToken(""); data = null; message = null; render();
+    },
+  })));
+}
+
+function renderRequests() {
+  const recent = data.requests.filter((request) =>
+    request.status !== "done" || Date.now() - new Date(request.outcome.at).getTime() < 24 * 3600 * 1000);
+  if (recent.length === 0) return;
+  main.append(el("h2", { text: "보낸 요청" }));
+  const card = el("div", { class: "card" });
+  for (const request of recent) {
+    let chip;
+    if (request.status === "done") {
+      chip = request.outcome.approved
+        ? el("span", { class: "chip done", text: "적용됨" })
+        : el("span", { class: "chip refused", text: "적용되지 않음" });
+    } else if (request.status === "handling") {
+      chip = el("span", { class: "chip waiting", text: "PC가 처리하는 중" });
+    } else {
+      chip = el("span", { class: "chip waiting", text: "PC를 기다리는 중" });
+    }
+    card.append(el("div", { class: "row" }, [
+      el("div", {}, [changeSummary(request.change), chip]),
+      request.outcome && request.outcome.reply ? el("div", { class: "reply weak", text: request.outcome.reply }) : null,
+    ]));
+  }
+  main.append(card);
+}
+
+function todoMeta(todo) {
+  const parts = [];
+  if (todo.deadline) parts.push("마감 " + todo.deadline.slice(5));
+  if (todo.priority) parts.push("중요도 " + todo.priority);
+  if (todo.estimate_minutes) parts.push("예상 " + minutesText(todo.estimate_minutes));
+  if (todo.repeat) parts.push("반복");
+  return parts.join(" · ");
+}
+
+function renderTodos() {
+  const all = todos();
+  const plain = all.filter((todo) => !todo.group);
+  main.append(el("h2", { text: "할 일 (" + plain.length + ")" }));
+  if (all.length === 0) { main.append(el("p", { class: "weak", text: "할 일이 없습니다." })); return; }
+  const ids = new Set(all.map((todo) => todo.id));
+  const byRank = (first, second) => (first.rank || 0) - (second.rank || 0);
+  const children = (parent) => all
+    .filter((todo) => (parent === null ? !todo.parent || !ids.has(todo.parent) : todo.parent === parent))
+    .sort(byRank);
+  const card = el("div", { class: "card" });
+  const add = (todo, depth) => {
+    const indent = { style: "padding-left:" + (12 + depth * 16) + "px" };
+    if (todo.group) {
+      card.append(el("div", Object.assign({ class: "group-title" }, indent), todo.title));
+      for (const child of children(todo.id)) add(child, depth + 1);
+      return;
+    }
+    const opened = view.open === todo.id;
+    const row = el("div", Object.assign({ class: "row todo" }, indent), [
+      el("div", { class: "title", text: todo.title }),
+      todoMeta(todo) ? el("div", { class: "meta", text: todoMeta(todo) }) : null,
+    ]);
+    row.addEventListener("click", (event) => {
+      if (event.target.tagName === "BUTTON") return;
+      view.open = opened ? null : todo.id; render();
+    });
+    if (opened) {
+      row.append(el("div", { class: "details" }, [
+        todo.notes ? el("div", { class: "notes", text: todo.notes }) : null,
+        el("div", { class: "buttons" }, [
+          el("button", { text: "고치기", onclick: () => openForm({ kind: "edit", todo }) }),
+          el("button", { class: "danger", text: "지우기", onclick: () => openForm({ kind: "remove", todo }) }),
+        ]),
+      ]));
+    }
+    card.append(row);
+  };
+  for (const todo of children(null)) add(todo, 0);
+  main.append(card);
+}
+
+function renderAppointments() {
+  const appointments = (data.list && data.list.appointments) || [];
+  if (appointments.length === 0) return;
+  main.append(el("h2", { text: "약속" }));
+  const card = el("div", { class: "card" });
+  for (const appointment of appointments) {
+    const start = new Date(appointment.start), end = new Date(appointment.end);
+    card.append(el("div", { class: "row" }, [
+      el("div", { class: "title", text: appointment.title }),
+      el("div", { class: "meta", text: dayText(start) + " " + clock(start) + "–" + clock(end) }),
+    ]));
+  }
+  main.append(card);
+}
+
+function openForm(form) {
+  view = { screen: "form", open: view.open, form };
+  message = null;
+  render();
+  window.scrollTo(0, 0);
+}
+
+function closeForm() {
+  view = { screen: "list", open: view.open, form: null };
+  render();
+}
+
+function field(labelText, input) {
+  return [el("label", { for: input.id, text: labelText }), input];
+}
+
+function reasonField() {
+  const hint = data.strict
+    ? "이유 (AI가 보고 승인할지 정합니다)"
+    : "이유 (선택)";
+  return field(hint, el("textarea", { id: "reason", rows: "3" }));
+}
+
+function renderForm() {
+  const form = view.form;
+  const titles = { add: "할 일 추가", edit: "할 일 고치기", remove: "할 일 지우기", add_appointment: "약속 추가" };
+  main.append(el("h2", { text: titles[form.kind] }));
+  const body = el("div", { class: "card", style: "padding: 4px 12px 12px" });
+  const todo = form.todo || {};
+  if (form.kind === "add" || form.kind === "edit") {
+    const groups = todos().filter((item) => item.group && item.id !== todo.id);
+    const parent = el("select", { id: "parent" }, [el("option", { value: "", text: "맨 위" })]
+      .concat(groups.map((group) => el("option", { value: group.id, text: group.title }))));
+    parent.value = todo.parent || "";
+    const priority = el("select", { id: "priority" }, [1, 2, 3, 4, 5].map((number) =>
+      el("option", { value: String(number), text: number + (number === 5 ? " (급함)" : number === 1 ? " (낮음)" : "") })));
+    priority.value = String(todo.priority || 3);
+    body.append(...field("제목", el("input", { id: "title", value: todo.title || "", maxlength: "200" })));
+    body.append(...field("메모", el("textarea", { id: "notes" })));
+    body.querySelector("#notes").value = todo.notes || "";
+    body.append(el("div", { class: "inline" }, [
+      el("div", {}, field("마감", el("input", { id: "deadline", type: "date", value: todo.deadline || "" }))),
+      el("div", {}, field("중요도", priority)),
+    ]));
+    body.append(...field("예상 시간 (분, 비우면 AI가 정합니다)", el("input", { id: "estimate", type: "number", min: "1", max: "6000", inputmode: "numeric", value: todo.estimate_minutes || "" })));
+    if (groups.length > 0) body.append(...field("묶음", parent));
+  } else if (form.kind === "remove") {
+    body.append(el("p", { text: "\"" + todo.title + "\"을(를) 목록에서 지웁니다." }));
+  } else if (form.kind === "add_appointment") {
+    body.append(...field("제목", el("input", { id: "title", maxlength: "200" })));
+    body.append(...field("메모", el("textarea", { id: "notes" })));
+    body.append(...field("날짜", el("input", { id: "day", type: "date", value: todayText() })));
+    body.append(el("div", { class: "inline" }, [
+      el("div", {}, field("시작", el("input", { id: "start", type: "time" }))),
+      el("div", {}, field("끝", el("input", { id: "end", type: "time" }))),
+    ]));
+  }
+  body.append(...reasonField());
+  const send = el("button", { class: "primary", text: "보내기" });
+  send.addEventListener("click", () => submit(send));
+  body.append(el("div", { class: "actions" }, [
+    el("button", { text: "취소", onclick: closeForm }),
+    send,
+  ]));
+  main.append(body);
+  if (!data.pc_ready) {
+    main.append(el("p", { class: "weak", text: "지금 켜진 PC가 없어, 보낸 변경은 PC가 켜지면 처리됩니다." }));
+  }
+}
+
+function value(id) {
+  const input = document.getElementById(id);
+  return input ? input.value.trim() : "";
+}
+
+// The change to send, or a message saying what is missing.
+function buildChange() {
+  const form = view.form;
+  const todo = form.todo || {};
+  if (form.kind === "add" || form.kind === "edit") {
+    const title = value("title");
+    if (!title) return { error: "제목을 적으세요." };
+    const estimate = value("estimate") ? Number(value("estimate")) : null;
+    if (estimate !== null && !(estimate >= 1 && estimate <= 6000)) return { error: "예상 시간은 1분에서 6000분 사이로 적으세요." };
+    const fields = {
+      title,
+      notes: value("notes"),
+      deadline: value("deadline") || null,
+      priority: Number(value("priority") || 3),
+      estimate_minutes: estimate,
+    };
+    const parent = document.getElementById("parent") ? value("parent") : (todo.parent || "");
+    if (form.kind === "add") {
+      if (parent) fields.parent = parent;
+      return { change: { kind: "add", todo: fields } };
+    }
+    // Editing: only what changed (empty fields stay as they are).
+    const changed = {};
+    if (fields.title !== todo.title) changed.title = fields.title;
+    if (fields.notes !== (todo.notes || "")) changed.notes = fields.notes;
+    if (fields.deadline && fields.deadline !== todo.deadline) changed.deadline = fields.deadline;
+    if (fields.priority !== todo.priority) changed.priority = fields.priority;
+    if (fields.estimate_minutes && fields.estimate_minutes !== todo.estimate_minutes) changed.estimate_minutes = fields.estimate_minutes;
+    if (parent !== (todo.parent || "")) changed.parent = parent;
+    if (Object.keys(changed).length === 0) return { error: "바뀐 것이 없습니다." };
+    return { change: { kind: "edit", todo_id: todo.id, todo: changed } };
+  }
+  if (form.kind === "remove") return { change: { kind: "remove", todo_id: todo.id } };
+  const title = value("title");
+  if (!title) return { error: "제목을 적으세요." };
+  if (!value("day") || !value("start") || !value("end")) return { error: "날짜와 시작, 끝 시각을 적으세요." };
+  const start = new Date(value("day") + "T" + value("start"));
+  const end = new Date(value("day") + "T" + value("end"));
+  if (!(end > start)) return { error: "끝이 시작보다 늦어야 합니다." };
+  return { change: { kind: "add_appointment", appointment: {
+    title, notes: value("notes"), start: start.toISOString(), end: end.toISOString(),
+  } } };
+}
+
+async function submit(button) {
+  const built = buildChange();
+  if (built.error) { message = { tone: "error", text: built.error }; render(); return; }
+  button.disabled = true;
+  try {
+    const answer = await api({ action: "request", token: storedToken(), change: built.change, reason: value("reason") });
+    if (answer.unpaired) { storeToken(""); data = null; message = { tone: "error", text: answer.error }; render(); return; }
+    if (answer.error) { message = { tone: "error", text: answer.error }; button.disabled = false; render(); return; }
+    message = { tone: "", text: data.pc_ready
+      ? "보냈습니다. PC가 처리하면 \"보낸 요청\"에 결과가 나옵니다."
+      : "보냈습니다. PC가 켜지면 처리됩니다." };
+    view = { screen: "list", open: null, form: null };
+    await load();
+  } catch (error) {
+    message = { tone: "error", text: "서버에 닿지 않습니다." };
+    button.disabled = false;
+    render();
+  }
+}
+
+load();
+</script>
+</body>
+</html>

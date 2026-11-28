@@ -104,19 +104,19 @@ jobs:
           path: dist/*
       # The rolling release servers update themselves from (public: no login needed).
       - name: Publish to the release "sync-latest"
-        if: github.event_name == 'push' && github.ref == 'refs/heads/claude/digital-wellness-app-dfj98x'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
           git tag -f sync-latest
           git push -f origin refs/tags/sync-latest
       - uses: softprops/action-gh-release@v2
-        if: github.event_name == 'push' && github.ref == 'refs/heads/claude/digital-wellness-app-dfj98x'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         with:
           tag_name: sync-latest
           name: Sync server (latest build)
           prerelease: true
           make_latest: false
           body: |
-            동기화 서버(리눅스)의 최신 빌드입니다. 동기화 브랜치의 테스트를 모두 통과한 빌드만 올라옵니다.
+            동기화 서버(리눅스)의 최신 빌드입니다. master 브랜치의 테스트를 모두 통과한 빌드만 올라옵니다.
             서버의 자동 업데이트(digital-wellbeing-sync-update)가 하루 한 번 이 파일을 받습니다. 설명은 docs/sync.md 4장에 있습니다.
           files: dist/*
 

@@ -52,7 +52,10 @@ pub fn server_folder() -> PathBuf {
 }
 
 fn server() -> SyncServer {
-    SyncServer::new(server_folder())
+    // The phone page's to-do list, with the planner's rules for what is open and to come.
+    SyncServer::new(server_folder()).with_phone_view(Arc::new(|planner, state| {
+        task_planner::phone_list(planner, state, chrono::Utc::now())
+    }))
 }
 
 fn port_option(arguments: &[String]) -> anyhow::Result<u16> {
@@ -402,8 +405,13 @@ pub fn log_in_device(
 
 /// One sync; when the server no longer knows this device (it was set up again) and the device
 /// logged in with an account, it logs in again by itself and syncs from the server's state.
-pub fn sync_device(data_directory: &Path, config: &ClientConfig) -> Result<SyncReport, String> {
-    let result = sync_with_vault(data_directory, config);
+/// `phone_ready`: an agent of this PC can review phone requests now.
+pub fn sync_device(
+    data_directory: &Path,
+    config: &ClientConfig,
+    phone_ready: bool,
+) -> Result<SyncReport, String> {
+    let result = sync_with_vault(data_directory, config, phone_ready);
     let Err(error) = &result else {
         return result;
     };
@@ -453,13 +461,17 @@ pub fn sync_device(data_directory: &Path, config: &ClientConfig) -> Result<SyncR
         ..config.clone()
     };
     renewed.save(data_directory)?;
-    sync_with_vault(data_directory, &renewed)
+    sync_with_vault(data_directory, &renewed, phone_ready)
 }
 
 /// One sync round, with the API key sealed into the vault before (a key changed here goes
 /// out) and taken from it after (a key changed elsewhere comes in), when the PC logged in
 /// with an account.
-fn sync_with_vault(data_directory: &Path, config: &ClientConfig) -> Result<SyncReport, String> {
+fn sync_with_vault(
+    data_directory: &Path,
+    config: &ClientConfig,
+    phone_ready: bool,
+) -> Result<SyncReport, String> {
     let vault_key = config
         .account
         .as_ref()
@@ -470,6 +482,7 @@ fn sync_with_vault(data_directory: &Path, config: &ClientConfig) -> Result<SyncR
         }
     }
     let report = SyncClient::new(data_directory.to_path_buf(), config.clone())
+        .phone_ready(phone_ready)
         .sync_once(&mut client::http_transport(&config.server_url))?;
     if let Some(vault_key) = &vault_key {
         match sync::vault::reconcile(data_directory, vault_key) {
@@ -554,7 +567,22 @@ fn status(data_directory: &Path) -> anyhow::Result<()> {
 
 fn sync_now(data_directory: &Path) -> anyhow::Result<()> {
     let config = ClientConfig::load(data_directory).context("this device does not sync")?;
-    let report = sync_device(data_directory, &config).map_err(anyhow::Error::msg)?;
+    let session = crate::phone_work::agent_session();
+    let report =
+        sync_device(data_directory, &config, session.is_some()).map_err(anyhow::Error::msg)?;
+    // The phone requests this PC got are handled now, and their outcomes sent.
+    if let Some(session) = session {
+        let handled = crate::phone_work::handle_requests(
+            data_directory,
+            &config.device_id,
+            &mut |change, reason| crate::phone_work::review_with_agent(session, change, reason),
+        )
+        .map_err(anyhow::Error::msg)?;
+        if handled > 0 {
+            println!("handled {handled} phone request(s)");
+            sync_device(data_directory, &config, true).map_err(anyhow::Error::msg)?;
+        }
+    }
     println!(
         "sent {:?}, received {:?}, merged {:?}",
         report.pushed, report.pulled, report.merged
@@ -571,8 +599,13 @@ pub fn sync_loop(data_directory: PathBuf) {
     let mut last_error: Option<String> = None;
     loop {
         if let Some(config) = ClientConfig::load(&data_directory) {
-            match sync_device(&data_directory, &config) {
+            let session = crate::phone_work::agent_session();
+            match sync_device(&data_directory, &config, session.is_some()) {
                 Ok(report) => {
+                    // Phone requests the server gave this PC: its agent reviews them.
+                    if let Some(session) = session {
+                        crate::phone_work::handle_in_background(&data_directory, session);
+                    }
                     if !report.pulled.is_empty() || !report.merged.is_empty() {
                         info!(
                             "sync: received {:?}, merged {:?}",

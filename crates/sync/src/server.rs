@@ -16,8 +16,12 @@
 //!   minutes (a wrong password ends none); then it waits, so a password cannot be guessed
 //!   over the internet. A sign-up is taken only while the server has no account.
 //!
+//! - Phones ([`crate::phone`]): `GET /phone` serves the phone's to-do page and `POST
+//!   /phone/api` its requests. A phone joins with a one-time code a PC made, and its token
+//!   reaches nothing else: it reads the to-do list and leaves to-do changes for a PC to review.
+//!
 //! Storage: `<folder>/devices.json`, `<folder>/accounts.json` (OPAQUE password files),
-//! `<folder>/opaque_setup.json` (the server's OPAQUE keys) and
+//! `<folder>/opaque_setup.json` (the server's OPAQUE keys), `<folder>/phone_tokens.json` and
 //! `<folder>/documents/<name with / as ~>.json`.
 
 use crate::envelope::{self, Envelope};
@@ -40,7 +44,7 @@ use std::time::Duration;
 /// The shared document that holds the strict mode.
 const PROTECTION_DOCUMENT: &str = "settings_protection.json";
 
-pub const SHARED_DOCUMENTS: [&str; 7] = [
+pub const SHARED_DOCUMENTS: [&str; 8] = [
     "policy.json",
     "ai_focus.json",
     "planner.json",
@@ -49,9 +53,22 @@ pub const SHARED_DOCUMENTS: [&str; 7] = [
     "planner_state.json",
     // The API key, sealed with a key the server never sees ([`crate::vault`]).
     crate::vault::VAULT_DOCUMENT,
+    // The codes the PCs made for phones, and the phones they took off.
+    crate::phone::ACCESS_DOCUMENT,
 ];
 /// Documents only the server writes; devices take them as they are.
-pub const SERVER_DOCUMENTS: [&str; 1] = [crate::users::USERS_DOCUMENT];
+pub const SERVER_DOCUMENTS: [&str; 2] =
+    [crate::users::USERS_DOCUMENT, crate::phone::PHONES_DOCUMENT];
+/// The phone's page ([`crate::phone`]).
+const PHONE_PAGE: &str = include_str!("phone_page.html");
+/// The largest request of the phone page.
+const MAX_PHONE_BODY_BYTES: usize = 64 * 1024;
+/// Wrong phone codes the server takes in [`LOGIN_WINDOW_MINUTES`] before it waits.
+const MAX_PHONE_CODE_FAILURES: usize = 10;
+
+/// Builds the phone's view of the to-do list from `planner.json` and `planner_state.json`
+/// (the service gives the server one that knows the planner's rules).
+pub type PhoneView = std::sync::Arc<dyn Fn(&Value, &Value) -> Value + Send + Sync>;
 /// Folders whose files every device shares (one file per login or Windows user).
 pub const SHARED_FOLDERS: [&str; 2] = ["grants", "blocks"];
 /// The folder of per-device files (`usage/<device>/<user>.json`), summed for the statistics.
@@ -258,6 +275,13 @@ pub struct SyncServer {
     unfinished_logins: Mutex<std::collections::HashMap<String, Vec<DateTime<Utc>>>>,
     /// Login id -> a login between its two steps.
     pending_logins: Mutex<std::collections::HashMap<String, PendingLogin>>,
+    /// Turns the stored planner files into the phone's to-do list.
+    phone_view: Option<PhoneView>,
+    /// The last time a PC said it can take phone requests (kept in memory only, so
+    /// `phones.json` does not change every round).
+    phone_ready_at: Mutex<Option<DateTime<Utc>>>,
+    /// When recent wrong phone codes came.
+    phone_code_failures: Mutex<Vec<DateTime<Utc>>>,
 }
 
 impl SyncServer {
@@ -267,7 +291,16 @@ impl SyncServer {
             busy: Mutex::new(()),
             unfinished_logins: Mutex::new(std::collections::HashMap::new()),
             pending_logins: Mutex::new(std::collections::HashMap::new()),
+            phone_view: None,
+            phone_ready_at: Mutex::new(None),
+            phone_code_failures: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Give the phone page its to-do list from the stored planner files.
+    pub fn with_phone_view(mut self, view: PhoneView) -> Self {
+        self.phone_view = Some(view);
+        self
     }
 
     fn accounts_path(&self) -> PathBuf {
@@ -777,6 +810,10 @@ impl SyncServer {
                 }),
             }
         }
+        // Phones: the ones taken off leave, this PC's outcomes go in, and a PC whose agent
+        // runs gets the requests nobody handles (all before the documents are gathered, so
+        // this answer already carries them).
+        self.update_phones(&device_id, &request, now)?;
         // Every document newer than the device has, and the current version of every
         // refused one (so the device can merge, or take the server's).
         let documents = self
@@ -821,6 +858,283 @@ impl SyncServer {
         };
         let bytes = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
         envelope::seal(&device_id, &key, &bytes)
+    }
+
+    fn phone_tokens_path(&self) -> PathBuf {
+        self.folder.join(crate::phone::TOKENS_FILE)
+    }
+
+    fn phone_access(&self) -> crate::phone::PhoneAccess {
+        self.load_document(crate::phone::ACCESS_DOCUMENT)
+            .and_then(|stored| serde_json::from_value(stored.content).ok())
+            .unwrap_or_default()
+    }
+
+    fn phones(&self) -> crate::phone::Phones {
+        self.load_document(crate::phone::PHONES_DOCUMENT)
+            .and_then(|stored| serde_json::from_value(stored.content).ok())
+            .unwrap_or_default()
+    }
+
+    /// Change `phones.json` (the caller holds `busy`); written only when `change` says it
+    /// changed something.
+    fn write_phones(
+        &self,
+        change: impl FnOnce(&mut crate::phone::Phones) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let name = crate::phone::PHONES_DOCUMENT;
+        let current = self.load_document(name);
+        let mut phones: crate::phone::Phones = current
+            .as_ref()
+            .and_then(|stored| serde_json::from_value(stored.content.clone()).ok())
+            .unwrap_or_default();
+        if !change(&mut phones)? {
+            return Ok(());
+        }
+        crate::phone::trim_requests(&mut phones);
+        let stored = Stored {
+            revision: current.map_or(0, |stored| stored.revision) + 1,
+            written_by: "server".into(),
+            written_at: Utc::now(),
+            content: serde_json::to_value(&phones).map_err(|error| error.to_string())?,
+        };
+        write_json(&self.documents_folder().join(file_name(name)), &stored)
+    }
+
+    /// The phone part of a sync round (the caller holds `busy`).
+    fn update_phones(
+        &self,
+        device_id: &str,
+        request: &SyncRequest,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        if request.phone_ready {
+            *self.phone_ready_at.lock() = Some(now);
+        }
+        let removed = self.phone_access().removed;
+        if !removed.is_empty() {
+            let mut tokens: crate::phone::Tokens =
+                read_json(&self.phone_tokens_path()).unwrap_or_default();
+            let before = tokens.phones.len();
+            tokens
+                .phones
+                .retain(|token| !removed.contains(&token.phone_id));
+            if tokens.phones.len() != before {
+                write_json(&self.phone_tokens_path(), &tokens)?;
+            }
+        }
+        self.write_phones(|phones| {
+            let dropped = crate::phone::drop_removed(phones, &removed);
+            let recorded =
+                crate::phone::record_outcomes(phones, device_id, &request.phone_outcomes, now);
+            let assigned = request.phone_ready && crate::phone::assign(phones, device_id, now);
+            Ok(dropped || recorded || assigned)
+        })
+    }
+
+    /// Answer one request of the phone page: `{"action": "pair", "code", "name"}`, `{"action":
+    /// "list", "token"}` or `{"action": "request", "token", "change", "reason"}`. A refusal is
+    /// `{"error": "…"}`, with `"unpaired": true` when the phone must join again.
+    pub fn phone_api(&self, body: &Value) -> Value {
+        let _busy = self.busy.lock();
+        let now = Utc::now();
+        let result = match body["action"].as_str().unwrap_or_default() {
+            "pair" => self.phone_pair(
+                body["code"].as_str().unwrap_or_default(),
+                body["name"].as_str().unwrap_or_default(),
+                now,
+            ),
+            "list" => self
+                .phone_for(body["token"].as_str().unwrap_or_default())
+                .and_then(|phone| self.phone_list(&phone, now)),
+            "request" => self
+                .phone_for(body["token"].as_str().unwrap_or_default())
+                .and_then(|phone| {
+                    self.phone_request(
+                        &phone,
+                        &body["change"],
+                        body["reason"].as_str().unwrap_or_default(),
+                        now,
+                    )
+                }),
+            _ => Err(json!({ "error": "unknown action" })),
+        };
+        result.unwrap_or_else(|refusal| refusal)
+    }
+
+    /// A phone joins with a code a PC made: it gets a token for the phone page only.
+    fn phone_pair(&self, code: &str, name: &str, now: DateTime<Utc>) -> Result<Value, Value> {
+        let window = chrono::Duration::minutes(LOGIN_WINDOW_MINUTES);
+        {
+            let mut failures = self.phone_code_failures.lock();
+            failures.retain(|failure| now - *failure < window);
+            if failures.len() >= MAX_PHONE_CODE_FAILURES {
+                return Err(json!({
+                    "error": "코드가 너무 많이 틀렸습니다. 15분 뒤에 다시 해 보세요."
+                }));
+            }
+        }
+        let hashed = crate::phone::hash(&crate::phone::normalize_code(code));
+        let mut tokens: crate::phone::Tokens =
+            read_json(&self.phone_tokens_path()).unwrap_or_default();
+        let Some(found) = self.phone_access().codes.into_iter().find(|made| {
+            made.hash == hashed && made.expires_at > now && !tokens.used_codes.contains(&made.id)
+        }) else {
+            self.phone_code_failures.lock().push(now);
+            return Err(json!({
+                "error": "코드가 맞지 않거나 시간이 지났습니다. PC의 Focus 앱에서 새 코드를 만드세요. \
+                          PC가 만든 코드는 20초쯤 뒤부터 쓸 수 있습니다."
+            }));
+        };
+        let failed = |error: String| json!({ "error": error });
+        let phone_id = crate::phone::random_hex(8).map_err(failed)?;
+        let token = crate::phone::random_hex(32).map_err(failed)?;
+        let name: String = name.trim().chars().take(40).collect();
+        let phone = crate::phone::Phone {
+            id: phone_id.clone(),
+            name: if name.is_empty() {
+                "휴대폰".into()
+            } else {
+                name
+            },
+            paired_at: now,
+        };
+        tokens.used_codes.push(found.id);
+        let excess = tokens.used_codes.len().saturating_sub(200);
+        tokens.used_codes.drain(..excess);
+        tokens.phones.push(crate::phone::PhoneToken {
+            phone_id: phone_id.clone(),
+            hash: crate::phone::hash(&token),
+        });
+        write_json(&self.phone_tokens_path(), &tokens).map_err(failed)?;
+        let shown_name = phone.name.clone();
+        self.write_phones(|phones| {
+            phones.phones.push(phone);
+            Ok(true)
+        })
+        .map_err(failed)?;
+        tracing::info!("a phone joined: {shown_name}");
+        Ok(json!({ "token": token, "phone": { "id": phone_id, "name": shown_name } }))
+    }
+
+    /// The phone whose token this is, unless it was taken off.
+    fn phone_for(&self, token: &str) -> Result<crate::phone::Phone, Value> {
+        let unpaired = json!({
+            "error": "이 휴대폰은 연결되어 있지 않습니다. PC의 Focus 앱에서 코드를 만들어 다시 연결하세요.",
+            "unpaired": true,
+        });
+        if token.is_empty() {
+            return Err(unpaired);
+        }
+        let hashed = crate::phone::hash(token);
+        let tokens: crate::phone::Tokens = read_json(&self.phone_tokens_path()).unwrap_or_default();
+        let Some(phone_id) = tokens
+            .phones
+            .iter()
+            .find(|kept| kept.hash == hashed)
+            .map(|kept| kept.phone_id.clone())
+        else {
+            return Err(unpaired);
+        };
+        if self.phone_access().removed.contains(&phone_id) {
+            return Err(unpaired);
+        }
+        self.phones()
+            .phones
+            .into_iter()
+            .find(|phone| phone.id == phone_id)
+            .ok_or(unpaired)
+    }
+
+    /// What the phone page shows: the to-do list, whether strict mode is on, whether a PC can
+    /// take requests now, and this phone's requests (newest first).
+    fn phone_list(&self, phone: &crate::phone::Phone, now: DateTime<Utc>) -> Result<Value, Value> {
+        let content = |name: &str| {
+            self.load_document(name)
+                .map(|stored| stored.content)
+                .unwrap_or(Value::Null)
+        };
+        let list = self
+            .phone_view
+            .as_ref()
+            .map(|view| view(&content("planner.json"), &content("planner_state.json")))
+            .unwrap_or(Value::Null);
+        let pc_ready = self.phone_ready_at.lock().is_some_and(|ready_at| {
+            now - ready_at < chrono::Duration::seconds(crate::phone::READY_SECONDS)
+        });
+        let requests: Vec<Value> = self
+            .phones()
+            .requests
+            .into_iter()
+            .rev()
+            .filter(|request| request.phone_id == phone.id)
+            .take(30)
+            .map(|request| {
+                let status = match (&request.outcome, &request.assigned_to) {
+                    (Some(_), _) => "done",
+                    (None, Some(_)) => "handling",
+                    (None, None) => "waiting",
+                };
+                json!({
+                    "id": request.id,
+                    "at": request.at,
+                    "change": request.change,
+                    "reason": request.reason,
+                    "status": status,
+                    "outcome": request.outcome,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "phone": phone,
+            "strict": protected(&content(PROTECTION_DOCUMENT)),
+            "pc_ready": pc_ready,
+            "list": list,
+            "requests": requests,
+        }))
+    }
+
+    /// Leave a change for a PC to review and apply.
+    fn phone_request(
+        &self,
+        phone: &crate::phone::Phone,
+        change: &Value,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Value, Value> {
+        let failed = |error: String| json!({ "error": error });
+        crate::phone::check_change(change).map_err(failed)?;
+        if reason.chars().count() > crate::phone::MAX_REASON_CHARS {
+            return Err(failed("이유가 너무 깁니다".into()));
+        }
+        let waiting = self
+            .phones()
+            .requests
+            .iter()
+            .filter(|request| request.phone_id == phone.id && request.outcome.is_none())
+            .count();
+        if waiting >= crate::phone::MAX_WAITING_PER_PHONE {
+            return Err(failed(
+                "처리를 기다리는 요청이 너무 많습니다. PC를 켜서 먼저 처리하세요.".into(),
+            ));
+        }
+        let id = crate::phone::random_hex(8).map_err(failed)?;
+        let request = crate::phone::PhoneRequest {
+            id: id.clone(),
+            phone_id: phone.id.clone(),
+            at: now,
+            change: change.clone(),
+            reason: reason.trim().to_string(),
+            assigned_to: None,
+            assigned_at: None,
+            outcome: None,
+        };
+        self.write_phones(|phones| {
+            phones.requests.push(request);
+            Ok(true)
+        })
+        .map_err(failed)?;
+        Ok(json!({ "id": id }))
     }
 
     fn accept(
@@ -935,7 +1249,31 @@ impl SyncServer {
                 length = value.trim().parse().unwrap_or(0);
             }
         }
-        let (status, body) = if request_line.starts_with("POST /account ") && length <= 64 * 1024 {
+        let page_requested = ["GET /phone ", "GET /phone/ ", "GET /phone?"]
+            .iter()
+            .any(|start| request_line.starts_with(start));
+        let mut content_type = "application/json";
+        let (status, body) = if page_requested {
+            content_type = "text/html; charset=utf-8";
+            ("200 OK", PHONE_PAGE.to_string())
+        } else if request_line.starts_with("POST /phone/api ") {
+            if length > MAX_PHONE_BODY_BYTES {
+                (
+                    "413 Payload Too Large",
+                    json!({ "error": "too large" }).to_string(),
+                )
+            } else {
+                let mut body = vec![0; length];
+                reader
+                    .read_exact(&mut body)
+                    .map_err(|error| error.to_string())?;
+                let answer = match serde_json::from_slice::<Value>(&body) {
+                    Ok(request) => self.phone_api(&request),
+                    Err(error) => json!({ "error": format!("bad request: {error}") }),
+                };
+                ("200 OK", answer.to_string())
+            }
+        } else if request_line.starts_with("POST /account ") && length <= 64 * 1024 {
             let mut body = vec![0; length];
             reader
                 .read_exact(&mut body)
@@ -971,7 +1309,7 @@ impl SyncServer {
         let mut stream = reader.into_inner();
         write!(
             stream,
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
         .map_err(|error| error.to_string())
@@ -1087,6 +1425,8 @@ mod tests {
             app_version: crate::protocol::app_version().to_string(),
             machine_id: Some("machine-a".into()),
             forget_devices: vec![other.device_id.clone()],
+            phone_ready: false,
+            phone_outcomes: Vec::new(),
         };
         let sealed = envelope::seal(
             &again.device_id,

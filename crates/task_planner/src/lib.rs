@@ -18,6 +18,7 @@ mod deadline;
 mod focus_link;
 mod model;
 pub mod outline;
+mod phone_list;
 mod planner;
 mod settings_file;
 pub mod time;
@@ -41,6 +42,7 @@ pub use model::{
     TimetableKind, TodoChange, TodoChangeRecord, TodoItem, TodoListWrite, WaitingItem, WeekPlan,
     WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
+pub use phone_list::phone_list;
 pub use planner::{needs_no_review, parse_time_of_day, PlannerError, TaskPlanner};
 
 #[cfg(test)]

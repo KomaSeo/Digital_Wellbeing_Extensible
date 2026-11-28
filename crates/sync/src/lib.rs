@@ -14,6 +14,7 @@
 //! - [`vault`]: the owner's API key, sealed with a key the server never sees.
 //! - [`secret`]: the password kept on a PC, sealed for that PC.
 //! - [`client`]: one device's side: which files sync, and one sync round.
+//! - [`phone`]: a phone's to-do page: joining with a code, and the changes it leaves for a PC.
 //!
 //! Walkthrough (Korean): `docs/sync.md`.
 
@@ -23,6 +24,7 @@ pub mod device_local;
 pub mod envelope;
 pub mod machine_identity;
 pub mod merge;
+pub mod phone;
 pub mod protocol;
 pub mod secret;
 pub mod server;

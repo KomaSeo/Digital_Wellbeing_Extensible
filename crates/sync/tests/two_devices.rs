@@ -288,6 +288,8 @@ fn the_server_refuses_strangers_replays_old_requests_and_foreign_files() {
         app_version: sync::protocol::app_version().to_string(),
         machine_id: None,
         forget_devices: Vec::new(),
+        phone_ready: false,
+        phone_outcomes: Vec::new(),
     };
 
     // A wrong key, or an unknown device.
@@ -457,6 +459,8 @@ fn a_device_with_an_older_version_stops_syncing_until_it_is_updated() {
         app_version: version.to_string(),
         machine_id: None,
         forget_devices: Vec::new(),
+        phone_ready: false,
+        phone_outcomes: Vec::new(),
     };
     send_raw(
         &server,

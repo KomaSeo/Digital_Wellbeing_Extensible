@@ -59,6 +59,12 @@ pub struct SyncRequest {
     /// again, or computers no longer used). The server refuses one that synced lately.
     #[serde(default)]
     pub forget_devices: Vec<String>,
+    /// This PC's agent runs and can review requests a phone sent ([`crate::phone`]).
+    #[serde(default)]
+    pub phone_ready: bool,
+    /// What this PC's agent decided about the phone requests it was given.
+    #[serde(default)]
+    pub phone_outcomes: Vec<crate::phone::PhoneOutcome>,
 }
 
 /// Responsibility: Describe a paired device for the device list.
