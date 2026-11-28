@@ -25,6 +25,8 @@ parking_lot = { workspace = true }
 ai_focus_rule = { workspace = true }
 list_based_rule = { workspace = true }
 directories = { workspace = true }
+# The QR code of the phone app's download link (settings tab → 휴대폰).
+qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

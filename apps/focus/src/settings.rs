@@ -374,8 +374,8 @@ pub struct SettingsTab {
     cheat_request: Option<&'static str>,
     /// A cheat time request was sent from here: its refusal shows under the buttons.
     cheat_sent: bool,
-    /// The code made for a phone, until when it works, and the page to open on the phone.
-    phone_code: Option<(String, DateTime<Utc>, String)>,
+    /// The code made for a phone, with what the phone app needs next to it.
+    phone_code: Option<PhoneCode>,
     /// What the last phone request said when it failed.
     phone_message: String,
     /// "연결 끊기" was pressed once for this phone: asks before taking it off.
@@ -559,9 +559,10 @@ impl SettingsTab {
             .default_open(self.phone_code.is_some())
             .show(ui, |ui| {
                 ui.label(
-                    "연결한 휴대폰은 브라우저에서 할 일 목록을 보고, 할 일을 추가하거나 고치거나 지우고, \
-                     약속을 추가할 수 있습니다. 설정은 바꿀 수 없습니다. 휴대폰이 보낸 변경은 켜져 있는 \
-                     PC가 할 일 탭에서와 똑같이 처리합니다. 엄격 모드에서는 AI가 승인해야 적용됩니다.",
+                    "연결한 휴대폰은 휴대폰 앱(\"DW 할 일\", 안드로이드)에서 할 일 목록을 보고, 할 일을 \
+                     추가하거나 고치거나 지우고, 약속을 추가할 수 있습니다. 설정은 바꿀 수 없습니다. \
+                     휴대폰이 보낸 변경은 켜져 있는 PC가 할 일 탭에서와 똑같이 처리합니다. 엄격 \
+                     모드에서는 AI가 승인해야 적용됩니다.",
                 );
                 ui.small(
                     "휴대폰과 서버 사이는 암호화하지 않습니다(HTTP). 공용 와이파이에서는 같은 \
@@ -572,11 +573,16 @@ impl SettingsTab {
                         Ok(answer) => {
                             let expires_at = serde_json::from_value(answer["expires_at"].clone())
                                 .unwrap_or_else(|_| Utc::now());
-                            self.phone_code = Some((
-                                answer["code"].as_str().unwrap_or_default().to_string(),
+                            let text = |name: &str| {
+                                answer[name].as_str().unwrap_or_default().to_string()
+                            };
+                            self.phone_code = Some(PhoneCode {
+                                code: text("code"),
                                 expires_at,
-                                answer["page"].as_str().unwrap_or_default().to_string(),
-                            ));
+                                server: text("server"),
+                                app: text("app"),
+                                app_qr: None,
+                            });
                             self.phone_message.clear();
                             self.phone_joined = None;
                         }
@@ -584,7 +590,7 @@ impl SettingsTab {
                     }
                 }
                 // A phone that joined after the code was made used it: the code is done.
-                if let Some((_, expires_at, _)) = &self.phone_code {
+                if let Some(PhoneCode { expires_at, .. }) = &self.phone_code {
                     let made_at = *expires_at
                         - chrono::Duration::minutes(agent_api::user_api::PHONE_CODE_MINUTES);
                     if let Some(phone) = sync
@@ -600,22 +606,31 @@ impl SettingsTab {
                 if let Some(name) = &self.phone_joined {
                     ui.colored_label(GREEN, format!("\"{name}\"이(가) 연결되었습니다."));
                 }
-                if let Some((code, expires_at, page)) = &self.phone_code {
-                    if *expires_at > Utc::now() {
+                if let Some(made) = &mut self.phone_code {
+                    if made.expires_at > Utc::now() {
                         ui.group(|ui| {
-                            ui.label("1. 휴대폰의 브라우저에서 이 주소를 엽니다.");
+                            ui.label(
+                                "1. 처음 한 번은 휴대폰의 카메라로 이 QR 코드를 찍거나 아래 주소를 \
+                                 열어 앱을 내려받아 설치합니다. 설치할 때 \"출처를 알 수 없는 \
+                                 앱\"을 허용해야 합니다.",
+                            );
+                            qr_code(ui, &made.app, &mut made.app_qr);
+                            copyable(ui, &made.app);
+                            ui.label("2. 휴대폰의 \"DW 할 일\" 앱에 서버 주소와 코드를 넣습니다.");
                             ui.horizontal_wrapped(|ui| {
-                                ui.strong(page);
-                                if ui.small_button("복사").clicked() {
-                                    ui.ctx().copy_text(page.clone());
-                                }
+                                ui.label("서버 주소:");
+                                copyable(ui, &made.server);
                             });
-                            ui.label("2. 페이지에 이 코드를 넣습니다.");
-                            ui.label(egui::RichText::new(code).size(28.0).strong().monospace());
+                            ui.label(
+                                egui::RichText::new(&made.code)
+                                    .size(28.0)
+                                    .strong()
+                                    .monospace(),
+                            );
                             ui.small(format!(
                                 "코드는 {}까지 한 번만 쓸 수 있습니다. 서버에는 다음 동기화(20초쯤 뒤)에 \
                                  닿으므로, 그 전에 넣으면 \"맞지 않는다\"고 나올 수 있습니다.",
-                                local(*expires_at)
+                                local(made.expires_at)
                             ));
                         });
                     } else {
@@ -4061,4 +4076,61 @@ fn downloaded_installers() -> Vec<PathBuf> {
         .take(8)
         .map(|(_, path)| path)
         .collect()
+}
+
+/// Responsibility: Hold a code made for the phone app and what to type next to it.
+struct PhoneCode {
+    code: String,
+    expires_at: DateTime<Utc>,
+    /// The sync server's address, typed into the app.
+    server: String,
+    /// Where the phone downloads the app.
+    app: String,
+    /// `app` as a QR code, made the first time it shows.
+    app_qr: Option<egui::TextureHandle>,
+}
+
+/// `text` as a QR code a phone camera reads (black on white, whatever the theme).
+fn qr_code(ui: &mut egui::Ui, text: &str, texture: &mut Option<egui::TextureHandle>) {
+    const MODULE_PIXELS: usize = 4;
+    const QUIET_MODULES: usize = 4;
+    if texture.is_none() {
+        let Ok(code) = qrcode::QrCode::new(text.as_bytes()) else {
+            return;
+        };
+        let modules = code.width();
+        let colors = code.to_colors();
+        let side = (modules + 2 * QUIET_MODULES) * MODULE_PIXELS;
+        let mut image = egui::ColorImage::new([side, side], egui::Color32::WHITE);
+        for (index, color) in colors.iter().enumerate() {
+            if *color != qrcode::Color::Dark {
+                continue;
+            }
+            let column = (index % modules + QUIET_MODULES) * MODULE_PIXELS;
+            let row = (index / modules + QUIET_MODULES) * MODULE_PIXELS;
+            for pixel_row in row..row + MODULE_PIXELS {
+                for pixel_column in column..column + MODULE_PIXELS {
+                    image.pixels[pixel_row * side + pixel_column] = egui::Color32::BLACK;
+                }
+            }
+        }
+        *texture = Some(ui.ctx().load_texture(
+            "phone app link",
+            image,
+            egui::TextureOptions::NEAREST,
+        ));
+    }
+    if let Some(texture) = texture {
+        ui.image((texture.id(), egui::vec2(180.0, 180.0)));
+    }
+}
+
+/// `text` in bold with a "복사" button next to it.
+fn copyable(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.strong(text);
+        if ui.small_button("복사").clicked() {
+            ui.ctx().copy_text(text.to_string());
+        }
+    });
 }

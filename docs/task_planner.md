@@ -886,7 +886,7 @@ Focus 앱은 agent에게 다음 요청을 보낼 수 있습니다. 남은 할 �
 - `{ "kind": "edit_appointment", "appointment_id": "...", "appointment": { 추가와 같은 칸 } }` (4.12절)
 - `{ "kind": "remove_appointment", "appointment_id": "..." }`
 
-휴대폰(동기화 서버의 할 일 페이지, [`sync.md`](sync.md) 11장)이 보낸 할 일 변경은 PC의 서비스가 `todo_change`로 agent에게 넘기고, 출처(`via`)는 `"phone"`입니다. 휴대폰을 연결하는 코드는 `phone_code`(인자 없음, 답은 `{ code, expires_at, page }`)로 만들고, 휴대폰의 연결은 `phone_remove`(`{ "id": "…" }`)로 끊습니다.
+휴대폰(휴대폰 앱, [`sync.md`](sync.md) 11장)이 보낸 할 일 변경은 PC의 서비스가 `todo_change`로 agent에게 넘기고, 출처(`via`)는 `"phone"`입니다. 휴대폰을 연결하는 코드는 `phone_code`(인자 없음, 답은 `{ code, expires_at, server, app }`: 코드, 끝나는 시각, 앱에 넣을 서버 주소, 앱을 내려받는 주소)로 만들고, 휴대폰의 연결은 `phone_remove`(`{ "id": "…" }`)로 끊습니다.
 
 시뮬레이션(4.21절)의 요청은 다섯 가지이고, 답은 모두 `{ active, view, cost }`입니다(`view`는 칸마다의 가상 시계, 지금 할 일, 기록, 요약, `cost`는 시뮬레이션을 시작한 뒤 쓴 AI 비용). `simulation_start`(`{ "at": "RFC 3339 시각", "situation": "…", "draft": { 고치는 중인 규칙 묶음 } }`, `draft`는 생략할 수 있습니다)는 시뮬레이션을 새로 만들고, `simulation_act`(`{ "action": { "kind": "assign" | "advance" | "request" | "todo_change" | "event" | "auto", … } }`)는 누른 것을 다른 스레드에서 진행합니다. 진행 중에는 다음 `simulation_act`를 거부합니다. `simulation_status`, `simulation_stop`(자동 진행 멈추기), `simulation_end`는 인자가 없습니다.
 

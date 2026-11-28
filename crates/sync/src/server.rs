@@ -16,9 +16,9 @@
 //!   minutes (a wrong password ends none); then it waits, so a password cannot be guessed
 //!   over the internet. A sign-up is taken only while the server has no account.
 //!
-//! - Phones ([`crate::phone`]): `GET /phone` serves the phone's to-do page and `POST
-//!   /phone/api` its requests. A phone joins with a one-time code a PC made, and its token
-//!   reaches nothing else: it reads the to-do list and leaves to-do changes for a PC to review.
+//! - Phones ([`crate::phone`]): `POST /phone/api` takes the requests of the phone app (`android/`).
+//!   A phone joins with a one-time code a PC made, and its token reaches nothing else: it reads
+//!   the to-do list and leaves to-do changes for a PC to review.
 //!
 //! Storage: `<folder>/devices.json`, `<folder>/accounts.json` (OPAQUE password files),
 //! `<folder>/opaque_setup.json` (the server's OPAQUE keys), `<folder>/phone_tokens.json` and
@@ -59,9 +59,7 @@ pub const SHARED_DOCUMENTS: [&str; 8] = [
 /// Documents only the server writes; devices take them as they are.
 pub const SERVER_DOCUMENTS: [&str; 2] =
     [crate::users::USERS_DOCUMENT, crate::phone::PHONES_DOCUMENT];
-/// The phone's page ([`crate::phone`]).
-const PHONE_PAGE: &str = include_str!("phone_page.html");
-/// The largest request of the phone page.
+/// The largest request of the phone app.
 const MAX_PHONE_BODY_BYTES: usize = 64 * 1024;
 /// Wrong phone codes the server takes in [`LOGIN_WINDOW_MINUTES`] before it waits.
 const MAX_PHONE_CODE_FAILURES: usize = 10;
@@ -1249,14 +1247,8 @@ impl SyncServer {
                 length = value.trim().parse().unwrap_or(0);
             }
         }
-        let page_requested = ["GET /phone ", "GET /phone/ ", "GET /phone?"]
-            .iter()
-            .any(|start| request_line.starts_with(start));
-        let mut content_type = "application/json";
-        let (status, body) = if page_requested {
-            content_type = "text/html; charset=utf-8";
-            ("200 OK", PHONE_PAGE.to_string())
-        } else if request_line.starts_with("POST /phone/api ") {
+        let content_type = "application/json";
+        let (status, body) = if request_line.starts_with("POST /phone/api ") {
             if length > MAX_PHONE_BODY_BYTES {
                 (
                     "413 Payload Too Large",

@@ -30,7 +30,7 @@
 //! | `simulation_start` | `task_planner::SimulationSetup` (`{ at, situation, draft? }`) | `{ active, view, cost }` |
 //! | `simulation_act` | `{ action: task_planner::SimulationAction }` (runs on its own thread) | `{ active, view, cost }` |
 //! | `simulation_status` / `simulation_stop` / `simulation_end` | `{}` | `{ active, view?, cost? }` |
-//! | `phone_code` | `{}` (a one-time code a phone joins with; this PC must sync) | `{ code, expires_at, page }` |
+//! | `phone_code` | `{}` (a one-time code a phone joins with; this PC must sync) | `{ code, expires_at, server, app }` |
 //! | `phone_remove` | `{ id }` (takes a phone off) | `{ ok }` |
 //! | `cheat_start` | `{}` (cheat time with a daily or weekly budget; no AI) | [`Status`] |
 //! | `cheat_end` | `{}` (ends cheat time early) | [`Status`] |
@@ -899,8 +899,9 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             }
             return Ok(json!({ "active": false }));
         }
-        // A code a phone joins the to-do page with (the owner: "핸드폰에서 할 일 만 관리할 수
-        // 있게 만들 수 있나."). It reaches the server with the next sync.
+        // A code the phone app joins with (the owner: "핸드폰에서 할 일 만 관리할 수 있게 만들
+        // 수 있나."), with the server address to type next to it. It reaches the server with the
+        // next sync.
         "phone_code" => {
             let config = sync::client::ClientConfig::load(&data_directory).ok_or(
                 "이 PC가 동기화 서버에 연결되어 있지 않습니다. 휴대폰은 동기화 서버를 거쳐 연결합니다",
@@ -910,7 +911,8 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
             return Ok(json!({
                 "code": code,
                 "expires_at": now + chrono::Duration::minutes(sync::phone::CODE_MINUTES),
-                "page": format!("{}/phone", config.server_url.trim_end_matches('/')),
+                "server": config.server_url.trim_end_matches('/'),
+                "app": sync::phone::APP_DOWNLOAD,
             }));
         }
         "phone_remove" => {

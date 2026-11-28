@@ -1,5 +1,6 @@
 # Responsibility: Check every push on real machines: the whole test suite on Linux under a
-# virtual X server (including the end-to-end agent test), and on Windows the test suite plus
+# virtual X server (including the end-to-end agent test), the phone app's build and tests, and
+# on Windows the test suite plus
 # a real install, upgrade and uninstall of the service with an end-to-end test of the agent it
 # starts, driven through the agent's user API.
 #
@@ -37,6 +38,20 @@ jobs:
 
   # The sync server for a Linux machine (a cloud server): one static program that runs on any
   # 64-bit Linux, with its systemd service file. Download it from the run's artifacts.
+  # The phone app (android/): it builds, its unit tests pass and Android lint finds no error.
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build and test the phone app
+        working-directory: android
+        run: ./gradlew --no-daemon assembleDebug testDebugUnitTest lintDebug
+
   linux-sync-server:
     runs-on: ubuntu-latest
     timeout-minutes: 30

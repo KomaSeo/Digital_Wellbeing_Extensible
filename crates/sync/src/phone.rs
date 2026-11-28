@@ -4,7 +4,8 @@
 //!
 //! - A PC makes a one-time code ([`new_code`]) into `phone_access.json`, a document the PCs
 //!   share. The phone gives the code to the server once ([`crate::server::SyncServer::phone_pair`])
-//!   and gets a token that reaches nothing but the phone page's requests.
+//!   and gets a token that reaches nothing but the phone app's requests. The phone app
+//!   (`android/`, the owner: "브라우저 말고 휴대폰 앱으로 만들자") shows the to-do page.
 //! - The server keeps the phones and their requests in `phones.json` ([`Phones`]): only the
 //!   server writes it, and every PC gets it. A PC whose agent runs says so in its sync round
 //!   (`phone_ready`); the server gives it the requests nobody handles ([`assign`]). That PC's
@@ -30,6 +31,9 @@ pub(crate) const TOKENS_FILE: &str = "phone_tokens.json";
 
 /// How long a code is good for.
 pub const CODE_MINUTES: i64 = 10;
+
+/// Where a phone gets the newest phone app (the release workflow publishes it there).
+pub const APP_DOWNLOAD: &str = "https://github.com/KomaSeo/Digital_Wellbeing_Extensible/releases/download/phone-latest/DigitalWellbeing-Phone.apk";
 /// A request given to a PC that sent no outcome for this long goes to another PC (that PC
 /// was turned off while its agent asked the AI).
 const REASSIGN_AFTER_MINUTES: i64 = 30;

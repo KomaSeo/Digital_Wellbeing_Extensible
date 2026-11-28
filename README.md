@@ -24,7 +24,7 @@ Digital Wellbeing is a Windows program that helps one person stay on the to-dos 
 - Emergency use (비상 사용) is time when the AI checks rest. The user gives it as a daily budget, a weekly budget or fixed times of day, and uses it without the AI's approval, in strict mode too.
 - A rule simulation (시뮬레이션 돌려보기) lets the user try the life rules on a virtual day before applying them: the user plays what happens (finishing early, taking longer, not doing the task, being stuck) and the AI answers as it would, with the rules being edited and the rules in force side by side.
 - The program can be used by talking to it through Claude Desktop.
-- A phone's browser can show the to-do list and add or edit to-dos and appointments. The sync server serves that page, and a PC that is on reviews the changes.
+- An Android phone app ("DW 할 일") shows the to-do list and adds or edits to-dos and appointments. It talks to the sync server, and a PC that is on reviews the changes.
 - Once strict mode is on, the program stops the user from dodging the rules by breaking the API key, not taking tasks, changing the time zone and the like.
 
 ## 3. Installing

@@ -103,11 +103,12 @@ Windows에서 agent의 환경 변수는 SYSTEM 서비스의 환경 변수이고,
 
 ## 3. 자동 검사 (`.github/workflows/ci.yml`)
 
-GitHub Actions는 모든 push마다 두 작업을 돌립니다.
+GitHub Actions는 모든 push마다 다음 작업들을 돌립니다.
 
 | 작업 | 하는 일 |
 |---|---|
 | **linux** (ubuntu-latest) | Xvfb를 설치하고 `xvfb-run -a cargo test --workspace`를 실행합니다. 위의 X11 테스트와 끝에서 끝까지 테스트가 여기서 돕니다. |
+| **android** (ubuntu-latest) | 휴대폰 앱(`android/`, [`sync.md`](sync.md) 11장)을 빌드하고, 단위 테스트(사용자가 적은 서버 주소 읽기, 서버로 요청을 보내고 답 받기)와 Android lint를 실행합니다(`./gradlew assembleDebug testDebugUnitTest lintDebug`). 개발자 PC에서는 JDK 17 이상과 Android SDK(환경 변수 `ANDROID_HOME`)가 있으면 `android` 폴더에서 같은 명령을 실행합니다. |
 | **windows** (windows-latest) | release 설정으로 테스트하고 빌드한 뒤, 실제로 서비스를 설치·업데이트하고, 서비스가 띄운 agent를 사용자 API로 시험하고, 서비스를 제거합니다. |
 
 windows 작업의 설치 시험은 다음을 확인합니다.
