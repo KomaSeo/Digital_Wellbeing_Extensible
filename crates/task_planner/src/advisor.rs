@@ -372,6 +372,8 @@ pub struct Review {
 
 /// Responsibility: Carry what the AI sees when picking a to-do.
 pub struct PickRequest<'a> {
+    /// The time the question is about (the real time, or a simulation's).
+    pub now: DateTime<Utc>,
     /// The system instruction: the owner's version or [`PICK_PROMPT`].
     pub instructions: &'a str,
     /// e.g. `2026-10-30 Friday 14:05`
@@ -443,6 +445,8 @@ pub struct WeekPlanAnswerTodo {
 
 /// Responsibility: Carry what the AI sees when reviewing a change request.
 pub struct ReviewRequest<'a> {
+    /// The time the question is about (the real time, or a simulation's).
+    pub now: DateTime<Utc>,
     /// The system instruction: the owner's version or [`REVIEW_PROMPT`].
     pub instructions: &'a str,
     pub now_local: &'a str,
@@ -513,6 +517,8 @@ pub struct ReviewedTodo {
 
 /// Responsibility: Carry what the AI sees when the user asks to add an appointment.
 pub struct AppointmentRequest<'a> {
+    /// The time the question is about (the real time, or a simulation's).
+    pub now: DateTime<Utc>,
     /// The system instruction: the owner's version or [`APPOINTMENT_PROMPT`].
     pub instructions: &'a str,
     pub now_local: &'a str,
@@ -561,11 +567,18 @@ pub type AdvisorProvider =
 
 /// Claude advisor using the key, model and effort of `settings`.
 pub fn claude_advisor_provider() -> AdvisorProvider {
-    Arc::new(|settings: &AiSettings| {
+    claude_advisor_provider_labeled("")
+}
+
+/// [`claude_advisor_provider`] whose calls are recorded in the AI cost statistics under
+/// `label` followed by the usual purpose (e.g. "simulation: planner pick").
+pub fn claude_advisor_provider_labeled(label: &'static str) -> AdvisorProvider {
+    Arc::new(move |settings: &AiSettings| {
         let key = settings.api_key.clone().ok_or(JudgeError::NoApiKey)?;
         Ok(Arc::new(ClaudeAdvisor {
             client: ClaudeClient::new(key, settings.model.clone()),
             effort: settings.effort.clone(),
+            label,
         }) as Arc<dyn Advisor>)
     })
 }
@@ -575,6 +588,15 @@ pub struct ClaudeAdvisor {
     client: ClaudeClient,
     /// The settings' effort for decisions.
     effort: String,
+    /// Put before each purpose in the AI cost statistics ("" for the planner itself).
+    label: &'static str,
+}
+
+impl ClaudeAdvisor {
+    /// The purpose a call is recorded under.
+    fn purpose(&self, purpose: &str) -> String {
+        format!("{}{purpose}", self.label)
+    }
 }
 
 impl Advisor for ClaudeAdvisor {
@@ -582,7 +604,7 @@ impl Advisor for ClaudeAdvisor {
         // `medium`: rare call, and weighing deadlines against priorities
         // benefits from some reasoning.
         self.client.structured(
-            "planner pick",
+            &self.purpose("planner pick"),
             request.instructions,
             question(request.life_rules, request.open, pick_text(request)),
             pick_schema(),
@@ -600,7 +622,7 @@ impl Advisor for ClaudeAdvisor {
             content.push(jpeg_block(jpeg));
         }
         self.client.structured(
-            "planner review",
+            &self.purpose("planner review"),
             request.instructions,
             content,
             change_review_schema(),
@@ -610,7 +632,7 @@ impl Advisor for ClaudeAdvisor {
 
     fn plan_week(&self, request: &WeekPlanRequest) -> Result<WeekPlanAnswer, JudgeError> {
         self.client.structured(
-            "week plan",
+            &self.purpose("week plan"),
             request.instructions,
             vec![text_block(week_plan_text(request))],
             week_plan_schema(),
@@ -620,7 +642,7 @@ impl Advisor for ClaudeAdvisor {
 
     fn review_todo_change(&self, request: &TodoChangeRequest) -> Result<TodoReview, JudgeError> {
         self.client.structured(
-            "to-do change review",
+            &self.purpose("to-do change review"),
             request.instructions,
             uncached(question(
                 request.life_rules,
@@ -637,7 +659,7 @@ impl Advisor for ClaudeAdvisor {
         request: &AppointmentRequest,
     ) -> Result<AppointmentReview, JudgeError> {
         self.client.structured(
-            "appointment review",
+            &self.purpose("appointment review"),
             request.instructions,
             question(request.life_rules, request.open, appointment_text(request)),
             appointment_review_schema(),
@@ -772,7 +794,7 @@ pub(crate) fn appointment_text(request: &AppointmentRequest) -> String {
         appointments = appointments_text(request.appointments),
         current = request
             .current
-            .map(|assignment| assignment_text(assignment, Utc::now()))
+            .map(|assignment| assignment_text(assignment, request.now))
             .unwrap_or_else(|| "(none)".into()),
         past = or_none(&past.join("\n")),
     )
@@ -1205,7 +1227,7 @@ pub(crate) fn pick_text(request: &PickRequest) -> String {
         done = or_none(&done.join("\n")),
         prev = request
             .previous
-            .map(|assignment| assignment_text(assignment, Utc::now()))
+            .map(|assignment| assignment_text(assignment, request.now))
             .unwrap_or_else(|| "(none)".into()),
         history = or_none(request.history),
         repick = request.repick_reason.map_or(String::new(), |reason| {
@@ -1309,7 +1331,7 @@ pub(crate) fn review_text(request: &ReviewRequest) -> String {
         now = request.now_local,
         current = request
             .current
-            .map(|assignment| assignment_text(assignment, Utc::now()))
+            .map(|assignment| assignment_text(assignment, request.now))
             .unwrap_or_else(|| "(none)".into()),
         timing = match request.planned_minutes {
             Some(planned) => format!(

@@ -40,6 +40,7 @@ use thiserror::Error;
 use tracing::info;
 
 pub(crate) mod cheat;
+pub(crate) mod simulation;
 pub use cheat::parse_time_of_day;
 
 const REQUEST_LOG_CAPACITY: usize = 50;
@@ -692,7 +693,7 @@ impl TaskPlanner {
             })
             .collect();
         let recently_done: Vec<DoneRecord> = state.done.iter().rev().take(10).cloned().collect();
-        let now_local = local_now_text();
+        let now_local = local_now_text(now);
         let advisor = (self.advisor)(&self.focus.ai_settings())?;
         let answer = advisor.plan_week(&WeekPlanRequest {
             instructions: config.instructions.week_plan_or_default(),
@@ -870,7 +871,7 @@ impl TaskPlanner {
 
         let recent: Vec<TodoChangeRecord> = state.todo_changes.iter().rev().cloned().collect();
         let history = self.focus.recent_activity();
-        let now_local = local_now_text();
+        let now_local = local_now_text(now);
         let config = self.config.get();
         if matches!(
             change,
@@ -1046,7 +1047,7 @@ impl TaskPlanner {
                         false,
                     )
                 } else {
-                    let now_local = local_now_text();
+                    let now_local = local_now_text(now);
                     let state = self.state.get();
                     // The AI weighs the edited appointment against the others, not itself.
                     let others: Vec<Appointment> = self
@@ -1060,6 +1061,7 @@ impl TaskPlanner {
                         .collect();
                     let review = (self.advisor)(&self.focus.ai_settings()).and_then(|advisor| {
                         advisor.review_appointment(&AppointmentRequest {
+                            now,
                             instructions: config.instructions.appointment_review_or_default(),
                             now_local: &now_local,
                             appointment_rules: &config.appointment_rules,
@@ -1776,7 +1778,7 @@ impl TaskPlanner {
         let state = self.state.get();
         let recent: Vec<ChangeRecord> = state.requests.iter().rev().cloned().collect();
         let history = self.focus.recent_activity();
-        let now_local = local_now_text();
+        let now_local = local_now_text(now);
         let advisor = (self.advisor)(&self.focus.ai_settings())?;
         let config = self.config.get();
         let current_todo = state
@@ -1784,6 +1786,7 @@ impl TaskPlanner {
             .as_ref()
             .and_then(|assignment| assignment.todo_id.clone());
         let review = advisor.review(&ReviewRequest {
+            now,
             // "연장하기" and the reports about the to-do itself have their own instructions.
             instructions: match request {
                 ChangeKind::Extend { .. } => config.instructions.extension_review_or_default(),
@@ -2357,7 +2360,7 @@ impl TaskPlanner {
         let state = self.state.get();
         let recently_done: Vec<DoneRecord> = state.done.iter().rev().take(10).cloned().collect();
         let history = self.focus.recent_activity();
-        let now_local = local_now_text();
+        let now_local = local_now_text(now);
         let advisor = (self.advisor)(&self.focus.ai_settings())?;
         let config = self.config.get();
         let status = self.status();
@@ -2371,6 +2374,7 @@ impl TaskPlanner {
             misses: state.estimate_misses.iter().cloned().collect(),
         };
         let pick = advisor.pick(&PickRequest {
+            now,
             instructions: config.instructions.pick_or_default(),
             now_local: &now_local,
             life_rules: &config.life_rules,
@@ -3255,6 +3259,9 @@ fn edited_fields(draft: &ProposalInput) -> Map<String, Value> {
     changed_fields
 }
 
-fn local_now_text() -> String {
-    Local::now().format("%Y-%m-%d %A %H:%M").to_string()
+/// `now` in local time as the AI reads it (the real time, or a simulation's).
+fn local_now_text(now: DateTime<Utc>) -> String {
+    now.with_timezone(&Local)
+        .format("%Y-%m-%d %A %H:%M")
+        .to_string()
 }

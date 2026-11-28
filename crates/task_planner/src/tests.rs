@@ -42,6 +42,8 @@ struct FakeAdvisor {
     saw_current_away: AtomicBool,
     /// The list changes the next change review makes.
     list_changes: parking_lot::Mutex<Vec<ListChange>>,
+    /// The time and the life rules of every pick, in order.
+    saw_picks: parking_lot::Mutex<Vec<(chrono::DateTime<Utc>, String)>>,
 }
 
 impl Advisor for FakeAdvisor {
@@ -49,6 +51,9 @@ impl Advisor for FakeAdvisor {
         self.picks.fetch_add(1, Ordering::SeqCst);
         *self.saw_repick_reason.lock() = request.repick_reason.map(str::to_string);
         *self.saw_rules.lock() = request.life_rules.to_string();
+        self.saw_picks
+            .lock()
+            .push((request.now, request.life_rules.to_string()));
         *self.saw_instructions.lock() = request.instructions.to_string();
         *self.saw_appointments.lock() = request
             .appointments
@@ -284,6 +289,7 @@ fn harness_with_state(enabled: bool, ids: &[&str], state: JsonStore<PlannerState
         saw_other_appointments: parking_lot::Mutex::new(Vec::new()),
         saw_current_away: AtomicBool::new(false),
         list_changes: parking_lot::Mutex::new(Vec::new()),
+        saw_picks: parking_lot::Mutex::new(Vec::new()),
     });
     let provided = Arc::clone(&advisor);
     let planner = TaskPlanner::new(
@@ -966,6 +972,7 @@ fn a_question_starts_with_the_cached_rules_and_list_and_ends_with_what_changes()
         .iter()
         .all(|block| block.get("cache_control").is_none()));
     let pick = crate::advisor::pick_text(&PickRequest {
+        now: Utc::now(),
         instructions: crate::advisor::PICK_PROMPT,
         now_local: "14:05",
         life_rules: "rules",
@@ -1243,6 +1250,7 @@ fn notes_are_saved_for_open_todos_and_reach_the_done_review() {
     assert_eq!(saved.steps[0].minutes, None, "0 minutes is no estimate");
     let state = fixture.planner.state_store_for_tests().get();
     let text = crate::advisor::review_text(&ReviewRequest {
+        now: Utc::now(),
         instructions: crate::advisor::REVIEW_PROMPT,
         now_local: "now",
         life_rules: "",
@@ -2538,6 +2546,7 @@ fn a_question_about_one_to_do_shows_its_notes_the_list_does_not() {
         todo_id: "b".into(),
     };
     let text = crate::advisor::review_text(&ReviewRequest {
+        now: Utc::now(),
         instructions: "",
         now_local: "now",
         life_rules: "",
@@ -3694,4 +3703,164 @@ fn times_of_day_are_read_only_when_well_formed() {
     assert_eq!(parsed.1.to_string(), "22:30:00");
     assert!(crate::parse_time_of_day("22:00-21:00").is_none());
     assert!(crate::parse_time_of_day("9pm-10pm").is_none());
+}
+
+// --- simulation ------------------------------------------------------------------------------
+
+#[test]
+fn a_simulation_runs_both_rule_sets_at_a_virtual_time_and_touches_nothing_real() {
+    // The owner: "사용자가 시뮬레이션을 돌리면서 가상으로 이 프로그램을 사용해 볼거야 …"
+    let fixture = harness(true, &["a", "b", "c"]);
+    fixture
+        .planner
+        .config_store()
+        .update(|config| config.life_rules = "rules in force".into())
+        .unwrap();
+    let provided = Arc::clone(&fixture.advisor);
+    let provider: crate::AdvisorProvider =
+        Arc::new(move |_| Ok(Arc::clone(&provided) as Arc<dyn Advisor>));
+    let at = local_noon() + chrono::Duration::days(1);
+    let draft = crate::RuleSet {
+        life_rules: "edited rules".into(),
+        ..crate::RuleSet::of(&fixture.planner.config_store().get())
+    };
+    let simulation = fixture.planner.simulation(
+        crate::SimulationSetup {
+            at,
+            situation: "at a cafe".into(),
+            draft: Some(draft),
+        },
+        provider,
+        true,
+    );
+    let never = || false;
+    simulation.run(&crate::SimulationAction::Assign, &never);
+    let view = simulation.view();
+    assert_eq!(view.sandboxes.len(), 2);
+    assert_eq!(view.sandboxes[0].label, "고치는 중인 규칙");
+    assert_eq!(view.sandboxes[1].label, "지금 규칙");
+    for sandbox in &view.sandboxes {
+        assert_eq!(sandbox.clock, at);
+        assert_eq!(sandbox.task.as_deref(), Some("work on a"));
+        assert_eq!(sandbox.ai_calls, 1);
+        assert!(sandbox.log[0].text.contains("at a cafe"));
+    }
+    // The AI got the virtual time, and each column its own life rules.
+    let mut picks = fixture.advisor.saw_picks.lock().clone();
+    picks.sort_by(|left, right| left.1.cmp(&right.1));
+    assert_eq!(
+        picks,
+        vec![
+            (at, "edited rules".to_string()),
+            (at, "rules in force".to_string())
+        ]
+    );
+
+    // Done on time: 45 minutes pass, then the report.
+    simulation.run(
+        &crate::SimulationAction::Event {
+            event: crate::SimulationEvent::OnTime,
+        },
+        &never,
+    );
+    let view = simulation.view();
+    let sandbox = &view.sandboxes[0];
+    assert_eq!(sandbox.clock, at + chrono::Duration::minutes(45));
+    assert!(sandbox
+        .log
+        .iter()
+        .any(|entry| entry.kind == crate::LogKind::Approved && entry.text.starts_with("끝냈다")));
+    assert!(sandbox.task.is_none());
+
+    // A whole afternoon by itself, with some surprises; it stops at the time asked.
+    let until = at + chrono::Duration::hours(4);
+    simulation.run(
+        &crate::SimulationAction::Auto {
+            until,
+            variability: crate::Variability::Some,
+        },
+        &never,
+    );
+    let view = simulation.view();
+    for sandbox in &view.sandboxes {
+        assert!(sandbox.clock >= until, "{:?}", sandbox.log);
+        assert!(sandbox
+            .log
+            .last()
+            .unwrap()
+            .text
+            .contains("자동 진행을 마쳤습니다"));
+        assert!(sandbox.summary.iter().any(|line| line.starts_with("요청 ")));
+    }
+    // Both sandboxes faced the same luck.
+    let events = |sandbox: &crate::SandboxView| -> Vec<String> {
+        sandbox
+            .log
+            .iter()
+            .filter(|entry| entry.kind == crate::LogKind::Event)
+            .map(|entry| entry.text.clone())
+            .collect()
+    };
+    assert_eq!(events(&view.sandboxes[0]), events(&view.sandboxes[1]));
+
+    // An added to-do lands in the sandbox's list only.
+    simulation.run(
+        &crate::SimulationAction::TodoChange {
+            change: TodoChange::Add {
+                todo: proposal("Call the bank"),
+            },
+            reason: "before Friday".into(),
+        },
+        &never,
+    );
+    let view = simulation.view();
+    assert!(view.sandboxes[0]
+        .log
+        .iter()
+        .any(|entry| entry.text.starts_with("할 일 추가: Call the bank")));
+
+    // Nothing reached the real planner.
+    assert!(fixture.planner.status().assignment.is_none());
+    assert_eq!(fixture.planner.config_store().get().todos.len(), 3);
+    assert_eq!(
+        fixture.planner.config_store().get().life_rules,
+        "rules in force"
+    );
+    assert!(fixture.focus.state().task.is_empty());
+}
+
+#[test]
+fn the_same_rules_run_once_and_a_stop_ends_an_automatic_run() {
+    let fixture = harness(true, &["a"]);
+    let provided = Arc::clone(&fixture.advisor);
+    let provider: crate::AdvisorProvider =
+        Arc::new(move |_| Ok(Arc::clone(&provided) as Arc<dyn Advisor>));
+    let in_force = crate::RuleSet::of(&fixture.planner.config_store().get());
+    let simulation = fixture.planner.simulation(
+        crate::SimulationSetup {
+            at: local_noon(),
+            situation: String::new(),
+            draft: Some(in_force),
+        },
+        provider,
+        false,
+    );
+    assert_eq!(simulation.view().sandboxes.len(), 1);
+    let stop = || true;
+    simulation.run(
+        &crate::SimulationAction::Auto {
+            until: local_noon() + chrono::Duration::hours(8),
+            variability: crate::Variability::None,
+        },
+        &stop,
+    );
+    let view = simulation.view();
+    assert_eq!(view.sandboxes[0].clock, local_noon());
+    assert!(view.sandboxes[0]
+        .log
+        .last()
+        .unwrap()
+        .text
+        .contains("멈췄습니다"));
+    assert!(!view.running);
 }

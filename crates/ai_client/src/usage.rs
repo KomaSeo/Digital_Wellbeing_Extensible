@@ -386,6 +386,24 @@ pub fn record(purpose: &str, model: &str, response: &Value) {
     }
 }
 
+/// Today's cost from the installed recorder ([`UsageRecorder::today_cost`]); `None` without one.
+pub fn installed_today_cost() -> Option<f64> {
+    RECORDER
+        .read()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .map(|recorder| recorder.today_cost())
+}
+
+/// [`UsageRecorder::over_budget`] of the installed recorder; `None` without one.
+pub fn installed_over_budget(limit: f64) -> Option<(f64, f64)> {
+    RECORDER
+        .read()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .and_then(|recorder| recorder.over_budget(limit))
+}
+
 /// Keep a model comparison in the installed recorder's file (if any).
 pub fn record_comparison(record: crate::comparison::ComparisonRecord) {
     if let Some(recorder) = RECORDER.read().ok().and_then(|slot| slot.clone()) {

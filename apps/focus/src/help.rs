@@ -28,9 +28,11 @@ pub(crate) fn help_tab(ui: &mut egui::Ui) -> bool {
     egui::CollapsingHeader::new("엄격 모드 켜기 (설정 잠그기)")
         .default_open(true)
         .show(ui, |ui| open_settings = protection_guide(ui));
-    egui::CollapsingHeader::new("할 일 받기, 완료 보고, 묶음과 순서, 약속, 일시 정지, 비상 사용")
-        .default_open(false)
-        .show(ui, task_flow_guide);
+    egui::CollapsingHeader::new(
+        "할 일 받기, 완료 보고, 묶음과 순서, 약속, 일시 정지, 비상 사용, 시뮬레이션",
+    )
+    .default_open(false)
+    .show(ui, task_flow_guide);
     egui::CollapsingHeader::new("Claude Desktop으로 이 프로그램 쓰기")
         .default_open(false)
         .show(ui, claude_desktop_guide);
@@ -264,6 +266,16 @@ fn task_flow_guide(ui: &mut egui::Ui) {
          끝납니다. 그동안 하던 일은 일시 정지했다가 끝나면 다시 시작하고, 엄격 모드에서도 화면을 덮지 \
          않습니다. 항상 막을 프로그램과 웹사이트는 그대로 막힙니다. AI에게 묻지 않으며, 엄격 모드에서 \
          비상 사용 시간을 늘리는 변경은 예약됩니다.",
+    );
+    paragraph(
+        ui,
+        "시뮬레이션 돌려보기: 설정 탭의 AI 규칙 맨 아래에서 생활 규칙을 가상으로 시험합니다. 가상 날짜와 \
+         시작 시각을 정하고 \"시뮬레이션 시작\"을 누르면, 지금의 할 일 목록을 복사한 가상의 플래너가 \
+         그 시각부터 돕니다. 고치는 중인 규칙이 지금 규칙과 다르면 두 규칙이 나란히 돌아서 결과를 \
+         비교할 수 있습니다. \"할 일 받기\", \"30분 지나가기\", \"일을 안 함\"이나 \"오래 걸림\" 같은 \
+         일어난 일, 변경 요청, 할 일과 약속 추가를 누르면 AI가 실제처럼 답합니다. \"자동으로 진행\"은 \
+         정한 시각까지 이것을 저절로 되풀이합니다. 시뮬레이션은 진짜 할 일 목록과 차단을 건드리지 \
+         않지만, AI는 진짜이므로 비용이 들고, 오늘의 AI 비용이 하루 예산에 닿으면 멈춥니다.",
     );
     paragraph(
         ui,

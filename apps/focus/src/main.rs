@@ -28,6 +28,7 @@ mod help;
 mod login;
 mod reopen;
 mod settings;
+mod simulation;
 mod statistics;
 mod style;
 mod timetable;

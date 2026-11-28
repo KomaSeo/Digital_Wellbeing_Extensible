@@ -24,11 +24,12 @@ mod settings_file;
 pub mod time;
 
 pub use advisor::{
-    change_summary, claude_advisor_provider, Advisor, AdvisorProvider, AppointmentRequest,
-    AppointmentReview, ClaudeAdvisor, ListChange, Pick, PickRequest, Review, ReviewRequest,
-    ReviewedTodo, TodoChangeRequest, TodoReview, WeekPlanAnswer, WeekPlanAnswerDay,
-    WeekPlanAnswerTodo, WeekPlanRequest, APPOINTMENT_PROMPT, COMPLETION_PROMPT, EXTENSION_PROMPT,
-    PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT, WEEK_PLAN_PROMPT,
+    change_summary, claude_advisor_provider, claude_advisor_provider_labeled, Advisor,
+    AdvisorProvider, AppointmentRequest, AppointmentReview, ClaudeAdvisor, ListChange, Pick,
+    PickRequest, Review, ReviewRequest, ReviewedTodo, TodoChangeRequest, TodoReview,
+    WeekPlanAnswer, WeekPlanAnswerDay, WeekPlanAnswerTodo, WeekPlanRequest, APPOINTMENT_PROMPT,
+    COMPLETION_PROMPT, EXTENSION_PROMPT, PICK_PROMPT, PROPOSAL_PROMPT, REVIEW_PROMPT,
+    WEEK_PLAN_PROMPT,
 };
 pub use deadline::parse_deadline;
 pub use focus_link::{FocusLink, WatchedTask};
@@ -43,6 +44,10 @@ pub use model::{
     WeekPlanDay, WeekPlanTodo, WhenTimeIsUp, APPOINTMENT_GRACE_MINUTES,
 };
 pub use phone_list::phone_list;
+pub use planner::simulation::{
+    LogEntry, LogKind, RuleSet, SandboxView, Simulation, SimulationAction, SimulationEvent,
+    SimulationSetup, SimulationView, Variability, MAX_AUTO_STEPS,
+};
 pub use planner::{needs_no_review, parse_time_of_day, PlannerError, TaskPlanner};
 
 #[cfg(test)]
@@ -50,4 +55,4 @@ mod outline_tests;
 #[cfg(test)]
 mod tests;
 
-pub use settings_file::SETTINGS_FILE;
+pub use settings_file::{list_write_edits, SETTINGS_FILE};

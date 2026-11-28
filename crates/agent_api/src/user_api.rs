@@ -27,6 +27,9 @@
 //! | `todo_change`    | `{ "change": TodoChange, "reason": "…", "via": "…" }` | [`Status`], `last_todo_change` set; approved = in force |
 //! | `todo_change_schedule` | `{ "id": "…" }` (a change the AI did not approve) | [`Status`], `last_todo_change` set |
 //! | `task_notes_put` | `{ "todo_id": "…", "notes": TaskNotes }` | [`Status`] |
+//! | `simulation_start` | `task_planner::SimulationSetup` (`{ at, situation, draft? }`) | `{ active, view, cost }` |
+//! | `simulation_act` | `{ action: task_planner::SimulationAction }` (runs on its own thread) | `{ active, view, cost }` |
+//! | `simulation_status` / `simulation_stop` / `simulation_end` | `{}` | `{ active, view?, cost? }` |
 //! | `phone_code` | `{}` (a one-time code a phone joins with; this PC must sync) | `{ code, expires_at, page }` |
 //! | `phone_remove` | `{ id }` (takes a phone off) | `{ ok }` |
 //! | `cheat_start` | `{}` (cheat time with a daily or weekly budget; no AI) | [`Status`] |
@@ -197,6 +200,41 @@ pub struct SyncStatus {
     /// The phones connected to the server ([`sync::phone`]), as this PC last got them.
     #[serde(default)]
     pub phones: Vec<sync::phone::Phone>,
+}
+
+/// Responsibility: Hold this agent's simulation (one at a time) and today's AI cost when it
+/// started, to show what it cost.
+struct SimulationSlot {
+    simulation: Arc<task_planner::Simulation>,
+    cost_at_start: f64,
+}
+
+static SIMULATION: std::sync::Mutex<Option<SimulationSlot>> = std::sync::Mutex::new(None);
+
+/// What the Focus app gets about the simulation.
+fn simulation_answer() -> Value {
+    let slot = SIMULATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match slot.as_ref() {
+        Some(slot) => json!({
+            "active": true,
+            "view": slot.simulation.view(),
+            "cost": (ai_client::usage::installed_today_cost().unwrap_or(0.0) - slot.cost_at_start).max(0.0),
+        }),
+        None => json!({ "active": false }),
+    }
+}
+
+/// The simulation does not spend past the AI daily budget (the window check stops there).
+fn simulation_budget_check(api: &AgentApi) -> Result<f64, String> {
+    let limit = api.monitor.store().get().daily_budget_usd;
+    match ai_client::usage::installed_over_budget(limit) {
+        Some((spent, limit)) => Err(format!(
+            "오늘의 AI 비용(${spent:.2})이 하루 예산(${limit:.2})에 닿아서 시뮬레이션을 돌리지 않습니다"
+        )),
+        None => Ok(limit),
+    }
 }
 
 /// How long a phone code is good for.
@@ -437,48 +475,7 @@ fn apply_list_writes(
 }
 
 fn todo_list_edits(writes: &[TodoListWrite]) -> Vec<machine::setting_edits::Edit> {
-    use machine::setting_edits::Edit;
-    writes
-        .iter()
-        .map(|write| match write {
-            TodoListWrite::Put(todo) => Edit::PutListItem {
-                path: vec!["todos".into()],
-                id: todo.id.clone(),
-                item: Some(serde_json::to_value(todo).unwrap_or(Value::Null)),
-            },
-            TodoListWrite::Merge {
-                todo_id,
-                changed_fields,
-                base,
-            } => Edit::MergeListItem {
-                path: vec!["todos".into()],
-                id: todo_id.clone(),
-                changed_fields: changed_fields.clone(),
-                base: base
-                    .as_ref()
-                    .map(|todo| serde_json::to_value(todo).unwrap_or(Value::Null)),
-            },
-            TodoListWrite::Remove(todo_id) => Edit::PutListItem {
-                path: vec!["todos".into()],
-                id: todo_id.clone(),
-                item: None,
-            },
-            TodoListWrite::Dismiss(todo_id) => Edit::AddItems {
-                path: vec!["dismissed".into()],
-                items: vec![Value::String(todo_id.clone())],
-            },
-            TodoListWrite::PutAppointment(appointment) => Edit::PutListItem {
-                path: vec!["appointments".into()],
-                id: appointment.id.clone(),
-                item: Some(serde_json::to_value(appointment).unwrap_or(Value::Null)),
-            },
-            TodoListWrite::RemoveAppointment(appointment_id) => Edit::PutListItem {
-                path: vec!["appointments".into()],
-                id: appointment_id.clone(),
-                item: None,
-            },
-        })
-        .collect()
+    task_planner::list_write_edits(writes)
 }
 
 /// Handle one request.
@@ -833,6 +830,74 @@ pub fn dispatch(api: &AgentApi, method: &str, params: &Value) -> Result<Value, S
                 .end_waiting(Utc::now(), id, params["arrived"].as_bool().unwrap_or(false))
                 .map_err(|error| error.to_string())?;
             apply_list_writes(&data_directory, planner, &writes)?;
+        }
+        // The rule simulation under the AI rules (the owner: "AI규칙창 아래에 시뮬레이션
+        // 돌려보기를 하나 만들어줄래?"): a sandbox copy of the planner with a virtual clock.
+        "simulation_start" => {
+            let planner = api.planner.as_ref().ok_or("no task planner")?;
+            let setup: task_planner::SimulationSetup = serde_json::from_value(params.clone())
+                .map_err(|error| format!("params: {error}"))?;
+            simulation_budget_check(api)?;
+            let simulation = Arc::new(planner.simulation(
+                setup,
+                task_planner::claude_advisor_provider_labeled("simulation: "),
+                machine::settings::is_protected(&data_directory),
+            ));
+            let mut slot = SIMULATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(old) = slot.take() {
+                old.simulation.request_stop();
+            }
+            *slot = Some(SimulationSlot {
+                simulation,
+                cost_at_start: ai_client::usage::installed_today_cost().unwrap_or(0.0),
+            });
+            drop(slot);
+            return Ok(simulation_answer());
+        }
+        "simulation_act" => {
+            let action: task_planner::SimulationAction =
+                serde_json::from_value(params["action"].clone())
+                    .map_err(|error| format!("params.action: {error}"))?;
+            let limit = simulation_budget_check(api)?;
+            let simulation = SIMULATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map(|slot| Arc::clone(&slot.simulation))
+                .ok_or("시뮬레이션을 먼저 시작하세요")?;
+            if simulation.running() {
+                return Err("시뮬레이션이 아직 진행 중입니다".into());
+            }
+            simulation.mark_running();
+            thread::spawn(move || {
+                simulation.run(&action, &move || {
+                    ai_client::usage::installed_over_budget(limit).is_some()
+                });
+            });
+            return Ok(simulation_answer());
+        }
+        "simulation_status" => return Ok(simulation_answer()),
+        "simulation_stop" => {
+            if let Some(slot) = SIMULATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+            {
+                slot.simulation.request_stop();
+            }
+            return Ok(simulation_answer());
+        }
+        "simulation_end" => {
+            if let Some(slot) = SIMULATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                slot.simulation.request_stop();
+            }
+            return Ok(json!({ "active": false }));
         }
         // A code a phone joins the to-do page with (the owner: "핸드폰에서 할 일 만 관리할 수
         // 있게 만들 수 있나."). It reaches the server with the next sync.

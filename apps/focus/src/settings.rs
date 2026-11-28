@@ -382,6 +382,8 @@ pub struct SettingsTab {
     phone_remove_confirm: Option<String>,
     /// The phone that joined with the last code made here.
     phone_joined: Option<String>,
+    /// "시뮬레이션 돌려보기" under the AI rules.
+    simulation: crate::simulation::SimulationPanel,
 }
 
 /// Responsibility: Carry what the Settings tab's cheat time buttons need from the app: the
@@ -472,6 +474,7 @@ impl SettingsTab {
             phone_message: String::new(),
             phone_remove_confirm: None,
             phone_joined: None,
+            simulation: crate::simulation::SimulationPanel::default(),
         }
     }
 
@@ -1662,6 +1665,16 @@ impl SettingsTab {
                     self.block_bar(ui, block, snapshot, protected);
                 });
         }
+
+        // Try the rules on a virtual day (the owner: "AI규칙창 아래에 시뮬레이션 돌려보기를
+        // 하나 만들어줄래?").
+        let in_force: Option<PlannerConfig> = snapshot
+            .files
+            .get("planner")
+            .and_then(|file| serde_json::from_value(file.clone()).ok());
+        let draft = self.drafts.as_ref().map(|drafts| drafts.planner.clone());
+        self.simulation
+            .ui(ui, self.session, draft.as_ref(), in_force.as_ref());
     }
 
     /// Cheat time (the owner: "엄격모드에서 치팅시간을 설정할 수 있도록 해줄래?"): how it is
@@ -3439,6 +3452,12 @@ fn purpose_label(purpose: &str) -> (&str, &str) {
             "연결 확인",
             "크레딧이 없을 때 30초마다 보내는 가장 짧은 메시지",
         ),
+        // The rule simulation (설정 탭 → AI 규칙 → 시뮬레이션 돌려보기).
+        "simulation: planner pick" => ("시뮬레이션: 할 일 고르기", "시뮬레이션 돌려보기"),
+        "simulation: planner review" => ("시뮬레이션: 변경 요청 심사", "시뮬레이션 돌려보기"),
+        "simulation: to-do change review" => ("시뮬레이션: 할 일 변경 심사", "시뮬레이션 돌려보기"),
+        "simulation: appointment review" => ("시뮬레이션: 약속 심사", "시뮬레이션 돌려보기"),
+        "simulation: week plan" => ("시뮬레이션: 7일 계획", "시뮬레이션 돌려보기"),
         other => (other, ""),
     }
 }
